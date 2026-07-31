@@ -253,7 +253,8 @@ fetch_crawl_https(std::string const& host, uint16_t port)
     try
     {
         tcp_stream.expires_after(std::chrono::seconds(5));
-        co_await tcp_stream.async_connect(endpoints, boost::asio::use_awaitable);
+        co_await tcp_stream.async_connect(
+            endpoints, boost::asio::use_awaitable);
     }
     catch (std::exception const& e)
     {
@@ -368,28 +369,50 @@ summarize_crawl_error(std::string_view error)
 }
 
 boost::asio::awaitable<CrawlResponse>
-co_fetch_peer_crawl(std::string host, uint16_t port)
+detail::co_fetch_peer_crawl_with_stop(
+    std::string host,
+    uint16_t port,
+    std::stop_token stop,
+    CrawlFetchHooks hooks)
 {
     // Try HTTP first — XRPL/Xahau peer crawl endpoints serve plain HTTP
     // on the peer port. HTTPS wastes time on TLS handshake timeout.
     std::string http_summary;
+    std::exception_ptr http_failure;
     try
     {
         co_return co_await fetch_crawl_http(host, port);
     }
     catch (std::exception const& http_error)
     {
+        http_failure = std::current_exception();
         http_summary = strip_diagnostic(http_error.what());
-        PLOGD(
-            log_,
-            "HTTP crawl failed for ",
-            host,
-            ":",
-            port,
-            ": ",
-            http_summary,
-            " — falling back to HTTPS");
     }
+
+    // The Asio cancellation edge can be consumed or translated by the nested
+    // HTTP await. The PeerSet-issued stop token is the retained owner fact.
+    if (hooks.before_stop_check)
+        hooks.before_stop_check();
+
+    //@@mutation-site crawl-stop-intent-prevents-https-fallback
+    if (stop.stop_requested())
+    {
+        std::rethrow_exception(http_failure);
+    }
+    //@@mutation-end crawl-stop-intent-prevents-https-fallback
+
+    if (hooks.before_https_fallback)
+        hooks.before_https_fallback();
+
+    PLOGD(
+        log_,
+        "HTTP crawl failed for ",
+        host,
+        ":",
+        port,
+        ": ",
+        http_summary,
+        " — falling back to HTTPS");
 
     try
     {
@@ -401,6 +424,13 @@ co_fetch_peer_crawl(std::string host, uint16_t port)
             "crawl fallback failed: http=" + http_summary +
             "; https=" + strip_diagnostic(https_error.what()));
     }
+}
+
+boost::asio::awaitable<CrawlResponse>
+co_fetch_peer_crawl(std::string host, uint16_t port)
+{
+    co_return co_await detail::co_fetch_peer_crawl_with_stop(
+        std::move(host), port, {}, {});
 }
 
 }  // namespace catl::peer_client

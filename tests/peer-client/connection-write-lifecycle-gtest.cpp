@@ -1,6 +1,7 @@
 // Forced interleavings for the peer_connection active-write state machine.
 //
-// Three confirmed blockers motivated this file (adversarial review, 2026-07-25):
+// Three confirmed blockers motivated this file (adversarial review,
+// 2026-07-25):
 //
 //   1. in-flight buffer destroyed before Asio completion — `fail_queued_writes`
 //      moved the active entry out of the queue into a loop-local that died the
@@ -20,24 +21,29 @@
 //   lifetime + exactly-once completion authority + successor-pump state +
 //   close/drain disposition
 //
-// Every test below FORCES its interleaving through `set_write_initiator_for_test`
-// — a seam that substitutes transport initiation only — rather than racing a
-// socket. No sleeps, no timing. Slot ownership, buffer lifetime, terminal
-// selection, drain and pump are all the production path.
+// Every test below FORCES its interleaving through
+// `set_write_initiator_for_test` — a seam that substitutes transport initiation
+// only — rather than racing a socket. No sleeps, no timing. Slot ownership,
+// buffer lifetime, terminal selection, drain and pump are all the production
+// path.
 //
 // Scope honesty: these prove the state machine's ownership rules. They do not
 // prove Asio reads the buffer after close — that is Asio's documented contract,
-// not this class's behavior. The obligation tested here is that the bytes remain
-// alive and unmoved when the completion runs.
+// not this class's behavior. The obligation tested here is that the bytes
+// remain alive and unmoved when the completion runs.
 
+#include <catl/common/utils.h>
 #include <catl/peer-client/connection.h>
 
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -83,7 +89,8 @@ struct WriteHarness
     WriteHarness()
     {
         peer_config config;
-        conn = std::make_shared<peer_connection>(strand, ssl, std::move(config));
+        conn =
+            std::make_shared<peer_connection>(strand, ssl, std::move(config));
         // Open the socket so "reaches closed state" assertions are not vacuous:
         // on a never-opened socket is_open() is false before teardown too.
         boost::system::error_code ec;
@@ -104,13 +111,14 @@ struct WriteHarness
     }
 
     /// Enqueue a packet whose payload is a recognizable repeated byte, so a
-    /// freed-and-reused buffer is detectable by content and not only by address.
-    /// `reenter` runs INSIDE the completion handler, which is how the
+    /// freed-and-reused buffer is detectable by content and not only by
+    /// address. `reenter` runs INSIDE the completion handler, which is how the
     /// callback-boundary interleavings are forced.
     void
-    send(std::uint8_t fill,
-         std::function<void()> reenter = {},
-         std::size_t payload = 64)
+    send(
+        std::uint8_t fill,
+        std::function<void()> reenter = {},
+        std::size_t payload = 64)
     {
         std::vector<std::uint8_t> data(payload, fill);
         conn->async_send_packet(
@@ -126,11 +134,11 @@ struct WriteHarness
 
     /// Fire a captured completion FROM the connection's strand.
     ///
-    /// Load-bearing, not cosmetic: `close()` runs `close_impl()` inline only when
-    /// `strand_.running_in_this_thread()`. Completing from the test body instead
-    /// makes a re-entrant `close()` merely POST, which silently defuses every
-    /// synchronous re-entrancy this file claims to force. A control caught exactly
-    /// that — the disposition test passed with the fix reverted.
+    /// Load-bearing, not cosmetic: `close()` runs `close_impl()` inline only
+    /// when `strand_.running_in_this_thread()`. Completing from the test body
+    /// instead makes a re-entrant `close()` merely POST, which silently defuses
+    /// every synchronous re-entrancy this file claims to force. A control
+    /// caught exactly that — the disposition test passed with the fix reverted.
     void
     complete_on_strand(std::size_t i, boost::system::error_code ec)
     {
@@ -146,7 +154,8 @@ struct WriteHarness
         return conn->socket().lowest_layer().is_open();
     }
 
-    /// Bytes of the write currently retained as active, as the connection sees it.
+    /// Bytes of the write currently retained as active, as the connection sees
+    /// it.
     std::pair<void const*, std::size_t>
     active_storage() const
     {
@@ -174,6 +183,103 @@ struct WriteHarness
                 return false;
         }
         return true;
+    }
+};
+
+/// A connection whose steady-state read initiation is substituted, so a
+/// completion may be delivered as success even after close has won the strand.
+struct ReadHarness
+{
+    asio::io_context io;
+    asio::ssl::context ssl{asio::ssl::context::tlsv12_client};
+    asio::strand<asio::io_context::executor_type> strand{
+        asio::make_strand(io.get_executor())};
+    std::shared_ptr<peer_connection> conn;
+
+    struct InFlight
+    {
+        peer_connection::test_read_stage stage;
+        asio::mutable_buffer buffer;
+        peer_connection::test_read_completion complete;
+    };
+    std::vector<InFlight> in_flight;
+
+    int packet_calls = 0;
+    bool close_in_packet_handler = false;
+    bool drained_inside_packet_handler = false;
+
+    ReadHarness()
+    {
+        peer_config config;
+        conn =
+            std::make_shared<peer_connection>(strand, ssl, std::move(config));
+        boost::system::error_code ec;
+        conn->socket().lowest_layer().open(boost::asio::ip::tcp::v4(), ec);
+        conn->set_read_initiator_for_test(
+            [this](
+                peer_connection::test_read_stage stage,
+                asio::mutable_buffer buffer,
+                peer_connection::test_read_completion complete) {
+                in_flight.push_back({stage, buffer, std::move(complete)});
+            });
+    }
+
+    void
+    start()
+    {
+        conn->start_read(
+            [this](packet_header const&, std::vector<std::uint8_t> const&) {
+                ++packet_calls;
+                if (close_in_packet_handler)
+                {
+                    conn->close();
+                    drained_inside_packet_handler =
+                        conn->physical_transport_drained_for_test();
+                }
+            });
+    }
+
+    void
+    write_header(
+        std::size_t index,
+        std::uint32_t payload_size,
+        packet_type type)
+    {
+        ASSERT_EQ(
+            in_flight[index].stage, peer_connection::test_read_stage::header);
+        ASSERT_GE(in_flight[index].buffer.size(), 6u);
+        auto* bytes =
+            static_cast<std::uint8_t*>(in_flight[index].buffer.data());
+        catl::common::put_uint32_be(bytes, payload_size);
+        auto const type_value = static_cast<std::uint16_t>(type);
+        bytes[4] = static_cast<std::uint8_t>(type_value >> 8);
+        bytes[5] = static_cast<std::uint8_t>(type_value & 0xFF);
+    }
+
+    void
+    fill(std::size_t index, std::uint8_t value)
+    {
+        auto* bytes =
+            static_cast<std::uint8_t*>(in_flight[index].buffer.data());
+        std::fill_n(bytes, in_flight[index].buffer.size(), value);
+    }
+
+    void
+    complete_on_strand(
+        std::size_t index,
+        boost::system::error_code ec,
+        std::size_t bytes)
+    {
+        auto completion = in_flight[index].complete;
+        asio::post(strand, [completion, ec, bytes] { completion(ec, bytes); });
+        io.restart();
+        io.run();
+    }
+
+    bool
+    socket_open() const
+    {
+        return conn->socket().lowest_layer().is_open();
     }
 };
 
@@ -211,6 +317,317 @@ TEST(ConnectionWriteLifecycle, CloseRetainsActiveBufferUntilCompletion)
     h.in_flight[0].complete(asio::error::operation_aborted);
     EXPECT_EQ(h.active_storage().first, nullptr);
     EXPECT_EQ(h.handler_calls.size(), 1u);
+}
+
+TEST(ConnectionWriteLifecycle, PhysicalCloseJoinsExactHeldWriteForAllCallers)
+{
+    WriteHarness h;
+    h.send(0xAC);
+
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    ASSERT_EQ(h.conn->transport_operation_count_for_test(), 1u);
+    ASSERT_FALSE(h.conn->physical_transport_drained_for_test());
+
+    int joins = 0;
+    std::vector<std::exception_ptr> failures;
+    auto launch_join = [&] {
+        asio::co_spawn(
+            h.strand,
+            [conn = h.conn]() -> asio::awaitable<void> {
+                co_await conn->co_close();
+            },
+            [&](std::exception_ptr failure) {
+                if (failure)
+                    failures.push_back(failure);
+                else
+                    ++joins;
+            });
+    };
+
+    launch_join();
+    launch_join();
+    h.io.poll();
+
+    // Logical close and socket cancellation are already committed, but neither
+    // rider may counterfeit physical drain while the held write still owns its
+    // buffer and exact census row.
+    EXPECT_FALSE(h.socket_open());
+    EXPECT_EQ(h.handler_calls.size(), 1u);
+    EXPECT_EQ(h.handler_calls[0], asio::error::operation_aborted);
+    EXPECT_TRUE(h.active_payload_intact(0xAC));
+    EXPECT_EQ(h.conn->transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(h.conn->physical_transport_drained_for_test());
+    EXPECT_EQ(joins, 0);
+    EXPECT_TRUE(failures.empty());
+
+    h.complete_on_strand(0, asio::error::operation_aborted);
+
+    EXPECT_EQ(h.conn->transport_operation_count_for_test(), 0u);
+    EXPECT_TRUE(h.conn->physical_transport_drained_for_test());
+    EXPECT_EQ(h.active_storage().first, nullptr);
+    EXPECT_EQ(joins, 2);
+    EXPECT_TRUE(failures.empty());
+
+    // The receipt is retained as terminal state: a later join does not launch a
+    // second driver or wait for another edge notification.
+    launch_join();
+    h.io.restart();
+    h.io.run();
+    EXPECT_EQ(joins, 3);
+    EXPECT_TRUE(failures.empty());
+}
+
+TEST(ConnectionWriteLifecycle, PacketHandlerCloseCannotRearmReadLoop)
+{
+    ReadHarness h;
+    h.close_in_packet_handler = true;
+    h.start();
+
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    ASSERT_EQ(h.in_flight[0].stage, peer_connection::test_read_stage::header);
+    ASSERT_EQ(h.conn->transport_operation_count_for_test(), 1u);
+
+    h.write_header(0, 4, packet_type::ping);
+    h.complete_on_strand(0, {}, 6);
+
+    // The payload successor was admitted before the header receipt released:
+    // the census never exposed a false zero between the two read stages.
+    ASSERT_EQ(h.in_flight.size(), 2u);
+    ASSERT_EQ(h.in_flight[1].stage, peer_connection::test_read_stage::payload);
+    ASSERT_EQ(h.conn->transport_operation_count_for_test(), 1u);
+    h.fill(1, 0x5A);
+
+    h.complete_on_strand(1, {}, 4);
+
+    EXPECT_EQ(h.packet_calls, 1);
+    EXPECT_FALSE(h.drained_inside_packet_handler)
+        << "the current payload receipt still belongs to its callback frame";
+    EXPECT_FALSE(h.socket_open());
+    EXPECT_EQ(h.in_flight.size(), 2u)
+        << "re-entrant close must prevent a successor header initiation";
+    EXPECT_EQ(h.conn->transport_operation_count_for_test(), 0u);
+    EXPECT_TRUE(h.conn->physical_transport_drained_for_test());
+
+    int late_joins = 0;
+    asio::co_spawn(
+        h.strand,
+        [conn = h.conn]() -> asio::awaitable<void> {
+            co_await conn->co_close();
+        },
+        [&](std::exception_ptr failure) {
+            EXPECT_EQ(failure, nullptr);
+            ++late_joins;
+        });
+    h.io.restart();
+    h.io.run();
+    EXPECT_EQ(late_joins, 1);
+}
+
+TEST(ConnectionWriteLifecycle, CloseBeatsReadySuccessfulReadWithoutSuccessor)
+{
+    ReadHarness h;
+    h.start();
+
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    h.write_header(0, 4, packet_type::ping);
+
+    int joins = 0;
+    std::vector<std::exception_ptr> failures;
+    auto launch_join = [&] {
+        asio::co_spawn(
+            h.strand,
+            [conn = h.conn]() -> asio::awaitable<void> {
+                co_await conn->co_close();
+            },
+            [&](std::exception_ptr failure) {
+                if (failure)
+                    failures.push_back(failure);
+                else
+                    ++joins;
+            });
+    };
+    launch_join();
+    launch_join();
+    h.io.poll();
+
+    EXPECT_FALSE(h.socket_open());
+    EXPECT_EQ(h.conn->transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(h.conn->physical_transport_drained_for_test());
+    EXPECT_EQ(joins, 0);
+
+    // Deliver success deliberately after close. The lifecycle gate, not the
+    // usual operation_aborted result, must prevent parsing and successor work.
+    h.complete_on_strand(0, {}, 6);
+
+    EXPECT_EQ(h.packet_calls, 0);
+    EXPECT_EQ(h.in_flight.size(), 1u);
+    EXPECT_EQ(h.conn->transport_operation_count_for_test(), 0u);
+    EXPECT_TRUE(h.conn->physical_transport_drained_for_test());
+    EXPECT_EQ(joins, 2);
+    EXPECT_TRUE(failures.empty());
+}
+
+TEST(ConnectionWriteLifecycle, PhysicalCloseRefusesUnownedListenAcceptDrain)
+{
+    asio::io_context io;
+    asio::ssl::context ssl(asio::ssl::context::tlsv12_client);
+    auto strand = asio::make_strand(io);
+    peer_config config;
+    config.listen_mode = true;
+    auto conn =
+        std::make_shared<peer_connection>(strand, ssl, std::move(config));
+
+    std::exception_ptr failure;
+    asio::co_spawn(
+        strand,
+        [conn]() -> asio::awaitable<void> { co_await conn->co_close(); },
+        [&](std::exception_ptr error) { failure = error; });
+    io.run();
+
+    ASSERT_NE(failure, nullptr);
+    EXPECT_THROW(std::rethrow_exception(failure), std::logic_error);
+}
+
+TEST(
+    ConnectionWriteLifecycle,
+    ResolveInitiationFailureReturnsOperationAndResolverBeforeCloseReceipt)
+{
+    asio::io_context io;
+    asio::ssl::context ssl(asio::ssl::context::tlsv12_client);
+    auto strand = asio::make_strand(io);
+    peer_config config;
+    config.host = "resolver-initiation.invalid";
+    config.port = 443;
+    auto conn =
+        std::make_shared<peer_connection>(strand, ssl, std::move(config));
+
+    bool observed_installed_authority = false;
+    bool nested_initiation = false;
+    std::vector<boost::system::error_code> overlapping_outcomes;
+    conn->set_before_resolve_initiation_for_test([&] {
+        if (nested_initiation)
+        {
+            throw std::runtime_error(
+                "overlapping resolver initiation was not refused");
+        }
+        observed_installed_authority = true;
+        EXPECT_EQ(conn->transport_operation_count_for_test(), 1u);
+        EXPECT_TRUE(conn->resolver_installed_for_test());
+        nested_initiation = true;
+        conn->async_connect([&](boost::system::error_code ec) {
+            overlapping_outcomes.push_back(ec);
+        });
+        nested_initiation = false;
+        throw std::runtime_error("forced resolver initiation failure");
+    });
+
+    std::vector<boost::system::error_code> outcomes;
+    asio::post(strand, [&] {
+        conn->async_connect(
+            [&](boost::system::error_code ec) { outcomes.push_back(ec); });
+    });
+    io.run();
+
+    ASSERT_TRUE(observed_installed_authority);
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_TRUE(outcomes.front());
+    ASSERT_EQ(overlapping_outcomes.size(), 1u);
+    EXPECT_EQ(overlapping_outcomes.front(), asio::error::already_started);
+    EXPECT_EQ(conn->transport_operation_count_for_test(), 0u);
+    EXPECT_FALSE(conn->resolver_installed_for_test());
+    EXPECT_FALSE(conn->physical_transport_drained_for_test());
+
+    int joins = 0;
+    asio::co_spawn(
+        strand,
+        [conn]() -> asio::awaitable<void> { co_await conn->co_close(); },
+        [&](std::exception_ptr failure) {
+            EXPECT_EQ(failure, nullptr);
+            ++joins;
+        });
+    io.restart();
+    io.run();
+
+    EXPECT_EQ(joins, 1);
+    EXPECT_TRUE(conn->physical_transport_drained_for_test());
+}
+
+TEST(
+    ConnectionWriteLifecycle,
+    ResolveCompletionAfterCloseRetiresExactOperationBeforeDrain)
+{
+    asio::io_context io;
+    asio::ssl::context ssl(asio::ssl::context::tlsv12_client);
+    auto strand = asio::make_strand(io);
+    peer_config config;
+    config.host = "127.0.0.1";
+    config.port = 443;
+    auto conn =
+        std::make_shared<peer_connection>(strand, ssl, std::move(config));
+
+    std::size_t physical_waiters = 0;
+    conn->set_after_physical_drain_waiter_registered_for_test(
+        [&](std::size_t count) { physical_waiters = count; });
+
+    bool closed_after_admission = false;
+    int joins = 0;
+    std::exception_ptr join_failure;
+    conn->set_before_resolve_initiation_for_test([&] {
+        ASSERT_TRUE(strand.running_in_this_thread());
+        ASSERT_EQ(conn->transport_operation_count_for_test(), 1u);
+        ASSERT_TRUE(conn->resolver_installed_for_test());
+
+        // The exact resolve row already exists, but its Asio initiation has not
+        // happened. Close seals admission and consumes the resolver capability;
+        // the subsequently delivered callback still owns the operation receipt.
+        conn->close();
+        closed_after_admission = true;
+        EXPECT_EQ(conn->transport_operation_count_for_test(), 1u);
+        EXPECT_FALSE(conn->resolver_installed_for_test());
+        EXPECT_FALSE(conn->physical_transport_drained_for_test());
+
+        asio::co_spawn(
+            strand,
+            [conn]() -> asio::awaitable<void> { co_await conn->co_close(); },
+            [&](std::exception_ptr failure) {
+                join_failure = std::move(failure);
+                ++joins;
+            });
+    });
+
+    std::vector<boost::system::error_code> outcomes;
+    asio::post(strand, [&] {
+        conn->async_connect(
+            [&](boost::system::error_code ec) { outcomes.push_back(ec); });
+    });
+
+    ASSERT_EQ(io.poll_one(), 1u);
+    ASSERT_TRUE(closed_after_admission);
+
+    // Locally queued close work precedes the resolver service's completion.
+    // Drive only until the exact physical waiter is registered, then inspect
+    // the deliberately open completion window.
+    for (int step = 0; step != 8 && physical_waiters == 0; ++step)
+    {
+        io.restart();
+        ASSERT_EQ(io.poll_one(), 1u);
+    }
+    ASSERT_EQ(physical_waiters, 1u);
+    EXPECT_EQ(joins, 0);
+    EXPECT_EQ(conn->transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(conn->resolver_installed_for_test());
+    EXPECT_FALSE(conn->physical_transport_drained_for_test());
+
+    io.restart();
+    io.run();
+
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), asio::error::operation_aborted);
+    EXPECT_EQ(conn->transport_operation_count_for_test(), 0u);
+    EXPECT_FALSE(conn->resolver_installed_for_test());
+    EXPECT_TRUE(conn->physical_transport_drained_for_test());
+    EXPECT_EQ(joins, 1);
+    EXPECT_EQ(join_failure, nullptr);
 }
 
 // ─── 2. in-flight plus queued successors, then close ────────────────────────
@@ -337,8 +754,8 @@ TEST(ConnectionWriteLifecycle, WriteErrorClosesAndDrainsWithoutDoubleTerminal)
     h.io.run();
 
     ASSERT_EQ(h.handler_calls.size(), 2u);
-    EXPECT_EQ(h.handler_calls[0], asio::error::broken_pipe);   // active, once
-    EXPECT_EQ(h.handler_calls[1], asio::error::broken_pipe);   // drained
+    EXPECT_EQ(h.handler_calls[0], asio::error::broken_pipe);  // active, once
+    EXPECT_EQ(h.handler_calls[1], asio::error::broken_pipe);  // drained
     EXPECT_EQ(h.queued(), 0u);
     EXPECT_EQ(h.active_storage().first, nullptr);
 }
@@ -393,8 +810,8 @@ TEST(ConnectionWriteLifecycle, LateCompletionAfterCloseIsInert)
     ASSERT_TRUE(h.active_payload_intact(0xD1));
 
     // The physical completion arrives after the logical terminal was already
-    // selected by close. It must release storage and do nothing else — no second
-    // handler call, no pump of a closed connection, no crash.
+    // selected by close. It must release storage and do nothing else — no
+    // second handler call, no pump of a closed connection, no crash.
     h.in_flight[0].complete({});
     EXPECT_EQ(h.handler_calls.size(), 1u);
     EXPECT_EQ(h.active_storage().first, nullptr);
@@ -418,7 +835,8 @@ TEST(ConnectionWriteLifecycle, RollbackCallbackReentryDoesNotClobberActiveWrite)
 {
     WriteHarness h;
 
-    // A active; B, C queued. B's initiation will throw; B's handler then sends D.
+    // A active; B, C queued. B's initiation will throw; B's handler then sends
+    // D.
     h.send(0xA0);
     ASSERT_EQ(h.in_flight.size(), 1u);
     h.send(0xB0, [&h] { h.send(0xD0); });
@@ -451,7 +869,8 @@ TEST(ConnectionWriteLifecycle, RollbackCallbackReentryDoesNotClobberActiveWrite)
     EXPECT_FALSE(h.handler_calls[2]);
 }
 
-// B2.1: a failing write's own handler must not be admitted onto a dead transport.
+// B2.1: a failing write's own handler must not be admitted onto a dead
+// transport.
 
 TEST(ConnectionWriteLifecycle, FailedWriteHandlerCannotInitiateOnDeadTransport)
 {
@@ -478,8 +897,8 @@ TEST(ConnectionWriteLifecycle, QueueFullRefusalDoesNotRecurse)
     WriteHarness h;
     // One fill for the whole setup, deliberately NOT 0xFE or 0xFF: the
     // assertions below attribute refusals by fill byte, and an earlier version
-    // filled these 0x00..0xFF, so a setup send collided with the retry marker and
-    // was scored as a retry.
+    // filled these 0x00..0xFF, so a setup send collided with the retry marker
+    // and was scored as a retry.
     for (int i = 0; i < 257; ++i)
         h.send(0x01);
 
@@ -487,10 +906,11 @@ TEST(ConnectionWriteLifecycle, QueueFullRefusalDoesNotRecurse)
     auto const queued_before = h.queued();
     auto const calls_before = h.handler_calls.size();
 
-    // This send trips the cap. Its handler retries synchronously, and each retry
-    // carries the retry lambda too, so the recursion can genuinely deepen — an
-    // earlier version passed a non-retrying handler, which made this test pass
-    // whichever order the production code used. A negative control caught it.
+    // This send trips the cap. Its handler retries synchronously, and each
+    // retry carries the retry lambda too, so the recursion can genuinely deepen
+    // — an earlier version passed a non-retrying handler, which made this test
+    // pass whichever order the production code used. A negative control caught
+    // it.
     int retries = 0;
     std::function<void()> retry;
     retry = [&h, &retries, &retry] {
@@ -500,12 +920,12 @@ TEST(ConnectionWriteLifecycle, QueueFullRefusalDoesNotRecurse)
     h.send(0xFF, retry);
 
     // The discriminator is WHICH refusal path each retry takes, attributed by
-    // send rather than by position — `fail_and_close` legitimately drains all the
-    // already-queued terminals with no_buffer_space first, so position tells you
-    // nothing. Every RETRY (0xFE) must be refused by the ADMISSION gate, because
-    // the failure transition committed before this caller's callback ran. With
-    // the callback exposed first, the retries re-enter the cap check while
-    // admission is still open and get no_buffer_space instead.
+    // send rather than by position — `fail_and_close` legitimately drains all
+    // the already-queued terminals with no_buffer_space first, so position
+    // tells you nothing. Every RETRY (0xFE) must be refused by the ADMISSION
+    // gate, because the failure transition committed before this caller's
+    // callback ran. With the callback exposed first, the retries re-enter the
+    // cap check while admission is still open and get no_buffer_space instead.
     ASSERT_EQ(h.handler_fills.size(), h.handler_calls.size());
     int retry_refusals = 0;
     for (std::size_t i = calls_before; i < h.handler_calls.size(); ++i)
@@ -589,15 +1009,16 @@ TEST(ConnectionWriteLifecycle, ThrowingSuccessHandlerStillPumpsSuccessor)
     ASSERT_EQ(h.in_flight.size(), 2u);
     EXPECT_TRUE(h.active_payload_intact(0x32));
     EXPECT_EQ(h.queued(), 0u);
-    EXPECT_TRUE(h.socket_open());  // a throwing handler is not a transport fault
+    EXPECT_TRUE(
+        h.socket_open());  // a throwing handler is not a transport fault
 }
 
 // ─── terminal disposition is owned, not a stack argument ────────────────────
 //
 // The disconnect export is the connection's SOLE terminal export: in production
 // it is the only commit that moves PeerClient to Failed, drains pending work as
-// disconnected, and publishes PeerTerminalReason to PeerSet. Losing it leaves the
-// client logically live and the generation unremoved after the transport is
+// disconnected, and publishes PeerTerminalReason to PeerSet. Losing it leaves
+// the client logically live and the generation unremoved after the transport is
 // physically closed.
 
 TEST(ConnectionWriteLifecycle, ReentrantCloseCannotDowngradeFatalDisposition)
@@ -606,11 +1027,10 @@ TEST(ConnectionWriteLifecycle, ReentrantCloseCannotDowngradeFatalDisposition)
 
     int disconnects = 0;
     boost::system::error_code disconnect_ec;
-    h.conn->set_disconnect_handler(
-        [&](boost::system::error_code ec) {
-            ++disconnects;
-            disconnect_ec = ec;
-        });
+    h.conn->set_disconnect_handler([&](boost::system::error_code ec) {
+        ++disconnects;
+        disconnect_ec = ec;
+    });
 
     // The write's own terminal handler reacts to failure by closing — which is
     // exactly what a real PeerClient callback does.
@@ -625,9 +1045,11 @@ TEST(ConnectionWriteLifecycle, ReentrantCloseCannotDowngradeFatalDisposition)
     // Before the disposition became an owned row, the re-entrant close() won
     // close_ran_ with (operation_aborted, fire_disconnect=false): the socket
     // closed and this export was consumed WITHOUT firing, so the count was 0.
-    ASSERT_EQ(disconnects, 1) << "the connection's sole terminal export was lost";
+    ASSERT_EQ(disconnects, 1)
+        << "the connection's sole terminal export was lost";
     EXPECT_EQ(disconnect_ec, asio::error::broken_pipe)
-        << "exported the re-entrant close's cause instead of the observed failure";
+        << "exported the re-entrant close's cause instead of the observed "
+           "failure";
 
     EXPECT_FALSE(h.socket_open());
     ASSERT_EQ(h.handler_calls.size(), 1u);
@@ -637,9 +1059,9 @@ TEST(ConnectionWriteLifecycle, ReentrantCloseCannotDowngradeFatalDisposition)
 
 TEST(ConnectionWriteLifecycle, DeliberateCloseKeepsItsOwnQuietDisposition)
 {
-    // The complement: a plain close() with no observed failure must NOT invent a
-    // disconnect export. Without this, "always fire" would pass the test above
-    // while breaking eviction.
+    // The complement: a plain close() with no observed failure must NOT invent
+    // a disconnect export. Without this, "always fire" would pass the test
+    // above while breaking eviction.
     WriteHarness h;
     int disconnects = 0;
     h.conn->set_disconnect_handler(

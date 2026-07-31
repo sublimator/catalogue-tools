@@ -40,6 +40,7 @@ class PeerClientException : public std::runtime_error
 public:
     Error error;
     std::string detail;
+    std::optional<ConnectAttemptDisposition> connect_disposition;
 
     static std::string
     error_name(Error e)
@@ -52,8 +53,8 @@ public:
                 return "Timeout (peer did not respond in time)";
             case Error::Disconnected:
                 return "Disconnected";
-            case Error::NoLedger:
-                return "NoLedger (peer does not have this ledger)";
+            case Error::PeerNoLedger:
+                return "PeerNoLedger (uniquely correlated peer observation)";
             case Error::NoNode:
                 return "NoNode (requested node not found)";
             case Error::BadRequest:
@@ -68,18 +69,31 @@ public:
                 return "DuplicateRequest";
             case Error::ResourceExhausted:
                 return "ResourceExhausted";
+            case Error::NoSuitablePeer:
+                return "NoSuitablePeer (no eligible peer advertises the "
+                       "ledger)";
+            case Error::PeerCoverageChanged:
+                return "PeerCoverageChanged (selected peer revoked coverage "
+                       "before send)";
+            case Error::SendNotInitiated:
+                return "SendNotInitiated (local deadline expired before "
+                       "physical write initiation)";
             default:
                 return "Unknown(" + std::to_string(static_cast<int>(e)) + ")";
         }
     }
 
-    explicit PeerClientException(Error e, std::string detail_text = {})
+    explicit PeerClientException(
+        Error e,
+        std::string detail_text = {},
+        std::optional<ConnectAttemptDisposition> disposition = std::nullopt)
         : std::runtime_error(
               detail_text.empty()
                   ? "PeerClient: " + error_name(e)
                   : "PeerClient: " + error_name(e) + " [" + detail_text + "]")
         , error(e)
         , detail(std::move(detail_text))
+        , connect_disposition(disposition)
     {
     }
 };

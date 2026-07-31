@@ -30,7 +30,9 @@ enum class Error {
     Success = 0,
     Timeout,
     Disconnected,
-    NoLedger,
+    /// A peer emitted a reNO_LEDGER observation which this PeerClient
+    /// uniquely correlated to one currently pending request.
+    PeerNoLedger,
     NoNode,
     BadRequest,
     FeatureDisabled,
@@ -38,6 +40,37 @@ enum class Error {
     Cancelled,
     DuplicateRequest,
     ResourceExhausted,
+    /// No local transport attempt was admitted because no currently eligible
+    /// peer advertised the required ledger. This carries no peer-response
+    /// evidence and must never be reported as PeerNoLedger.
+    NoSuitablePeer,
+    /// This exact PeerClient no longer advertised the requested ledger when
+    /// the queued request reached its owner strand. This is neither peer
+    /// response evidence nor proof that the PeerSet has no suitable peer.
+    PeerCoverageChanged,
+    /// The local request deadline expired before this PeerClient initiated
+    /// the physical write. No packet was yet attributable to the peer, so this
+    /// must never become peer response or service-failure evidence.
+    SendNotInitiated,
+};
+
+/// First retained logical terminal cause for one PeerClient instance.
+///
+/// This is deliberately distinct from State: State may later move from Failed
+/// to Disconnected while physical transport is drained, but the cause which
+/// won terminality must remain stable for the initial-connect consumer.
+enum class PeerLogicalTerminalCause : std::uint8_t {
+    none,
+    peer_failure,
+    owner_disconnect,
+};
+
+/// Exact terminal disposition of one initial connect attempt.
+enum class ConnectAttemptDisposition : std::uint8_t {
+    ready,
+    peer_failure,
+    owner_disconnect,
+    deadline,
 };
 
 //------------------------------------------------------------------------------

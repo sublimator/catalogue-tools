@@ -65,6 +65,9 @@ struct BuildServices
     // Cancel token — set by HTTP session on client disconnect.
     // Checked at cancellation boundaries (peer waits and node walks)
     // to stop work without disrupting shared NodeCache state.
+    //@@authority state=prv.S0012 status=provisional scope=field
+    // owner=unresolved owner_hypothesis=request_session observed_home=build_services
+    // label=borrowed_per_request_cancellation_projection
     std::shared_ptr<std::atomic<bool>> cancel_token;
 
     /// Optional SSE step callback — co_awaited with each step as it
@@ -73,6 +76,9 @@ struct BuildServices
     /// step variant; caller is responsible for serialization and writing.
     using StepCallback =
         std::function<boost::asio::awaitable<void>(ChainStep const&)>;
+    //@@authority state=prv.S0013 status=provisional scope=field
+    // owner=unresolved owner_hypothesis=request_session observed_home=build_services
+    // label=borrowed_per_request_proof_step_delivery_sink
     StepCallback on_step;
 };
 

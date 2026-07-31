@@ -2,7 +2,9 @@
 
 #include <boost/asio/awaitable.hpp>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,5 +37,22 @@ summarize_crawl_error(std::string_view error);
 
 boost::asio::awaitable<CrawlResponse>
 co_fetch_peer_crawl(std::string host, uint16_t port);
+
+namespace detail {
+
+struct CrawlFetchHooks
+{
+    std::function<void()> before_stop_check;
+    std::function<void()> before_https_fallback;
+};
+
+boost::asio::awaitable<CrawlResponse>
+co_fetch_peer_crawl_with_stop(
+    std::string host,
+    uint16_t port,
+    std::stop_token stop,
+    CrawlFetchHooks hooks = {});
+
+}  // namespace detail
 
 }  // namespace catl::peer_client

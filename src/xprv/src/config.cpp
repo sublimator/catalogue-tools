@@ -129,6 +129,8 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
                 config.max_walk_peer_retries = static_cast<int>(*v);
             if (auto v = (*s)["fetch_stale_multiplier"].value<int64_t>())
                 config.fetch_stale_multiplier = static_cast<int>(*v);
+            if (auto v = (*s)["ledger_fetch_coordinator"].value<bool>())
+                config.ledger_fetch_coordinator = *v;
             if (auto v = (*s)["peer_cache_path"].value<std::string>())
                 config.peer_cache_path = *v;
         }
@@ -138,9 +140,6 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
         {
             if (auto v = (*s)["archival_range_threshold"].value<int64_t>())
                 config.archival_range_threshold = static_cast<uint32_t>(*v);
-            if (auto v = (*s)["peer_fallback_ms"].value<int64_t>())
-                config.peer_fallback = std::chrono::milliseconds(*v);
-
             // Helper to load a PeerPool from a TOML sub-table
             auto load_pool = [](toml::table const& t, Config::PeerPool& pool) {
                 if (auto v = t["max_hub_peers"].value<int64_t>())
@@ -251,6 +250,8 @@ apply_env_overrides(Config& config)
         config.max_walk_peer_retries = static_cast<int>(*v);
     if (auto v = env_u32("XPRV_FETCH_STALE_MULTIPLIER"))
         config.fetch_stale_multiplier = static_cast<int>(*v);
+    if (auto v = env_bool("XPRV_LEDGER_FETCH_COORDINATOR"))
+        config.ledger_fetch_coordinator = *v;
     if (auto v = env_str("XPRV_PEER_CACHE_PATH"))
         config.peer_cache_path = *v;
     if (auto v = env_u32("XPRV_FD_LIMIT"))
@@ -383,6 +384,8 @@ dump_config(Config const& config, std::ostream& os)
     os << "rpc_max_concurrent = " << config.rpc_max_concurrent << "\n";
     os << "max_walk_peer_retries = " << config.max_walk_peer_retries << "\n";
     os << "fetch_stale_multiplier = " << config.fetch_stale_multiplier << "\n";
+    os << "ledger_fetch_coordinator = "
+       << (config.ledger_fetch_coordinator ? "true" : "false") << "\n";
     if (!config.peer_cache_path.empty())
         os << "peer_cache_path = \"" << config.peer_cache_path << "\"\n";
     os << "\n";

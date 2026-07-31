@@ -87,6 +87,10 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
     boost::asio::co_spawn(
         io,
         [&, engine]() -> boost::asio::awaitable<void> {
+            //@@authority transition=prv.T0036 status=provisional scope=statement
+            // owner=unresolved owner_hypothesis=request_session
+            // commit=cli_coroutine calls=prove
+            // label=submit_cli_proof_without_opaque_operation_id
             auto prove_result = co_await engine->prove(opts.tx_hash);
             auto& chain = prove_result.chain;
 

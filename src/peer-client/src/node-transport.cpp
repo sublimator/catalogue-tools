@@ -9,11 +9,19 @@ namespace catl::peer_client {
 Hash256
 node_batch_payload_digest(
     Hash256 const& ledger_hash,
+    std::uint32_t ledger_seq,
     NodeTree tree,
     std::vector<SHAMapNodeID> const& node_ids)
 {
     crypto::Sha512HalfHasher hasher;
     hasher.update(ledger_hash.data(), Hash256::size());
+    std::array<std::uint8_t, 4> const wire_ledger_seq{
+        static_cast<std::uint8_t>((ledger_seq >> 24) & 0xff),
+        static_cast<std::uint8_t>((ledger_seq >> 16) & 0xff),
+        static_cast<std::uint8_t>((ledger_seq >> 8) & 0xff),
+        static_cast<std::uint8_t>(ledger_seq & 0xff),
+    };
+    hasher.update(wire_ledger_seq.data(), wire_ledger_seq.size());
     auto const tree_type = static_cast<std::uint32_t>(tree);
     std::array<std::uint8_t, 4> const wire_tree_type{
         static_cast<std::uint8_t>((tree_type >> 24) & 0xff),
@@ -35,15 +43,17 @@ NodeBatchIntent::NodeBatchIntent(
     TransportAttemptId attempt_id,
     SenderGenerationId sender_generation,
     Hash256 ledger_hash,
+    std::uint32_t ledger_seq,
     NodeTree tree,
     std::vector<SHAMapNodeID> node_ids)
     : attempt_id_(attempt_id)
     , sender_generation_(sender_generation)
     , ledger_hash_(std::move(ledger_hash))
+    , ledger_seq_(ledger_seq)
     , tree_(tree)
     , node_ids_(std::move(node_ids))
     , payload_digest_(
-          node_batch_payload_digest(ledger_hash_, tree_, node_ids_))
+          node_batch_payload_digest(ledger_hash_, ledger_seq_, tree_, node_ids_))
 {
 }
 

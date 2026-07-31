@@ -26,6 +26,18 @@ public:
     using packet_handler = std::function<
         void(packet_header const&, std::vector<std::uint8_t> const&)>;
     using disconnect_handler = std::function<void(boost::system::error_code)>;
+    using send_initiated_handler = std::function<void()>;
+
+    /// Synchronous disposition of one packet's queue-admission attempt.
+    ///
+    /// `accepted` says only that the connection retained the row. The separate
+    /// initiation callback publishes the later fact that the transport
+    /// initiation call itself returned successfully.
+    enum class SendAdmission {
+        accepted,
+        admission_closed,
+        queue_full,
+    };
 
     /// Strand-based construction. All async operations complete on the
     /// strand, so all callbacks fire on it automatically.
@@ -49,11 +61,12 @@ public:
     start_read(packet_handler handler);
 
     // Send packet
-    void
+    SendAdmission
     async_send_packet(
         packet_type type,
         std::vector<std::uint8_t> const& data,
-        std::function<void(boost::system::error_code)> handler);
+        std::function<void(boost::system::error_code)> handler,
+        send_initiated_handler on_initiated = {});
 
     // Get remote endpoint info
     std::string
@@ -115,6 +128,15 @@ public:
     void
     close();
 
+    /// Commit the same idempotent close as close(), then wait until every
+    /// connection-owned transport operation has returned its exact receipt.
+    ///
+    /// This is deliberately outbound-only. In listen mode the acceptor owns
+    /// cancellation of async_accept(), so a peer_connection cannot truthfully
+    /// mint the complete physical-drain receipt by itself.
+    boost::asio::awaitable<void>
+    co_close();
+
     // Set handler to be called on disconnect (EOF, reset, etc.)
     void
     set_disconnect_handler(disconnect_handler handler);
@@ -138,14 +160,15 @@ public:
     connect_failure_detail() const;
 
     /// Completion of a substituted transport write.
-    using test_write_completion = std::function<void(boost::system::error_code)>;
+    using test_write_completion =
+        std::function<void(boost::system::error_code)>;
 
     /// Test seam: substitute transport initiation only.
     ///
-    /// When set, `do_write()` calls this instead of `asio::async_write` and hands
-    /// over the completion, so a test can fire it at an exact point instead of
-    /// racing a socket. Everything the correction is about stays on the
-    /// production path: slot ownership, physical buffer lifetime, terminal
+    /// When set, `do_write()` calls this instead of `asio::async_write` and
+    /// hands over the completion, so a test can fire it at an exact point
+    /// instead of racing a socket. Everything the correction is about stays on
+    /// the production path: slot ownership, physical buffer lifetime, terminal
     /// selection, drain, and the successor pump. An initiator that throws also
     /// forces the initiation-exception rollback, so this one seam covers both.
     ///
@@ -161,10 +184,50 @@ public:
         write_initiator_for_test_ = std::move(initiator);
     }
 
+    enum class test_read_stage {
+        header,
+        header_extension,
+        payload,
+        payload_drain,
+    };
+
+    using test_read_completion =
+        std::function<void(boost::system::error_code, std::size_t)>;
+
+    /// Test seam: substitute steady-state transport reads while preserving the
+    /// production census, successor gates, frame parser, and completion path.
+    void
+    set_read_initiator_for_test(std::function<void(
+                                    test_read_stage,
+                                    boost::asio::mutable_buffer,
+                                    test_read_completion)> initiator)
+    {
+        read_initiator_for_test_ = std::move(initiator);
+    }
+
+    /// Test seam: run after both the resolver capability and its exact
+    /// transport-operation row are installed, immediately before Asio
+    /// initiation. Throwing here forces the synchronous initiation-refusal
+    /// rollback without racing DNS or a socket.
+    void
+    set_before_resolve_initiation_for_test(std::function<void()> hook)
+    {
+        before_resolve_initiation_for_test_ = std::move(hook);
+    }
+
+    /// Test seam: observe registration at the exact physical-drain wait site.
+    /// Runs on the connection strand after the waiter has an owned home.
+    void
+    set_after_physical_drain_waiter_registered_for_test(
+        std::function<void(std::size_t)> observer)
+    {
+        after_physical_drain_waiter_registered_for_test_ = std::move(observer);
+    }
+
     /// Test observation: the retained backing store of the write currently in
     /// flight, or `{nullptr, 0}` when none is. Lets a test assert that a close
-    /// did not free bytes Asio still owns (blocker 1) without relying on ASan or
-    /// on a race.
+    /// did not free bytes Asio still owns (blocker 1) without relying on ASan
+    /// or on a race.
     std::pair<void const*, std::size_t>
     active_write_storage_for_test() const
     {
@@ -178,6 +241,24 @@ public:
     queued_write_count_for_test() const
     {
         return write_queue_.size();
+    }
+
+    std::size_t
+    transport_operation_count_for_test() const
+    {
+        return transport_operations_.size();
+    }
+
+    bool
+    physical_transport_drained_for_test() const
+    {
+        return physical_phase_ == PhysicalPhase::drained;
+    }
+
+    bool
+    resolver_installed_for_test() const
+    {
+        return static_cast<bool>(resolver_);
     }
 
 private:
@@ -298,9 +379,10 @@ private:
     disconnect_handler disconnect_handler_;
 
     // Two facts, previously one bool called `closing_`. They were split because
-    // the correct teardown ordering was INEXPRESSIBLE while they shared storage:
-    // closing admission early (so a callback cannot send onto a dead transport)
-    // also tripped the settlement guard, which then skipped the physical close.
+    // the correct teardown ordering was INEXPRESSIBLE while they shared
+    // storage: closing admission early (so a callback cannot send onto a dead
+    // transport) also tripped the settlement guard, which then skipped the
+    // physical close.
     //
     //   admission_closed_  the gate. Commits BEFORE any external callback runs,
     //                      on every teardown path.
@@ -309,16 +391,119 @@ private:
     bool admission_closed_ = false;
     bool close_ran_ = false;
 
+    enum class PhysicalPhase {
+        open,
+        closing,
+        drained,
+    };
+
+    enum class TransportOperationKind {
+        resolve,
+        connect,
+        accept,
+        tls_handshake,
+        http_read,
+        http_write,
+        header_read,
+        header_extension_read,
+        payload_read,
+        payload_drain,
+        packet_write,
+    };
+
+    using TransportOperationId = std::uint64_t;
+
+    struct TransportOperationCompletion
+    {
+        peer_connection* owner;
+        TransportOperationId id;
+
+        ~TransportOperationCompletion()
+        {
+            owner->complete_transport_operation(id);
+        }
+    };
+
+    TransportOperationId
+    begin_transport_operation(TransportOperationKind kind);
+
+    template <typename Initiator>
+    void
+    initiate_transport_operation(
+        TransportOperationKind kind,
+        Initiator&& initiator)
+    {
+        //@@authority transition=prv.T0140 status=provisional scope=statement
+        // bind=declaration@27bff81293db626b
+        // owner=unresolved owner_hypothesis=peer_connection
+        // commit=connection_strand touches=prv.S0045
+        // mutation_class=running_guarded
+        // label=reserve_exact_transport_operation_before_fallible_initiation
+        auto const id =
+            begin_transport_operation(kind);  //@@authority-target ids=prv.T0140
+        try
+        {
+            std::invoke(std::forward<Initiator>(initiator), id);
+        }
+        catch (...)
+        {
+            // No completion handler exists when initiation throws, so this
+            // frame must synchronously return the exact reservation.
+            complete_transport_operation(id);
+            throw;
+        }
+    }
+
+    void
+    complete_transport_operation(TransportOperationId id) noexcept;
+
+    void
+    release_resolver_after_non_close_terminal(
+        std::shared_ptr<tcp::resolver> const& resolver) noexcept;
+
+    void
+    try_complete_physical_drain() noexcept;
+
+    //@@authority state=prv.S0045 status=provisional scope=field
+    // bind=catl::peer_client::peer_connection::transport_operations_@49066613f0f4f1c2
+    // owner=unresolved owner_hypothesis=peer_connection
+    // observed_home=peer_connection
+    // label=exact_connection_transport_operation_census
+    std::map<TransportOperationId, TransportOperationKind>
+        transport_operations_;
+    TransportOperationId next_transport_operation_id_ = 1;
+
+    //@@authority state=prv.S0048 status=provisional scope=field
+    // bind=catl::peer_client::peer_connection::physical_phase_@11427c92d72ac66a
+    // owner=unresolved owner_hypothesis=peer_connection
+    // observed_home=peer_connection
+    // label=connection_physical_lifecycle_phase
+    PhysicalPhase physical_phase_ = PhysicalPhase::open;
+
+    //@@authority state=prv.S0046 status=provisional scope=field
+    // bind=catl::peer_client::peer_connection::physical_drain_waiters_@3615b76151cac3cd
+    // owner=unresolved owner_hypothesis=peer_connection
+    // observed_home=peer_connection
+    // label=shared_connection_physical_drain_receipt_waiters
+    std::vector<std::shared_ptr<asio::steady_timer>> physical_drain_waiters_;
+
+    //@@authority state=prv.S0047 status=provisional scope=field
+    // bind=catl::peer_client::peer_connection::resolver_@f4e0d43498370569
+    // owner=unresolved owner_hypothesis=peer_connection
+    // observed_home=peer_connection
+    // label=owned_outbound_resolver_cancellation_capability
+    std::shared_ptr<tcp::resolver> resolver_;
+
     /// How this connection ends, committed the moment a cause is OBSERVED and
     /// honored by whichever frame later wins `close_ran_`.
     ///
-    /// This exists because `fire_disconnect` used to be transition authority held
-    /// only in a stack argument. A handler reacting to a fatal write could call
-    /// close(), whose `settle_and_close(operation_aborted, false)` won the shared
-    /// latch with the WEAKER disposition — the socket closed and the disconnect
-    /// export, the sole commit that moves PeerClient to Failed and publishes
-    /// PeerTerminalReason, was consumed without firing. Authority for a
-    /// world-changing transition has to live in an owned row, not on a stack.
+    /// This exists because `fire_disconnect` used to be transition authority
+    /// held only in a stack argument. A handler reacting to a fatal write could
+    /// call close(), whose `settle_and_close(operation_aborted, false)` won the
+    /// shared latch with the WEAKER disposition — the socket closed and the
+    /// disconnect export, the sole commit that moves PeerClient to Failed and
+    /// publishes PeerTerminalReason, was consumed without firing. Authority for
+    /// a world-changing transition has to live in an owned row, not on a stack.
     ///
     /// First commit wins, which is sufficient because every path commits its
     /// disposition before running external code.
@@ -345,6 +530,7 @@ private:
     {
         std::vector<std::uint8_t> packet;
         std::function<void(boost::system::error_code)> handler;
+        send_initiated_handler on_initiated;
     };
     // Four distinct things, deliberately not collapsed into flags:
     //
@@ -361,34 +547,36 @@ private:
     //                      the LOGICAL terminal, held as a linear capability.
     //                      Whoever delivers it MOVES it out, so possession is
     //                      the exactly-once proof and a second delivery is
-    //                      unrepresentable rather than flag-guarded. This is why
-    //                      close can terminalize the handler without freeing the
-    //                      bytes: the two live in the same row but are consumed
-    //                      by different owners at different times.
+    //                      unrepresentable rather than flag-guarded. This is
+    //                      why close can terminalize the handler without
+    //                      freeing the bytes: the two live in the same row but
+    //                      are consumed by different owners at different times.
     //   admission_closed_  admission gate. Refuse before queue mutation.
-    //@@authority state=peer_client.connection_write_rows v4=S51 owner=peer_client
-    // S51 is PeerClient.PhysicalLifecycle[GenerationId] — "socket, timers, write
-    // queue, and callback gates", minted by T31. These rows are the write-queue
-    // portion of it. peer_connection is deliberately NOT an owner: it is
-    // constructed with PeerClient's strand, and the canonical model states that a
-    // name absent from `owners:` cannot mint authority.
+    //@@authority state=peer_client.connection_write_rows v4=S51
+    // owner=peer_client
+    // bind=catl::peer_client::peer_connection::write_queue_@dd3d0279829e5b18
+    // S51 is PeerClient.PhysicalLifecycle[GenerationId] — "socket, timers,
+    // write queue, and callback gates", minted by T31. These rows are the
+    // write-queue portion of it. peer_connection is deliberately NOT an owner:
+    // it is constructed with PeerClient's strand, and the canonical model
+    // states that a name absent from `owners:` cannot mint authority.
     //
     // MODEL DISAGREEMENT (filed, not resolved): S51 is one row for four things
     // whose release points differ. The active write's BYTES outlive its logical
     // terminal, which outlives the queued successors, and the close disposition
-    // outlives all three. Three review rounds found real defects at exactly those
-    // seams. This annotation binds the code honestly to the row that exists; it
-    // does not claim the row is correctly decomposed.
+    // outlives all three. Three review rounds found real defects at exactly
+    // those seams. This annotation binds the code honestly to the row that
+    // exists; it does not claim the row is correctly decomposed.
     std::deque<PendingWrite> write_queue_;
     std::optional<PendingWrite> active_write_;
 
     // settle_and_close() moves the queue and one handler INSIDE its commit
-    // section, after close_ran_ has latched. That is only safe while those moves
-    // cannot throw: a throwing move would unwind with the idempotency flag
-    // already set, the socket still open, and every later close returning
-    // immediately — the exact shape that was removed from this function. Asserted
-    // beside the types so a later container or allocator change cannot silently
-    // invalidate the commit section.
+    // section, after close_ran_ has latched. That is only safe while those
+    // moves cannot throw: a throwing move would unwind with the idempotency
+    // flag already set, the socket still open, and every later close returning
+    // immediately — the exact shape that was removed from this function.
+    // Asserted beside the types so a later container or allocator change cannot
+    // silently invalidate the commit section.
     static_assert(
         std::is_nothrow_move_constructible_v<std::deque<PendingWrite>>,
         "settle_and_close moves write_queue_ after latching close_ran_");
@@ -402,6 +590,19 @@ private:
     /// Never set in production. See set_write_initiator_for_test().
     std::function<void(boost::asio::const_buffer, test_write_completion)>
         write_initiator_for_test_;
+    /// Never set in production. See set_read_initiator_for_test().
+    std::function<void(
+        test_read_stage,
+        boost::asio::mutable_buffer,
+        test_read_completion)>
+        read_initiator_for_test_;
+    /// Never set in production. See
+    /// set_before_resolve_initiation_for_test().
+    std::function<void()> before_resolve_initiation_for_test_;
+    /// Never set in production. See
+    /// set_after_physical_drain_waiter_registered_for_test().
+    std::function<void(std::size_t)>
+        after_physical_drain_waiter_registered_for_test_;
 
     void
     do_write();
@@ -419,11 +620,13 @@ private:
         boost::system::error_code ec) noexcept;
 
     /// Strand-only: the single teardown transition. Commits closed admission,
-    /// completes owner-local settlement (collect terminals, cancel and close the
-    /// socket), and only then exposes external callbacks.
-    /// Idempotent — guarded by close_ran_.
+    /// completes owner-local settlement (collect terminals, cancel and close
+    /// the socket), and only then exposes external callbacks. Idempotent —
+    /// guarded by close_ran_.
     void
-    settle_and_close(boost::system::error_code terminal_ec, bool fire_disconnect);
+    settle_and_close(
+        boost::system::error_code terminal_ec,
+        bool fire_disconnect);
 
     /// Strand-only: close socket and fail queued writes.
     /// Idempotent — guarded by close_ran_.

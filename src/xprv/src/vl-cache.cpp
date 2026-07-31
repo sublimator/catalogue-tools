@@ -5,12 +5,14 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/dispatch.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace xprv {
 
@@ -37,179 +39,520 @@ VlCache::VlCache(asio::io_context& io, std::string vl_host, uint16_t vl_port)
     , vl_host_(std::move(vl_host))
     , vl_port_(vl_port)
     , refresh_(strand_)
+    , stop_progress_(strand_, asio::steady_timer::time_point::max())
 {
 }
 
+//@@authority transition=prv.T0068 status=provisional scope=function
+// bind=xprv::start@ff4c4534e3a56929
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0023,prv.S0025 label=start_validator_list_fetch_lifecycle
 void
 VlCache::start()
 {
-    do_fetch();
+    auto self = shared_from_this();
+    asio::dispatch(strand_, [self]() {
+        if (self->phase_ == Phase::running)
+            self->do_fetch();
+    });
 }
 
+//@@authority transition=prv.T0069 status=provisional scope=function
+// bind=xprv::do_fetch@08fae73c5cc51d45
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0023,prv.S0025,prv.S0067,prv.S0068
+// label=admit_validator_list_fetch_and_install_terminal_callback
 void
 VlCache::do_fetch()
 {
-    if (fetch_in_progress_)
+    if (phase_ != Phase::running || fetch_in_progress_)
         return;
-    fetch_in_progress_ = true;
 
     auto self = shared_from_this();
-    catl::vl::VlClient client(io_, vl_host_, vl_port_);
 
-    PLOGI(log_, "Fetching VL from ", vl_host_, ":", vl_port_, "...");
+    // Diagnostics are observers, never fetch-admission authority. Contain
+    // every failure before the operation census becomes visible.
+    try
+    {
+        PLOGI(log_, "Fetching VL from ", vl_host_, ":", vl_port_, "...");
+    }
+    catch (...)
+    {
+    }
+    fetch_in_progress_ = true;
 
-    client.fetch([self](catl::vl::VlResult result) {
-        // VlClient callback — may fire on any thread.
-        // Repost onto our strand to update state.
-        asio::post(self->strand_, [self, result = std::move(result)]() mutable {
-            self->fetch_in_progress_ = false;
-            self->fetch_generation_++;
+    struct FetchAdmissionRollback
+    {
+        VlCache& owner;
+        bool terminal_producer_committed = false;
 
-            // Verify fetched content against the pinned publisher key before
-            // storing it. Treat rejection like a failed fetch so the previous
-            // list remains available.
-            if (result.success && self->verify_)
+        ~FetchAdmissionRollback() noexcept
+        {
+            if (terminal_producer_committed || !owner.fetch_in_progress_)
+                return;
+            auto const operation = owner.active_fetch_;
+            owner.retire_fetch_on_strand(operation);
+            owner.try_finish_stop_on_strand();
+        }
+    } admission_rollback{*this};
+
+    auto on_fetch = [self](
+                        catl::vl::VlFetchOperationPtr operation,
+                        catl::vl::VlResult result) {
+        auto consume = [self,
+                        operation = std::move(operation),
+                        result = std::move(result)]() mutable {
+            try
             {
-                std::string verr;
+                if (self->fetch_terminal_observer_for_test_)
+                    self->fetch_terminal_observer_for_test_(operation);
+            }
+            catch (...)
+            {
+            }
+
+            if (!self->retire_fetch_on_strand(operation))
+            {
                 try
                 {
-                    if (!self->verify_(result.vl, verr))
-                    {
-                        result.success = false;
-                        result.error = "VL verification failed: " + verr;
-                    }
+                    PLOGW(
+                        VlCache::log_,
+                        "Ignoring stale VL fetch terminal from a replaced "
+                        "operation");
                 }
-                catch (std::exception const& e)
+                catch (...)
                 {
-                    result.success = false;
-                    result.error =
-                        std::string("VL verification failed: ") + e.what();
                 }
-            }
-
-            auto freshness = VlFreshnessDisposition::accept;
-            if (result.success)
-            {
-                std::string freshness_error;
-                freshness = assess_vl_freshness(
-                    result.vl,
-                    self->vl_ ? &*self->vl_ : nullptr,
-                    catl::common::current_ripple_time(),
-                    freshness_error,
-                    &self->validator_manifest_history_);
-                if (freshness == VlFreshnessDisposition::reject)
-                {
-                    result.success = false;
-                    result.error =
-                        "VL freshness check failed: " + freshness_error;
-                }
-            }
-
-            if (result.success)
-            {
-                remember_validator_manifests(
-                    result.vl, self->validator_manifest_history_);
-            }
-
-            if (result.success &&
-                freshness == VlFreshnessDisposition::unchanged)
-            {
-                self->last_fetch_ok_ = true;
-                self->last_fetch_error_.clear();
-                self->initial_retry_ = std::chrono::seconds(2);
-                self->wake_waiters();
-                self->schedule_refresh();
                 return;
             }
 
-            if (result.success)
+            struct FinishStop
             {
-                bool first_load = !self->vl_.has_value();
-                self->vl_ = std::move(result.vl);
-                self->last_fetch_ok_ = true;
-                self->last_fetch_error_.clear();
-                self->initial_retry_ =
-                    std::chrono::seconds(2);  // reset for next cold start
-                PLOGI(
-                    VlCache::log_,
-                    "VL loaded: ",
-                    self->vl_->validators.size(),
-                    " validators from ",
-                    self->vl_host_,
-                    first_load ? " (initial)" : " (refresh)");
-
-                // Notify subscriber (e.g. ValidationBuffer) on every load
-                if (self->on_refresh_)
+                VlCache& owner;
+                ~FinishStop()
                 {
-                    self->on_refresh_(*self->vl_);
+                    owner.try_finish_stop_on_strand();
+                }
+            } finish_stop{*self};
+
+            try
+            {
+                if (self->phase_ != Phase::running)
+                {
+                    self->wake_waiters();
+                    return;
                 }
 
-                self->wake_waiters();
-                self->schedule_refresh();
-            }
-            else
-            {
-                self->last_fetch_ok_ = false;
-                self->last_fetch_error_ = result.error;
-                PLOGE(VlCache::log_, "VL fetch failed: ", result.error);
-                self->wake_waiters();
-
-                if (!self->vl_.has_value() || !is_active(*self->vl_))
+                // Verify fetched content against the pinned publisher key
+                // before storing it. Treat rejection like a failed fetch so
+                // the previous list remains available.
+                if (result.success && self->verify_)
                 {
-                    // Never loaded — retry aggressively
-                    auto delay = self->initial_retry_;
-                    PLOGW(
+                    std::string verr;
+                    try
+                    {
+                        if (!self->verify_(result.vl, verr))
+                        {
+                            result.success = false;
+                            result.error = "VL verification failed: " + verr;
+                        }
+                    }
+                    catch (std::exception const& e)
+                    {
+                        result.success = false;
+                        result.error =
+                            std::string("VL verification failed: ") + e.what();
+                    }
+                }
+
+                auto freshness = VlFreshnessDisposition::accept;
+                if (result.success)
+                {
+                    std::string freshness_error;
+                    freshness = assess_vl_freshness(
+                        result.vl,
+                        self->vl_ ? &*self->vl_ : nullptr,
+                        catl::common::current_ripple_time(),
+                        freshness_error,
+                        &self->validator_manifest_history_);
+                    if (freshness == VlFreshnessDisposition::reject)
+                    {
+                        result.success = false;
+                        result.error =
+                            "VL freshness check failed: " + freshness_error;
+                    }
+                }
+
+                if (result.success)
+                {
+                    remember_validator_manifests(
+                        result.vl, self->validator_manifest_history_);
+                }
+
+                if (result.success &&
+                    freshness == VlFreshnessDisposition::unchanged)
+                {
+                    self->last_fetch_ok_ = true;
+                    self->last_fetch_error_.clear();
+                    self->initial_retry_ = std::chrono::seconds(2);
+                    self->wake_waiters();
+                    self->schedule_refresh();
+                    return;
+                }
+
+                if (result.success)
+                {
+                    bool first_load = !self->vl_.has_value();
+                    self->vl_ = std::move(result.vl);
+                    self->last_fetch_ok_ = true;
+                    self->last_fetch_error_.clear();
+                    self->initial_retry_ =
+                        std::chrono::seconds(2);  // reset for next cold start
+                    PLOGI(
                         VlCache::log_,
-                        "VL not yet loaded, retrying in ",
-                        delay.count(),
-                        "s");
-                    self->schedule_retry(delay);
-                    // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s cap
-                    self->initial_retry_ = std::min(
-                        self->initial_retry_ * 2, self->initial_retry_cap_);
+                        "VL loaded: ",
+                        self->vl_->validators.size(),
+                        " validators from ",
+                        self->vl_host_,
+                        first_load ? " (initial)" : " (refresh)");
+
+                    // Notify subscriber (e.g. ValidationBuffer) on every load
+                    if (self->on_refresh_)
+                    {
+                        self->on_refresh_(*self->vl_);
+                    }
+
+                    self->wake_waiters();
+                    self->schedule_refresh();
                 }
                 else
                 {
-                    // An active cached list remains usable; retry on the normal
-                    // refresh cadence.
-                    self->schedule_refresh();
+                    self->last_fetch_ok_ = false;
+                    self->last_fetch_error_ = result.error;
+                    PLOGE(VlCache::log_, "VL fetch failed: ", result.error);
+                    self->wake_waiters();
+
+                    if (!self->vl_.has_value() || !is_active(*self->vl_))
+                    {
+                        // Never loaded — retry aggressively
+                        auto delay = self->initial_retry_;
+                        PLOGW(
+                            VlCache::log_,
+                            "VL not yet loaded, retrying in ",
+                            delay.count(),
+                            "s");
+                        self->schedule_retry(delay);
+                        // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s cap
+                        self->initial_retry_ = std::min(
+                            self->initial_retry_ * 2, self->initial_retry_cap_);
+                    }
+                    else
+                    {
+                        // An active cached list remains usable; retry on the
+                        // normal refresh cadence.
+                        self->schedule_refresh();
+                    }
                 }
             }
-        });
-    });
+            catch (std::exception const& e)
+            {
+                self->last_fetch_ok_ = false;
+                self->last_fetch_error_ =
+                    std::string("VL result observer failed: ") + e.what();
+                PLOGE(VlCache::log_, self->last_fetch_error_);
+                self->wake_waiters();
+            }
+            catch (...)
+            {
+                self->last_fetch_ok_ = false;
+                self->last_fetch_error_ = "VL result observer failed";
+                PLOGE(VlCache::log_, self->last_fetch_error_);
+                self->wake_waiters();
+            }
+        };
+
+        // Production operations complete from co_spawn's physical terminal
+        // boundary on this exact owner strand. The post is retained only for
+        // the deterministic test seam, whose callback may be injected from
+        // outside the executor.
+        if (self->strand_.running_in_this_thread())
+            consume();
+        else
+            asio::post(self->strand_, std::move(consume));
+    };
+
+    auto publish_start_refusal = [&](char const* detail) {
+        catl::vl::VlResult failed;
+        try
+        {
+            if (initiation_failure_diagnostic_for_test_)
+                initiation_failure_diagnostic_for_test_();
+            failed.error = "VL fetch initiation failed";
+            if (detail && *detail)
+            {
+                failed.error += ": ";
+                failed.error += detail;
+            }
+        }
+        catch (...)
+        {
+        }
+        //@@authority transition=prv.T0216 status=provisional scope=statement bind=expression_statement@04751e2fe4506cda
+        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+        // boundary_ref=vl_fetch.operation_terminal
+        // receipt=vl_fetch.operation_terminal receipt_role=publish
+        // label=publish_synchronous_fetch_start_refusal_terminal
+        on_fetch(
+            active_fetch_,
+            std::move(failed)); //@@authority-target ids=prv.T0216
+    };
+
+    try
+    {
+        if (fetch_for_test_)
+        {
+            fetch_for_test_([on_fetch](catl::vl::VlResult result) mutable {
+                on_fetch({}, std::move(result));
+            });
+            admission_rollback.terminal_producer_committed = true;
+        }
+        else
+        {
+            catl::vl::VlClient client(io_, vl_host_, vl_port_);
+            auto operation = client.prepare_fetch(strand_);
+            //@@authority transition=prv.T0208 status=provisional
+            // bind=expression_statement@bf6644464277f70a
+            // scope=statement owner=unresolved owner_hypothesis=vl_cache
+            // commit=vl_cache_strand touches=prv.S0067
+            // label=install_exact_validator_list_fetch_cancellation_capability
+            active_fetch_ = operation; //@@authority-target ids=prv.T0208
+            if (fail_fetch_operation_starts_for_test_ != 0)
+            {
+                --fail_fetch_operation_starts_for_test_;
+                throw std::runtime_error("VL fetch operation start failpoint");
+            }
+            operation->start(on_fetch);
+            admission_rollback.terminal_producer_committed = true;
+        }
+    }
+    catch (std::exception const& e)
+    {
+        publish_start_refusal(e.what());
+    }
+    catch (...)
+    {
+        publish_start_refusal(nullptr);
+    }
+}
+
+//@@authority transition=prv.T0075 status=provisional scope=function
+// bind=xprv::retire_fetch_on_strand@58f2ee55d206538a
+// owner=unresolved owner_hypothesis=vl_cache
+// commit=vl_cache_strand touches=prv.S0025,prv.S0067,prv.S0068
+// boundary_ref=vl_fetch.operation_terminal
+// receipt=vl_fetch.operation_terminal receipt_role=consume
+// label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
+bool
+VlCache::retire_fetch_on_strand(
+    catl::vl::VlFetchOperationPtr const& operation) noexcept
+{
+    assert(strand_.running_in_this_thread());
+    if (operation ? active_fetch_ != operation
+                  : static_cast<bool>(active_fetch_))
+    {
+        return false;
+    }
+    active_fetch_.reset();
+    active_fetch_cancel_requested_ = false;
+    fetch_in_progress_ = false;
+    ++fetch_generation_;
+    return true;
 }
 
 void
 VlCache::stop()
 {
-    refresh_.cancel();
-    wake_waiters();
+    auto self = shared_from_this();
+    asio::dispatch(strand_, [self]() { self->begin_stop_on_strand(); });
 }
 
+//@@authority transition=prv.T0070 status=provisional scope=function
+// bind=xprv::co_stop@fb06248bb1a1b4d5
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0026
+// label=join_validator_list_timer_and_fetch_obligations
+asio::awaitable<void>
+VlCache::co_stop()
+{
+    auto self = shared_from_this();
+    co_await asio::post(strand_, asio::use_awaitable);
+    begin_stop_on_strand();
+    if (phase_ == Phase::stopped)
+        co_return;
+
+    boost::system::error_code ec;
+    co_await stop_progress_.async_wait(
+        asio::redirect_error(asio::use_awaitable, ec));
+
+    auto const cancel_state = co_await asio::this_coro::cancellation_state;
+    if (cancel_state.cancelled() != asio::cancellation_type::none)
+        throw boost::system::system_error(asio::error::operation_aborted);
+}
+
+//@@authority transition=prv.T0071 status=provisional scope=function
+// bind=xprv::begin_stop_on_strand@47e9653c14d73494
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0067,prv.S0068
+// label=seal_validator_list_refresh_admission_and_request_child_cancel
+void
+VlCache::begin_stop_on_strand()
+{
+    if (phase_ == Phase::stopped)
+        return;
+    phase_ = Phase::stopping;
+    try
+    {
+        PLOGI(
+            log_,
+            "VL cache stop entered: refresh_handlers=",
+            refresh_wait_outstanding_,
+            " fetch_in_progress=",
+            fetch_in_progress_,
+            " cancellation_disposition=",
+            active_fetch_ ? static_cast<unsigned>(
+                                active_fetch_->cancellation_disposition())
+                          : 0u);
+    }
+    catch (...)
+    {
+    }
+    if (fetch_in_progress_ && !active_fetch_cancel_requested_)
+    {
+        bool requested = false;
+        if (active_fetch_)
+        {
+            //@@authority transition=prv.T0209 status=provisional
+            // bind=expression_statement@4d2bd899bf060dde
+            // scope=statement owner=unresolved owner_hypothesis=vl_cache
+            // commit=vl_cache_strand touches=prv.S0067
+            // label=request_active_validator_list_fetch_cancellation
+            requested =
+                active_fetch_
+                    ->request_cancel(); //@@authority-target ids=prv.T0209
+        }
+        else if (cancel_fetch_for_test_)
+        {
+            try
+            {
+                requested = cancel_fetch_for_test_();
+            }
+            catch (...)
+            {
+            }
+        }
+        //@@authority transition=prv.T0214 status=provisional scope=statement
+        // bind=expression_statement@36c9154a7737ee7d
+        // owner=unresolved owner_hypothesis=vl_cache
+        // commit=vl_cache_strand touches=prv.S0068
+        // label=retain_owner_accepted_fetch_cancellation_request
+        active_fetch_cancel_requested_ =
+            requested; //@@authority-target ids=prv.T0214
+    }
+    try
+    {
+        refresh_.cancel();
+    }
+    catch (...)
+    {
+    }
+    wake_waiters();
+    try_finish_stop_on_strand();
+}
+
+//@@authority transition=prv.T0072 status=provisional scope=function
+// bind=xprv::try_finish_stop_on_strand@bf7a4ce5d9a98cd5
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0026
+// label=commit_validator_list_cache_stopped_when_children_empty
+void
+VlCache::try_finish_stop_on_strand() noexcept
+{
+    if (phase_ != Phase::stopping || refresh_wait_outstanding_ != 0 ||
+        fetch_in_progress_)
+        return;
+    phase_ = Phase::stopped;
+    try
+    {
+        PLOGI(log_, "VL cache drained");
+    }
+    catch (...)
+    {
+    }
+    try
+    {
+        stop_progress_.cancel();
+    }
+    catch (...)
+    {
+    }
+}
+
+//@@authority transition=prv.T0073 status=provisional scope=function
+// bind=xprv::schedule_refresh@4728af8d30731abe
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0024 label=arm_refresh_timer_obligation
 void
 VlCache::schedule_refresh()
 {
+    if (phase_ != Phase::running)
+        return;
     auto self = shared_from_this();
     refresh_.expires_after(refresh_interval_);
-    refresh_.async_wait([self](boost::system::error_code ec) {
-        if (!ec)
-        {
-            self->do_fetch();
-        }
-    });
+    ++refresh_wait_outstanding_;
+    try
+    {
+        refresh_.async_wait([self](boost::system::error_code ec) {
+            if (self->refresh_wait_outstanding_ != 0)
+                --self->refresh_wait_outstanding_;
+            if (!ec && self->phase_ == Phase::running)
+                self->do_fetch();
+            self->try_finish_stop_on_strand();
+        });
+    }
+    catch (...)
+    {
+        --refresh_wait_outstanding_;
+        throw;
+    }
 }
 
+//@@authority transition=prv.T0074 status=provisional scope=function
+// bind=xprv::schedule_retry@d94ed85885bf7cbd
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0024 label=arm_retry_timer_obligation
 void
 VlCache::schedule_retry(std::chrono::seconds delay)
 {
+    if (phase_ != Phase::running)
+        return;
     auto self = shared_from_this();
     refresh_.expires_after(delay);
-    refresh_.async_wait([self](boost::system::error_code ec) {
-        if (!ec)
-        {
-            self->do_fetch();
-        }
-    });
+    ++refresh_wait_outstanding_;
+    try
+    {
+        refresh_.async_wait([self](boost::system::error_code ec) {
+            if (self->refresh_wait_outstanding_ != 0)
+                --self->refresh_wait_outstanding_;
+            if (!ec && self->phase_ == Phase::running)
+                self->do_fetch();
+            self->try_finish_stop_on_strand();
+        });
+    }
+    catch (...)
+    {
+        --refresh_wait_outstanding_;
+        throw;
+    }
 }
 
 void
@@ -227,6 +570,9 @@ VlCache::co_get()
     // Hop to our strand to read vl_
     auto self = shared_from_this();
     co_await asio::post(strand_, asio::use_awaitable);
+
+    if (phase_ != Phase::running)
+        throw boost::system::system_error(asio::error::operation_aborted);
 
     if (vl_ && is_active(*vl_))
     {
@@ -290,6 +636,12 @@ VlCache::co_get()
 
         co_await asio::post(strand_, asio::use_awaitable);
 
+        if (phase_ != Phase::running)
+        {
+            cleanup.clean_now();
+            throw boost::system::system_error(asio::error::operation_aborted);
+        }
+
         if (fetch_generation_ == generation)
             continue;
 
@@ -313,8 +665,17 @@ VlCache::co_refresh()
     auto self = shared_from_this();
     co_await asio::post(strand_, asio::use_awaitable);
 
+    if (phase_ != Phase::running)
+        throw boost::system::system_error(asio::error::operation_aborted);
+
     auto const generation = fetch_generation_;
-    refresh_.cancel();
+    try
+    {
+        refresh_.cancel();
+    }
+    catch (...)
+    {
+    }
     if (!fetch_in_progress_)
         do_fetch();
 
@@ -370,6 +731,12 @@ VlCache::co_refresh()
             throw boost::system::system_error(asio::error::operation_aborted);
 
         co_await asio::post(strand_, asio::use_awaitable);
+
+        if (phase_ != Phase::running)
+        {
+            cleanup.clean_now();
+            throw boost::system::system_error(asio::error::operation_aborted);
+        }
 
         if (fetch_generation_ == generation)
             continue;

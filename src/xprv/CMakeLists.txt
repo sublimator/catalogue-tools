@@ -56,6 +56,7 @@ add_executable(
   src/proof-chain-binary.cpp
   src/proof-chain-json.cpp
   src/proof-engine.cpp
+  src/service-lifecycle.cpp
   src/proof-resolver.cpp
   src/proof-steps.cpp
   src/manifest-utils.cpp
@@ -70,7 +71,8 @@ target_include_directories(xprv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includes
 # Bake git short hash into the binary at compile time.
 # .gcloudignore/.dockerignore include .git/ minus objects/ and lfs/ (~800KB).
 # git needs an objects dir to recognize a repo, so create it if missing.
-if(EXISTS "${CMAKE_SOURCE_DIR}/.git" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/.git/objects")
+if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git"
+   AND NOT EXISTS "${CMAKE_SOURCE_DIR}/.git/objects")
   file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/.git/objects")
 endif()
 execute_process(

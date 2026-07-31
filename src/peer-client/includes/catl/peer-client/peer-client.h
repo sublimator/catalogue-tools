@@ -11,9 +11,11 @@
 #include <array>
 #include <atomic>
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/ssl.hpp>
 #include <chrono>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
@@ -21,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace catl::peer_client {
@@ -44,6 +47,236 @@ enum class State {
     Ready,             // Status exchanged, can send requests
     Failed,
 };
+
+namespace detail {
+
+enum class ConnectAttemptTerminalKind : std::uint8_t {
+    ready,
+    peer_failure,
+    owner_disconnect,
+    deadline,
+    caller_cancelled,
+    infrastructure_failure,
+};
+
+struct ConnectAttemptTerminal
+{
+    ConnectAttemptTerminal(
+        ConnectAttemptTerminalKind kind,
+        boost::system::error_code error = {},
+        std::uint32_t peer_seq = 0,
+        int deadline_seconds = 0,
+        std::exception_ptr failure = {})
+        : kind(kind)
+        , error(error)
+        , peer_seq(peer_seq)
+        , deadline_seconds(deadline_seconds)
+        , failure(std::move(failure))
+    {
+    }
+
+    ConnectAttemptTerminalKind kind;
+    boost::system::error_code error;
+    uint32_t peer_seq = 0;
+    int deadline_seconds = 0;
+    std::exception_ptr failure;
+};
+
+enum class ConnectAttemptPublication : std::uint8_t {
+    immediate,
+    deferred,
+};
+
+struct ConnectAttemptCommit
+{
+    bool event_committed = false;
+    bool terminal_committed = false;
+};
+
+struct ConnectAttemptSnapshot
+{
+    std::optional<ConnectAttemptTerminal> initial_terminal;
+    PeerLogicalTerminalCause session_terminal_cause =
+        PeerLogicalTerminalCause::none;
+};
+
+/// One synchronization home for the initial attempt result and the pre-ready
+/// PeerClient terminal cause. The deadline and PeerClient owner transitions
+/// compete under the same mutex; the capacity-one channel retains the winner
+/// when publication precedes receive initiation.
+class ConnectAttemptState
+{
+public:
+    using Signal = boost::asio::experimental::concurrent_channel<void(
+        boost::system::error_code)>;
+
+    explicit ConnectAttemptState(boost::asio::any_io_executor executor)
+        : signal_(std::move(executor), 1)
+    {
+    }
+
+    template <typename Commit>
+        requires std::is_nothrow_invocable_v<Commit>
+    //@@authority transition=prv.T0186 status=provisional scope=function
+    // bind=catl::peer_client::detail::ConnectAttemptState::try_commit_initial@40046a19bde7ce9b
+    // owner=unresolved owner_hypothesis=connect_attempt
+    // commit=connect_attempt_mutex touches=prv.S0059
+    // mutation_class=terminal_receipt
+    // label=commit_first_connect_attempt_terminal_result
+    ConnectAttemptCommit
+    try_commit_initial(
+        ConnectAttemptTerminal terminal,
+        Commit&& owner_commit,
+        ConnectAttemptPublication publication =
+            ConnectAttemptPublication::immediate) noexcept
+    {
+        bool publish_now = false;
+        {
+            std::lock_guard lock(mutex_);
+            if (terminal_)
+                return {};
+            terminal_ = terminal;
+            std::forward<Commit>(owner_commit)();
+            terminal_publication_pending_ = true;
+            publish_now = publication == ConnectAttemptPublication::immediate &&
+                !hold_terminal_publication_for_test_;
+        }
+        if (publish_now)
+            publish_terminal();
+        return {.event_committed = true, .terminal_committed = true};
+    }
+
+    template <typename Commit>
+        requires std::is_nothrow_invocable_v<Commit>
+    ConnectAttemptCommit
+    try_commit_peer_terminal(
+        PeerLogicalTerminalCause cause,
+        ConnectAttemptTerminal terminal,
+        Commit&& owner_commit) noexcept
+    {
+        bool terminal_committed = false;
+        bool publish_now = false;
+        {
+            std::lock_guard lock(mutex_);
+            if (terminal_cause_ != PeerLogicalTerminalCause::none)
+                return {};
+            terminal_cause_ = cause;
+            if (!terminal_)
+            {
+                terminal_ = terminal;
+                terminal_committed = true;
+                terminal_publication_pending_ = true;
+                publish_now = !hold_terminal_publication_for_test_;
+            }
+            std::forward<Commit>(owner_commit)();
+        }
+        if (publish_now)
+            publish_terminal();
+        return {
+            .event_committed = true, .terminal_committed = terminal_committed};
+    }
+
+    std::optional<ConnectAttemptTerminal>
+    snapshot() const
+    {
+        std::lock_guard lock(mutex_);
+        return terminal_;
+    }
+
+    /// Returns both retained facts under one lock. This is an observation, not
+    /// a transfer of session authority to PeerSet.
+    ConnectAttemptSnapshot
+    snapshot_for_handoff() const
+    {
+        std::lock_guard lock(mutex_);
+        return {terminal_, terminal_cause_};
+    }
+
+    PeerLogicalTerminalCause
+    terminal_cause() const
+    {
+        std::lock_guard lock(mutex_);
+        return terminal_cause_;
+    }
+
+    boost::asio::awaitable<boost::system::error_code>
+    wait_terminal()
+    {
+        boost::system::error_code ec;
+        co_await signal_.async_receive(
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        co_return ec;
+    }
+
+    bool
+    hold_terminal_publication_for_test()
+    {
+        std::lock_guard lock(mutex_);
+        if (terminal_)
+            return false;
+        hold_terminal_publication_for_test_ = true;
+        return true;
+    }
+
+    bool
+    release_terminal_publication_for_test() noexcept
+    {
+        {
+            std::lock_guard lock(mutex_);
+            if (!hold_terminal_publication_for_test_ ||
+                !terminal_publication_pending_)
+                return false;
+            hold_terminal_publication_for_test_ = false;
+        }
+        return publish_terminal();
+    }
+
+    bool
+    publish_terminal() noexcept
+    {
+        {
+            std::lock_guard lock(mutex_);
+            if (!terminal_publication_pending_ || terminal_published_ ||
+                hold_terminal_publication_for_test_)
+            {
+                return false;
+            }
+            terminal_publication_pending_ = false;
+            terminal_published_ = true;
+        }
+        try
+        {
+            if (!signal_.try_send(boost::system::error_code{}))
+                std::terminate();
+        }
+        catch (...)
+        {
+            std::terminate();
+        }
+        return true;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    //@@authority state=prv.S0059 status=provisional scope=field
+    // bind=catl::peer_client::detail::ConnectAttemptState::terminal_@3a9e1ad6fc4a0214
+    // owner=unresolved owner_hypothesis=connect_attempt
+    // observed_home=connect_attempt
+    // label=first_wins_initial_connect_attempt_terminal_result
+    std::optional<ConnectAttemptTerminal> terminal_;
+    //@@authority state=prv.S0058 status=provisional scope=field
+    // bind=catl::peer_client::detail::ConnectAttemptState::terminal_cause_@00cad104243cf62c
+    // owner=unresolved owner_hypothesis=connect_attempt
+    // observed_home=connect_attempt
+    // label=retained_first_peer_logical_terminal_cause
+    PeerLogicalTerminalCause terminal_cause_ = PeerLogicalTerminalCause::none;
+    Signal signal_;
+    bool hold_terminal_publication_for_test_ = false;
+    bool terminal_publication_pending_ = false;
+    bool terminal_published_ = false;
+};
+
+}  // namespace detail
 
 //------------------------------------------------------------------------------
 // PeerClient
@@ -85,10 +318,11 @@ enum class State {
  *
  * ## Timeouts
  *
- * Each callback has its own asio::steady_timer. When it fires, that
- * callback is called with Error::Timeout and removed. Other callbacks
- * for the same key remain active. If all callbacks timeout, the entry
- * is removed (response will arrive but nobody cares).
+ * Each callback has its own asio::steady_timer. When it fires, that callback
+ * is removed. It receives Error::SendNotInitiated if the exact pending attempt
+ * never reached physical write initiation, otherwise Error::Timeout. Other
+ * callbacks for the same key remain active. If all callbacks expire, the entry
+ * is removed (a later response has no remaining request consumer).
  *
  * ## Result Types
  *
@@ -215,6 +449,20 @@ public:
         return state_;
     }
 
+    PeerLogicalTerminalCause
+    terminal_cause() const
+    {
+        return initial_connect_attempt_->terminal_cause();
+    }
+
+    /// Internal typed result home consumed by the coroutine bridge. Public
+    /// callbacks remain legacy two-argument observers.
+    std::shared_ptr<detail::ConnectAttemptState> const&
+    initial_connect_attempt() const noexcept
+    {
+        return initial_connect_attempt_;
+    }
+
     bool
     is_ready() const override
     {
@@ -237,16 +485,11 @@ public:
     set_tracker(std::shared_ptr<EndpointTracker> tracker);
 
     /// Peer's advertised ledger range (from TMStatusChange).
-    uint32_t
-    peer_first_seq() const override
+    AdvertisedLedgerRange
+    advertised_ledger_range() const override
     {
-        return peer_first_seq_;
-    }
-
-    uint32_t
-    peer_last_seq() const override
-    {
-        return peer_last_seq_;
+        return AdvertisedLedgerRange::from_packed(
+            advertised_ledger_range_.load(std::memory_order_acquire));
     }
 
     std::map<std::string, std::string>
@@ -262,19 +505,24 @@ public:
     void
     set_node_response_handler(NodeResponseHandler handler) override;
 
+    /// Set a sink which reports acceptance and failure independently.
+    void
+    set_node_response_observer(NodeResponseObserver observer) override;
+
     /// Send a raw TMGetLedger for specific node IDs without registering
     /// in pending_nodes. The response will be delivered via the
     /// node_response_handler (if set) and then through normal dispatch.
     /// Thread-safe: submission first enters the PeerClient/connection strand.
-    /// Optional on_error callback fires if the async write fails (e.g.
-    /// broken pipe) — use this to cancel signal timers immediately
-    /// instead of waiting for the full fetch timeout.
+    /// Optional on_write callback fires exactly once: with an error if the
+    /// owner strand refuses the request or the async write fails, and with
+    /// success only after the async write completes.
     void
     send_get_nodes(
         Hash256 const& ledger_hash,
+        uint32_t ledger_seq,
         int type,  // liTX_NODE or liAS_NODE
         std::vector<SHAMapNodeID> const& node_ids,
-        std::function<void(boost::system::error_code)> on_error =
+        std::function<void(boost::system::error_code)> on_write =
             nullptr) override;
 
     bool
@@ -287,6 +535,9 @@ public:
 
     void
     disconnect() override;
+
+    boost::asio::awaitable<void>
+    co_disconnect() override;
 
     size_t
     pending_count() const override;
@@ -348,8 +599,17 @@ private:
     void
     send_initial_probe_ping();
 
+    bool
+    send_ping_request_on_strand(
+        std::uint32_t seq,
+        Callback<PingResult> callback,
+        RequestOptions const& opts);
+
     void
     handle_status_change(std::vector<uint8_t> const& payload);
+
+    AdvertisedLedgerRange
+    publish_advertised_ledger_range(AdvertisedLedgerRange range) noexcept;
 
     void
     handle_endpoints(std::vector<uint8_t> const& payload);
@@ -380,12 +640,18 @@ private:
     void
     disconnect_on_strand();
 
+    std::optional<State>
+    commit_failed_on_strand(
+        boost::system::error_code ec =
+            boost::asio::error::connection_reset) noexcept;
+
     void
     send_get_nodes_on_strand(
         Hash256 ledger_hash,
+        uint32_t ledger_seq,
         int type,
         std::vector<SHAMapNodeID> node_ids,
-        std::function<void(boost::system::error_code)> on_error);
+        std::function<void(boost::system::error_code)> on_write);
 
     bool
     submit_node_batch_on_strand(
@@ -401,8 +667,7 @@ private:
             NodeBatchWriteOutcome::written) noexcept;
 
     void
-    acknowledge_node_batch_receipt_on_strand(
-        NodeBatchReceiptAck ack) noexcept;
+    acknowledge_node_batch_receipt_on_strand(NodeBatchReceiptAck ack) noexcept;
 
     void
     get_ledger_header_on_strand(
@@ -488,8 +753,13 @@ private:
     {
         std::uint64_t incarnation = 0;
         std::vector<PendingCallback<T>> callbacks;
-        bool network_request_sent =
-            false;          // first callback sends, rest piggyback
+        //@@authority state=prv.S0065 status=provisional scope=field
+        // bind=catl::peer_client::PeerClient::PendingEntry::network_request_initiated@6512b1a82fc8c797
+        // owner=unresolved owner_hypothesis=peer_client
+        // observed_home=peer_client
+        // label=per_pending_attempt_send_initiation_fact
+        // True only after async send initiation returns successfully.
+        bool network_request_initiated = false;
         Hash256 match_key;  // secondary key for response matching (e.g.
                             // ledger_key for node requests)
         std::vector<SHAMapNodeID>
@@ -548,6 +818,21 @@ private:
     void
     resolve(PendingMap<T>& map, Hash256 const& key, Error err, T result);
 
+    template <typename T>
+    void
+    mark_network_request_initiated(
+        PendingMap<T>& map,
+        Hash256 const& key,
+        std::uint64_t incarnation) noexcept;
+
+    template <typename T>
+    void
+    complete_network_send(
+        PendingMap<T>& map,
+        Hash256 const& key,
+        std::uint64_t incarnation,
+        boost::system::error_code error);
+
     void
     complete_all_pending(Error error);
 
@@ -588,10 +873,8 @@ private:
         std::size_t waiter_count = 0;
         std::optional<NodeBatchWriteReceipt> terminal_receipt;
     };
-    static_assert(
-        std::is_nothrow_move_constructible_v<NodeBatchWriteRecord>);
-    static_assert(
-        std::is_nothrow_move_assignable_v<NodeBatchWriteRecord>);
+    static_assert(std::is_nothrow_move_constructible_v<NodeBatchWriteRecord>);
+    static_assert(std::is_nothrow_move_assignable_v<NodeBatchWriteRecord>);
     std::vector<NodeBatchWriteRecord> node_batch_write_records_;
     std::atomic<std::size_t> node_batch_ingress_projections_{0};
     std::atomic<std::size_t> node_batch_work_projection_{0};
@@ -600,6 +883,7 @@ private:
     std::uint64_t next_pending_incarnation_{1};
     std::uint64_t next_callback_incarnation_{1};
     std::atomic<std::size_t> pending_count_projection_{0};
+    std::function<void()> before_ledger_attempt_consume_for_test_;
 
     // Request state assumes strand affinity. Late-bound handler pointers
     // are separately mutex-protected so callers do not reintroduce races
@@ -615,13 +899,31 @@ private:
     std::shared_ptr<peer_connection> connection_;
     mutable std::mutex handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
+    //@@authority state=prv.S0061 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::ready_callback_@14ce61062bcf8d7c
+    // owner=unresolved owner_hypothesis=peer_client
+    // observed_home=peer_client
+    // label=one_shot_ready_observer
     ReadyCallback ready_callback_;
+    //@@authority state=prv.S0060 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::connect_completion_callback_@0916e06aa7c57741
+    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
+    // label=one_shot_initial_connect_completion_export_capability
     ConnectCompletionCallback connect_completion_callback_;
 
+    //@@authority state=prv.S0049 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::state_@9f0ac0751dded7b7
+    // owner=unresolved owner_hypothesis=peer_client
+    // observed_home=peer_client label=peer_client_logical_lifecycle_phase
     std::atomic<State> state_{State::Disconnected};
+    std::shared_ptr<detail::ConnectAttemptState> initial_connect_attempt_;
     std::atomic<uint32_t> peer_ledger_seq_{0};
-    std::atomic<uint32_t> peer_first_seq_{0};
-    std::atomic<uint32_t> peer_last_seq_{0};
+    //@@authority state=prv.S0021 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::advertised_ledger_range_@f4cbfc77b30d3841
+    // owner=unresolved owner_hypothesis=peer_client
+    // observed_home=peer_client
+    // label=coherent_advertised_ledger_range_snapshot
+    std::atomic<std::uint64_t> advertised_ledger_range_{0};
     std::string net_label_;
     std::string endpoint_str_;  // "host:port" for tracker
     std::uint64_t receiver_instance_id_ = 0;
@@ -631,7 +933,11 @@ private:
     std::shared_ptr<EndpointTracker> tracker_;
 
     DisconnectCallback on_disconnect_;
-    NodeResponseHandler node_response_handler_;
+    //@@authority state=prv.S0007 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::node_response_observer_@4ed65a4019fccdea
+    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
+    // label=singleton_uncorrelated_node_response_observer
+    NodeResponseObserver node_response_observer_;
 
     static LogPartition log_;
 };

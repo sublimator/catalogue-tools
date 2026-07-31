@@ -46,8 +46,19 @@ ProofEngine::create(asio::io_context& io, NetworkConfig config)
 }
 
 void
+ProofEngine::bind_request_drain_authority(
+    std::shared_ptr<RequestDrainAuthority const> authority)
+{
+    request_drain_binding_.bind(std::move(authority));
+}
+
+void
 ProofEngine::start()
 {
+    if (start_called_)
+        throw std::logic_error("ProofEngine::start may be called only once");
+    start_called_ = true;
+
     // VL cache
     vl_cache_ = VlCache::create(io_, config_.vl_host, config_.vl_port);
     // Authenticate list contents against the pinned publisher key independently
@@ -74,14 +85,6 @@ ProofEngine::start()
     // Wire VL → validation buffer: when VL loads, push UNL keys
     // We do this via a one-shot fetch, then the refresh will re-push.
     // For now, the VL co_get in prove() handles the initial UNL push.
-
-    // Node cache (content-addressed wire node store)
-    node_cache_ = NodeCache::create(
-        io_,
-        {.max_entries = node_cache_size_,
-         .fetch_timeout = fetch_timeout_,
-         .max_walk_peer_retries = max_walk_peer_retries_,
-         .fetch_stale_multiplier = fetch_stale_multiplier_});
 
     // Shared RPC client with concurrency limiter
     rpc_ = std::make_shared<catl::rpc::RpcClient>(
@@ -113,6 +116,35 @@ ProofEngine::start()
         pool.max_in_flight_crawls);
     peers_ = PeerSet::create(io_, peer_opts);
 
+    if (ledger_fetch_coordinator_enabled_)
+    {
+        //@@authority transition=prv.T0044 status=provisional scope=statement
+        // bind=create@c921008e8a6ff63e
+        // owner=unresolved owner_hypothesis=proof_engine
+        // commit=startup_coroutine calls=create
+        // label=construct_one_ledger_fetch_coordinator_per_peer_set
+        ledger_fetch_coordinator_ = LedgerFetchCoordinator::create(
+            io_, peers_); //@@authority-target ids=prv.T0044
+        if (!ledger_fetch_coordinator_)
+            throw std::runtime_error(
+                "failed to create ledger fetch coordinator generation");
+    }
+
+    // Node cache (content-addressed wire node store). The optional coordinator
+    // is selected once here; request callsites do not branch on server mode.
+    //@@authority transition=prv.T0004 status=provisional scope=statement
+    // bind=create@c881629500fe6506
+    // owner=unresolved owner_hypothesis=ledger_data_provider
+    // commit=startup_coroutine calls=create
+    // label=construct_live_node_cache_with_selected_transport_capability
+    node_cache_ = NodeCache::create(
+        io_,
+        {.max_entries = node_cache_size_,
+         .fetch_timeout = fetch_timeout_,
+         .max_walk_peer_retries = max_walk_peer_retries_,
+         .fetch_stale_multiplier = fetch_stale_multiplier_},
+        ledger_fetch_coordinator_); //@@authority-target ids=prv.T0004
+
     // Wire peers → validation buffer: unsolicited validations
     auto vbuf = val_buffer_;
     peers_->set_unsolicited_handler(
@@ -133,39 +165,9 @@ ProofEngine::start()
         vbuf->set_unl(vl.validators, vl.sequence);
     });
 
-    // Try the configured initial peer
-    auto self = shared_from_this();
-    asio::co_spawn(
-        io_,
-        [self]() -> asio::awaitable<void> {
-            auto client = co_await self->peers_->try_connect(
-                self->config_.peer_host, self->config_.peer_port);
-            if (client)
-            {
-                PLOGI(
-                    log_,
-                    "[",
-                    self->net_label_,
-                    "] Initial peer connected: ",
-                    client->endpoint(),
-                    " (ledger ",
-                    client->peer_ledger_seq(),
-                    ")");
-            }
-            else
-            {
-                PLOGW(
-                    log_,
-                    "[",
-                    self->net_label_,
-                    "] Initial peer ",
-                    self->config_.peer_host,
-                    ":",
-                    self->config_.peer_port,
-                    " failed — using bootstrap discovery");
-            }
-        },
-        asio::detached);
+    // The configured endpoint uses PeerSet's owned background census. A
+    // detached try_connect caller would be invisible to PeerSet::co_stop().
+    peers_->start_connect(config_.peer_host, config_.peer_port);
 
     // Pre-resolve RPC hostname so concurrent proves don't hammer DNS.
     // RPC host doesn't change at runtime — resolve once, use IP forever.
@@ -231,14 +233,257 @@ ProofEngine::stop()
     {
         val_buffer_->stop();
     }
-    // The validator worker is joined above. Peer and heartbeat operations are
-    // quiesced when the owning command stops the io_context.
+    if (ledger_fetch_coordinator_)
+    {
+        // Logical seal only. The owning io_context must keep running to execute
+        // the coordinator's drain; stop() does not pretend this is quiescence.
+        //@@authority transition=prv.T0045 status=provisional scope=statement
+        // bind=fence@f07d60bfb8be76ad
+        // owner=unresolved owner_hypothesis=proof_engine commit=atomic
+        // calls=fence label=seal_managed_node_ingress_before_io_context_stop
+        auto const disposition =
+            ledger_fetch_coordinator_
+                ->fence(); //@@authority-target ids=prv.T0045
+        if (disposition != LedgerFetchCoordinator::Fence::drain_queued)
+        {
+            PLOGW(
+                log_,
+                "[",
+                net_label_,
+                "] ledger fetch coordinator fence notification refused");
+        }
+    }
+    // The validator worker is joined above. The owning command halts peer and
+    // heartbeat execution by stopping the io_context; that process-terminal
+    // boundary is not a graceful drain or a reusable-engine quiescence claim.
 }
+
+// Machine-readable target anchors in this block must remain on their
+// statements.
+// clang-format off
+//@@authority state=prv.S0056 status=provisional scope=function
+//bind=xprv::co_stop@3da48b9d47023132
+// owner=unresolved owner_hypothesis=proof_engine_drain_frame
+// observed_home=ProofEngine::co_stop_coroutine_frame
+// label=owned_installed_proof_engine_child_population_and_receipt_census
+//@@authority channel=prv.C0004 status=provisional scope=function
+//bind=xprv::co_stop@3da48b9d47023132
+// endpoints=service_lifecycle,proof_engine
+// channel_semantics=process_local_join
+// label=await_exact_proof_engine_drain_receipt
+asio::awaitable<ProofEngine::DrainReceipt>
+ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
+{
+    //@@authority transition=prv.T0166 status=provisional scope=statement
+    //bind=if_statement@5f390c1b907fdbdf
+    // owner=unresolved owner_hypothesis=proof_engine
+    // commit=request_drain_binding_mutex touches=prv.S0056
+    // boundary_ref=http.request_drain_receipt
+    // receipt=http.request_drain_receipt receipt_role=consume
+    // label=accept_exact_http_request_drain_receipt
+    if (!request_drain_binding_.accepts(request_drain))
+    {
+        throw std::invalid_argument(
+            "request-drain receipt does not authorize this engine");
+    } //@@authority-target ids=prv.T0166
+
+    // This is shared service lifecycle work. A canceled signal waiter must not
+    // abandon the drain between components and leave later joiners observing a
+    // half-sealed engine.
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
+    PLOGI(log_, "[", net_label_, "] Engine draining...");
+
+    struct InstalledDrainPopulation
+    {
+        std::shared_ptr<VlCache> vl_cache;
+        std::shared_ptr<ValidationBuffer> validation_buffer;
+        std::shared_ptr<NodeCache> node_cache;
+        std::shared_ptr<LedgerFetchCoordinator> ledger_fetch_coordinator;
+        std::shared_ptr<PeerSet> peer_set;
+    };
+
+    // Snapshot the complete installed child population once. The coroutine
+    // frame owns these exact capabilities until every admitted receipt has
+    // returned; later member reads cannot silently change the census.
+    //@@authority transition=prv.T0165 status=provisional scope=statement bind=declaration@22b7cc6553fb75c3
+    // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+    // commit=proof_engine_drain_coroutine touches=prv.S0056
+    // population_ref=proof_engine.installed_drain_population
+    // population_members=proof_engine.vl_cache,proof_engine.validation_buffer,proof_engine.node_cache,proof_engine.ledger_fetch_coordinator,proof_engine.peer_set
+    // label=snapshot_exact_proof_engine_installed_drain_population
+    auto const population = InstalledDrainPopulation{
+        .vl_cache = vl_cache_,
+        .validation_buffer = val_buffer_,
+        .node_cache = node_cache_,
+        .ledger_fetch_coordinator = ledger_fetch_coordinator_,
+        .peer_set = peers_,
+    }; //@@authority-target ids=prv.T0165
+
+    // The HTTP admission owner has already drained every request frame before
+    // entering here, so no new cache operation can be minted by this service.
+    if (population.vl_cache)
+    {
+        //@@authority transition=prv.T0167 status=provisional scope=statement
+        //bind=co_stop@24232176950b9c9a
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_stop touches=prv.S0056
+        // boundary_ref=vl_cache.co_stop receipt=vl_cache.stop_receipt
+        // receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.vl_cache
+        // label=consume_vl_cache_stop_receipt
+        co_await population.vl_cache
+            ->co_stop(); //@@authority-target ids=prv.T0167
+    }
+    if (population.validation_buffer)
+    {
+        //@@authority transition=prv.T0168 status=provisional scope=statement
+        //bind=co_stop@72491148edf6933d
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_stop
+        // touches=prv.S0056 boundary_ref=validation_buffer.co_stop
+        // receipt=validation_buffer.stop_receipt receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.validation_buffer
+        // label=consume_validation_buffer_stop_receipt
+        co_await population.validation_buffer
+            ->co_stop(); //@@authority-target ids=prv.T0168
+    }
+
+    if (population.node_cache)
+    {
+        //@@authority transition=prv.T0169 status=provisional scope=statement
+        //bind=co_stop_nodes@b426ab0c6792fffb
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_stop_nodes
+        // touches=prv.S0056 boundary_ref=node_cache.co_stop_nodes
+        // receipt=node_cache.node_stop_receipt receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.node_cache
+        // label=consume_node_cache_node_stop_receipt
+        co_await population.node_cache
+            ->co_stop_nodes(); //@@authority-target ids=prv.T0169
+        //@@authority transition=prv.T0170 status=provisional scope=statement
+        //bind=co_clear_headers@5dbb9a321013b130
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_clear_headers
+        // touches=prv.S0056 boundary_ref=node_cache.co_clear_headers
+        // receipt=node_cache.header_clear_receipt receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.node_cache
+        // label=consume_node_cache_header_clear_receipt
+        co_await population.node_cache
+            ->co_clear_headers(); //@@authority-target ids=prv.T0170
+    }
+
+    if (population.ledger_fetch_coordinator)
+    {
+        //@@authority transition=prv.T0171 status=provisional scope=statement
+        //bind=co_fence@7bf2af3a2b8cdd61
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_fence touches=prv.S0056
+        // boundary_ref=ledger_fetch_coordinator.co_fence
+        // receipt=ledger_fetch_coordinator.fence_receipt receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.ledger_fetch_coordinator
+        // label=consume_ledger_fetch_coordinator_fence_receipt
+        co_await population.ledger_fetch_coordinator
+            ->co_fence(); //@@authority-target ids=prv.T0171
+
+        // A PeerSet seal handler can enqueue its pin release behind the first
+        // barrier. The second pass consumes those causally generated releases.
+        //@@authority transition=prv.T0172 status=provisional scope=statement
+        //bind=co_generation_pin_release_barrier@6311aeeb80df5da0
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine touches=prv.S0056
+        // calls=co_generation_pin_release_barrier
+        // boundary_ref=peer_set.first_generation_pin_release_barrier
+        // receipt=peer_set.first_generation_pin_barrier_receipt
+        // receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.ledger_fetch_coordinator
+        // label=consume_peer_set_first_generation_pin_barrier_receipt
+        co_await population.peer_set
+            ->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0172
+        //@@authority transition=prv.T0173 status=provisional scope=statement
+        //bind=co_generation_pin_release_barrier@7957ee5f82e45f14
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine touches=prv.S0056
+        // calls=co_generation_pin_release_barrier
+        // boundary_ref=peer_set.causal_generation_pin_release_barrier
+        // receipt=peer_set.causal_generation_pin_barrier_receipt
+        // receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.ledger_fetch_coordinator
+        // label=consume_peer_set_causal_generation_pin_barrier_receipt
+        co_await population.peer_set
+            ->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0173
+
+        //@@authority transition=prv.T0174 status=provisional scope=statement
+        //bind=co_reconcile_shutdown_projection_residue@38fff40d7eef0489
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine touches=prv.S0056
+        // calls=co_reconcile_shutdown_projection_residue
+        // boundary_ref=ledger_fetch_coordinator.co_reconcile_shutdown_projection_residue
+        // receipt=ledger_fetch_coordinator.projection_reconciliation_receipt
+        // receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.ledger_fetch_coordinator
+        // label=consume_ledger_fetch_coordinator_projection_reconciliation_receipt
+        auto const lost = co_await population.ledger_fetch_coordinator
+                              ->co_reconcile_shutdown_projection_residue(); //@@authority-target ids=prv.T0174
+        if (lost != 0)
+        {
+            PLOGW(
+                log_,
+                "[",
+                net_label_,
+                "] reconciled ",
+                lost,
+                " lost coordinator bind completion(s) at shutdown");
+        }
+    }
+
+    if (population.peer_set)
+    {
+        //@@authority transition=prv.T0175 status=provisional scope=statement
+        //bind=co_stop@7495267fc239b21f
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_stop touches=prv.S0056
+        // boundary_ref=peer_set.co_stop
+        // receipt=peer_set.aggregate_stop_receipt receipt_role=consume
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.peer_set
+        // label=consume_peer_set_aggregate_stop_receipt
+        co_await population.peer_set
+            ->co_stop(); //@@authority-target ids=prv.T0175
+    }
+
+    PLOGI(log_, "[", net_label_, "] Engine drained");
+    if (before_drain_receipt_publish_for_test_)
+        before_drain_receipt_publish_for_test_();
+    //@@authority transition=prv.T0176 status=provisional scope=statement
+    //bind=co_return_statement@14dc731903ca3625
+    // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+    // commit=proof_engine_drain_coroutine touches=prv.S0056
+    // boundary_ref=proof_engine.drain_receipt
+    // receipt=proof_engine.drain_receipt receipt_role=publish
+    // population_ref=proof_engine.installed_drain_population
+    // label=publish_exact_proof_engine_drain_receipt
+    co_return DrainReceipt{shared_from_this()}; //@@authority-target ids=prv.T0176
+}
+// clang-format on
 
 // ═══════════════════════════════════════════════════════════════════════
 // prove() — build a proof chain using shared services
 // ═══════════════════════════════════════════════════════════════════════
 
+//@@authority transition=prv.T0005 status=provisional scope=function
+// bind=xprv::prove@3023246064adff8e
+// owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
+// label=begin_real_proof_operation_without_authority_identity
 asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(
     std::string const& tx_hash,
@@ -334,7 +579,13 @@ ProofEngine::prove(
         .on_step = std::move(on_step),
     };
 
-    auto result = co_await build_proof(svc, tx_hash);
+    //@@authority transition=prv.T0006 status=provisional scope=statement
+    // bind=build_proof@628b5988ba4dbec4
+    // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
+    // calls=build_proof
+    // label=enter_shared_proof_build_without_operation_identity
+    auto result =
+        co_await build_proof(svc, tx_hash); //@@authority-target ids=prv.T0006
     result.chain.network_id = config_.network_id;
 
     // Cache the tx→ledger mapping for future requests
@@ -564,6 +815,23 @@ ProofEngine::co_health()
     if (latest)
         status.latest_quorum_seq = latest->ledger_seq;
     status.validation_buffer = co_await val_buffer_->co_stats();
+
+    if (ledger_fetch_coordinator_)
+    {
+        status.ledger_fetch_coordinator.enabled = true;
+        status.ledger_fetch_coordinator.lifecycle =
+            ledger_fetch_coordinator_->lifecycle();
+        status.ledger_fetch_coordinator.ingress_sealed =
+            ledger_fetch_coordinator_->ingress_sealed();
+        status.ledger_fetch_coordinator.work_outstanding =
+            ledger_fetch_coordinator_->work_outstanding();
+        status.ledger_fetch_coordinator.outstanding_bind_projections =
+            ledger_fetch_coordinator_->outstanding_bind_projections();
+        status.ledger_fetch_coordinator.receipt_obligations =
+            ledger_fetch_coordinator_->receipt_obligations();
+        status.ledger_fetch_coordinator.accounting_broken =
+            ledger_fetch_coordinator_->accounting_broken();
+    }
 
     co_return status;
 }

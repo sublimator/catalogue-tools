@@ -65,6 +65,11 @@ struct Config
     /// this multiplier. A new caller will re-send the request.
     int fetch_stale_multiplier = 2;
 
+    /// Candidate transport cut: managed PeerSet generation pins submit node
+    /// batches through LedgerFetchCoordinator. Default false until the local
+    /// proof/SSE and deterministic-interleaving gates are green.
+    bool ledger_fetch_coordinator = false;
+
     /// Path to the peer endpoint SQLite cache. Empty = platform default
     /// (~/.config/xprv/peer-endpoints.sqlite3).
     std::string peer_cache_path;
@@ -86,10 +91,6 @@ struct Config
     /// Ledger range span threshold for "archival" classification.
     /// Shared between server and CLI modes.
     uint32_t archival_range_threshold = 1'000'000;
-
-    /// After this duration without finding a range-matching peer,
-    /// fall back to any ready peer. 0ms = disable. Default 1000ms.
-    std::chrono::milliseconds peer_fallback{1000};
 
     /// File descriptor soft limit for serve mode. 0 = don't touch.
     unsigned int fd_limit = 8192;

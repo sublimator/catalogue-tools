@@ -83,10 +83,17 @@ public:
     void
     on_packet(uint16_t type, std::vector<uint8_t> const& data);
 
-    /// Stop admission and join background manifest verification. One collector
-    /// operation already running on the validation strand may finish.
+    /// Compatibility/destructor seal. Stops admission and joins background
+    /// manifest verification, but does not attest that queued strand work has
+    /// retired. Graceful service shutdown must use co_stop().
     void
     stop();
+
+    /// Stop admission, join background manifest verification, and cross the
+    /// validation owner strand after every previously queued owner operation.
+    /// Completion is the exact ValidationBuffer drain receipt.
+    boost::asio::awaitable<void>
+    co_stop();
 
     /// Update UNL keys (called when VlCache refreshes). Older list sequences
     /// are ignored.
@@ -217,7 +224,8 @@ public:
     set_next_pending_id_for_test(std::uint64_t value)
     {
         if (!strand_.running_in_this_thread())
-            throw std::logic_error("pending identity test seed off owner strand");
+            throw std::logic_error(
+                "pending identity test seed off owner strand");
         next_pending_id_ = value;
     }
 
@@ -225,7 +233,8 @@ public:
     next_pending_id_for_test() const
     {
         if (!strand_.running_in_this_thread())
-            throw std::logic_error("pending identity test read off owner strand");
+            throw std::logic_error(
+                "pending identity test read off owner strand");
         return next_pending_id_;
     }
 
@@ -294,6 +303,9 @@ private:
 
     void
     cancel_pending_locked(QuorumCollectStopReason reason);
+
+    void
+    seal_admission_and_join_worker();
 
     std::optional<QuorumEntry>
     latest_quorum_locked(ValidationCollector::QuorumMode mode) const;

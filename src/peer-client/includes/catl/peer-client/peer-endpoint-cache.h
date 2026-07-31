@@ -15,12 +15,25 @@ namespace catl::peer_client {
 
 /// Persistent cache of peer endpoints discovered during bootstrap.
 ///
-/// This is intentionally small and synchronous. xprv drives peers from a
-/// single io_context thread, so immediate event-driven writes are simple and
-/// keep the bootstrap state fresh across process runs.
+/// This is intentionally small, synchronous, and internally mutex-protected.
+/// Immediate event-driven writes keep bootstrap state fresh across process
+/// runs without introducing another asynchronous owner.
 class PeerEndpointCache
 {
 public:
+    /// Hard per-network retention bound. It bounds both durable storage and
+    /// the population a synchronous ranked query may inspect. Active failures
+    /// displace reconstructible healthy hints; if failures alone exceed the
+    /// bound, later persisted failure timestamps win and equal-second ties use
+    /// stable endpoint order.
+    static constexpr std::size_t max_endpoints_per_network = 4096;
+
+    struct Health
+    {
+        bool available = false;
+        std::string error;
+    };
+
     struct Entry
     {
         std::string endpoint;
@@ -44,8 +57,26 @@ public:
     std::vector<Entry>
     load_bootstrap_candidates(uint32_t network_id, std::size_t limit) const;
 
+    /// Load bounded persistent hints whose last observed range covered the
+    /// requested ledger. These rows authorize search only; a live handshake
+    /// must still revalidate coverage before the peer can be used.
+    std::vector<Entry>
+    load_covering_candidates(
+        uint32_t network_id,
+        uint32_t ledger_seq,
+        std::size_t limit) const;
+
+    /// Load every currently active durable failure. The storage population is
+    /// hard-bounded, so this is a bounded startup projection rather than an
+    /// unbounded request-time scan.
+    std::vector<Entry>
+    load_active_failures(uint32_t network_id) const;
+
     std::size_t
     count_endpoints(uint32_t network_id) const;
+
+    Health
+    health() const;
 
     void
     remember_discovered(uint32_t network_id, std::string const& endpoint);
@@ -93,15 +124,29 @@ private:
     is_disabled() const;
 
     void
+    throw_if_disabled() const;
+
+    void
     disable();
 
     static std::int64_t
     now_unix();
 
     std::string path_;
+    //@@authority state=prv.S0073 status=provisional scope=field
+    // bind=catl::peer_client::PeerEndpointCache::db_@ea77b8c353c4656e
+    // owner=unresolved owner_hypothesis=peer_endpoint_cache
+    // observed_home=peer_endpoint_cache
+    // label=persistent_peer_endpoint_range_search_hints
     sqlite3* db_ = nullptr;
     mutable std::mutex mutex_;
+    //@@authority state=prv.S0075 status=provisional scope=field
+    // bind=catl::peer_client::PeerEndpointCache::disabled_@ff731b30e8046e6b
+    // owner=unresolved owner_hypothesis=peer_endpoint_cache
+    // observed_home=peer_endpoint_cache
+    // label=latched_peer_endpoint_cache_unavailable_fact
     bool disabled_ = false;
+    std::string disabled_reason_;
 };
 
 }  // namespace catl::peer_client

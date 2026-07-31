@@ -1,6 +1,6 @@
+#include "peer-set-test-access.h"
 #include <algorithm>
 #include <catl/peer-client/peer-set.h>
-#include "peer-set-test-access.h"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -41,9 +41,9 @@ find_snapshot_entry(
     std::string const& endpoint)
 {
     auto it = std::find_if(
-        snapshot.peers.begin(),
-        snapshot.peers.end(),
-        [&](auto const& entry) { return entry.endpoint == endpoint; });
+        snapshot.peers.begin(), snapshot.peers.end(), [&](auto const& entry) {
+            return entry.endpoint == endpoint;
+        });
     if (it == snapshot.peers.end())
         return nullptr;
     return &*it;
@@ -54,11 +54,13 @@ find_snapshot_entry(
 TEST(PeerSetPruning, WaitSignalWakesOnDiscoveryAcrossThreads)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
     auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
 
     bool done = false;
@@ -115,11 +117,13 @@ TEST(PeerSetPruning, WaitSignalWakesOnDiscoveryAcrossThreads)
 TEST(PeerSetPruning, WaitSignalWakesOnStatusUpdate)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
     auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
 
     bool done = false;
@@ -177,27 +181,27 @@ TEST(PeerSetPruning, WaitSignalWakesOnStatusUpdate)
     EXPECT_TRUE(woke_on_signal);
 }
 
-TEST(PeerSetPruning, RemovesExpiredAndOrphanedDiscoveryState)
+TEST(PeerSetPruning, RemovesExpiredStateButRetainsFreshRetryEvidence)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
 
     auto const now = std::chrono::steady_clock::now();
 
     PeerSetTestAccess::add_discovered(io, peers, "tracked.example.com:51235");
-    PeerSetTestAccess::add_discovered(io, peers, "tracked-fail.example.com:51235");
+    PeerSetTestAccess::add_discovered(
+        io, peers, "tracked-fail.example.com:51235");
 
     PeerSetTestAccess::set_crawled_at(
         io, peers, "tracked.example.com:51235", now);
     PeerSetTestAccess::set_crawled_at(
-        io,
-        peers,
-        "expired.example.com:51235",
-        now - std::chrono::minutes(31));
+        io, peers, "expired.example.com:51235", now - std::chrono::minutes(31));
     PeerSetTestAccess::set_crawled_at(
         io, peers, "orphan.example.com:51235", now);
 
@@ -224,18 +228,22 @@ TEST(PeerSetPruning, RemovesExpiredAndOrphanedDiscoveryState)
         io, peers, "tracked-fail.example.com:51235"));
     EXPECT_FALSE(PeerSetTestAccess::has_failed(
         io, peers, "expired-fail.example.com:51235"));
-    EXPECT_FALSE(PeerSetTestAccess::has_failed(
-        io, peers, "orphan-fail.example.com:51235"));
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(
+        io, peers, "orphan-fail.example.com:51235"))
+        << "the unified retry gate is itself owned evidence; unlike crawl "
+           "history, it does not require a tracker row to remain valid";
 }
 
 TEST(PeerSetPruning, CapsTrackerAndDeduplicatesCanonicalEndpoints)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
 
     auto const active = "active.example.com:51235";
     PeerSetTestAccess::add_discovered(io, peers, active);
@@ -246,12 +254,14 @@ TEST(PeerSetPruning, CapsTrackerAndDeduplicatesCanonicalEndpoints)
         "::ffff:1.2.3.4:51235",
     };
     endpoints_to_add.reserve(PeerSetTestAccess::max_tracked_endpoints + 34);
-    for (std::size_t i = 0; i < PeerSetTestAccess::max_tracked_endpoints + 32; ++i)
+    for (std::size_t i = 0; i < PeerSetTestAccess::max_tracked_endpoints + 32;
+         ++i)
     {
         endpoints_to_add.push_back(
             "peer-" + std::to_string(i) + ".example.com:51235");
     }
-    PeerSetTestAccess::add_discovered_many(io, peers, std::move(endpoints_to_add));
+    PeerSetTestAccess::add_discovered_many(
+        io, peers, std::move(endpoints_to_add));
 
     auto const initial_size = peers->tracker()->size();
     ASSERT_GT(initial_size, PeerSetTestAccess::max_tracked_endpoints);
@@ -259,8 +269,7 @@ TEST(PeerSetPruning, CapsTrackerAndDeduplicatesCanonicalEndpoints)
     PeerSetTestAccess::prune_discovery_state(io, peers);
 
     auto const endpoints = peers->tracker()->all_endpoints();
-    EXPECT_LE(
-        endpoints.size(), PeerSetTestAccess::max_tracked_endpoints + 1);
+    EXPECT_LE(endpoints.size(), PeerSetTestAccess::max_tracked_endpoints + 1);
     EXPECT_TRUE(contains_endpoint(endpoints, active));
     EXPECT_TRUE(
         contains_endpoint(endpoints, "1.2.3.4:51235") ||
@@ -273,11 +282,13 @@ TEST(PeerSetPruning, CapsTrackerAndDeduplicatesCanonicalEndpoints)
 TEST(PeerSetPruning, CandidateRankingPrefersHealthyConnectedPeers)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
 
     auto const status = PeerStatus{
         .first_seq = 100,
@@ -296,25 +307,21 @@ TEST(PeerSetPruning, CandidateRankingPrefersHealthyConnectedPeers)
         io, peers, "stale.example.com:51235");
 
     EXPECT_TRUE(PeerSetTestAccess::candidate_better(
-        io,
-        peers,
-        "healthy.example.com:51235",
-        "stale.example.com:51235"));
+        io, peers, "healthy.example.com:51235", "stale.example.com:51235"));
     EXPECT_FALSE(PeerSetTestAccess::candidate_better(
-        io,
-        peers,
-        "stale.example.com:51235",
-        "healthy.example.com:51235"));
+        io, peers, "stale.example.com:51235", "healthy.example.com:51235"));
 }
 
 TEST(PeerSetPruning, RetryBackoffUsesFailureCountAndCapsAtFiveMinutes)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
 
     auto const endpoint = std::string("retry.example.com:51235");
     PeerSetTestAccess::add_discovered(io, peers, endpoint);
@@ -350,11 +357,13 @@ TEST(PeerSetPruning, RetryBackoffUsesFailureCountAndCapsAtFiveMinutes)
 TEST(PeerSetPruning, PumpConnectsHonorsComputedRetryBackoff)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 1,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
 
     auto const endpoint = std::string("backoff.example.com:51235");
     PeerSetTestAccess::add_discovered(io, peers, endpoint);
@@ -369,18 +378,19 @@ TEST(PeerSetPruning, PumpConnectsHonorsComputedRetryBackoff)
     PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
     PeerSetTestAccess::pump_connects(io, peers);
 
-    EXPECT_FALSE(
-        PeerSetTestAccess::in_flight_contains(io, peers, endpoint));
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, endpoint));
 }
 
 TEST(PeerSetPruning, QueueCrawlSkipsPrivatePeersUntilRecheck)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 21337,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 1,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 21337,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 1,
+        });
 
     auto const endpoint = std::string("private.example.com:21337");
     PeerSetTestAccess::note_peer_headers(
@@ -408,11 +418,13 @@ TEST(PeerSetPruning, QueueCrawlSkipsPrivatePeersUntilRecheck)
 TEST(PeerSetPruning, SnapshotSummarizesRecentFailures)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
 
     auto const forbidden = std::string("forbidden.example.com:51235");
     auto const flakey = std::string("flakey.example.com:51235");
@@ -420,20 +432,11 @@ TEST(PeerSetPruning, SnapshotSummarizesRecentFailures)
     PeerSetTestAccess::add_discovered(io, peers, flakey);
 
     PeerSetTestAccess::note_connect_failure(
-        io,
-        peers,
-        forbidden,
-        "http upgrade status=403 reason=\"Forbidden\"");
+        io, peers, forbidden, "http upgrade status=403 reason=\"Forbidden\"");
     PeerSetTestAccess::note_connect_failure(
-        io,
-        peers,
-        forbidden,
-        "http upgrade status=403 reason=\"Forbidden\"");
+        io, peers, forbidden, "http upgrade status=403 reason=\"Forbidden\"");
     PeerSetTestAccess::note_connect_failure(
-        io,
-        peers,
-        flakey,
-        "PeerClient: Disconnected");
+        io, peers, flakey, "PeerClient: Disconnected");
 
     auto const snapshot = PeerSetTestAccess::snapshot(io, peers);
 
@@ -453,11 +456,13 @@ TEST(PeerSetPruning, SnapshotSummarizesRecentFailures)
 TEST(PeerSetPruning, TimedOutWaitForPeerClearsWantedLedger)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
 
     bool done = false;
     std::string error;
@@ -468,7 +473,8 @@ TEST(PeerSetPruning, TimedOutWaitForPeerClearsWantedLedger)
         [&, peers]() -> asio::awaitable<void> {
             try
             {
-                auto client = co_await peers->wait_for_peer(wanted_ledger, 0);
+                auto client =
+                    co_await peers->wait_for_covering_peer(wanted_ledger, 0);
                 EXPECT_FALSE(client);
             }
             catch (std::exception const& e)
@@ -487,18 +493,20 @@ TEST(PeerSetPruning, TimedOutWaitForPeerClearsWantedLedger)
 
     EXPECT_TRUE(done);
     EXPECT_TRUE(error.empty()) << error;
-    EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(
-        io, peers, wanted_ledger));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_wanted_ledger(io, peers, wanted_ledger));
 }
 
 TEST(PeerSetPruning, CancelledWaitForPeerClearsWantedLedger)
 {
     asio::io_context io;
-    auto peers = PeerSet::create(io, PeerSetOptions{
-        .network_id = 0,
-        .max_in_flight_connects = 0,
-        .max_in_flight_crawls = 0,
-    });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
 
     bool done = false;
     std::string error;
@@ -511,8 +519,8 @@ TEST(PeerSetPruning, CancelledWaitForPeerClearsWantedLedger)
         [&, peers, cancel]() -> asio::awaitable<void> {
             try
             {
-                auto client =
-                    co_await peers->wait_for_peer(wanted_ledger, 30, cancel);
+                auto client = co_await peers->wait_for_covering_peer(
+                    wanted_ledger, 30, cancel);
                 EXPECT_FALSE(client);
             }
             catch (std::exception const& e)
@@ -535,8 +543,8 @@ TEST(PeerSetPruning, CancelledWaitForPeerClearsWantedLedger)
     EXPECT_TRUE(error.empty()) << error;
     EXPECT_LT(elapsed, std::chrono::seconds(1));
     io.restart();
-    EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(
-        io, peers, wanted_ledger));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_wanted_ledger(io, peers, wanted_ledger));
 }
 
 TEST(PeerSetPruning, WantedLedgerRegistrationIsReferenceCounted)
@@ -627,6 +635,64 @@ TEST(PeerSetPruning, TargetedCandidateProbePrefersCoveringArchivalPeer)
         io, peers, "archive.example.com:1"));
 }
 
+TEST(PeerSetPruning, TargetedCandidateProbeExcludesKnownNonCoveringPeer)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    constexpr uint32_t ledger_seq = 500;
+
+    PeerSetTestAccess::set_status(
+        io,
+        peers,
+        "recent.example.com:1",
+        {.first_seq = 800, .last_seq = 1800, .current_seq = 1800});
+    PeerSetTestAccess::add_discovered(io, peers, "unknown.example.com:1");
+
+    auto queued =
+        PeerSetTestAccess::try_candidates_for(io, peers, ledger_seq, {}, 3);
+    ASSERT_EQ(queued.size(), 1u);
+    EXPECT_EQ(queued.front(), "unknown.example.com:1");
+    EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(
+        io, peers, "recent.example.com:1"));
+}
+
+TEST(PeerSetPruning, RediscoveredUnknownEndpointIsNotExcludedByStaleRange)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    constexpr uint32_t ledger_seq = 500;
+    auto const endpoint = std::string("rediscovered.example.com:1");
+
+    PeerSetTestAccess::set_status(
+        io,
+        peers,
+        endpoint,
+        {.first_seq = 800, .last_seq = 1800, .current_seq = 1800});
+    peers->tracker()->remove(endpoint);
+    PeerSetTestAccess::add_discovered(io, peers, endpoint);
+    PeerSetTestAccess::post_note_discovered(peers, endpoint);
+    io.run();
+    io.restart();
+
+    auto queued =
+        PeerSetTestAccess::try_candidates_for(io, peers, ledger_seq, {}, 1);
+    ASSERT_EQ(queued.size(), 1u);
+    EXPECT_EQ(queued.front(), endpoint);
+    EXPECT_TRUE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
+}
+
 TEST(PeerSetPruning, TargetedCandidateUpgradesExistingQueuedConnect)
 {
     asio::io_context io;
@@ -676,12 +742,52 @@ TEST(PeerSetPruning, TimedOutWaitRevokesQueuedReplacementProbe)
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            result = co_await peers->wait_for_peer(ledger_seq, 0);
+            result = co_await peers->wait_for_covering_peer(ledger_seq, 0);
         },
         asio::detached);
     io.run();
 
     EXPECT_FALSE(result);
+    io.restart();
+    EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
+    EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(io, peers, ledger_seq));
+}
+
+TEST(PeerSetPruning, TargetedQueuedCandidateExtendsVisibleWaitBound)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    constexpr uint32_t ledger_seq = 500;
+    auto const endpoint = std::string("queued-target.example.com:1");
+    PeerSetTestAccess::set_status(
+        io,
+        peers,
+        endpoint,
+        {.first_seq = 400, .last_seq = 600, .current_seq = 600});
+
+    PeerGenerationPin result;
+    auto const started = std::chrono::steady_clock::now();
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            result = co_await peers->wait_for_covering_peer(ledger_seq, 1);
+        },
+        asio::detached);
+    io.run();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_FALSE(result);
+    EXPECT_GE(elapsed, 1500ms)
+        << "a selected queued targeted candidate must not report terminality "
+           "at the first requester deadline";
     io.restart();
     EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
     EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(io, peers, ledger_seq));
@@ -717,15 +823,15 @@ TEST(PeerSetPruning, AsioCanceledWaitRevokesReplacementProbe)
                 co_await asio::experimental::make_parallel_group(
                     asio::co_spawn(
                         ex,
-                        peers->wait_for_peer(ledger_seq, 5),
+                        peers->wait_for_covering_peer(ledger_seq, 5),
                         asio::deferred),
                     asio::co_spawn(
                         ex,
                         [ex]() -> asio::awaitable<void> {
                             asio::steady_timer timer(ex, 10ms);
                             boost::system::error_code ec;
-                            co_await timer.async_wait(asio::redirect_error(
-                                asio::use_awaitable, ec));
+                            co_await timer.async_wait(
+                                asio::redirect_error(asio::use_awaitable, ec));
                         },
                         asio::deferred))
                     .async_wait(

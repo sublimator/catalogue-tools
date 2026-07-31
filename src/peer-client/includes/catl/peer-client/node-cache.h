@@ -12,7 +12,7 @@
 //   auto cache = NodeCache::create(io);
 //   auto walk = co_await cache->walk_to(
 //       root_hash, target_key, ledger_hash, liTX_NODE, peers);
-//   // walk.found, walk.leaf_nid, walk.leaf_data, walk.placeholders
+//   // walk.found(), walk.leaf(), walk.placeholders()
 
 #include "peer-client-coro.h"
 #include "peer-set.h"
@@ -44,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 class NodeCacheTestAccess;  // forward decl for test friend
@@ -51,6 +52,8 @@ class NodeCacheTestAccess;  // forward decl for test friend
 namespace catl::peer_client {
 
 namespace asio = boost::asio;
+
+class LedgerFetchCoordinator;
 
 /**
  * A latched one-shot signal whose timer operations are confined to one strand.
@@ -115,6 +118,12 @@ public:
                 co_return ec;
             },
             asio::use_awaitable);
+    }
+
+    asio::io_context::executor_type
+    base_executor() const noexcept
+    {
+        return strand_.get_inner_executor();
     }
 
     TimePoint
@@ -210,7 +219,7 @@ struct PathNode
 {
     SHAMapNodeID nodeid;  // position in tree
     Hash256 hash;         // content hash
-    std::shared_ptr<std::vector<uint8_t>>
+    std::shared_ptr<std::vector<uint8_t> const>
         wire;  // shared with cache — zero-copy
 };
 
@@ -221,21 +230,119 @@ struct PlaceholderNode
     Hash256 hash;
 };
 
-/// Result of walk_to: the full path from root to leaf (or deepest resolved).
-struct WalkResult
+struct WalkFound
 {
-    bool found = false;
-
-    /// Inner nodes along the path from root to leaf, in depth order.
-    std::vector<PathNode> path;
-
-    /// Sibling hashes at each depth — branches NOT on our target path.
-    /// These become placeholders in the abbreviated tree.
-    std::vector<PlaceholderNode> placeholders;
-
-    /// The leaf position and data (only valid when found=true).
     SHAMapNodeID leaf_nid;
     std::vector<uint8_t> leaf_data;
+};
+
+struct WalkBranchAbsent
+{
+    PathNode parent;
+    std::uint8_t branch = 0;
+};
+
+struct WalkNoSuitablePeer
+{
+    std::uint32_t ledger_seq = 0;
+    PeerHistoryCoverage coverage;
+};
+
+struct WalkTransportExhausted
+{
+    std::uint32_t ledger_seq = 0;
+    std::uint16_t depth = 0;
+    std::uint16_t retries = 0;
+    std::vector<std::string> attempted_peers;
+};
+
+struct WalkCancelled
+{
+};
+
+struct WalkDepthExhausted
+{
+    std::uint16_t depth = 0;
+};
+
+struct WalkInternalFailure
+{
+};
+
+/// Closed terminal disposition for one bounded tree walk.
+///
+/// A local selection refusal cannot carry a peer-response outcome. A found
+/// result owns its leaf; no leaf fields exist on any failure alternative.
+using WalkTerminal = std::variant<
+    WalkInternalFailure,
+    WalkFound,
+    WalkBranchAbsent,
+    WalkNoSuitablePeer,
+    WalkTransportExhausted,
+    WalkCancelled,
+    WalkDepthExhausted>;
+
+/// Result of walk_to: the resolved path plus one exact terminal disposition.
+class WalkResult
+{
+public:
+    /// Required by Asio's completion adapter for its exception path. The only
+    /// publicly mintable value is an inert failure with no authority-bearing
+    /// evidence.
+    WalkResult() = default;
+
+    std::vector<PathNode> const&
+    path() const noexcept
+    {
+        return path_;
+    }
+
+    std::vector<PlaceholderNode> const&
+    placeholders() const noexcept
+    {
+        return placeholders_;
+    }
+
+    WalkTerminal const&
+    terminal() const noexcept
+    {
+        return terminal_;
+    }
+
+    bool
+    found() const noexcept
+    {
+        return std::holds_alternative<WalkFound>(terminal_);
+    }
+
+    WalkFound const&
+    leaf() const
+    {
+        return std::get<WalkFound>(terminal_);
+    }
+
+private:
+    friend class NodeCache;
+
+    WalkResult(
+        std::vector<PathNode> path,
+        std::vector<PlaceholderNode> placeholders,
+        WalkTerminal terminal)
+        : path_(std::move(path))
+        , placeholders_(std::move(placeholders))
+        , terminal_(std::move(terminal))
+    {
+    }
+
+    std::vector<PathNode> path_;
+    std::vector<PlaceholderNode> placeholders_;
+
+    //@@authority state=prv.S0063 status=provisional scope=field
+    // bind=catl::peer_client::WalkResult::terminal_@ce74c248ea8dde2c
+    // owner=unresolved owner_hypothesis=node_cache
+    // observed_home=walk_result
+    // label=closed_node_walk_terminal_disposition
+    WalkTerminal terminal_ = WalkInternalFailure{};
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -251,6 +358,9 @@ public:
     {
         size_t max_entries = 65536;
         std::chrono::milliseconds fetch_timeout{1500};
+        // Managed transport has a separate pre-publication phase. It must not
+        // consume the response budget while the coordinator binds and writes.
+        std::chrono::milliseconds managed_admission_timeout{4000};
         int max_walk_peer_retries = 3;
         int fetch_stale_multiplier = 2;
         int peer_refresh_timeout_secs = 5;
@@ -258,7 +368,10 @@ public:
     };
 
     static std::shared_ptr<NodeCache>
-    create(asio::io_context& io, Options opts);
+    create(
+        asio::io_context& io,
+        Options opts,
+        std::shared_ptr<LedgerFetchCoordinator> node_fetch_coordinator = {});
 
     /// Walk a SHAMap from root hash to target key, fetching on miss.
     ///
@@ -309,7 +422,7 @@ public:
     has(Hash256 const& hash) const;
 
     /// Get the wire data for a hash. Returns nullptr if not cached/present.
-    std::shared_ptr<std::vector<uint8_t>>
+    std::shared_ptr<std::vector<uint8_t> const>
     get(Hash256 const& hash) const;
 
     /// Legacy compatibility: put by hash.
@@ -330,6 +443,15 @@ public:
         size_t misses = 0;
         size_t fetches = 0;
         size_t fetch_errors = 0;
+        bool managed_transport_selected = false;
+        size_t raw_fetches_projected = 0;
+        size_t raw_writes_confirmed = 0;
+        size_t raw_not_written = 0;
+        size_t managed_fetches_reserved = 0;
+        size_t managed_fetches_refused = 0;
+        size_t managed_writes_confirmed = 0;
+        size_t managed_not_written = 0;
+        size_t managed_indeterminate = 0;
         size_t hash_mismatches = 0;
         size_t waiter_wakeups = 0;
     };
@@ -365,6 +487,18 @@ public:
     void
     clear_nodes();
 
+    /// Permanently seal node admission and wait until every NodeCache-owned
+    /// deadline servant has ended and every NodeCache-local generation-pin
+    /// share has been destroyed. The driver then crosses every relevant
+    /// PeerSet strand; a later service-level coordinator fence owns final
+    /// release of pin states that still have non-NodeCache aliases.
+    ///
+    /// Precondition: the request-admission owner has stopped and every request
+    /// frame capable of entering NodeCache has completed. Overlapping and later
+    /// calls join the same terminal boundary.
+    asio::awaitable<void>
+    co_stop_nodes();
+
     /// Invalidate every pre-boundary header entry and wait until its detached
     /// drivers have ended and PeerSet has consumed their pin releases.
     /// Overlapping clears join one boundary. New header admissions are refused
@@ -372,18 +506,37 @@ public:
     asio::awaitable<void>
     co_clear_headers();
 
+#ifdef XPRV_TESTING
+    void
+    set_before_node_stop_driver_launch_for_test(std::function<void()> hook)
+    {
+        before_node_stop_driver_launch_for_test_ = std::move(hook);
+    }
+
+    void
+    set_before_header_clear_driver_launch_for_test(std::function<void()> hook)
+    {
+        before_header_clear_driver_launch_for_test_ = std::move(hook);
+    }
+#endif
+
 private:
-    NodeCache(asio::io_context& io, Options opts);
+    NodeCache(
+        asio::io_context& io,
+        Options opts,
+        std::shared_ptr<LedgerFetchCoordinator> node_fetch_coordinator);
 
     static constexpr std::size_t kProgressCapacity = 16;
     static constexpr uint16_t kNoDepth = 0xFFFF;
 
     enum class ProgressKind : uint8_t {
         retry_same_peer,
+        retry_covered_peer,
         switch_peer,
         acquired_peer,
         give_up,
-        no_peer_available,
+        searching_covering_peer,
+        no_covering_peer,
     };
 
     struct ProgressEvent
@@ -414,6 +567,11 @@ private:
             return ProgressCursor{next_seq};
         }
 
+        //@@authority transition=prv.T0116 status=provisional scope=function
+        // bind=catl::peer_client::NodeCache::ProgressJournal::publish@215045b93c64e480
+        // owner=unresolved owner_hypothesis=node_cache commit=owner_lock
+        // touches=prv.S0004 mutation_class=running_guarded
+        // label=publish_bounded_progress_journal_event
         void
         publish(ProgressEvent event) noexcept
         {
@@ -449,11 +607,71 @@ private:
         std::shared_ptr<SerializedTimerSignal> signal;
     };
 
+    struct NodeFetchRound;
+
     struct WaitRegistration
     {
         std::shared_ptr<SerializedTimerSignal> done_signal;
         std::shared_ptr<SerializedTimerSignal> progress_signal;
+        std::shared_ptr<NodeFetchRound> round;
         ProgressCursor cursor;
+    };
+
+    struct NodeFetchRound
+    {
+        enum class Phase : std::uint8_t {
+            admission,
+            response,
+            retired,
+        };
+        enum class DispatchState : std::uint8_t {
+            submitting,
+            reserved,
+            written,
+            not_written,
+            indeterminate,
+        };
+        struct DispatchSlot
+        {
+            std::string endpoint;
+            DispatchState state = DispatchState::submitting;
+        };
+
+        Phase phase = Phase::response;
+        //@@authority state=prv.S0041 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::NodeFetchRound::deadline_servants@f5a990307921c287
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=exact_deadline_servant_identities_for_node_operation
+        std::map<std::uint64_t, std::shared_ptr<SerializedTimerSignal>>
+            deadline_servants;
+        std::shared_ptr<SerializedTimerSignal> servants_done_signal;
+        std::uint64_t operation_id = 0;
+        // NodeCache fans out to one primary plus at most two additional peers.
+        // A fixed table makes the callback/return handshake bounded by shape.
+        std::array<DispatchSlot, 3> dispatches;
+        std::size_t dispatch_count = 0;
+        bool submissions_closed = false;
+        // Admission time and waiter progress are different facts. Only the
+        // deadline servant observes this timer; Entry::signal is a phase latch
+        // completed when admission commits to response or retirement.
+        std::shared_ptr<SerializedTimerSignal> admission_deadline;
+        //@@authority state=prv.S0020 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::NodeFetchRound::admission_expired@f1eac8a90ba7ad6a
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=managed_round_admission_boundary_elapsed
+        bool admission_expired = false;
+        bool response_possible = false;
+    };
+
+    struct NodeStopState
+    {
+        enum class Phase : std::uint8_t { running, succeeded, failed };
+
+        std::shared_ptr<SerializedTimerSignal> completion_signal;
+        std::exception_ptr failure;
+        Phase phase = Phase::running;
     };
 
     // ── Cache entry ─────────────────────────────────────────────
@@ -471,12 +689,37 @@ private:
     // in-flight entries with non-null signal).
     struct Entry
     {
-        std::shared_ptr<std::vector<uint8_t>> wire_data;
+        std::shared_ptr<std::vector<uint8_t> const> wire_data;
+        //@@authority state=prv.S0002 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::Entry::signal@e24590d1aa2b06af
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=shared_node_fetch_round_completion_signal
         std::shared_ptr<SerializedTimerSignal>
             signal;  // non-null while in-flight
+        // Stable identity and bounded evidence for one exact physical round.
+        // The phase signal may change at managed publication, but the round
+        // identity does not. Waiters retain this object so evidence remains
+        // attributable even if a later caller opens a replacement round.
+        //@@authority state=prv.S0018 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::Entry::round@c6fa8c63a891c776
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=exact_node_fetch_round_phase_dispatch_and_evidence
+        std::shared_ptr<NodeFetchRound> round;
         // Physical generation pins for the transport round represented by
         // signal. Shared waiters do not own these; the coalesced entry does.
+        //@@authority state=prv.S0003 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::Entry::peer_pins@dde6c4bc6b2e73b7
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=peer_generation_pins_retained_by_shared_round
         std::vector<PeerGenerationPin> peer_pins;
+        //@@authority state=prv.S0004 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::Entry::progress@701253230d8be0f3
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=shared_round_progress_and_rider_cursor_home
         ProgressState progress;
         bool present = false;
 
@@ -484,12 +727,23 @@ private:
         // Publishing the signal and this timestamp is one mutex commit, so a
         // second caller cannot immediately replace a freshly admitted round
         // using its predecessor's stale timestamp.
+        //@@authority state=prv.S0005 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::Entry::round_opened_at@43339160535e957d
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache label=exact_round_admission_time
         std::chrono::steady_clock::time_point round_opened_at{};
 
-        // Hash-level evidence that at least one TMGetLedger request was
-        // actually submitted. Unlike round_opened_at, this may outlive exact
-        // round retirement because a late content-addressed response remains
-        // useful. It justifies waiting without a currently usable peer.
+        // Hash-level evidence that at least one raw TMGetLedger write completed
+        // successfully. Projecting work onto PeerClient's strand is
+        // deliberately weaker and does not update this value. Unlike
+        // round_opened_at, confirmed write evidence may outlive exact round
+        // retirement because a late content-addressed response remains useful.
+        // It justifies waiting without a currently usable peer.
+        //@@authority state=prv.S0006 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::Entry::last_fetch_at@c630d439bcf3126a
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=confirmed_raw_write_evidence_outliving_exact_round
         std::chrono::steady_clock::time_point last_fetch_at{};
     };
 
@@ -502,6 +756,18 @@ private:
         std::atomic<bool> dispatch_complete{false};
         std::atomic<bool> completed{false};
         bool closed = false;
+        //@@authority state=prv.S0066 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::HeaderRound::settled_endpoints@165d2594b0b69e02
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=per_header_round_endpoint_terminal_evidence
+        // Both sets are confined to header_state_strand_. A settled endpoint
+        // returned a typed terminal; the subset in ledger_failure_endpoints
+        // carries actual service-failure evidence. Aggregate round expiry
+        // cannot populate that subset: an unsettled endpoint carries no proof
+        // that its queued write physically started.
+        std::unordered_set<std::string> settled_endpoints;
+        std::unordered_set<std::string> ledger_failure_endpoints;
 
         bool
         try_begin_send(PeerGenerationPin pin)
@@ -583,6 +849,7 @@ private:
         // callbacks, retries, deadline, and clear from later same-sequence
         // work.
         //@@authority state=node_cache.header_fetch_slots owner=node_cache
+        // bind=catl::peer_client::NodeCache::HeaderEntry::fetch@94463d77f3fa7446
         std::shared_ptr<HeaderFetchState> fetch;
         ProgressState progress;
         bool present = false;
@@ -591,7 +858,7 @@ private:
     /// Ensure a node is in the cache. Fetches from peer on miss.
     /// Peer must be pre-acquired by walk_to — no strand hop here.
     /// Returns shared wire data, or nullptr on timeout/error.
-    asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
+    asio::awaitable<std::shared_ptr<std::vector<uint8_t> const>>
     ensure_present(
         Hash256 expected_hash,
         Hash256 ledger_hash,
@@ -606,13 +873,26 @@ private:
         std::shared_ptr<std::atomic<bool>> cancel = nullptr,
         std::unordered_set<std::string>* attempted_peers = nullptr,
         std::unordered_set<std::string> const* excluded_peers = nullptr,
-        bool* initiated_fetch = nullptr);
+        bool* initiated_fetch = nullptr,
+        std::unordered_set<std::string>* written_peers = nullptr);
 
     /// Send a TMGetLedger request for a node (+ speculative deeper nodes).
     /// Non-coroutine: just builds and sends the request, no waiting.
     /// The response arrives asynchronously via on_node_response →
     /// insert_and_notify which wakes all waiters.
-    void
+    enum class NodeFetchSubmission : std::uint8_t {
+        raw_projected,
+        managed_reserved,
+        not_submitted,
+    };
+
+    enum class ManagedSubmissionOutcome : std::uint8_t {
+        written,
+        not_written,
+        indeterminate,
+    };
+
+    NodeFetchSubmission
     send_fetch(
         Hash256 expected_hash,
         Hash256 ledger_hash,
@@ -620,7 +900,81 @@ private:
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
-        PeerSession& peer);
+        uint32_t ledger_seq,
+        PeerSession& peer,
+        PeerGenerationPin peer_pin,
+        std::shared_ptr<NodeFetchRound> round);
+
+    std::optional<std::size_t>
+    register_managed_submission(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::string_view endpoint);
+
+    void
+    commit_managed_submission(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::size_t slot) noexcept;
+
+    void
+    rollback_managed_submission(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::size_t slot) noexcept;
+
+    void
+    close_managed_submissions(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    void
+    settle_managed_submission(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::size_t slot,
+        ManagedSubmissionOutcome outcome) noexcept;
+
+    void
+    reconcile_managed_round(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    bool
+    retain_node_fanout_pin(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        PeerGenerationPin pin) noexcept;
+
+    bool
+    handle_node_waiter_timeout(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::shared_ptr<SerializedTimerSignal> const& waited_signal,
+        WaitRegistration& wait) noexcept;
+
+    std::optional<std::size_t>
+    register_raw_submission(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::string_view endpoint);
+
+    void
+    settle_raw_submission(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::size_t slot,
+        boost::system::error_code ec) noexcept;
+
+    void
+    close_raw_submissions(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    void
+    reconcile_raw_round(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
 
     /// Send a header request to a single peer (fire-and-forget).
     /// On success: populate header_cache_ entry and wake all callers.
@@ -631,8 +985,7 @@ private:
         uint32_t ledger_seq,
         PeerSession& peer,
         std::shared_ptr<HeaderFetchState> fetch,
-        std::shared_ptr<HeaderRound> round,
-        std::shared_ptr<PeerSet> peers);
+        std::shared_ptr<HeaderRound> round);
 
     asio::awaitable<void>
     drive_header_fetch(
@@ -678,12 +1031,50 @@ private:
     bool
     arm_node_round_deadline(
         Hash256 hash,
+        std::shared_ptr<NodeFetchRound> round,
         std::shared_ptr<SerializedTimerSignal> signal) noexcept;
+
+    void
+    expire_node_fetch_round(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::shared_ptr<SerializedTimerSignal> const& signal) noexcept;
 
     void
     retire_node_fetch_round(
         Hash256 const& hash,
         std::shared_ptr<SerializedTimerSignal> const& signal) noexcept;
+
+    void
+    remember_node_pin_owner_barrier_locked(PeerGenerationPin const& pin);
+
+    std::shared_ptr<SerializedTimerSignal>
+    maybe_complete_node_operation_locked(
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    std::shared_ptr<SerializedTimerSignal>
+    terminalize_node_operation_locked(
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    void
+    on_node_deadline_servant_done(
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::uint64_t servant_id) noexcept;
+
+    void
+    publish_node_stop_failure_locked(
+        std::shared_ptr<NodeStopState> const& stop,
+        std::exception_ptr failure) noexcept;
+
+    bool
+    node_stop_terminal_predicate_locked(
+        std::shared_ptr<NodeStopState> const& stop,
+        std::vector<std::shared_ptr<NodeFetchRound>> const& operations,
+        bool local_pins_consumed,
+        bool owner_barriers_consumed) const noexcept;
+
+    asio::awaitable<void>
+    drive_node_stop(std::shared_ptr<NodeStopState> stop);
 
     asio::awaitable<WalkResult>
     walk_to_impl(
@@ -706,9 +1097,15 @@ private:
         PeerSessionPtr unmanaged_owner);
 
     /// Called by the response handler for every TMLedgerData node response.
-    /// Computes content hash for each node, inserts into cache, wakes waiters.
-    void
+    /// Reports acceptance and processing failure independently. An earlier
+    /// node in a multi-node response may commit before a later node fails.
+    NodeResponseObservation
     on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg);
+
+    /// Observed form used only by the response sink. Public callers keep the
+    /// predecessor's void insert-and-notify contract.
+    bool
+    insert_and_notify_observed(Hash256 const& hash, std::vector<uint8_t> data);
 
     /// Evict LRU entries when over capacity.
     void
@@ -777,12 +1174,59 @@ private:
     asio::strand<asio::io_context::executor_type> header_state_strand_;
     size_t max_entries_;
     std::chrono::milliseconds fetch_timeout_;
+    std::chrono::milliseconds managed_admission_timeout_;
     int max_walk_peer_retries_;
     int fetch_stale_multiplier_;
     int peer_refresh_timeout_secs_;
     std::chrono::milliseconds header_timeout_floor_;
 
+    // Immutable transport selection. An engaged weak capability means managed
+    // mode: missing pins and expired lifecycle owners fail closed. Disengaged
+    // means the explicitly selected raw compatibility mode.
+    //@@authority state=prv.S0014 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::node_fetch_coordinator_@73ff97420ec99324
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=non_owning_managed_node_transport_selection
+    std::optional<std::weak_ptr<LedgerFetchCoordinator>>
+        node_fetch_coordinator_;
+
     mutable std::mutex mutex_;
+    enum class NodeLifecycle : std::uint8_t { running, stopping, stopped };
+    //@@authority state=prv.S0039 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::node_lifecycle_@25163ae6b3471c09
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=node_admission_and_terminal_lifecycle
+    NodeLifecycle node_lifecycle_ = NodeLifecycle::running;
+    // The node map is not an operation census: a row may disappear while its
+    // deadline servant is still unwinding. This registry owns each exact round
+    // until it is terminal and its exact servant set is empty.
+    //@@authority state=prv.S0040 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::active_node_operations_@872bc98a5381389e
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=active_node_operations_independent_of_cache_rows
+    std::map<std::uint64_t, std::shared_ptr<NodeFetchRound>>
+        active_node_operations_;
+    std::uint64_t next_node_operation_id_ = 0;
+    std::uint64_t next_node_deadline_servant_id_ = 0;
+    // Destroying a NodeCache-local pin share need not emit a release command:
+    // another component may retain an alias of the same shared pin state.
+    // Retaining each distinct PeerSet here lets node stop cross every relevant
+    // owner strand after destroying its local shares. The later service-level
+    // coordinator fence owns final shared-pin release.
+    //@@authority state=prv.S0043 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::node_pin_owner_barriers_@dae05b46d99a0a78
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=peer_set_strands_relevant_to_node_pin_destruction
+    std::vector<std::shared_ptr<PeerSet>> node_pin_owner_barriers_;
+    //@@authority state=prv.S0042 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::node_stop_state_@b492410fc860e0cf
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=shared_terminal_node_stop_receipt
+    std::shared_ptr<NodeStopState> node_stop_state_;
+    //@@authority state=prv.S0001 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::store_@6b31857b371de564
+    // owner=unresolved owner_hypothesis=mixed observed_home=node_cache
+    // legacy_container=store_ label=mixed_cached_and_coalesced_node_rows
     std::map<Hash256, Entry> store_;
     std::map<uint32_t, HeaderEntry> header_cache_;
     // Immutable off-strand projection. The container itself remains owned by
@@ -792,12 +1236,14 @@ private:
     // This registry owns every operation until both coroutine frames are gone
     // and PeerSet has consumed their generation-pin releases.
     //@@authority state=node_cache.active_header_fetches owner=node_cache
+    // bind=catl::peer_client::NodeCache::active_header_fetches_@64a4050eddf54810
     std::map<std::uint64_t, std::shared_ptr<HeaderFetchState>>
         active_header_fetches_;
     std::uint64_t next_header_fetch_id_ = 0;
     // Owner-strand lifecycle state. A non-null barrier means one clear
     // boundary has committed and is still draining predecessor authority.
     //@@authority state=node_cache.header_clear_boundary owner=node_cache
+    // bind=catl::peer_client::NodeCache::header_clear_state_@a98153bde92847e1
     std::shared_ptr<HeaderClearState> header_clear_state_;
     std::uint64_t header_epoch_ = 0;
 
@@ -826,14 +1272,39 @@ private:
     // empty; tests use them to stop precisely at the authority boundaries.
     std::function<void()> before_node_send_commit_for_test_;
     std::function<void()> after_node_waiter_attached_for_test_;
+    std::function<void()> before_node_fanout_for_test_;
+    std::function<void()> after_managed_slot_registered_for_test_;
+    std::function<void()> after_managed_ingress_reconciled_for_test_;
+    std::function<void()> before_node_deadline_launch_for_test_;
     std::function<void()> node_deadline_servant_hook_for_test_;
+    std::function<void()> after_node_deadline_wait_for_test_;
+    std::function<void()> after_node_deadline_commit_for_test_;
     std::function<void()> node_round_retired_hook_for_test_;
+    std::function<void()> node_stop_sealed_hook_for_test_;
+    std::function<void()> before_node_response_prepare_for_test_;
+    std::function<void()> before_node_response_commit_for_test_;
+    std::function<void()> after_node_response_commit_for_test_;
+    std::function<void()> before_node_primary_pin_commit_for_test_;
+    std::function<void()> before_node_waiter_attach_commit_for_test_;
+    std::function<void()> before_node_stop_driver_launch_for_test_;
+    std::function<void()> node_stop_driver_hook_for_test_;
+    std::function<void()> after_node_local_pins_destroyed_for_test_;
+    std::function<void()> before_header_clear_driver_launch_for_test_;
+    std::optional<std::chrono::seconds> header_request_timeout_for_test_;
 
     // Stats — atomic for lock-free concurrent access
     mutable std::atomic<size_t> hits_{0};
     mutable std::atomic<size_t> misses_{0};
     std::atomic<size_t> fetches_{0};
     std::atomic<size_t> fetch_errors_{0};
+    std::atomic<size_t> raw_fetches_projected_{0};
+    std::atomic<size_t> raw_writes_confirmed_{0};
+    std::atomic<size_t> raw_not_written_{0};
+    std::atomic<size_t> managed_fetches_reserved_{0};
+    std::atomic<size_t> managed_fetches_refused_{0};
+    std::atomic<size_t> managed_writes_confirmed_{0};
+    std::atomic<size_t> managed_not_written_{0};
+    std::atomic<size_t> managed_indeterminate_{0};
     std::atomic<size_t> hash_mismatches_{0};
     std::atomic<size_t> waiter_wakeups_{0};
 

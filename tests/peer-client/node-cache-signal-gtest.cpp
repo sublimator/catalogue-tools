@@ -261,7 +261,7 @@ public:
 
     /// Call ensure_present in wait mode (entry already in-flight).
     /// Returns the wire data shared_ptr (nullptr on timeout).
-    static asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
+    static asio::awaitable<std::shared_ptr<std::vector<uint8_t> const>>
     wait_for_hash(
         std::shared_ptr<NodeCache> cache,
         Hash256 hash)
@@ -280,7 +280,7 @@ public:
             nullptr);         // ledger_seq / cancel
     }
 
-    static asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
+    static asio::awaitable<std::shared_ptr<std::vector<uint8_t> const>>
     wait_for_hash_with_cancel(
         std::shared_ptr<NodeCache> cache,
         Hash256 hash,
@@ -432,7 +432,7 @@ TEST(NodeCacheIntegration, InsertNotifyWakesEnsurePresent)
     NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
     // Start waiter
-    std::shared_ptr<std::vector<uint8_t>> result;
+    std::shared_ptr<std::vector<uint8_t> const> result;
     bool done = false;
     asio::co_spawn(
         io,
@@ -471,7 +471,7 @@ TEST(NodeCacheIntegration, TwoWaitersBothGetData)
 
     NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
-    std::shared_ptr<std::vector<uint8_t>> r1, r2;
+    std::shared_ptr<std::vector<uint8_t> const> r1, r2;
     int done_count = 0;
 
     for (auto* rp : {&r1, &r2})
@@ -511,7 +511,7 @@ TEST(NodeCacheIntegration, TimeoutReturnsNullptr)
     auto hash = make_hash(0xCC);
     NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(1000));
 
-    std::shared_ptr<std::vector<uint8_t>> result;
+    std::shared_ptr<std::vector<uint8_t> const> result;
     bool done = false;
     asio::co_spawn(
         io,
@@ -561,7 +561,7 @@ TEST(NodeCacheIntegration, SecondWaiterAfterTimeoutGetsFreshSignal)
     // Second waiter — WITHOUT the fix, this would immediately timeout
     // because the expired signal is still on the entry. WITH the fix,
     // ensure_present detects the expired signal and creates a fresh one.
-    std::shared_ptr<std::vector<uint8_t>> second_result;
+    std::shared_ptr<std::vector<uint8_t> const> second_result;
     bool second_done = false;
     asio::co_spawn(
         io,
@@ -602,7 +602,7 @@ TEST(NodeCacheIntegration, ProgressEventRelayedThenContinuesWaiting)
 
     NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
-    std::shared_ptr<std::vector<uint8_t>> result;
+    std::shared_ptr<std::vector<uint8_t> const> result;
     bool done = false;
     asio::co_spawn(
         io,
@@ -645,7 +645,7 @@ TEST(NodeCacheIntegration, DataArrivesDuringProgressProcessing)
 
     NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
-    std::shared_ptr<std::vector<uint8_t>> result;
+    std::shared_ptr<std::vector<uint8_t> const> result;
     bool done = false;
     asio::co_spawn(
         io,
@@ -685,7 +685,7 @@ TEST(NodeCacheIntegration, CacheHitOnSecondCall)
     cache->insert(hash, data);
 
     // ensure_present should return immediately (HIT)
-    std::shared_ptr<std::vector<uint8_t>> result;
+    std::shared_ptr<std::vector<uint8_t> const> result;
     bool done = false;
     asio::co_spawn(
         io,
@@ -843,7 +843,7 @@ TEST(NodeCacheIntegration, CancelledEnsurePresentReturnsPromptly)
         *cache, hash, std::chrono::seconds(5));
 
     bool done = false;
-    std::shared_ptr<std::vector<uint8_t>> result;
+    std::shared_ptr<std::vector<uint8_t> const> result;
     auto const started = std::chrono::steady_clock::now();
 
     asio::co_spawn(
@@ -885,7 +885,7 @@ TEST(NodeCacheIntegration, CancelledEnsurePresentDoesNotPoisonSharedEntry)
 
     bool canceled_done = false;
     bool second_done = false;
-    std::shared_ptr<std::vector<uint8_t>> second_result;
+    std::shared_ptr<std::vector<uint8_t> const> second_result;
 
     asio::co_spawn(
         io,

@@ -82,7 +82,17 @@ def excerpt(data: bytes | str, limit: int = 160) -> str:
   return text
 
 
-def load_cases(path: Path, n_txn: int, random_seed: int | None) -> list[TxCase]:
+def network_base_url(base_url: str, network_id: int) -> str:
+  slug = {
+      0: "xrpl-mainnet",
+      21337: "xahau-mainnet",
+  }.get(network_id, str(network_id))
+  return f"{base_url.rstrip('/')}/network/{slug}"
+
+
+def load_cases(
+    path: Path, n_txn: int, random_seed: int | None
+) -> tuple[list[TxCase], int | None]:
   data = json.loads(path.read_text())
   raw_cases = list(data.get("hot_set", [])) + list(data.get("cold_set", []))
   cases = [
@@ -99,7 +109,10 @@ def load_cases(path: Path, n_txn: int, random_seed: int | None) -> list[TxCase]:
   if random_seed is not None:
       rng = random.Random(random_seed)
       rng.shuffle(cases)
-  return cases[: min(n_txn, len(cases))]
+  network_id = data.get("network_id")
+  if network_id is not None and not isinstance(network_id, int):
+      raise SystemExit("corpus network_id must be an integer")
+  return cases[: min(n_txn, len(cases))], network_id
 
 
 def hit(
@@ -110,6 +123,7 @@ def hit(
     format_name: str,
     proof_dir: Path | None,
     xprv: Path | None,
+    network_id: int,
     tracker: InFlightTracker | None = None,
 ) -> HitResult:
   suffix = "bin" if format_name == "bin" else "json"
@@ -135,9 +149,16 @@ def hit(
               proof_path.write_bytes(body)
               if xprv is not None:
                   completed = subprocess.run(
-                      [str(xprv), "verify", str(proof_path)],
+                      [
+                          str(xprv),
+                          "verify",
+                          str(proof_path),
+                          "--network",
+                          str(network_id),
+                      ],
                       capture_output=True,
                       text=True,
+                      check=False,
                   )
                   verify_rc = completed.returncode
                   verify_ok = completed.returncode == 0
@@ -313,6 +334,14 @@ def main() -> int:
       help="path to xprv binary for --verify",
   )
   ap.add_argument(
+      "--network",
+      type=int,
+      help=(
+          "network ID for routed requests and --verify; "
+          "defaults to corpus network_id, then 0"
+      ),
+  )
+  ap.add_argument(
       "--proof-dir",
       help="directory to write downloaded proofs into when --verify is enabled",
   )
@@ -320,7 +349,15 @@ def main() -> int:
   args = ap.parse_args()
 
   random_seed = args.random_seed if args.random_seed is not None else args.seed
-  cases = load_cases(Path(args.corpus), args.n_txn, random_seed)
+  cases, corpus_network = load_cases(
+      Path(args.corpus), args.n_txn, random_seed
+  )
+  network_id = (
+      args.network
+      if args.network is not None
+      else corpus_network if corpus_network is not None else 0
+  )
+  routed_base_url = network_base_url(args.base_url, network_id)
   jobs: list[TxCase] = []
   for case in cases:
       jobs.extend([case] * args.repeat)
@@ -328,7 +365,8 @@ def main() -> int:
 
   print(
       f"loaded {len(cases)} txns, firing {len(jobs)} requests with {workers} workers "
-      f"(random_seed={random_seed if random_seed is not None else 'off'}, format={args.format})"
+      f"(random_seed={random_seed if random_seed is not None else 'off'}, "
+      f"format={args.format}, network={network_id})"
   )
   for case in cases:
       print(
@@ -354,7 +392,14 @@ def main() -> int:
   stop_event = threading.Event()
   poller = threading.Thread(
       target=peers_poller,
-      args=(args.base_url, args.timeout, args.peers_interval, stop_event, started, tracker),
+      args=(
+          routed_base_url,
+          args.timeout,
+          args.peers_interval,
+          stop_event,
+          started,
+          tracker,
+      ),
       daemon=True,
   )
   poller.start()
@@ -368,13 +413,14 @@ def main() -> int:
           futs = [
               ex.submit(
                   hit,
-                  args.base_url,
+                  routed_base_url,
                   case,
                   i + 1,
                   args.timeout,
                   args.format,
                   proof_dir,
                   xprv_path,
+                  network_id,
                   tracker,
               )
               for i, case in enumerate(jobs)
@@ -408,7 +454,7 @@ def main() -> int:
       poller.join(timeout=1.0)
 
   try:
-      snapshot = fetch_json(f"{args.base_url}/peers", timeout=args.timeout)
+      snapshot = fetch_json(f"{routed_base_url}/peers", timeout=args.timeout)
       print(f"FINAL PEERS {summarize_peers(snapshot)}")
   except Exception as exc:
       print(f"FINAL PEERS error={exc}")

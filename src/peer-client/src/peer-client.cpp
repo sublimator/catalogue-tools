@@ -10,6 +10,7 @@
 #include <cassert>
 #include <limits>
 #include <stdexcept>
+#include <variant>
 
 namespace catl::peer_client {
 
@@ -97,10 +98,7 @@ try_acquire_node_batch_ingress(
         if (work >= max_work)
             return false;
     } while (!work_count.compare_exchange_weak(
-        work,
-        work + 1,
-        std::memory_order_acq_rel,
-        std::memory_order_relaxed));
+        work, work + 1, std::memory_order_acq_rel, std::memory_order_relaxed));
 
     auto ingress = ingress_count.load(std::memory_order_relaxed);
     do
@@ -333,6 +331,20 @@ PeerClient::register_callback(
                         return;
 
                     auto callback = std::move(callback_it->callback);
+                    //@@authority transition=prv.T0204 status=provisional
+                    // bind=declaration@3ec3250d7d11cea5
+                    // scope=statement owner=unresolved
+                    // owner_hypothesis=peer_client commit=strand
+                    // touches=prv.S0065
+                    // label=classify_request_deadline_from_exact_send_evidence
+                    // clang-format off
+                    //@@mutation-site header-deadline-consults-exact-send-initiation
+                    auto const terminal =
+                        current->second.network_request_initiated
+                            ? Error::Timeout
+                            : Error::SendNotInitiated; //@@authority-target ids=prv.T0204
+                    //@@mutation-end header-deadline-consults-exact-send-initiation
+                    // clang-format on
                     callbacks.erase(callback_it);
                     if (callbacks.empty())
                         map.erase(current);
@@ -345,9 +357,11 @@ PeerClient::register_callback(
                         " entry=",
                         entry_incarnation,
                         " callback=",
-                        callback_incarnation);
+                        callback_incarnation,
+                        " terminal=",
+                        static_cast<int>(terminal));
                     complete_callback_noexcept(
-                        PeerClient::log_, std::move(callback), Error::Timeout);
+                        PeerClient::log_, std::move(callback), terminal);
                 });
             return true;
         }
@@ -426,8 +440,7 @@ PeerClient::register_callback(
         next_pending_incarnation_ ==
             std::numeric_limits<std::uint64_t>::max() ||
         next_callback_incarnation_ == 0 ||
-        next_callback_incarnation_ ==
-            std::numeric_limits<std::uint64_t>::max())
+        next_callback_incarnation_ == std::numeric_limits<std::uint64_t>::max())
     {
         PLOGE(
             log_,
@@ -445,7 +458,6 @@ PeerClient::register_callback(
 
     PendingEntry<T> entry;
     entry.incarnation = entry_incarnation;
-    entry.network_request_sent = true;
     entry.callbacks.push_back(
         {callback_incarnation, std::move(callback), std::move(timer)});
 
@@ -544,6 +556,41 @@ PeerClient::resolve(PendingMap<T>& map, Hash256 const& key, Error err, T result)
             PLOGE(log_, "  callback ", i, " is NULL — should never happen");
         }
     }
+}
+
+template <typename T>
+void
+PeerClient::mark_network_request_initiated(
+    PendingMap<T>& map,
+    Hash256 const& key,
+    std::uint64_t incarnation) noexcept
+{
+    assert(strand_.running_in_this_thread());
+    auto const found = map.find(key);
+    if (found == map.end() || found->second.incarnation != incarnation)
+        return;
+    found->second.network_request_initiated = true;
+}
+
+template <typename T>
+void
+PeerClient::complete_network_send(
+    PendingMap<T>& map,
+    Hash256 const& key,
+    std::uint64_t incarnation,
+    boost::system::error_code error)
+{
+    assert(strand_.running_in_this_thread());
+    if (!error)
+        return;
+    auto const found = map.find(key);
+    if (found == map.end() || found->second.incarnation != incarnation)
+        return;
+
+    auto const terminal = error == boost::asio::error::no_buffer_space
+        ? Error::ResourceExhausted
+        : Error::Disconnected;
+    resolve(map, key, terminal, T{});
 }
 
 // Explicit instantiations
@@ -804,6 +851,8 @@ PeerClient::PeerClient(asio::io_context& io_context)
     : io_context_(io_context), strand_(asio::make_strand(io_context))
 {
     receiver_instance_id_ = mint_peer_client_instance_id();
+    initial_connect_attempt_ =
+        std::make_shared<detail::ConnectAttemptState>(strand_);
 }
 
 PeerClient::~PeerClient()
@@ -869,8 +918,28 @@ PeerClient::set_tracker(std::shared_ptr<EndpointTracker> tracker)
 void
 PeerClient::set_node_response_handler(NodeResponseHandler handler)
 {
+    if (!handler)
+    {
+        set_node_response_observer({});
+        return;
+    }
+    set_node_response_observer(
+        [handler = std::move(handler)](
+            std::shared_ptr<protocol::TMLedgerData> const& message) mutable {
+            handler(message);
+            return NodeResponseObservation{};
+        });
+}
+
+//@@authority transition=prv.T0021 status=provisional scope=function
+// bind=catl::peer_client::set_node_response_observer@9f2c8cc7561283eb
+// owner=unresolved owner_hypothesis=peer_client commit=mutex
+// touches=prv.S0007 label=replace_singleton_node_response_observer
+void
+PeerClient::set_node_response_observer(NodeResponseObserver observer)
+{
     std::lock_guard lock(handler_mutex_);
-    node_response_handler_ = std::move(handler);
+    node_response_observer_ = std::move(observer);
 }
 
 void
@@ -880,11 +949,52 @@ PeerClient::disconnect()
     asio::dispatch(strand_, [self]() { self->disconnect_on_strand(); });
 }
 
+//@@authority transition=prv.T0145 status=provisional scope=function
+// bind=catl::peer_client::co_disconnect@8237806aa45018b4
+// owner=unresolved owner_hypothesis=peer_client commit=peer_client_strand
+// touches=prv.S0046,prv.S0048,prv.S0049 mutation_class=stop_driver
+// label=join_connection_physical_drain_after_logical_disconnect
+asio::awaitable<void>
+PeerClient::co_disconnect()
+{
+    auto self = shared_from_this();
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+    co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<void> {
+            auto connection = self->connection_;
+            self->disconnect_on_strand();
+            if (connection)
+                co_await connection->co_close();
+            co_return;
+        },
+        asio::use_awaitable);
+}
+
 void
 PeerClient::disconnect_on_strand()
 {
     assert(strand_.running_in_this_thread());
-    auto const previous = state_.exchange(State::Disconnected);
+    State previous = state_.load();
+    //@@authority transition=prv.T0184 status=provisional scope=statement
+    // bind=declaration@8145f15a5c540e99
+    // owner=unresolved owner_hypothesis=peer_client
+    // commit=connect_attempt_mutex touches=prv.S0049,prv.S0058,prv.S0059
+    // mutation_class=terminal_receipt
+    // label=commit_owner_disconnect_and_initial_result_atomically
+    auto const commit = initial_connect_attempt_->try_commit_peer_terminal(
+        PeerLogicalTerminalCause::owner_disconnect,
+        detail::ConnectAttemptTerminal{
+            detail::ConnectAttemptTerminalKind::owner_disconnect,
+            boost::asio::error::operation_aborted,
+            peer_ledger_seq_.load(),
+            0},
+        [this, &previous]() noexcept {
+            previous = state_.exchange(State::Disconnected);
+        });  //@@authority-target ids=prv.T0184
+    if (!commit.event_committed)
+        previous = state_.exchange(State::Disconnected);
 
     if (previous != State::Disconnected && previous != State::Failed)
         complete_all_pending(Error::Cancelled);
@@ -900,43 +1010,94 @@ PeerClient::disconnect_on_strand()
     if (previous == State::Disconnected || previous == State::Failed)
         return;
 
-    if (previous != State::Ready)
+    if (previous != State::Ready && commit.event_committed)
         complete_connect(boost::asio::error::operation_aborted);
+}
+
+//@@authority transition=prv.T0146 status=provisional scope=function
+// bind=catl::peer_client::commit_failed_on_strand@8a1d2d52a01ef0c7
+// owner=unresolved owner_hypothesis=peer_client commit=connect_attempt_mutex
+// touches=prv.S0049,prv.S0058,prv.S0059 mutation_class=terminal_receipt
+// label=commit_peer_failure_and_initial_result_atomically
+std::optional<State>
+PeerClient::commit_failed_on_strand(boost::system::error_code ec) noexcept
+{
+    assert(strand_.running_in_this_thread());
+    auto const previous = state_.load();
+    if (previous == State::Disconnected || previous == State::Failed)
+        return std::nullopt;
+
+    auto committed = initial_connect_attempt_->try_commit_peer_terminal(
+        PeerLogicalTerminalCause::peer_failure,
+        detail::ConnectAttemptTerminal{
+            detail::ConnectAttemptTerminalKind::peer_failure,
+            ec,
+            peer_ledger_seq_.load(),
+            0},
+        [this]() noexcept { state_.store(State::Failed); });
+    if (!committed.event_committed)
+        return std::nullopt;
+
+    return previous;
 }
 
 void
 PeerClient::send_get_nodes(
     Hash256 const& ledger_hash,
+    uint32_t ledger_seq,
     int type,
     std::vector<SHAMapNodeID> const& node_ids,
-    std::function<void(boost::system::error_code)> on_error)
+    std::function<void(boost::system::error_code)> on_write)
 {
     auto self = shared_from_this();
     asio::dispatch(
         strand_,
         [self,
          ledger_hash,
+         ledger_seq,
          type,
          node_ids,
-         on_error = std::move(on_error)]() mutable {
+         on_write = std::move(on_write)]() mutable {
             self->send_get_nodes_on_strand(
-                ledger_hash, type, std::move(node_ids), std::move(on_error));
+                ledger_hash,
+                ledger_seq,
+                type,
+                std::move(node_ids),
+                std::move(on_write));
         });
 }
 
+//@@authority transition=prv.T0023 status=provisional scope=function
+// bind=catl::peer_client::send_get_nodes_on_strand@3d429aee34d810d3
+// owner=unresolved owner_hypothesis=peer_client commit=strand
+// touches=prv.S0021
+// label=raw_node_packet_commit_requires_current_advertised_coverage
 void
 PeerClient::send_get_nodes_on_strand(
     Hash256 ledger_hash,
+    uint32_t ledger_seq,
     int type,
     std::vector<SHAMapNodeID> node_ids,
-    std::function<void(boost::system::error_code)> on_error)
+    std::function<void(boost::system::error_code)> on_write)
 {
     assert(strand_.running_in_this_thread());
     if (state_ != State::Ready)
     {
         PLOGD(log_, "send_get_nodes: not ready, dropping");
-        if (on_error)
-            on_error(boost::asio::error::connection_aborted);
+        if (on_write)
+            on_write(boost::asio::error::connection_aborted);
+        return;
+    }
+
+    if (!advertised_ledger_range().contains(ledger_seq))
+    {
+        PLOGD(
+            log_,
+            "send_get_nodes: ledger ",
+            ledger_seq,
+            " no longer advertised, refusing before write");
+        if (on_write)
+            on_write(boost::asio::error::operation_aborted);
         return;
     }
 
@@ -963,14 +1124,14 @@ PeerClient::send_get_nodes_on_strand(
     connection_->async_send_packet(
         packet_type::get_ledger,
         data,
-        [on_error = std::move(on_error)](boost::system::error_code ec) {
+        [on_write = std::move(on_write)](boost::system::error_code ec) {
             if (ec)
             {
                 PLOGE(
                     PeerClient::log_, "send_get_nodes failed: ", ec.message());
-                if (on_error)
-                    on_error(ec);
             }
+            if (on_write)
+                on_write(ec);
         });
 }
 
@@ -981,7 +1142,7 @@ PeerClient::submit_node_batch(
 {
     if (!on_receipt || command.attempt_id().value() == 0 ||
         command.sender_generation().value() == 0 ||
-        command.peer_generation().value() == 0 ||
+        command.peer_generation().value() == 0 || command.ledger_seq() == 0 ||
         command.node_ids().empty() ||
         command.node_ids().size() > kMaxNodeBatchRequestNodes ||
         (command.tree() != NodeTree::transaction &&
@@ -1042,8 +1203,7 @@ PeerClient::submit_node_batch(
         {
             node_batch_ingress_projections_.fetch_sub(
                 1, std::memory_order_acq_rel);
-            node_batch_work_projection_.fetch_sub(
-                1, std::memory_order_acq_rel);
+            node_batch_work_projection_.fetch_sub(1, std::memory_order_acq_rel);
         }
         return false;
     }
@@ -1052,10 +1212,8 @@ PeerClient::submit_node_batch(
 bool
 PeerClient::acknowledge_node_batch_receipt(NodeBatchReceiptAck ack)
 {
-    if (ack.attempt_id().value() == 0 ||
-        ack.sender_generation().value() == 0 ||
-        ack.peer_generation().value() == 0 ||
-        ack.receiver_instance_id() == 0 ||
+    if (ack.attempt_id().value() == 0 || ack.sender_generation().value() == 0 ||
+        ack.peer_generation().value() == 0 || ack.receiver_instance_id() == 0 ||
         ack.receiver_commit_sequence() == 0)
     {
         return false;
@@ -1087,8 +1245,7 @@ PeerClient::acknowledge_node_batch_receipt(NodeBatchReceiptAck ack)
         {
             node_batch_ingress_projections_.fetch_sub(
                 1, std::memory_order_acq_rel);
-            node_batch_work_projection_.fetch_sub(
-                1, std::memory_order_acq_rel);
+            node_batch_work_projection_.fetch_sub(1, std::memory_order_acq_rel);
         }
         return false;
     }
@@ -1203,13 +1360,26 @@ PeerClient::submit_node_batch_on_strand(
         return false;
     }
 
+    // The command crossed executors after PeerSet admitted its pin. Status
+    // changes are serialized by this same strand, so this is the authoritative
+    // dispatch-time coverage decision. Earlier selector checks are advisory.
+    //@@authority transition=prv.T0062 status=provisional scope=statement
+    // bind=if_statement@71ecdc0da9d7dc10
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0021,prv.S0022
+    // label=managed_node_packet_commit_requires_current_advertised_coverage
+    if (!advertised_ledger_range().contains(command.ledger_seq()))
+    {
+        refuse(NodeBatchWriteOutcome::ledger_not_advertised);
+        return false;
+    }  //@@authority-target ids=prv.T0062
+
     if (node_batch_write_records_.size() >= kMaxNodeBatchReceiptRows)
     {
         refuse(NodeBatchWriteOutcome::receipt_capacity_exhausted);
         return false;
     }
-    if (node_batch_write_records_.capacity() <
-        kMaxNodeBatchReceiptRows)
+    if (node_batch_write_records_.capacity() < kMaxNodeBatchReceiptRows)
     {
         try
         {
@@ -1224,8 +1394,7 @@ PeerClient::submit_node_batch_on_strand(
     auto const remaining_receipt_sequences =
         std::numeric_limits<std::uint64_t>::max() -
         next_node_batch_receipt_sequence_;
-    if (reserved_node_batch_receipt_sequences_ >=
-        remaining_receipt_sequences)
+    if (reserved_node_batch_receipt_sequences_ >= remaining_receipt_sequences)
     {
         refuse(NodeBatchWriteOutcome::receipt_sequence_exhausted);
         return false;
@@ -1327,8 +1496,7 @@ PeerClient::complete_node_batch_write(
             return record.sender_generation == sender_generation &&
                 record.attempt_id == attempt_id;
         });
-    if (found == node_batch_write_records_.end() ||
-        !found->pending_command)
+    if (found == node_batch_write_records_.end() || !found->pending_command)
     {
         return;
     }
@@ -1338,15 +1506,13 @@ PeerClient::complete_node_batch_write(
         ? NodeBatchWriteOutcome::write_failed
         : terminal_override;
     assert(reserved_node_batch_receipt_sequences_ != 0);
-    auto const receiver_commit_sequence =
-        next_node_batch_receipt_sequence_ + 1;
-    found->terminal_receipt =
-        NodeBatchWriteReceipt{
-            *found->pending_command,
-            outcome,
-            receiver_instance_id_,
-            receiver_commit_sequence,
-            ec};
+    auto const receiver_commit_sequence = next_node_batch_receipt_sequence_ + 1;
+    found->terminal_receipt = NodeBatchWriteReceipt{
+        *found->pending_command,
+        outcome,
+        receiver_instance_id_,
+        receiver_commit_sequence,
+        ec};
     found->pending_command.reset();
     --reserved_node_batch_receipt_sequences_;
     next_node_batch_receipt_sequence_ = receiver_commit_sequence;
@@ -1391,8 +1557,7 @@ PeerClient::acknowledge_node_batch_receipt_on_strand(
             return record.sender_generation == ack.sender_generation() &&
                 record.attempt_id == ack.attempt_id();
         });
-    if (found == node_batch_write_records_.end() ||
-        !found->terminal_receipt ||
+    if (found == node_batch_write_records_.end() || !found->terminal_receipt ||
         found->payload_digest != ack.payload_digest() ||
         found->terminal_receipt->receiver_commit_sequence() !=
             ack.receiver_commit_sequence())
@@ -1448,8 +1613,8 @@ PeerClient::do_connect(
         if (!self)
             return;
 
-        auto const previous = self->state_.exchange(State::Failed);
-        if (previous == State::Disconnected || previous == State::Failed)
+        auto const previous = self->commit_failed_on_strand(ec);
+        if (!previous)
             return;
 
         self->complete_all_pending(Error::Disconnected);
@@ -1458,6 +1623,7 @@ PeerClient::do_connect(
         // terminal fact is formed here, once, on the client strand —
         // this is the sole export commit for this instance's death.
         //@@authority channel=peer_client.terminal_export owner=peer_client
+        // bind=catl::peer_client::do_connect@e37232fc24310fa4
         // commit=client-strand
         if (self->on_disconnect_)
         {
@@ -1480,7 +1646,7 @@ PeerClient::do_connect(
             }
         }
 
-        if (previous == State::Ready)
+        if (*previous == State::Ready)
             return;
 
         if (ec == boost::asio::error::invalid_argument ||
@@ -1509,35 +1675,55 @@ PeerClient::do_connect(
         self->complete_connect(ec);
     });
 
-    // Connect callback fires on the strand (socket is strand-aware).
-    // One-shot callback — shared_ptr capture is fine here, it completes
-    // promptly and doesn't create a cycle (not stored as a member).
+    // Construction above is exclusive because the client has not escaped.
+    // Physical admission and every fallible Asio initiation below are owner
+    // transitions: mechanically enter the shared PeerClient/connection strand
+    // before either can become observable.
     auto self = shared_from_this();
-    connection_->async_connect([self, on_ready = std::move(on_ready)](
-                                   boost::system::error_code ec) mutable {
-        if (ec)
-        {
-            // Connection failures are routine (503 redirect, timeout,
-            // refused). Only unexpected errors are worth logging loudly.
-            PLOGD(
-                PeerClient::log_,
-                "[",
-                self->net_label_,
-                "] [",
-                self->endpoint_str_,
-                "] Connection failed: ",
-                ec.message());
-            auto const previous = self->state_.exchange(State::Failed);
-            if (previous != State::Disconnected && previous != State::Failed)
-                self->complete_all_pending(Error::Disconnected);
-            self->complete_connect(ec);
-            return;
-        }
-        auto const state = self->state_.load();
-        if (state == State::Disconnected || state == State::Failed)
-            return;
-        self->on_connected(std::move(on_ready));
-    });
+    auto connection = connection_;
+    //@@authority transition=prv.T0148 status=provisional scope=statement
+    // bind=expression_statement@808245b5e3cf12b7
+    // owner=unresolved owner_hypothesis=peer_client
+    // commit=peer_client_strand mutation_class=running_guarded
+    // label=enter_owner_strand_before_physical_connection_admission
+    asio::dispatch(
+        strand_,
+        [self,
+         connection = std::move(connection),
+         on_ready = std::move(on_ready)]() mutable {
+            // Connect callback runs on this same strand, including a
+            // synchronous initiation refusal.
+            connection->async_connect(
+                [self, on_ready = std::move(on_ready)](
+                    boost::system::error_code ec) mutable {
+                    if (ec)
+                    {
+                        // Connection failures are routine (503 redirect,
+                        // timeout, refused). Only unexpected errors are worth
+                        // logging loudly.
+                        PLOGD(
+                            PeerClient::log_,
+                            "[",
+                            self->net_label_,
+                            "] [",
+                            self->endpoint_str_,
+                            "] Connection failed: ",
+                            ec.message());
+                        if (!self->commit_failed_on_strand(ec))
+                        {
+                            self->complete_connect(ec);
+                            return;
+                        }
+                        self->complete_all_pending(Error::Disconnected);
+                        self->complete_connect(ec);
+                        return;
+                    }
+                    auto const state = self->state_.load();
+                    if (state == State::Disconnected || state == State::Failed)
+                        return;
+                    self->on_connected(std::move(on_ready));
+                });
+        });  //@@authority-target ids=prv.T0148
 }
 
 void
@@ -1548,8 +1734,27 @@ PeerClient::complete_connect(boost::system::error_code ec)
         return;
     }
 
-    auto cb = std::move(connect_completion_callback_);
-    cb(ec, peer_ledger_seq_.load());
+    //@@mutation-site connect-completion-observer-is-consumed
+    //@@authority transition=prv.T0185 status=provisional scope=statement
+    // bind=declaration@1d0e14c7fe979588
+    // owner=unresolved owner_hypothesis=peer_client
+    // commit=peer_client_strand touches=prv.S0060
+    // label=consume_one_shot_connect_completion_before_invoke
+    auto cb = std::exchange(
+        connect_completion_callback_, {});  //@@authority-target ids=prv.T0185
+    //@@mutation-end connect-completion-observer-is-consumed
+    try
+    {
+        cb(ec, peer_ledger_seq_.load());
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "connect completion observer threw: ", e.what());
+    }
+    catch (...)
+    {
+        PLOGE(log_, "connect completion observer threw");
+    }
 }
 
 void
@@ -1603,13 +1808,11 @@ void
 PeerClient::send_initial_probe_ping()
 {
     auto const seq = static_cast<uint32_t>(next_seq_.fetch_add(1));
-    auto const key = ping_key(seq);
 
     RequestOptions opts;
     opts.timeout = std::chrono::seconds{10};
-    if (!register_callback<PingResult>(
-            pending_pings_,
-            key,
+    if (!send_ping_request_on_strand(
+            seq,
             Callback<PingResult>{[seq](Error err, PingResult) {
                 if (err == Error::Success)
                 {
@@ -1631,8 +1834,7 @@ PeerClient::send_initial_probe_ping()
                         static_cast<int>(err));
                 }
             }},
-            opts,
-            false))
+            opts))
     {
         PLOGW(
             log_,
@@ -1643,16 +1845,22 @@ PeerClient::send_initial_probe_ping()
         return;
     }
 
-    protocol::TMPing msg;
-    msg.set_type(protocol::TMPing_pingType_ptPING);
-    msg.set_seq(seq);
-
-    std::vector<uint8_t> data(msg.ByteSizeLong());
-    msg.SerializeToArray(data.data(), data.size());
-
-    connection_->async_send_packet(
-        packet_type::ping, data, [](boost::system::error_code) {});
     PLOGD(log_, "[", net_label_, "] Sent initial probe ping seq=", seq);
+}
+
+//@@authority transition=prv.T0060 status=provisional scope=function
+// bind=catl::peer_client::publish_advertised_ledger_range@7067c13e402f7a68
+// owner=unresolved owner_hypothesis=peer_client commit=atomic
+// touches=prv.S0021
+// label=publish_one_coherent_advertised_ledger_range
+AdvertisedLedgerRange
+PeerClient::publish_advertised_ledger_range(
+    AdvertisedLedgerRange range) noexcept
+{
+    if (!range.valid())
+        range = {};
+    advertised_ledger_range_.store(range.packed(), std::memory_order_release);
+    return range;
 }
 
 void
@@ -1674,20 +1882,14 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
 
     if (status.has_firstseq() && status.has_lastseq())
     {
-        auto old_first = peer_first_seq_.load();
-        auto old_last = peer_last_seq_.load();
-        peer_first_seq_.store(status.firstseq());
-        peer_last_seq_.store(status.lastseq());
-        if (peer_last_seq_.load() < peer_first_seq_.load() ||
-            peer_first_seq_.load() == 0 || peer_last_seq_.load() == 0)
-        {
-            peer_first_seq_ = 0;
-            peer_last_seq_ = 0;
-        }
-        else if (old_first != peer_first_seq_ || old_last != peer_last_seq_)
+        auto const old_range = advertised_ledger_range();
+        auto const next_range = publish_advertised_ledger_range(
+            {.first_seq = status.firstseq(), .last_seq = status.lastseq()});
+
+        if (next_range.valid() && old_range != next_range)
         {
             // Only log when range actually changes
-            if (old_first == 0)
+            if (!old_range.valid())
             {
                 PLOGI(
                     log_,
@@ -1696,9 +1898,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
                     "] [",
                     endpoint_str_,
                     "] range: ",
-                    peer_first_seq_,
+                    next_range.first_seq,
                     " - ",
-                    peer_last_seq_);
+                    next_range.last_seq);
             }
             else
             {
@@ -1709,9 +1911,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
                     "] [",
                     endpoint_str_,
                     "] range: ",
-                    peer_first_seq_,
+                    next_range.first_seq,
                     " - ",
-                    peer_last_seq_);
+                    next_range.last_seq);
             }
         }
 
@@ -1725,8 +1927,8 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
         {
             tracker->update(
                 endpoint_str_,
-                {.first_seq = peer_first_seq_,
-                 .last_seq = peer_last_seq_,
+                {.first_seq = next_range.first_seq,
+                 .last_seq = next_range.last_seq,
                  .current_seq = peer_ledger_seq_});
         }
     }
@@ -1808,7 +2010,17 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
 void
 PeerClient::become_ready()
 {
-    state_ = State::Ready;
+    auto const ready = initial_connect_attempt_->try_commit_initial(
+        detail::ConnectAttemptTerminal{
+            detail::ConnectAttemptTerminalKind::ready,
+            {},
+            peer_ledger_seq_.load(),
+            0},
+        [this]() noexcept { state_.store(State::Ready); },
+        detail::ConnectAttemptPublication::deferred);
+    if (!ready.event_committed)
+        return;
+
     PLOGI(
         log_,
         "[",
@@ -1822,12 +2034,32 @@ PeerClient::become_ready()
     if (ready_callback_)
     {
         PLOGD(log_, "become_ready: invoking ready_callback_");
-        auto cb = std::move(ready_callback_);
-        cb(peer_ledger_seq_);
-        PLOGD(log_, "become_ready: ready_callback_ returned");
+        //@@mutation-site connect-ready-observer-is-consumed
+        //@@authority transition=prv.T0188 status=provisional scope=statement
+        // bind=declaration@472710938f942183
+        // owner=unresolved owner_hypothesis=peer_client
+        // commit=peer_client_strand touches=prv.S0061
+        // label=consume_one_shot_ready_observer_before_invoke
+        auto cb = std::exchange(
+            ready_callback_, {});  //@@authority-target ids=prv.T0188
+        //@@mutation-end connect-ready-observer-is-consumed
+        try
+        {
+            cb(peer_ledger_seq_);
+            PLOGD(log_, "become_ready: ready_callback_ returned");
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(log_, "ready observer threw: ", e.what());
+        }
+        catch (...)
+        {
+            PLOGE(log_, "ready observer threw");
+        }
     }
 
     complete_connect({});
+    initial_connect_attempt_->publish_terminal();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1911,9 +2143,24 @@ PeerClient::handle_ping(std::vector<uint8_t> const& payload)
     }
 }
 
+//@@authority channel=prv.C0002 status=provisional scope=function
+// bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+// endpoints=peer_client,node_cache channel_semantics=legacy_uncorrelated
+// label=uncorrelated_node_response_delivery_to_singleton_sink
+//@@authority transition=prv.T0022 status=provisional scope=function
+// bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+// owner=unresolved owner_hypothesis=peer_client commit=strand
+// touches=prv.S0007 label=deliver_uncorrelated_node_response_to_shared_sink
+//@@authority state=prv.S0064 status=provisional scope=function
+// bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+// owner=unresolved owner_hypothesis=peer_client
+// observed_home=dispatch_stack
+// label=peer_ledger_observation_and_candidate_snapshot
 void
 PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
 {
+    assert(strand_.running_in_this_thread());
+
     auto msg = std::make_shared<protocol::TMLedgerData>();
     if (!msg->ParseFromArray(payload.data(), payload.size()))
     {
@@ -1938,6 +2185,24 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         " has_cookie=",
         msg->has_requestcookie());
 
+    // We originate requests; we never act as a relay. A legitimate indirect
+    // response has its routing cookie removed by the relay before it reaches
+    // us. Treat a retained cookie as unowned routing authority for request
+    // correlation, while still allowing independently validated
+    // content-addressed nodes to reach their separate sink.
+    auto legacy_identity_envelope_complete = true;
+    if (msg->has_requestcookie())
+    {
+        PLOGW(log_, "dispatch_ledger_data: refusing unexpected relay cookie");
+        //@@authority transition=prv.T0197 status=provisional
+        // bind=expression_statement@5f5909b2f6b7edc6
+        // scope=statement owner=unresolved owner_hypothesis=peer_client
+        // commit=strand touches=prv.S0064
+        // label=refuse_unowned_relay_routing_authority
+        legacy_identity_envelope_complete =
+            false;  //@@authority-target ids=prv.T0197
+    }
+
     // Reject responses with an absurd node count before any iteration. The
     // frame cap bounds the message size, but a densely-packed message could
     // still encode millions of tiny node entries that amplify into O(N) /
@@ -1955,18 +2220,47 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         return;
     }
 
-    // Feed node responses to the NodeCache interceptor FIRST.
-    // This handles responses from send_get_nodes() which bypass pending_nodes.
+    // Feed node responses to the NodeCache sink first. Delivery is not the
+    // disposition: the sink reports whether it accepted valid content, while
+    // the legacy pending map independently reports whether it matched.
+    NodeResponseObservation cache_observation;
     if (msg->type() != protocol::liBASE && !msg->has_error())
     {
-        NodeResponseHandler handler;
+        NodeResponseObserver observer;
         {
             std::lock_guard lock(handler_mutex_);
-            handler = node_response_handler_;
+            observer = node_response_observer_;
         }
-        if (handler)
+        if (observer)
         {
-            handler(msg);
+            try
+            {
+                //@@authority transition=prv.T0041 status=provisional
+                // bind=expression_statement@5d67e628682c2fe8 scope=statement
+                // owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0007
+                // label=invoke_snapshot_and_observe_uncorrelated_response_sink
+                //@@mutation-site node-response-sink-disposition-preserved
+                cache_observation =
+                    observer(msg);  //@@authority-target ids=prv.T0041
+                //@@mutation-end node-response-sink-disposition-preserved
+            }
+            catch (...)
+            {
+                // clang-format off
+                //@@authority transition=prv.T0191 status=provisional
+                // bind=expression_statement@a3ab411002d19fc5 scope=statement
+                // owner=unresolved
+                // owner_hypothesis=peer_client commit=peer_client_strand
+                // touches=prv.S0007
+                // label=contain_node_response_sink_failure_before_legacy_dispatch
+                //@@mutation-site node-response-observer-failure-contained
+                cache_observation.failure =
+                    std::current_exception(); //@@authority-target ids=prv.T0191
+                //@@mutation-end node-response-observer-failure-contained
+                // clang-format on
+            }
         }
     }
 
@@ -2033,24 +2327,107 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
             (!e.callbacks.empty() ? static_cast<bool>(e.callbacks[0].callback)
                                   : false));
 
-    // For headers: direct key match (seq_key or hash_key)
-    auto find_header_key = [&]() -> Hash256 const* {
-        if (pending_headers_.count(seq_key))
-            return &seq_key;
-        if (have_hash_key && pending_headers_.count(hash_key_val))
-            return &hash_key_val;
-        return nullptr;
+    enum class PendingLedgerKind : std::uint8_t { header, nodes };
+
+    struct PeerLedgerObservation
+    {
+        PeerClient const* session = nullptr;
+        std::uint32_t ledger_seq = 0;
+        std::optional<Hash256> ledger_hash;
+        int type = 0;
+        std::optional<Error> remote_error;
     };
 
-    //@@start find-node-key
-    // For nodes: match response to the correct pending entry using the
-    // per-node nodeids in the response. Each response nodeid must be a
-    // descendant-or-equal of one of the entry's requested nodeids.
-    // This handles: exact matches, speculative depth (leaf terminates
-    // early → fewer nodes returned), and single-child chain traversal
-    // (queryDepth=0 still follows bc==1 chains → extra descendants).
-    //
-    // Fallback to match_key scan for error responses (no nodes).
+    struct PendingLedgerAttempt
+    {
+        PendingLedgerKind kind = PendingLedgerKind::header;
+        Hash256 key;
+        std::uint64_t attempt_id = 0;
+    };
+
+    struct UnmatchedLedgerObservation
+    {
+        PeerLedgerObservation observation;
+    };
+
+    struct AmbiguousLedgerObservation
+    {
+        PeerLedgerObservation observation;
+        std::vector<PendingLedgerAttempt> candidates;
+    };
+
+    struct UniquelyCorrelatedLedgerObservation
+    {
+        PeerLedgerObservation observation;
+        PendingLedgerAttempt candidate;
+    };
+
+    using LedgerObservationCorrelation = std::variant<
+        UnmatchedLedgerObservation,
+        AmbiguousLedgerObservation,
+        UniquelyCorrelatedLedgerObservation>;
+
+    auto const remote_error = [&]() -> std::optional<Error> {
+        if (!msg->has_error())
+            return std::nullopt;
+        if (msg->error() == protocol::reNO_LEDGER)
+            return Error::PeerNoLedger;
+        if (msg->error() == protocol::reNO_NODE)
+            return Error::NoNode;
+        return Error::BadRequest;
+    }();
+
+    PeerLedgerObservation observation{
+        .session = this,
+        .ledger_seq = msg->ledgerseq(),
+        .ledger_hash = have_hash_key
+            ? std::optional<Hash256>{Hash256(
+                  reinterpret_cast<std::uint8_t const*>(
+                      msg->ledgerhash().data()))}
+            : std::nullopt,
+        .type = msg->type(),
+        .remote_error = remote_error,
+    };
+
+    std::vector<PendingLedgerAttempt> candidates;
+    auto add_candidate = [&candidates, legacy_identity_envelope_complete](
+                             PendingLedgerKind kind,
+                             Hash256 const& key,
+                             auto const& entry) {
+        if (!legacy_identity_envelope_complete ||
+            !entry.network_request_initiated)
+            return;
+        if (std::ranges::any_of(
+                candidates, [&entry](PendingLedgerAttempt const& candidate) {
+                    return candidate.attempt_id == entry.incarnation;
+                }))
+        {
+            return;
+        }
+        candidates.push_back({kind, key, entry.incarnation});
+    };
+
+    auto add_header_candidate = [&](Hash256 const& key) {
+        auto const current = pending_headers_.find(key);
+        if (current != pending_headers_.end())
+        {
+            add_candidate(
+                PendingLedgerKind::header, current->first, current->second);
+        }
+    };
+
+    // Candidate identity is the union of every wire-supported index,
+    // deduplicated by the local pending-entry incarnation.
+    if (msg->type() == protocol::liBASE)
+    {
+        add_header_candidate(seq_key);
+        if (have_hash_key)
+            add_header_candidate(hash_key_val);
+    }
+
+    // For successful node responses, the response's self-identifying nodeids
+    // must fit the exact requested subtree. For errors, the wire carries no
+    // nodeids, so only ledger hash/sequence plus type are available.
     auto is_descendant_or_equal = [](SHAMapNodeID const& child,
                                      SHAMapNodeID const& ancestor) -> bool {
         if (child.depth < ancestor.depth)
@@ -2073,147 +2450,241 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         return true;
     };
 
-    auto find_node_key = [&]() -> Hash256 const* {
-        auto response_match = have_hash_key ? hash_key_val : seq_key;
-
-        // Extract response nodeids
-        std::vector<SHAMapNodeID> response_nids;
-        for (int i = 0; i < msg->nodes_size(); ++i)
+    std::vector<SHAMapNodeID> response_nids;
+    auto response_nodeids_complete = true;
+    if (!msg->has_error() && msg->type() != protocol::liBASE)
+    {
+        response_nids.reserve(static_cast<std::size_t>(msg->nodes_size()));
+        for (int index = 0; index < msg->nodes_size(); ++index)
         {
-            if (!msg->nodes(i).has_nodeid() ||
-                msg->nodes(i).nodeid().size() != 33)
+            if (!msg->nodes(index).has_nodeid() ||
+                msg->nodes(index).nodeid().size() != 33)
+            {
+                response_nodeids_complete = false;
                 continue;
-            auto const& nid_bytes = msg->nodes(i).nodeid();
+            }
+            auto const& nid_bytes = msg->nodes(index).nodeid();
             SHAMapNodeID nid;
             std::memcpy(nid.id.data(), nid_bytes.data(), 32);
             nid.depth = static_cast<uint8_t>(nid_bytes[32]);
+            if (nid.depth > 64)
+            {
+                response_nodeids_complete = false;
+                continue;
+            }
             response_nids.push_back(nid);
         }
+    }
 
-        // If we have response nodeids, find the pending entry whose
-        // requested_nodeids are ancestors of ALL response nodeids
-        if (!response_nids.empty())
+    if (msg->type() != protocol::liBASE)
+    {
+        for (auto const& [key, entry] : pending_nodes_)
         {
-            Hash256 const* best = nullptr;
-            for (auto const& [k, entry] : pending_nodes_)
+            auto const matches_wire_index = entry.match_key == seq_key ||
+                (have_hash_key && entry.match_key == hash_key_val);
+            if (!matches_wire_index)
+                continue;
+
+            if (msg->has_error())
             {
-                if (entry.match_key != response_match)
-                    continue;
-                if (entry.requested_nodeids.empty())
-                    continue;
-
-                // Every response nodeid must descend from at least one
-                // requested nodeid in this entry
-                bool all_match = true;
-                for (auto const& resp_nid : response_nids)
-                {
-                    bool found = false;
-                    for (auto const& req_nid : entry.requested_nodeids)
-                    {
-                        if (is_descendant_or_equal(resp_nid, req_nid))
-                        {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found)
-                    {
-                        all_match = false;
-                        break;
-                    }
-                }
-                if (all_match)
-                {
-                    best = &k;
-                    break;
-                }
+                add_candidate(PendingLedgerKind::nodes, key, entry);
+                continue;
             }
-            if (best)
-                return best;
+
+            if (!response_nodeids_complete || response_nids.empty() ||
+                entry.requested_nodeids.empty())
+                continue;
+
+            auto const all_match = std::ranges::all_of(
+                response_nids,
+                [&entry,
+                 &is_descendant_or_equal](SHAMapNodeID const& response_nid) {
+                    return std::ranges::any_of(
+                        entry.requested_nodeids,
+                        [&response_nid, &is_descendant_or_equal](
+                            SHAMapNodeID const& requested_nid) {
+                            return is_descendant_or_equal(
+                                response_nid, requested_nid);
+                        });
+                });
+            if (all_match)
+                add_candidate(PendingLedgerKind::nodes, key, entry);
+        }
+    }
+
+    //@@authority transition=prv.T0194 status=provisional scope=statement
+    // bind=declaration@99d2a3766448847e
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0064
+    // label=classify_wire_observation_against_pending_attempt_population
+    LedgerObservationCorrelation correlation = candidates.empty()
+        ? LedgerObservationCorrelation{UnmatchedLedgerObservation{observation}}
+        : candidates.size() == 1
+        ? LedgerObservationCorrelation{UniquelyCorrelatedLedgerObservation{
+              observation, candidates.front()}}
+        : LedgerObservationCorrelation{AmbiguousLedgerObservation{
+              observation,
+              std::move(candidates)}};  //@@authority-target ids=prv.T0194
+
+    auto const* unique =
+        std::get_if<UniquelyCorrelatedLedgerObservation>(&correlation);
+    auto const* ambiguous =
+        std::get_if<AmbiguousLedgerObservation>(&correlation);
+
+    auto before_consume = std::move(before_ledger_attempt_consume_for_test_);
+    if (before_consume)
+        before_consume();
+
+    auto consume_unique = [&](Error error, auto result) {
+        if (!unique || unique->observation.session != this)
+            return false;
+
+        auto const& candidate = unique->candidate;
+        if (candidate.kind == PendingLedgerKind::header)
+        {
+            auto const current = pending_headers_.find(candidate.key);
+            if (current == pending_headers_.end() ||
+                current->second.incarnation != candidate.attempt_id)
+            {
+                PLOGW(
+                    log_,
+                    "stale ledger-attempt correlation refused before header "
+                    "consumption");
+                return false;
+            }
+            //@@authority transition=prv.T0195 status=provisional
+            // bind=expression_statement@bd9ba51fc8010f1e
+            // scope=statement owner=unresolved owner_hypothesis=peer_client
+            // commit=strand touches=prv.S0064
+            // label=consume_uniquely_correlated_header_attempt
+            resolve(
+                pending_headers_,
+                candidate.key,
+                error,
+                LedgerHeaderResult{
+                    std::move(result)});  //@@authority-target ids=prv.T0195
+            return true;
         }
 
-        // Fallback: scan by match_key only (error responses, no nodeids,
-        // or no descendant match found)
-        for (auto const& [k, entry] : pending_nodes_)
+        auto const current = pending_nodes_.find(candidate.key);
+        if (current == pending_nodes_.end() ||
+            current->second.incarnation != candidate.attempt_id)
         {
-            if (entry.match_key == response_match)
-                return &k;
+            PLOGW(
+                log_,
+                "stale ledger-attempt correlation refused before node "
+                "consumption");
+            return false;
         }
-        return nullptr;
+        //@@authority transition=prv.T0196 status=provisional
+        // bind=expression_statement@d593400107116538
+        // scope=statement owner=unresolved owner_hypothesis=peer_client
+        // commit=strand touches=prv.S0064
+        // label=consume_uniquely_correlated_node_attempt
+        resolve(
+            pending_nodes_,
+            candidate.key,
+            error,
+            LedgerNodesResult{
+                std::move(result)});  //@@authority-target ids=prv.T0196
+        return true;
     };
-    //@@end find-node-key
 
     if (msg->has_error())
     {
-        auto err = msg->error() == protocol::reNO_LEDGER ? Error::NoLedger
-            : msg->error() == protocol::reNO_NODE        ? Error::NoNode
-                                                         : Error::BadRequest;
-        PLOGW(log_, "  error response: code=", msg->error());
-        if (auto k = find_header_key())
+        assert(remote_error);
+        if (!consume_unique(
+                *remote_error, std::shared_ptr<protocol::TMLedgerData>{}))
         {
-            PLOGD(
+            PLOGW(
                 log_,
-                "  resolving error → pending_headers key=",
-                k->hex().substr(0, 16));
-            resolve(pending_headers_, *k, err, LedgerHeaderResult{});
-        }
-        else if (auto k = find_node_key())
-        {
-            PLOGD(
-                log_,
-                "  resolving error → pending_nodes key=",
-                k->hex().substr(0, 16));
-            resolve(pending_nodes_, *k, err, LedgerNodesResult{});
-        }
-        else
-        {
-            PLOGW(log_, "  error response with no matching pending request");
+                "  error response unresolved: code=",
+                msg->error(),
+                " correlation=",
+                ambiguous ? "ambiguous" : "unmatched",
+                " candidates=",
+                ambiguous ? ambiguous->candidates.size() : 0);
         }
         return;
     }
 
     if (msg->type() == protocol::liBASE)
     {
-        if (auto k = find_header_key())
+        if (!consume_unique(Error::Success, std::move(msg)))
         {
-            PLOGD(
+            PLOGW(
                 log_,
-                "  resolving liBASE → headers key=",
-                k->hex().substr(0, 16));
-            resolve(
-                pending_headers_,
-                *k,
-                Error::Success,
-                LedgerHeaderResult{std::move(msg)});
-        }
-        else
-        {
-            PLOGW(log_, "  liBASE response but no matching pending_headers");
+                "  liBASE response unresolved: correlation=",
+                ambiguous ? "ambiguous" : "unmatched",
+                " candidates=",
+                ambiguous ? ambiguous->candidates.size() : 0);
         }
     }
     else
     {
-        if (auto k = find_node_key())
+        auto const response_type = msg->type();
+        auto const cache_accepted = cache_observation.accepted;
+        auto const cache_failed = static_cast<bool>(cache_observation.failure);
+        auto legacy_matched = false;
+        //@@mutation-site node-response-legacy-dispatch-remains-independent
+        if (unique)
+        //@@mutation-end node-response-legacy-dispatch-remains-independent
         {
-            PLOGD(
-                log_,
-                "  resolving type=",
-                msg->type(),
-                " → nodes key=",
-                k->hex().substr(0, 16));
-            resolve(
-                pending_nodes_,
-                *k,
-                Error::Success,
-                LedgerNodesResult{std::move(msg)});
+            legacy_matched = consume_unique(Error::Success, std::move(msg));
         }
-        else
+
+        if (cache_failed)
+        {
+            try
+            {
+                std::rethrow_exception(cache_observation.failure);
+            }
+            catch (std::exception const& error)
+            {
+                PLOGE(
+                    log_,
+                    "  node response sink failure: type=",
+                    response_type,
+                    " cache=",
+                    cache_accepted ? "accepted" : "ignored",
+                    " legacy=",
+                    legacy_matched ? "matched" : "absent",
+                    " error=",
+                    error.what());
+            }
+            catch (...)
+            {
+                PLOGE(
+                    log_,
+                    "  node response sink failure: type=",
+                    response_type,
+                    " cache=",
+                    cache_accepted ? "accepted" : "ignored",
+                    " legacy=",
+                    legacy_matched ? "matched" : "absent",
+                    " error=non-std exception");
+            }
+        }
+        //@@mutation-site node-response-warning-requires-global-nonownership
+        else if (!legacy_matched && !cache_accepted)
+        //@@mutation-end node-response-warning-requires-global-nonownership
         {
             PLOGW(
                 log_,
-                "  type=",
-                msg->type(),
-                " response but no matching pending_nodes");
+                "  node response disposition: type=",
+                response_type,
+                " cache=ignored legacy=absent");
+        }
+        else
+        {
+            PLOGD(
+                log_,
+                "  node response disposition: type=",
+                response_type,
+                " cache=",
+                cache_accepted ? "accepted" : "ignored",
+                " legacy=",
+                legacy_matched ? "matched" : "absent");
         }
     }
 }
@@ -2249,7 +2720,7 @@ PeerClient::dispatch_proof_path_response(std::vector<uint8_t> const& payload)
 
     if (msg->has_error())
     {
-        auto err = msg->error() == protocol::reNO_LEDGER ? Error::NoLedger
+        auto err = msg->error() == protocol::reNO_LEDGER ? Error::PeerNoLedger
             : msg->error() == protocol::reNO_NODE        ? Error::NoNode
                                                          : Error::BadRequest;
         resolve(pending_proof_paths_, key, err, ProofPathResult{});
@@ -2282,6 +2753,11 @@ PeerClient::get_ledger_header(
         });
 }
 
+//@@authority transition=prv.T0063 status=provisional scope=function
+// bind=catl::peer_client::get_ledger_header_on_strand@7a7c058436449b49
+// owner=unresolved owner_hypothesis=peer_client commit=strand
+// touches=prv.S0021
+// label=header_packet_commit_requires_current_advertised_coverage
 void
 PeerClient::get_ledger_header_on_strand(
     uint32_t ledger_seq,
@@ -2309,6 +2785,15 @@ PeerClient::get_ledger_header_on_strand(
             complete_callback_noexcept(
                 log_, std::move(callback), terminal_request_error(state));
         }
+        return;
+    }
+
+    // Selection happened before this request crossed onto our strand. A queued
+    // status update may have revoked coverage in between.
+    if (!advertised_ledger_range().contains(ledger_seq))
+    {
+        complete_callback_noexcept(
+            log_, std::move(callback), Error::PeerCoverageChanged);
         return;
     }
 
@@ -2340,13 +2825,35 @@ PeerClient::get_ledger_header_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_headers_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send TMGetLedger failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_headers_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0198 status=provisional
+                // bind=expression_statement@0f209b623021e574
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_sequence_header_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_headers_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0198
+            }
         });
 }
 
@@ -2411,8 +2918,31 @@ PeerClient::get_ledger_header_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_headers_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code) {});
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_headers_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0199 status=provisional
+                // bind=expression_statement@24ea44f75b1d37c8
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_hash_header_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_headers_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0199
+            }
+        });
 }
 
 void
@@ -2500,13 +3030,35 @@ PeerClient::get_state_nodes_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_nodes_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_state_nodes failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_nodes_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0200 status=provisional
+                // bind=expression_statement@ce67337b191241d7
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_state_node_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_nodes_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0200
+            }
         });
 }
 
@@ -2595,13 +3147,35 @@ PeerClient::get_tx_nodes_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_nodes_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_tx_nodes failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_nodes_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0201 status=provisional
+                // bind=expression_statement@422928ff37eb7f53
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_transaction_node_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_nodes_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0201
+            }
         });
 }
 
@@ -2681,13 +3255,41 @@ PeerClient::get_tx_proof_path_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_proof_paths_.at(ckey).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::proof_path_req, data, [](boost::system::error_code ec) {
+        packet_type::proof_path_req,
+        data,
+        [weak, ckey, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_tx_proof_path failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+            {
+                //@@mutation-site tx-proof-path-send-error-retires-pending
+                self->complete_network_send(
+                    self->pending_proof_paths_, ckey, incarnation, ec);
+                //@@mutation-end tx-proof-path-send-error-retires-pending
+            }
+        },
+        [weak, ckey, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0205 status=provisional
+                //bind=expression_statement@71a1b1d7568d95d3
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_transaction_proof_path_send_initiation
+                //@@mutation-site tx-proof-path-records-send-initiation
+                self->mark_network_request_initiated(
+                    self->pending_proof_paths_,
+                    ckey,
+                    incarnation);  //@@authority-target ids=prv.T0205
+                //@@mutation-end tx-proof-path-records-send-initiation
+            }
         });
 }
 
@@ -2767,13 +3369,41 @@ PeerClient::get_state_proof_path_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_proof_paths_.at(ckey).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::proof_path_req, data, [](boost::system::error_code ec) {
+        packet_type::proof_path_req,
+        data,
+        [weak, ckey, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_state_proof_path failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+            {
+                //@@mutation-site state-proof-path-send-error-retires-pending
+                self->complete_network_send(
+                    self->pending_proof_paths_, ckey, incarnation, ec);
+                //@@mutation-end state-proof-path-send-error-retires-pending
+            }
+        },
+        [weak, ckey, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0206 status=provisional
+                //bind=expression_statement@f8a084d8a0a7f248
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_state_proof_path_send_initiation
+                //@@mutation-site state-proof-path-records-send-initiation
+                self->mark_network_request_initiated(
+                    self->pending_proof_paths_,
+                    ckey,
+                    incarnation);  //@@authority-target ids=prv.T0206
+                //@@mutation-end state-proof-path-records-send-initiation
+            }
         });
 }
 
@@ -2810,6 +3440,16 @@ PeerClient::ping_on_strand(Callback<PingResult> callback, RequestOptions opts)
     }
 
     auto seq = static_cast<uint32_t>(next_seq_.fetch_add(1));
+    (void)send_ping_request_on_strand(seq, std::move(callback), opts);
+}
+
+bool
+PeerClient::send_ping_request_on_strand(
+    std::uint32_t seq,
+    Callback<PingResult> callback,
+    RequestOptions const& opts)
+{
+    assert(strand_.running_in_this_thread());
     auto key = ping_key(seq);
     PLOGD(log_, "ping: seq=", seq, " key=", key.hex().substr(0, 16));
 
@@ -2817,7 +3457,7 @@ PeerClient::ping_on_strand(Callback<PingResult> callback, RequestOptions opts)
             pending_pings_, key, std::move(callback), opts, false))
     {
         PLOGD(log_, "ping: registration refused before send");
-        return;
+        return false;
     }
 
     protocol::TMPing msg;
@@ -2827,8 +3467,38 @@ PeerClient::ping_on_strand(Callback<PingResult> callback, RequestOptions opts)
     std::vector<uint8_t> data(msg.ByteSizeLong());
     msg.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_pings_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::ping, data, [](boost::system::error_code) {});
+        packet_type::ping,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
+            if (auto self = weak.lock())
+            {
+                //@@mutation-site ping-send-error-retires-pending
+                self->complete_network_send(
+                    self->pending_pings_, key, incarnation, ec);
+                //@@mutation-end ping-send-error-retires-pending
+            }
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0207 status=provisional
+                //bind=expression_statement@0eea5f51802de08a
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_ping_send_initiation
+                //@@mutation-site ping-records-send-initiation
+                self->mark_network_request_initiated(
+                    self->pending_pings_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0207
+                //@@mutation-end ping-records-send-initiation
+            }
+        });
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

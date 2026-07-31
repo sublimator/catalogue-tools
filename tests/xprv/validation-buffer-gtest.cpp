@@ -6,6 +6,8 @@
 #include <catl/peer-client/connection-types.h>
 #include <catl/xdata/protocol.h>
 
+#include "../test-support/io-context-runners.h"
+
 #include "ripple.pb.h"
 
 #include <boost/asio/co_spawn.hpp>
@@ -1617,12 +1619,13 @@ TEST(ValidationBuffer, StopCancelsHeartbeatWork)
     io.stop();
 }
 
-TEST(ValidationBuffer, StopResolvesPendingWaiter)
+TEST(ValidationBuffer, CoStopConsumesPendingWaiterBeforeReceipt)
 {
     asio::io_context io;
     auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
 
     bool done = false;
+    std::size_t pending_at_receipt = 1;
     xprv::QuorumCollectStopReason stop_reason =
         xprv::QuorumCollectStopReason::full;
     asio::co_spawn(
@@ -1636,11 +1639,13 @@ TEST(ValidationBuffer, StopResolvesPendingWaiter)
         asio::detached);
     asio::co_spawn(
         io,
-        [buffer]() -> asio::awaitable<void> {
+        [buffer, &pending_at_receipt]() -> asio::awaitable<void> {
             auto ex = co_await asio::this_coro::executor;
             while ((co_await buffer->co_stats()).pending_callbacks == 0)
                 co_await asio::post(ex, asio::use_awaitable);
-            buffer->stop();
+            co_await buffer->co_stop();
+            pending_at_receipt =
+                (co_await buffer->co_stats()).pending_callbacks;
         },
         asio::detached);
 
@@ -1648,6 +1653,59 @@ TEST(ValidationBuffer, StopResolvesPendingWaiter)
 
     EXPECT_TRUE(done);
     EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::timeout);
+    EXPECT_EQ(pending_at_receipt, 0u);
+}
+
+TEST(ValidationBuffer, CoStopCannotOvertakeQueuedOwnerWork)
+{
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+
+        std::promise<void> owner_entered;
+        std::promise<void> release_owner;
+        auto release_owner_future = release_owner.get_future().share();
+        asio::post(buffer->owner_strand_for_test(), [&]() {
+            owner_entered.set_value();
+            release_owner_future.wait();
+        });
+
+        std::promise<void> stop_entered;
+        auto stopped = asio::co_spawn(
+            io,
+            [buffer, &stop_entered]() -> asio::awaitable<void> {
+                stop_entered.set_value();
+                co_await buffer->co_stop();
+            },
+            asio::use_future);
+
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const owner_status = owner_entered.get_future().wait_for(5s);
+        auto const stop_status = stop_entered.get_future().wait_for(5s);
+        EXPECT_EQ(owner_status, std::future_status::ready);
+        EXPECT_EQ(stop_status, std::future_status::ready);
+
+        if (owner_status == std::future_status::ready &&
+            stop_status == std::future_status::ready)
+        {
+            EXPECT_EQ(stopped.wait_for(50ms), std::future_status::timeout);
+        }
+
+        release_owner.set_value();
+        auto const stopped_status = stopped.wait_for(5s);
+        EXPECT_EQ(stopped_status, std::future_status::ready);
+        if (stopped_status == std::future_status::ready)
+            EXPECT_NO_THROW(stopped.get());
+
+        work.reset();
+        runners.join();
+    }
 }
 
 TEST(ValidationBuffer, WaitAfterStopReturnsImmediately)

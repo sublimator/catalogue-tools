@@ -38,6 +38,9 @@ public:
         auto client = std::shared_ptr<PeerClient>(new PeerClient(io));
         client->state_ = state;
         client->connection_generation_ = connection_generation;
+        client->publish_advertised_ledger_range(
+            {.first_seq = 1,
+             .last_seq = std::numeric_limits<std::uint32_t>::max()});
         return client;
     }
 
@@ -51,12 +54,14 @@ public:
         std::uint64_t sender_generation = 1,
         Hash256 ledger_hash = {},
         NodeTree tree = NodeTree::account_state,
-        std::vector<SHAMapNodeID> node_ids = {SHAMapNodeID{}})
+        std::vector<SHAMapNodeID> node_ids = {SHAMapNodeID{}},
+        std::uint32_t ledger_seq = 1)
     {
         return NodeBatchIntent{
             TransportAttemptId{attempt_id},
             SenderGenerationId{sender_generation},
             std::move(ledger_hash),
+            ledger_seq,
             tree,
             std::move(node_ids)};
     }
@@ -68,17 +73,18 @@ public:
         Hash256 ledger_hash = {},
         NodeTree tree = NodeTree::transaction,
         std::vector<SHAMapNodeID> node_ids = {SHAMapNodeID{}},
-        std::uint64_t sender_generation = 1)
+        std::uint64_t sender_generation = 1,
+        std::uint32_t ledger_seq = 1)
     {
         NodeBatchIntent intent{
             TransportAttemptId{attempt_id},
             SenderGenerationId{sender_generation},
             std::move(ledger_hash),
+            ledger_seq,
             tree,
             std::move(node_ids)};
         return NodeBatchCommand{
-            std::move(intent),
-            PeerConnectionGenerationId{peer_generation}};
+            std::move(intent), PeerConnectionGenerationId{peer_generation}};
     }
 
     static void
@@ -139,9 +145,7 @@ public:
     }
 
     static void
-    seed_receipt_sequence(
-        PeerClient& client,
-        std::uint64_t next_sequence)
+    seed_receipt_sequence(PeerClient& client, std::uint64_t next_sequence)
     {
         client.next_node_batch_receipt_sequence_ = next_sequence;
     }
@@ -162,8 +166,51 @@ public:
         RequestOptions opts;
         opts.timeout = timeout;
         auto const key = PeerClient::ledger_key(1, 0);
-        return client.register_callback(
+        auto const registered = client.register_callback(
             client.pending_headers_, key, std::move(callback), opts, dedupe);
+        if (registered)
+            client.pending_headers_.at(key).network_request_initiated = true;
+        return registered;
+    }
+
+    static bool
+    seed_pending_header_by_sequence(
+        PeerClient& client,
+        std::uint32_t ledger_seq,
+        int type,
+        Callback<LedgerHeaderResult> callback)
+    {
+        RequestOptions opts;
+        auto const key = PeerClient::ledger_key(ledger_seq, type);
+        auto const registered = client.register_callback(
+            client.pending_headers_,
+            key,
+            std::move(callback),
+            opts,
+            false);
+        if (registered)
+            client.pending_headers_.at(key).network_request_initiated = true;
+        return registered;
+    }
+
+    static bool
+    seed_pending_header_by_hash(
+        PeerClient& client,
+        Hash256 const& ledger_hash,
+        int type,
+        Callback<LedgerHeaderResult> callback)
+    {
+        RequestOptions opts;
+        auto const key = PeerClient::ledger_key(ledger_hash, type);
+        auto const registered = client.register_callback(
+            client.pending_headers_,
+            key,
+            std::move(callback),
+            opts,
+            false);
+        if (registered)
+            client.pending_headers_.at(key).network_request_initiated = true;
+        return registered;
     }
 
     static void
@@ -174,10 +221,68 @@ public:
             client.pending_headers_, key, Error::Success, LedgerHeaderResult{});
     }
 
-    static void
-    defer(
+    static bool
+    seed_pending_nodes(
         PeerClient& client,
-        PeerClient::DeferredRequest request)
+        Hash256 const& ledger_hash,
+        int type,
+        std::vector<SHAMapNodeID> const& node_ids,
+        Callback<LedgerNodesResult> callback,
+        bool network_request_initiated = true)
+    {
+        RequestOptions opts;
+        auto const key = PeerClient::nodes_key(ledger_hash, type, node_ids);
+        auto const registered = client.register_callback(
+            client.pending_nodes_, key, std::move(callback), opts, false);
+        if (registered)
+        {
+            auto& entry = client.pending_nodes_.at(key);
+            entry.match_key = PeerClient::ledger_key(ledger_hash, type);
+            entry.requested_nodeids = node_ids;
+            entry.network_request_initiated = network_request_initiated;
+        }
+        return registered;
+    }
+
+    static bool
+    replace_pending_nodes_same_key(
+        PeerClient& client,
+        Hash256 const& ledger_hash,
+        int type,
+        std::vector<SHAMapNodeID> const& node_ids,
+        Callback<LedgerNodesResult> callback)
+    {
+        assert(client.strand_.running_in_this_thread());
+        auto const key = PeerClient::nodes_key(ledger_hash, type, node_ids);
+        if (client.pending_nodes_.erase(key) != 1)
+            return false;
+        client.refresh_pending_count_projection();
+        return seed_pending_nodes(
+            client,
+            ledger_hash,
+            type,
+            node_ids,
+            std::move(callback));
+    }
+
+    static void
+    set_before_ledger_attempt_consume(
+        PeerClient& client,
+        std::function<void()> hook)
+    {
+        client.before_ledger_attempt_consume_for_test_ = std::move(hook);
+    }
+
+    static void
+    dispatch_ledger_data(
+        PeerClient& client,
+        std::vector<std::uint8_t> const& data)
+    {
+        client.dispatch_ledger_data(data);
+    }
+
+    static void
+    defer(PeerClient& client, PeerClient::DeferredRequest request)
     {
         client.defer_request(std::move(request));
     }
@@ -187,6 +292,78 @@ public:
     {
         client.state_ = State::Ready;
         client.flush_queue();
+    }
+
+    static void
+    set_initial_connect_observers(
+        PeerClient& client,
+        ReadyCallback ready,
+        ConnectCompletionCallback complete)
+    {
+        client.ready_callback_ = std::move(ready);
+        client.connect_completion_callback_ = std::move(complete);
+    }
+
+    static void
+    become_ready_on_strand(PeerClient& client)
+    {
+        client.become_ready();
+    }
+
+    static std::optional<State>
+    commit_failed_on_strand(
+        PeerClient& client,
+        boost::system::error_code ec = asio::error::connection_reset)
+    {
+        return client.commit_failed_on_strand(ec);
+    }
+
+    static void
+    fail_initial_connect_on_strand(
+        PeerClient& client,
+        boost::system::error_code ec = asio::error::connection_reset)
+    {
+        auto const previous = client.commit_failed_on_strand(ec);
+        if (previous)
+            client.complete_connect(ec);
+    }
+
+    static void
+    disconnect_on_strand(PeerClient& client)
+    {
+        client.disconnect_on_strand();
+    }
+
+    static bool
+    hold_initial_connect_terminal_publication(PeerClient& client)
+    {
+        return client.initial_connect_attempt_
+            ->hold_terminal_publication_for_test();
+    }
+
+    static bool
+    release_initial_connect_terminal_publication(PeerClient& client)
+    {
+        return client.initial_connect_attempt_
+            ->release_terminal_publication_for_test();
+    }
+
+    static std::optional<detail::ConnectAttemptTerminal>
+    initial_connect_terminal(PeerClient const& client)
+    {
+        return client.initial_connect_attempt_->snapshot();
+    }
+
+    static detail::ConnectAttemptCommit
+    commit_initial_connect_deadline(PeerClient& client, int seconds)
+    {
+        return client.initial_connect_attempt_->try_commit_initial(
+            detail::ConnectAttemptTerminal{
+                detail::ConnectAttemptTerminalKind::deadline,
+                asio::error::timed_out,
+                0,
+                seconds},
+            []() noexcept {});
     }
 
     static void
@@ -202,9 +379,10 @@ public:
     /// Fill the receiver's bounded node-batch ingress so every further public
     /// submission or acknowledgement is refused before reaching the strand.
     ///
-    /// Used by the coordinator controls to force the acknowledgement-refused retry
-    /// path, which is otherwise unreachable: it is the receiver's own bound, and a
-    /// sender-side simulation of it would prove nothing about the real boundary.
+    /// Used by the coordinator controls to force the acknowledgement-refused
+    /// retry path, which is otherwise unreachable: it is the receiver's own
+    /// bound, and a sender-side simulation of it would prove nothing about the
+    /// real boundary.
     static void
     seed_node_batch_ingress_saturated(PeerClient& client)
     {
@@ -212,11 +390,11 @@ public:
             kMaxNodeBatchIngressProjections, std::memory_order_release);
     }
 
-    /// Release the receiver's node-batch ingress, as its own strand does when it
-    /// drains an item. Paired with seed_node_batch_ingress_saturated so a control
-    /// can force a refusal, then prove a later attempt succeeds — which is the
-    /// difference between a retry that yields and one that burns its budget in a
-    /// single strand pass.
+    /// Release the receiver's node-batch ingress, as its own strand does when
+    /// it drains an item. Paired with seed_node_batch_ingress_saturated so a
+    /// control can force a refusal, then prove a later attempt succeeds — which
+    /// is the difference between a retry that yields and one that burns its
+    /// budget in a single strand pass.
     static void
     drain_node_batch_ingress(PeerClient& client)
     {
@@ -233,6 +411,31 @@ public:
         boost::system::error_code ec;
         client.connection_->socket().lowest_layer().open(tcp::v4(), ec);
         ASSERT_FALSE(ec);
+    }
+
+    static void
+    publish_advertised_ledger_range(
+        PeerClient& client,
+        AdvertisedLedgerRange range)
+    {
+        client.publish_advertised_ledger_range(range);
+    }
+
+    static void
+    set_endpoint(PeerClient& client, std::string endpoint)
+    {
+        client.endpoint_str_ = std::move(endpoint);
+    }
+
+    static void
+    seed_successful_packet_writes(PeerClient& client)
+    {
+        ASSERT_TRUE(client.connection_);
+        client.connection_->set_write_initiator_for_test(
+            [](asio::const_buffer,
+               peer_connection::test_write_completion complete) {
+                complete({});
+            });
     }
 };
 

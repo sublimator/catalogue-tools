@@ -27,7 +27,9 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <chrono>
 #include <limits>
@@ -42,6 +44,7 @@ using Ingress = LedgerFetchCoordinator::Ingress;
 using Phase = LedgerFetchCoordinator::Phase;
 using Lifecycle = LedgerFetchCoordinator::Lifecycle;
 using Fence = LedgerFetchCoordinator::Fence;
+using SubmissionOutcome = LedgerFetchCoordinator::SubmissionOutcome;
 namespace asio = boost::asio;
 
 namespace {
@@ -116,10 +119,15 @@ struct CoordFixture
     }
 
     Ingress
-    submit()
+    submit(LedgerFetchCoordinator::SubmissionOutcomeHandler on_outcome = {})
     {
         return coord->submit_node_batch_on_pin(
-            ledger_hash(), NodeTree::account_state, nodes(), pin());
+            ledger_hash(),
+            5'500,
+            NodeTree::account_state,
+            nodes(),
+            pin(),
+            std::move(on_outcome));
     }
 
     /// Run exactly one ready handler. Returns how many ran (0 or 1).
@@ -181,6 +189,7 @@ TEST(LedgerFetchCoordinatorBind, ArgumentRefusalsTakeNoPermit)
     EXPECT_EQ(
         f.coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             CoordFixture::nodes(),
             PeerGenerationPin{}),
@@ -188,6 +197,7 @@ TEST(LedgerFetchCoordinatorBind, ArgumentRefusalsTakeNoPermit)
     EXPECT_EQ(
         f.coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             {},
             f.pin()),
@@ -195,6 +205,7 @@ TEST(LedgerFetchCoordinatorBind, ArgumentRefusalsTakeNoPermit)
     EXPECT_EQ(
         f.coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             std::vector<SHAMapNodeID>(kMaxNodeBatchRequestNodes + 1),
             f.pin()),
@@ -556,6 +567,113 @@ TEST(LedgerFetchCoordinatorBind, FenceDuringOpenBindCompletesExactlyOnce)
     EXPECT_EQ(fenced, 1);
 }
 
+TEST(LedgerFetchCoordinatorBind, AwaitableFenceCompletesAtLogicalBoundary)
+{
+    CoordFixture f;
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    auto fenced =
+        asio::co_spawn(f.io, f.coord->co_fence(), asio::use_future);
+    f.io.run();
+    EXPECT_NO_THROW(fenced.get());
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    f.io.restart();
+}
+
+TEST(
+    LedgerFetchCoordinatorBind,
+    AwaitableFenceRetainsReceiptBeforeWaitInitiation)
+{
+    CoordFixture f;
+    LedgerFetchCoordinatorTestAccess::set_after_fence_registration_before_wait(
+        f.coord, [&]() {
+            // Drain the exact coordinator commit and every notification it
+            // queues before co_fence initiates its receive. The former timer
+            // edge lost its cancellation in this ordering and slept forever.
+            while (f.io.poll_one() != 0)
+            {
+            }
+        });
+
+    auto fenced = asio::co_spawn(f.io, f.coord->co_fence(), asio::use_future);
+    f.io.run_for(std::chrono::milliseconds(50));
+
+    ASSERT_EQ(
+        fenced.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_NO_THROW(fenced.get());
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
+    f.io.restart();
+}
+
+TEST(
+    LedgerFetchCoordinatorBind,
+    ShutdownReconciliationConsumesOnlyProvablyLostProjectionResidue)
+{
+    CoordFixture f;
+    PeerSetTestAccess::drop_next_seal_completions(f.peers, 1);
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    auto reconciled = asio::co_spawn(
+        f.io,
+        [&f]() -> asio::awaitable<std::size_t> {
+            co_await f.coord->co_fence();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_return co_await f.coord
+                ->co_reconcile_shutdown_projection_residue();
+        },
+        asio::use_future);
+
+    f.io.run();
+    EXPECT_EQ(reconciled.get(), 1u);
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    f.io.restart();
+}
+
+TEST(
+    LedgerFetchCoordinatorBind,
+    ShutdownReconciliationPreservesCompletedProjectionAccounting)
+{
+    CoordFixture f;
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    auto reconciled = asio::co_spawn(
+        f.io,
+        [&f]() -> asio::awaitable<std::size_t> {
+            co_await f.coord->co_fence();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_return co_await f.coord
+                ->co_reconcile_shutdown_projection_residue();
+        },
+        asio::use_future);
+
+    f.io.run();
+    EXPECT_EQ(reconciled.get(), 0u)
+        << "an ordinarily delivered projection completion is accounting, not "
+           "shutdown residue";
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+    f.io.restart();
+}
+
+TEST(LedgerFetchCoordinatorBind, ShutdownReconciliationRefusesBeforeFence)
+{
+    CoordFixture f;
+    auto reconciled = asio::co_spawn(
+        f.io,
+        f.coord->co_reconcile_shutdown_projection_residue(),
+        asio::use_future);
+    f.io.run();
+    EXPECT_THROW(reconciled.get(), std::logic_error);
+    f.io.restart();
+}
+
 /// 12. The attempt-ID ceiling refuses without wrapping and without a partial row.
 TEST(LedgerFetchCoordinatorBind, AttemptIdCeilingRefusesWithoutMutation)
 {
@@ -713,8 +831,13 @@ TEST(LedgerFetchCoordinatorBind, RowCommitFailureReleasesTheGrantedPermit)
 {
     CoordFixture f;
     Access::set_row_commit_failure(f.coord, true);
+    std::vector<SubmissionOutcome> outcomes;
 
-    ASSERT_EQ(f.submit(), Ingress::reserved)
+    ASSERT_EQ(
+        f.submit([&outcomes](SubmissionOutcome outcome) {
+            outcomes.push_back(outcome);
+        }),
+        Ingress::reserved)
         << "the synchronous return only ever claimed reserved ingress";
     EXPECT_EQ(f.coord->work_outstanding(), 1u);
 
@@ -723,6 +846,8 @@ TEST(LedgerFetchCoordinatorBind, RowCommitFailureReleasesTheGrantedPermit)
     EXPECT_EQ(f.coord->work_outstanding(), 0u)
         << "commit-or-release: a failed commit must release the permit";
     EXPECT_EQ(Access::row_count(f.coord), 0u) << "and leave no partial row";
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), SubmissionOutcome::not_written);
 
     // Disarmed, the same submission commits — so the release above was the
     // failpoint, not a fixture that never got started.
@@ -1203,6 +1328,7 @@ struct PublishFixture
         {
             ssl.emplace(asio::ssl::context::tlsv12_client);
             PeerClientTestAccess::seed_open_connection(*client, *ssl);
+            PeerClientTestAccess::seed_successful_packet_writes(*client);
         }
         generation =
             PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, client);
@@ -1210,13 +1336,15 @@ struct PublishFixture
     }
 
     Ingress
-    submit()
+    submit(LedgerFetchCoordinator::SubmissionOutcomeHandler on_outcome = {})
     {
         return coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             CoordFixture::nodes(),
-            PeerSetTestAccess::make_peer_pin_for_session(io, peers, client));
+            PeerSetTestAccess::make_peer_pin_for_session(io, peers, client),
+            std::move(on_outcome));
     }
 
     /// Run exactly one ready handler, so a control can observe a row mid-flight.
@@ -1379,7 +1507,12 @@ TEST(LedgerFetchCoordinatorPublish, RefusedPublicationRetriesThenTerminalizes)
 TEST(LedgerFetchCoordinatorPublish, AdmittedWriteIsAcknowledgedAndRetiresTheRow)
 {
     PublishFixture f{1, /*with_connection=*/true};
-    ASSERT_EQ(f.submit(), Ingress::reserved);
+    std::vector<SubmissionOutcome> outcomes;
+    ASSERT_EQ(
+        f.submit([&outcomes](SubmissionOutcome outcome) {
+            outcomes.push_back(outcome);
+        }),
+        Ingress::reserved);
     f.settle();
 
     auto const attempt = Access::attempt_at(f.coord, 0);
@@ -1403,6 +1536,8 @@ TEST(LedgerFetchCoordinatorPublish, AdmittedWriteIsAcknowledgedAndRetiresTheRow)
     EXPECT_FALSE(row->sealed.has_value());
     EXPECT_EQ(f.coord->work_outstanding(), 0u);
     EXPECT_FALSE(f.coord->accounting_broken());
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), SubmissionOutcome::written);
 }
 
 /// 35. An acknowledgement that cannot be queued is retried, and its exhaustion
@@ -1741,7 +1876,12 @@ TEST(LedgerFetchCoordinatorBind, UnknownPublicationDispositionRetainsTheRow)
     Access::set_max_publish_attempts(f.coord, 1);
     Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
 
-    ASSERT_EQ(f.submit(), Ingress::reserved);
+    std::vector<SubmissionOutcome> outcomes;
+    ASSERT_EQ(
+        f.submit([&outcomes](SubmissionOutcome outcome) {
+            outcomes.push_back(outcome);
+        }),
+        Ingress::reserved);
     f.settle();
 
     auto const attempt = Access::attempt_at(f.coord, 0);
@@ -1759,6 +1899,8 @@ TEST(LedgerFetchCoordinatorBind, UnknownPublicationDispositionRetainsTheRow)
     EXPECT_EQ(f.coord->receipt_obligations(), 1u);
     EXPECT_EQ(f.coord->work_outstanding(), 1u)
         << "held, so a fence backpressures rather than reporting a false drain";
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), SubmissionOutcome::indeterminate);
     EXPECT_FALSE(f.coord->accounting_broken());
 }
 

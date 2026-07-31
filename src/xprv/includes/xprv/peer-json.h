@@ -13,11 +13,12 @@ namespace xprv {
 struct PeerSnapshotFilters
 {
     std::optional<bool> connected;
+    std::optional<uint32_t> ledger;
 
     [[nodiscard]] bool
     empty() const
     {
-        return !connected.has_value();
+        return !connected.has_value() && !ledger.has_value();
     }
 };
 

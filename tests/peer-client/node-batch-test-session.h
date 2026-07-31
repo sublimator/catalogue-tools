@@ -21,8 +21,9 @@
 ///
 /// Everything the bind path does not call is deliberately inert. A fake that
 /// quietly did work here would make refusals ambiguous.
-class NodeBatchTestSession : public catl::peer_client::PeerSession,
-                             public std::enable_shared_from_this<NodeBatchTestSession>
+class NodeBatchTestSession
+    : public catl::peer_client::PeerSession,
+      public std::enable_shared_from_this<NodeBatchTestSession>
 {
 public:
     explicit NodeBatchTestSession(std::string endpoint)
@@ -45,25 +46,20 @@ public:
     {
         return 100;
     }
-    std::uint32_t
-    peer_first_seq() const override
+    catl::peer_client::AdvertisedLedgerRange
+    advertised_ledger_range() const override
     {
-        return 1;
-    }
-    std::uint32_t
-    peer_last_seq() const override
-    {
-        return 100;
+        return {.first_seq = 1, .last_seq = 100};
     }
 
     /// Accepts publication and NEVER invokes the handler.
     ///
     /// That is not a convenience — it is PeerClient's duplicate-waiter-capacity
-    /// behaviour exactly: admission succeeds, no receipt is ever delivered, and the
-    /// sender is expected to replay once the original terminal receipt exists. A
-    /// fake could not deliver a receipt anyway, since NodeBatchWriteReceipt's only
-    /// friend is PeerClient. Controls that need a REAL receipt publish to a real
-    /// PeerClient instead.
+    /// behaviour exactly: admission succeeds, no receipt is ever delivered, and
+    /// the sender is expected to replay once the original terminal receipt
+    /// exists. A fake could not deliver a receipt anyway, since
+    /// NodeBatchWriteReceipt's only friend is PeerClient. Controls that need a
+    /// REAL receipt publish to a real PeerClient instead.
     bool
     submit_node_batch(
         catl::peer_client::NodeBatchCommand,
@@ -88,6 +84,11 @@ public:
     disconnect() override
     {
     }
+    boost::asio::awaitable<void>
+    co_disconnect() override
+    {
+        co_return;
+    }
     boost::asio::strand<boost::asio::io_context::executor_type>&
     strand() override
     {
@@ -98,7 +99,8 @@ public:
     {
     }
     void
-    set_node_response_handler(catl::peer_client::PeerSession::NodeResponseHandler) override
+    set_node_response_handler(
+        catl::peer_client::PeerSession::NodeResponseHandler) override
     {
     }
     void
@@ -156,10 +158,13 @@ public:
     void
     send_get_nodes(
         Hash256 const&,
+        std::uint32_t,
         int,
         std::vector<catl::peer_client::SHAMapNodeID> const&,
-        std::function<void(boost::system::error_code)>) override
+        std::function<void(boost::system::error_code)> on_write) override
     {
+        if (on_write)
+            on_write({});
     }
 
     void

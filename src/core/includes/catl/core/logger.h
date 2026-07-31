@@ -66,6 +66,7 @@ enum class LogLevel {
 };
 
 class LogPartition;
+class ScopedErrorLogStream;
 
 class Logger
 {
@@ -80,7 +81,7 @@ public:
     using RequestContextFn = RequestIdView const* (*)();
 
 private:
-    static LogLevel current_level_;
+    static std::atomic<LogLevel> current_level_;
     static std::mutex log_mutex_;
     static std::ostream* output_stream_;  // For INFO/DEBUG (default: std::cout)
     static std::ostream*
@@ -344,6 +345,7 @@ public:
 
 private:
     friend class LogPartition;
+    friend class ScopedErrorLogStream;
 
     static void
     register_partition(LogPartition* partition);
@@ -512,6 +514,62 @@ public:
 private:
     std::string name_;
     std::atomic<LogLevel> level_;
+};
+
+/// Temporarily override every currently registered partition with an exact
+/// name, then restore each partition's configured level on destruction.
+///
+/// Logger configuration is process-global. Callers must ensure scoped
+/// overrides do not overlap across independently executing tests or threads.
+class ScopedLogPartitionLevel
+{
+public:
+    ScopedLogPartitionLevel(std::string_view name, LogLevel level);
+    ~ScopedLogPartitionLevel();
+
+    ScopedLogPartitionLevel(ScopedLogPartitionLevel const&) = delete;
+    ScopedLogPartitionLevel&
+    operator=(ScopedLogPartitionLevel const&) = delete;
+    ScopedLogPartitionLevel(ScopedLogPartitionLevel&&) = delete;
+    ScopedLogPartitionLevel&
+    operator=(ScopedLogPartitionLevel&&) = delete;
+
+    bool
+    matched() const noexcept
+    {
+        return !previous_levels_.empty();
+    }
+
+private:
+    struct PreviousLevel
+    {
+        LogPartition* partition;
+        LogLevel level;
+    };
+
+    std::vector<PreviousLevel> previous_levels_;
+};
+
+/// Temporarily redirect ERROR/WARNING output and restore the exact previous
+/// stream on destruction. The target stream must outlive this guard.
+///
+/// Logger streams are process-global. Callers must drain or join work that may
+/// log through the redirected stream before destroying the guard.
+class ScopedErrorLogStream
+{
+public:
+    explicit ScopedErrorLogStream(std::ostream& stream);
+    ~ScopedErrorLogStream();
+
+    ScopedErrorLogStream(ScopedErrorLogStream const&) = delete;
+    ScopedErrorLogStream&
+    operator=(ScopedErrorLogStream const&) = delete;
+    ScopedErrorLogStream(ScopedErrorLogStream&&) = delete;
+    ScopedErrorLogStream&
+    operator=(ScopedErrorLogStream&&) = delete;
+
+private:
+    std::ostream* previous_;
 };
 
 // Super concise class-aware logging macros
