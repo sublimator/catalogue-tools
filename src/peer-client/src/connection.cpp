@@ -1303,6 +1303,19 @@ peer_connection::read_or_drain_payload()
         // reserving the peer-selected size in the process-wide buffer budget.
         // This branch must precede the general frame cap: real XRPL peers can
         // send manifest snapshots larger than one buffered frame.
+        PLOGI(
+            log_,
+            remote_endpoint(),
+            " draining manifest frame: type=",
+            current_header_.type,
+            " compressed=",
+            current_header_.compressed,
+            " wire_payload_size=",
+            payload_size,
+            " uncompressed_size=",
+            current_header_.uncompressed_size,
+            " buffered_limit=",
+            kMaxBufferedManifestBytes);
         drain_payload(payload_size);
         return;
     }
@@ -1315,7 +1328,11 @@ peer_connection::read_or_drain_payload()
         PLOGW(
             log_,
             remote_endpoint(),
-            " rejecting oversized frame: payload_size=",
+            " rejecting oversized frame: type=",
+            current_header_.type,
+            " compressed=",
+            current_header_.compressed,
+            " wire_payload_size=",
             payload_size,
             " uncompressed_size=",
             current_header_.uncompressed_size,
