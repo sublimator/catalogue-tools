@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -195,6 +196,32 @@ struct packet_header
     bool compressed;
     std::uint32_t uncompressed_size;
 };
+
+/// Bounded, back-pressured consumer for one large packet payload.
+///
+/// The transport publishes at most one chunk at a time and does not reuse its
+/// storage or read the next chunk until `on_consumed` fires. Implementations
+/// may therefore expose the bytes directly to a synchronous pull parser on a
+/// worker thread without copying or blocking the connection strand.
+class PacketStreamSink
+{
+public:
+    using ConsumedHandler = std::function<void(boost::system::error_code)>;
+
+    virtual ~PacketStreamSink() = default;
+
+    virtual void
+    consume(
+        std::shared_ptr<std::vector<std::uint8_t> const> chunk,
+        bool final,
+        ConsumedHandler on_consumed) = 0;
+
+    virtual void
+    cancel() noexcept = 0;
+};
+
+using PacketStreamFactory =
+    std::function<std::shared_ptr<PacketStreamSink>(packet_header const&)>;
 
 inline bool
 should_drain_manifest_payload(packet_header const& header)

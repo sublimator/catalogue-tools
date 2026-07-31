@@ -358,6 +358,7 @@ public:
         ConnectCompletionCallback on_complete{};
         std::shared_ptr<EndpointTracker> tracker{};
         UnsolicitedHandler unsolicited_handler{};
+        PacketStreamFactory packet_stream_factory{};
         DisconnectCallback on_disconnect{};
     };
 
@@ -478,6 +479,9 @@ public:
 
     void
     set_unsolicited_handler(UnsolicitedHandler handler) override;
+
+    void
+    set_packet_stream_factory(PacketStreamFactory factory) override;
 
     /// Set a shared endpoint tracker. TMStatusChange updates will
     /// be fed into it automatically.
@@ -899,6 +903,7 @@ private:
     std::shared_ptr<peer_connection> connection_;
     mutable std::mutex handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
+    PacketStreamFactory packet_stream_factory_;
     //@@authority state=prv.S0061 status=provisional scope=field
     // bind=catl::peer_client::PeerClient::ready_callback_@14ce61062bcf8d7c
     // owner=unresolved owner_hypothesis=peer_client

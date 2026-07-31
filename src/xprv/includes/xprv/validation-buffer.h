@@ -13,6 +13,7 @@
 #include "validation-collector.h"
 
 #include <catl/core/logger.h>
+#include <catl/peer-client/connection-types.h>
 #include <catl/vl-client/vl-client.h>
 #include <catl/xdata/protocol.h>
 
@@ -82,6 +83,9 @@ public:
     /// Feed from unsolicited handler. Safe to call from any thread/strand.
     void
     on_packet(uint16_t type, std::vector<uint8_t> const& data);
+
+    std::shared_ptr<catl::peer_client::PacketStreamSink>
+    open_packet_stream(catl::peer_client::packet_header const& header);
 
     /// Compatibility/destructor seal. Stops admission and joins background
     /// manifest verification, but does not attest that queued strand work has
@@ -343,6 +347,7 @@ private:
     bool manifest_pending_admitted_ = false;
     bool stopped_ = false;
     std::shared_ptr<std::vector<uint8_t>> pending_manifest_;
+    std::shared_ptr<catl::peer_client::PacketStreamSink> manifest_stream_;
 
     struct QueuedValidation
     {

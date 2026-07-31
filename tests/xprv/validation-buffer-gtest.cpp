@@ -416,8 +416,7 @@ TEST(ValidationBuffer, TransientOwnerHopStillUsesOwnerCoroutine)
     EXPECT_EQ(status, std::future_status::ready);
     if (status == std::future_status::ready)
         EXPECT_NO_THROW(done_future.get());
-    EXPECT_TRUE(
-        entered_during_owner_dispatch.load(std::memory_order_acquire));
+    EXPECT_TRUE(entered_during_owner_dispatch.load(std::memory_order_acquire));
     EXPECT_TRUE(cleanup_on_owner.load(std::memory_order_acquire));
 
     work.reset();
@@ -474,8 +473,7 @@ TEST(ValidationBuffer, PendingIdentityExhaustionRefusesBeforeMutation)
 
     EXPECT_TRUE(saw_overflow);
     EXPECT_EQ(pending_after, 0u);
-    EXPECT_EQ(
-        identity_after, std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(identity_after, std::numeric_limits<std::uint64_t>::max());
     EXPECT_TRUE(returned_on_caller);
 }
 
@@ -490,9 +488,8 @@ TEST(ValidationBuffer, DeadlineArmFailureRollsBackExactPendingRow)
     bool returned_on_caller = false;
     std::size_t pending_after = 1;
 
-    buffer->set_quorum_deadline_arm_hook_for_test([]() {
-        throw std::runtime_error("forced deadline arm failure");
-    });
+    buffer->set_quorum_deadline_arm_hook_for_test(
+        []() { throw std::runtime_error("forced deadline arm failure"); });
 
     asio::co_spawn(
         caller_strand,
@@ -688,8 +685,8 @@ TEST(ValidationBuffer, LockedQuorumSurvivesVoteRetention)
             for (uint8_t marker = 10; marker <= 12; ++marker)
             {
                 auto const inserted =
-                    co_await buffer->co_insert_validation_for_test(make_entry(
-                        make_hash(marker), 100, manifests.back()));
+                    co_await buffer->co_insert_validation_for_test(
+                        make_entry(make_hash(marker), 100, manifests.back()));
                 all_inserted = inserted && all_inserted;
             }
             for (std::size_t i = 0; i < 8; ++i)
@@ -815,6 +812,117 @@ TEST(ValidationBuffer, ManifestWorkerReplaysRotationAcrossListRefresh)
 
     io.run();
     EXPECT_TRUE(observed);
+}
+
+TEST(ValidationBuffer, StreamedManifestUsesBoundedChunkHandoff)
+{
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    std::thread runner([&]() { io.run(); });
+
+    protocol::TMManifests packet;
+    for (int i = 0; i < 8; ++i)
+        packet.add_list()->set_stobject(std::string(257, static_cast<char>(i)));
+    std::string bytes;
+    ASSERT_TRUE(packet.SerializeToString(&bytes));
+
+    catl::peer_client::packet_header header;
+    header.type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
+    header.payload_size = static_cast<uint32_t>(bytes.size());
+    header.uncompressed_size = header.payload_size;
+    auto sink = buffer->open_packet_stream(header);
+    ASSERT_TRUE(sink);
+
+    std::promise<boost::system::error_code> terminal;
+    std::function<void(std::size_t)> feed;
+    feed = [&](std::size_t offset) {
+        auto const size = std::min<std::size_t>(7, bytes.size() - offset);
+        auto chunk = std::make_shared<std::vector<uint8_t> const>(
+            bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+            bytes.begin() + static_cast<std::ptrdiff_t>(offset + size));
+        auto const final = offset + size == bytes.size();
+        sink->consume(
+            std::move(chunk),
+            final,
+            [&, next = offset + size, final](boost::system::error_code ec) {
+                if (ec || final)
+                    terminal.set_value(ec);
+                else
+                    feed(next);
+            });
+    };
+    feed(0);
+
+    auto future = terminal.get_future();
+    auto const ready = future.wait_for(std::chrono::seconds(3));
+    EXPECT_EQ(ready, std::future_status::ready);
+    if (ready == std::future_status::ready)
+        EXPECT_FALSE(future.get());
+    else
+        sink->cancel();
+
+    buffer->stop();
+    work.reset();
+    io.stop();
+    runner.join();
+}
+
+TEST(ValidationBuffer, StopCancelsManifestStreamWaitingForSuccessorChunk)
+{
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    std::thread runner([&]() { io.run(); });
+
+    catl::peer_client::packet_header header;
+    header.type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
+    header.payload_size = 2;
+    header.uncompressed_size = 2;
+    auto sink = buffer->open_packet_stream(header);
+    ASSERT_TRUE(sink);
+
+    std::promise<boost::system::error_code> first_consumed;
+    sink->consume(
+        std::make_shared<std::vector<uint8_t> const>(
+            std::initializer_list<uint8_t>{0x0A}),
+        false,
+        [&](boost::system::error_code ec) { first_consumed.set_value(ec); });
+    auto consumed = first_consumed.get_future();
+    auto const consumed_ready = consumed.wait_for(std::chrono::seconds(3));
+    EXPECT_EQ(consumed_ready, std::future_status::ready);
+    if (consumed_ready == std::future_status::ready)
+        EXPECT_FALSE(consumed.get());
+
+    auto const before = std::chrono::steady_clock::now();
+    buffer->stop();
+    EXPECT_LT(
+        std::chrono::steady_clock::now() - before, std::chrono::seconds(1));
+
+    std::atomic<int> refused_count{0};
+    std::promise<boost::system::error_code> refused;
+    sink->consume(
+        std::make_shared<std::vector<uint8_t> const>(
+            std::initializer_list<uint8_t>{0x00}),
+        true,
+        [&](boost::system::error_code ec) {
+            ++refused_count;
+            refused.set_value(ec);
+        });
+    auto refusal = refused.get_future();
+    auto const refusal_ready = refusal.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(refusal_ready, std::future_status::ready);
+    if (refusal_ready == std::future_status::ready)
+        EXPECT_EQ(refusal.get(), asio::error::operation_aborted);
+    sink->cancel();
+    sink->cancel();
+    EXPECT_EQ(refused_count.load(), 1);
+
+    work.reset();
+    io.stop();
+    runner.join();
 }
 
 TEST(ValidationBuffer, ConcurrentDuplicateIngressIsCoalesced)

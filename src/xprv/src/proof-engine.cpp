@@ -124,7 +124,7 @@ ProofEngine::start()
         // commit=startup_coroutine calls=create
         // label=construct_one_ledger_fetch_coordinator_per_peer_set
         ledger_fetch_coordinator_ = LedgerFetchCoordinator::create(
-            io_, peers_); //@@authority-target ids=prv.T0044
+            io_, peers_);  //@@authority-target ids=prv.T0044
         if (!ledger_fetch_coordinator_)
             throw std::runtime_error(
                 "failed to create ledger fetch coordinator generation");
@@ -143,13 +143,20 @@ ProofEngine::start()
          .fetch_timeout = fetch_timeout_,
          .max_walk_peer_retries = max_walk_peer_retries_,
          .fetch_stale_multiplier = fetch_stale_multiplier_},
-        ledger_fetch_coordinator_); //@@authority-target ids=prv.T0004
+        ledger_fetch_coordinator_);  //@@authority-target ids=prv.T0004
 
     // Wire peers → validation buffer: unsolicited validations
     auto vbuf = val_buffer_;
     peers_->set_unsolicited_handler(
         [vbuf](uint16_t type, std::vector<uint8_t> const& data) {
             vbuf->on_packet(type, data);
+        });
+    peers_->set_packet_stream_factory(
+        [weak = std::weak_ptr<ValidationBuffer>(vbuf)](
+            catl::peer_client::packet_header const& header) {
+            if (auto buffer = weak.lock())
+                return buffer->open_packet_stream(header);
+            return std::shared_ptr<catl::peer_client::PacketStreamSink>{};
         });
 
     // Wire observer repost (must be after create, uses shared_from_this)
@@ -243,7 +250,7 @@ ProofEngine::stop()
         // calls=fence label=seal_managed_node_ingress_before_io_context_stop
         auto const disposition =
             ledger_fetch_coordinator_
-                ->fence(); //@@authority-target ids=prv.T0045
+                ->fence();  //@@authority-target ids=prv.T0045
         if (disposition != LedgerFetchCoordinator::Fence::drain_queued)
         {
             PLOGW(
@@ -585,7 +592,7 @@ ProofEngine::prove(
     // calls=build_proof
     // label=enter_shared_proof_build_without_operation_identity
     auto result =
-        co_await build_proof(svc, tx_hash); //@@authority-target ids=prv.T0006
+        co_await build_proof(svc, tx_hash);  //@@authority-target ids=prv.T0006
     result.chain.network_id = config_.network_id;
 
     // Cache the tx→ledger mapping for future requests

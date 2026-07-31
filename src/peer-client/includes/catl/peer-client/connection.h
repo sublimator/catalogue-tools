@@ -58,7 +58,10 @@ public:
 
     // Start reading packets
     void
-    start_read(packet_handler handler);
+    start_read(packet_handler handler, PacketStreamFactory stream_factory = {});
+
+    void
+    set_packet_stream_factory(PacketStreamFactory factory);
 
     // Send packet
     SendAdmission
@@ -296,6 +299,9 @@ private:
     drain_payload(std::size_t remaining);
 
     void
+    stream_payload(std::size_t remaining);
+
+    void
     perform_http_upgrade(const connection_handler& handler);
 
     void
@@ -328,6 +334,8 @@ private:
     std::unique_ptr<ssl_socket> socket_;
     peer_config config_;
     packet_handler packet_handler_;
+    PacketStreamFactory stream_factory_;
+    std::shared_ptr<PacketStreamSink> active_stream_;
 
     // Read buffers
     std::array<std::uint8_t, 10> header_buffer_;
