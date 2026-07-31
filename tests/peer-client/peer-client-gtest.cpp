@@ -414,10 +414,16 @@ TEST(PeerConnectionFrames, ManifestDrainPolicyIsCompressionIndependent)
     header.compressed = true;
     EXPECT_TRUE(should_drain_manifest_payload(header));
 
+    header.payload_size = 1024;
+    header.uncompressed_size = kMaxBufferedManifestBytes + 1;
+    EXPECT_TRUE(should_drain_manifest_payload(header));
+
     header.payload_size = kMaxBufferedManifestBytes;
+    header.uncompressed_size = kMaxBufferedManifestBytes;
     EXPECT_FALSE(should_drain_manifest_payload(header));
 
     header.payload_size = kMaxBufferedManifestBytes + 1;
+    header.uncompressed_size = kMaxBufferedManifestBytes;
     header.type = static_cast<std::uint16_t>(packet_type::validation);
     EXPECT_FALSE(should_drain_manifest_payload(header));
 }

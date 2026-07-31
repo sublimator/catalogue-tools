@@ -1215,48 +1215,6 @@ peer_connection::handle_read_header(
         " compressed=",
         current_header_.compressed);
 
-    // Reject oversized frames before allocating. Guards both resize sites
-    // below (the compressed-extension path and the main path) since both
-    // flow from here. A hostile peer can otherwise force up to a 256 MiB
-    // allocation per frame.
-    if (payload_size > kMaxFramePayloadSize)
-    {
-        PLOGW(
-            log_,
-            remote_endpoint(),
-            " rejecting oversized frame: payload_size=",
-            payload_size,
-            " > max=",
-            kMaxFramePayloadSize);
-        note_connect_failure("oversized frame", asio::error::message_size);
-        fail_and_close(asio::error::message_size);
-        return;
-    }
-
-    // Reserve this frame's bytes from the process-wide inbound budget
-    // (sec #0055). Refuse if the aggregate across all peers would exceed the
-    // ceiling — bounds a coordinated multi-peer memory fill that the
-    // per-frame cap alone can't. Held until the frame is dispatched (or the
-    // connection tears down).
-    if (!global_inbound_budget().try_acquire(payload_size))
-    {
-        PLOGW(
-            log_,
-            remote_endpoint(),
-            " inbound budget exhausted (in_flight=",
-            global_inbound_budget().in_flight(),
-            " + ",
-            payload_size,
-            " > ",
-            global_inbound_budget().ceiling(),
-            "); dropping connection");
-        note_connect_failure(
-            "inbound budget exhausted", asio::error::no_buffer_space);
-        fail_and_close(asio::error::no_buffer_space);
-        return;
-    }
-    inbound_charge_.store(payload_size, std::memory_order_relaxed);
-
     if (current_header_.compressed)
     {
         // Need to read the additional 4 bytes for uncompressed size
@@ -1294,24 +1252,6 @@ peer_connection::handle_read_header(
                                 catl::common::get_uint32_be(
                                     self->header_buffer_.data() + 6);
 
-                            // Cap the attacker-declared post-inflate size too
-                            // (sec #0058).
-                            if (self->current_header_.uncompressed_size >
-                                kMaxFramePayloadSize)
-                            {
-                                PLOGW(
-                                    log_,
-                                    self->remote_endpoint(),
-                                    " rejecting frame: uncompressed_size=",
-                                    self->current_header_.uncompressed_size,
-                                    " > max=",
-                                    kMaxFramePayloadSize);
-                                self->note_connect_failure(
-                                    "oversized uncompressed frame",
-                                    asio::error::message_size);
-                                self->fail_and_close(asio::error::message_size);
-                                return;
-                            }
                             self->current_header_.payload_size = payload_size;
                             self->read_or_drain_payload();
                         };
@@ -1359,10 +1299,53 @@ peer_connection::read_or_drain_payload()
     // to a peer-selected size, then continue reading subsequent peer traffic.
     if (should_drain_manifest_payload(current_header_))
     {
-        release_inbound_charge();  // not buffering — return the reservation
+        // Optional manifest history is consumed raw, without inflating or
+        // reserving the peer-selected size in the process-wide buffer budget.
+        // This branch must precede the general frame cap: real XRPL peers can
+        // send manifest snapshots larger than one buffered frame.
         drain_payload(payload_size);
         return;
     }
+
+    // Non-manifest frames, and manifest frames small enough to dispatch, still
+    // receive both wire and declared post-inflate bounds before allocation.
+    if (payload_size > kMaxFramePayloadSize ||
+        current_header_.uncompressed_size > kMaxFramePayloadSize)
+    {
+        PLOGW(
+            log_,
+            remote_endpoint(),
+            " rejecting oversized frame: payload_size=",
+            payload_size,
+            " uncompressed_size=",
+            current_header_.uncompressed_size,
+            " > max=",
+            kMaxFramePayloadSize);
+        note_connect_failure("oversized frame", asio::error::message_size);
+        fail_and_close(asio::error::message_size);
+        return;
+    }
+
+    // Reserve this frame's bytes from the process-wide inbound budget only
+    // after the complete header has established that this frame is buffered.
+    if (!global_inbound_budget().try_acquire(payload_size))
+    {
+        PLOGW(
+            log_,
+            remote_endpoint(),
+            " inbound budget exhausted (in_flight=",
+            global_inbound_budget().in_flight(),
+            " + ",
+            payload_size,
+            " > ",
+            global_inbound_budget().ceiling(),
+            "); dropping connection");
+        note_connect_failure(
+            "inbound budget exhausted", asio::error::no_buffer_space);
+        fail_and_close(asio::error::no_buffer_space);
+        return;
+    }
+    inbound_charge_.store(payload_size, std::memory_order_relaxed);
 
     // Read payload
     payload_buffer_.resize(payload_size);

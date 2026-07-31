@@ -200,7 +200,8 @@ inline bool
 should_drain_manifest_payload(packet_header const& header)
 {
     return header.type == static_cast<std::uint16_t>(packet_type::manifests) &&
-        header.payload_size > kMaxBufferedManifestBytes;
+        (header.payload_size > kMaxBufferedManifestBytes ||
+         header.uncompressed_size > kMaxBufferedManifestBytes);
 }
 
 }  // namespace catl::peer_client
