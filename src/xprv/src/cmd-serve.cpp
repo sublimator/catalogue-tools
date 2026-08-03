@@ -2,6 +2,7 @@
 #include "config.h"
 #include "service-lifecycle.h"
 
+#include "xprv/build-id.h"
 #include "xprv/http-server.h"
 #include "xprv/proof-engine.h"
 
@@ -16,6 +17,7 @@
 #include <memory>
 #include <pthread.h>
 #include <sstream>
+#include <string>
 #include <sys/resource.h>
 #include <thread>
 #include <vector>
@@ -536,9 +538,7 @@ cmd_serve()
     xprv::HttpServerOptions http_opts;
     http_opts.bind_address = config.bind_address;
     http_opts.port = config.port;
-#ifdef XPRV_BUILD_ID
-    http_opts.build_id = XPRV_BUILD_ID;
-#endif
+    http_opts.build_id = std::string{xprv::xprv_build_id()};
 
     auto server = (engines.size() == 1)
         ? xprv::HttpServer::create(io, engines.begin()->second, http_opts)

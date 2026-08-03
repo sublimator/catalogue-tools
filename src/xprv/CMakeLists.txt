@@ -36,6 +36,43 @@ add_custom_command(
 
 add_custom_target(xprv_web_assets DEPENDS ${WEB_HEADER})
 
+# ── Tracked-source build id (one TU; refresh every build) ────────────
+# /health build_id = short HEAD, or HEAD-dirty.<sha8 of binary Git diff>.
+# run_id is the process invocation. Generator only rewrites the .cpp when the
+# id string changes → one recompile + relink, no configure-time staleness.
+set(XPRV_BUILD_ID_CPP
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/xprv-build-id.cpp)
+set(XPRV_BUILD_ID_SCRIPT
+    ${CMAKE_SOURCE_DIR}/scripts/generate-xprv-build-id.py)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+if(NOT EXISTS ${XPRV_BUILD_ID_CPP})
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} ${XPRV_BUILD_ID_SCRIPT} --repo
+            ${CMAKE_SOURCE_DIR} --output ${XPRV_BUILD_ID_CPP}
+    RESULT_VARIABLE XPRV_BUILD_ID_SEED_RC)
+  if(NOT XPRV_BUILD_ID_SEED_RC EQUAL 0)
+    file(
+      WRITE ${XPRV_BUILD_ID_CPP}
+      "// seed fallback\n#include <xprv/build-id.h>\nnamespace xprv {\n"
+      "std::string_view xprv_build_id() noexcept { return \"unknown\"; }\n"
+      "}\n")
+  endif()
+endif()
+
+if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git"
+   AND NOT EXISTS "${CMAKE_SOURCE_DIR}/.git/objects")
+  file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/.git/objects")
+endif()
+
+add_custom_target(
+  xprv_build_id_refresh
+  COMMAND ${Python3_EXECUTABLE} ${XPRV_BUILD_ID_SCRIPT} --repo
+          ${CMAKE_SOURCE_DIR} --output ${XPRV_BUILD_ID_CPP}
+  BYPRODUCTS ${XPRV_BUILD_ID_CPP}
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  COMMENT "Refreshing xprv build identity"
+  VERBATIM)
 add_executable(
   xprv
   src/main.cpp
@@ -62,27 +99,12 @@ add_executable(
   src/manifest-utils.cpp
   src/validation-buffer.cpp
   src/validation-collector.cpp
-  src/vl-cache.cpp)
+  src/vl-cache.cpp
+  ${XPRV_BUILD_ID_CPP})
 
-add_dependencies(xprv xprv_web_assets)
+add_dependencies(xprv xprv_web_assets xprv_build_id_refresh)
 target_include_directories(xprv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includes
                                         ${CMAKE_CURRENT_BINARY_DIR})
-
-# Bake git short hash into the binary at compile time.
-# .gcloudignore/.dockerignore include .git/ minus objects/ and lfs/ (~800KB).
-# git needs an objects dir to recognize a repo, so create it if missing.
-if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git"
-   AND NOT EXISTS "${CMAKE_SOURCE_DIR}/.git/objects")
-  file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/.git/objects")
-endif()
-execute_process(
-  COMMAND git rev-parse --short HEAD
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-  OUTPUT_VARIABLE XPRV_BUILD_ID
-  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-if(NOT XPRV_BUILD_ID)
-  set(XPRV_BUILD_ID "unknown")
-endif()
 
 # Read proof format version from VERSION file. Re-run CMake configure when the
 # file changes so a plain `cmake --build` picks up a version bump (file(READ)
@@ -94,9 +116,10 @@ set_property(
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/VERSION XPRV_FORMAT_VERSION)
 string(STRIP "${XPRV_FORMAT_VERSION}" XPRV_FORMAT_VERSION)
 
-target_compile_definitions(
-  xprv PRIVATE XPRV_BUILD_ID="${XPRV_BUILD_ID}"
-               XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION})
+# FORMAT_VERSION only — do not bake git identity via target-wide defines.
+# Tracked-source identity lives solely in generated/xprv-build-id.cpp.
+target_compile_definitions(xprv PRIVATE
+                           XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION})
 
 target_link_libraries(
   xprv
