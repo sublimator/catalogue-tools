@@ -2362,6 +2362,12 @@ peer_connection::settle_and_close(
 
     if (close_ran_)
         return;
+
+    // Default construction may allocate on some standard libraries. Prepare
+    // the receiving queue before committing close_ran_, so an allocation
+    // failure cannot strand the connection behind an already-set latch.
+    std::deque<PendingWrite> pending;
+
     close_ran_ = true;
     //@@authority transition=prv.T0137 status=provisional scope=statement
     // bind=expression_statement@561b30655be3bb43
@@ -2386,14 +2392,12 @@ peer_connection::settle_and_close(
     // is not noexcept and no contract forbids it) must not be able to leave the
     // socket open or the remaining terminals undelivered.
     //
-    // Both moves are non-allocating, which is deliberate: an earlier version
-    // grew a std::vector with push_back AFTER latching close_ran_, so an
-    // allocation failure unwound with the idempotency flag already committed,
-    // rows already popped, the socket still open, and every later close
-    // returning immediately. Moving the deque wholesale removes the fallible
-    // preparation instead of merely ordering it.
-    auto pending = std::move(write_queue_);
-    write_queue_.clear();
+    // Queue transfer is a same-allocator, non-throwing swap (enforced beside
+    // the member declaration). An earlier version grew a std::vector with
+    // push_back AFTER latching close_ran_; another moved the deque and assumed
+    // every standard library declared that move noexcept. Preparing above and
+    // swapping here makes the actual post-latch operation portable.
+    pending.swap(write_queue_);
     std::function<void(boost::system::error_code)> active_terminal;
     if (active_write_)
     {

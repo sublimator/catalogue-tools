@@ -48,4 +48,5 @@ proof-*.json
 # Local agent/editor tooling (never repository inputs)
 .agent-work/
 .mcp.json
+.codex/hooks.json
 scripts/uv.lock

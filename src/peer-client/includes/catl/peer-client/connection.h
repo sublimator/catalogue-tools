@@ -595,16 +595,18 @@ private:
     std::deque<PendingWrite> write_queue_;
     std::optional<PendingWrite> active_write_;
 
-    // settle_and_close() moves the queue and one handler INSIDE its commit
-    // section, after close_ran_ has latched. That is only safe while those
-    // moves cannot throw: a throwing move would unwind with the idempotency
-    // flag already set, the socket still open, and every later close returning
-    // immediately — the exact shape that was removed from this function.
-    // Asserted beside the types so a later container or allocator change cannot
-    // silently invalidate the commit section.
+    // settle_and_close() prepares an empty queue BEFORE its commit section,
+    // then swaps write_queue_ into it after close_ran_ has latched. The swap
+    // must remain non-throwing: an exception after the latch would leave the
+    // socket open and every later close returning immediately. Asserted beside
+    // the type so a later container or allocator change cannot silently
+    // invalidate the commit section. Do not assert that deque's move
+    // constructor is noexcept: that differs between standard libraries (and
+    // libstdc++'s old ABI), while equal-allocator swap is the operation used.
     static_assert(
-        std::is_nothrow_move_constructible_v<std::deque<PendingWrite>>,
-        "settle_and_close moves write_queue_ after latching close_ran_");
+        noexcept(std::declval<std::deque<PendingWrite>&>().swap(
+            std::declval<std::deque<PendingWrite>&>())),
+        "settle_and_close swaps write_queue_ after latching close_ran_");
     static_assert(
         std::is_nothrow_move_constructible_v<
             std::function<void(boost::system::error_code)>> &&
