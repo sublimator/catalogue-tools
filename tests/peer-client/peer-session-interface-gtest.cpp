@@ -4659,7 +4659,7 @@ TEST(NodeCacheShutdown, StopJoinsExactServantAndRefusesLateMutation)
     }
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{1u, 1u}));
+        (std::pair<std::size_t, std::size_t>{1, 1}));
 
     auto first_stop =
         asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
@@ -4704,7 +4704,7 @@ TEST(NodeCacheShutdown, StopJoinsExactServantAndRefusesLateMutation)
     EXPECT_TRUE(initiated);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{0u, 0u}));
+        (std::pair<std::size_t, std::size_t>{0, 0}));
     EXPECT_TRUE(NodeCacheTestAccess::node_lifecycle_stopped(*cache));
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
 
@@ -4745,7 +4745,7 @@ TEST(NodeCacheShutdown, DeadlineLaunchFailureRollsBackExactReservation)
     EXPECT_TRUE(attempted.empty());
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{0u, 0u}));
+        (std::pair<std::size_t, std::size_t>{0, 0}));
 
     io.restart();
     auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
@@ -4845,7 +4845,7 @@ TEST(NodeCacheShutdown, StopCountsOverlappingAdmissionAndResponseServants)
     }
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{1u, 2u}));
+        (std::pair<std::size_t, std::size_t>{1, 2}));
 
     auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
     auto const seal_status = stop_sealed_future.wait_for(2s);
@@ -4873,7 +4873,7 @@ TEST(NodeCacheShutdown, StopCountsOverlappingAdmissionAndResponseServants)
         EXPECT_EQ(request.get(), nullptr);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{0u, 0u}));
+        (std::pair<std::size_t, std::size_t>{0, 0}));
 
     stop_runners();
 }
@@ -4939,7 +4939,7 @@ TEST(NodeCacheShutdown, ResponsePreparationFailurePreservesExactOperation)
     EXPECT_THROW(cache->insert(Hash256{}, {1, 2, 3}), std::runtime_error);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{1u, 1u}));
+        (std::pair<std::size_t, std::size_t>{1, 1}));
     EXPECT_EQ(cache->get(Hash256{}), nullptr);
 
     failure_phase.store(2);
@@ -4947,7 +4947,7 @@ TEST(NodeCacheShutdown, ResponsePreparationFailurePreservesExactOperation)
         cache->insert_and_notify(Hash256{}, {4, 5, 6}), std::runtime_error);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{1u, 1u}));
+        (std::pair<std::size_t, std::size_t>{1, 1}));
     EXPECT_EQ(cache->get(Hash256{}), nullptr);
 
     failure_phase.store(0);
@@ -4958,7 +4958,7 @@ TEST(NodeCacheShutdown, ResponsePreparationFailurePreservesExactOperation)
     EXPECT_EQ(request.get(), nullptr);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{0u, 0u}));
+        (std::pair<std::size_t, std::size_t>{0, 0}));
 
     stop_runners();
 }
@@ -5037,7 +5037,7 @@ TEST(NodeCacheShutdown, StopWakesServantWhileResponseFrameIsHeld)
     (void)request.get();
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{0u, 0u}));
+        (std::pair<std::size_t, std::size_t>{0, 0}));
 
     stop_runners();
 }
@@ -5533,7 +5533,7 @@ TEST(NodeCacheShutdown, LateCallbackClassesCannotRecreateNodeState)
     EXPECT_EQ(NodeCacheTestAccess::node_store_row_count(*cache), 0u);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{0u, 0u}));
+        (std::pair<std::size_t, std::size_t>{0, 0}));
 }
 
 TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
@@ -5587,7 +5587,7 @@ TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
     cache->clear_nodes();
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{1u, 1u}));
+        (std::pair<std::size_t, std::size_t>{1, 1}));
     auto successor_request = asio::co_spawn(
         io,
         NodeCacheTestAccess::ensure_node(
@@ -5613,7 +5613,7 @@ TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
     EXPECT_TRUE(successor_initiated);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{0u, 0u}));
+        (std::pair<std::size_t, std::size_t>{0, 0}));
 
     stop_runners();
 }
@@ -5682,7 +5682,7 @@ TEST(NodeCacheShutdown, StopFirstMakesCompatibilityClearInert)
     EXPECT_EQ(NodeCacheTestAccess::node_store_row_count(*cache), 1u);
     EXPECT_EQ(
         NodeCacheTestAccess::node_operation_census(*cache),
-        (std::pair{1u, 1u}));
+        (std::pair<std::size_t, std::size_t>{1, 1}));
 
     release_seal_hook.set_value();
     EXPECT_EQ(stopped.wait_for(20ms), std::future_status::timeout);

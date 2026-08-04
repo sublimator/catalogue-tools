@@ -258,6 +258,25 @@ test_engine_stop(boost::asio::io_context& io, Stop stop)
         });
 }
 
+template <class CompletionToken>
+auto
+async_wait_started(
+    std::shared_ptr<boost::asio::steady_timer> timer,
+    std::promise<void>& entered,
+    CompletionToken&& token)
+{
+    return boost::asio::async_initiate<
+        CompletionToken,
+        void(boost::system::error_code)>(
+        [timer = std::move(timer), &entered](auto handler) mutable {
+            timer->async_wait(std::move(handler));
+            // Publish only after async_wait initiation has returned. The test
+            // thread may then cancel without racing timer object mutation.
+            entered.set_value();
+        },
+        token);
+}
+
 xprv::detail::ServiceTimerControl
 timer_control(catl::test::DeterministicScheduler::Timer& timer)
 {
@@ -1096,18 +1115,20 @@ TEST_P(ServiceRootRunnerModes, ParallelEngineReceiptsDrainOnEveryRunnerMode)
             io,
             [first_engine, &first_entered](
                 xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-                first_entered.set_value();
                 boost::system::error_code error;
-                co_await first_engine->async_wait(
+                co_await async_wait_started(
+                    first_engine,
+                    first_entered,
                     asio::redirect_error(asio::use_awaitable, error));
             }),
         test_engine_stop(
             io,
             [second_engine, &second_entered](
                 xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-                second_entered.set_value();
                 boost::system::error_code error;
-                co_await second_engine->async_wait(
+                co_await async_wait_started(
+                    second_engine,
+                    second_entered,
                     asio::redirect_error(asio::use_awaitable, error));
             }),
     };

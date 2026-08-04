@@ -10,9 +10,11 @@
 /// sender with nothing to retry from. So the load-bearing controls here are the
 /// ones that force those two failures and require recovery.
 ///
-/// No sleeps and no wall-clock waits. Interleavings are forced by stepping the
-/// io_context ONE handler at a time with poll_one(), which is why the deadline
-/// bound is set to 0ms where a timeout has to win a race.
+/// Interleavings are forced by stepping the io_context ONE handler at a time.
+/// Where a real 0ms timer is part of the contract, the settle loop gives the
+/// reactor one bounded wait after the immediately-ready queue is empty. A plain
+/// poll() is not portable here: an already-expired timer may not become ready
+/// until the reactor is entered.
 ///
 /// Single-threaded throughout, which is what makes the direct (non-hopping) test
 /// access sound: the strand only ever runs on the test thread.
@@ -147,10 +149,16 @@ struct CoordFixture
         for (int i = 0; i < 256; ++i)
         {
             io.restart();
-            if (io.poll() == 0)
-            {
+            if (io.poll() != 0)
+                continue;
+
+            // Linux's timer reactor need not surface a timer expiring "now"
+            // to a non-blocking poll. Enter it briefly so 0ms test deadlines
+            // have deterministic semantics without advancing the ordinary
+            // 5ms/250ms production backoffs.
+            io.restart();
+            if (io.run_one_for(std::chrono::milliseconds{1}) == 0)
                 break;
-            }
         }
         io.restart();
     }

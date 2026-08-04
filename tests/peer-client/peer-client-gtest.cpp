@@ -659,7 +659,8 @@ TEST(ConnectAttemptState, FirstDeadlineGrantsPostHandshakeGrace)
     deadline->start();
     ASSERT_EQ(io.poll_one(), 1u)
         << "the controller must first install its owner-strand timer";
-    ASSERT_EQ(io.poll_one(), 1u)
+    io.restart();
+    ASSERT_EQ(io.run_one_for(std::chrono::milliseconds(50)), 1u)
         << "the first expiry must execute the grace decision";
     EXPECT_FALSE(attempt->snapshot())
         << "post-handshake grace is not a terminal connect result";
