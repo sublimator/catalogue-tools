@@ -1155,7 +1155,7 @@ peer_connection::async_read_header()
 void
 peer_connection::handle_read_header(
     boost::system::error_code ec,
-    std::size_t /*bytes_transferred*/)
+    std::size_t bytes_transferred)
 {
     if (physical_phase_ != PhysicalPhase::open)
         return;
@@ -1188,6 +1188,16 @@ peer_connection::handle_read_header(
         return;
     }
 
+    if (bytes_transferred != 6)
+    {
+        auto const contract_error = boost::system::errc::make_error_code(
+            boost::system::errc::protocol_error);
+        note_connect_failure(
+            "packet header successful read size mismatch", contract_error);
+        fail_and_close(contract_error);
+        return;
+    }
+
     // Parse header
     // First check if compressed by looking at high nibble of first byte
     current_header_.compressed = (header_buffer_[0] & 0xF0) != 0;
@@ -1205,6 +1215,18 @@ peer_connection::handle_read_header(
 
     current_header_.payload_size = payload_size;
     current_header_.type = (header_buffer_[4] << 8) | header_buffer_[5];
+
+    auto const declared_wire_work =
+        payload_size + (current_header_.compressed ? 4u : 0u);
+    if (!begin_inbound_frame(declared_wire_work))
+    {
+        auto const generation_error = boost::system::errc::make_error_code(
+            boost::system::errc::value_too_large);
+        note_connect_failure(
+            "inbound frame generation exhausted", generation_error);
+        fail_and_close(generation_error);
+        return;
+    }
 
     PLOGT(
         log_,
@@ -1228,7 +1250,7 @@ peer_connection::handle_read_header(
                         asio::buffer(self->header_buffer_.data() + 6, 4);
                     test_read_completion completion =
                         [self, payload_size, read_id](
-                            boost::system::error_code ec, std::size_t) {
+                            boost::system::error_code ec, std::size_t n) {
                             TransportOperationCompletion read_complete{
                                 self.get(), read_id};
                             if (self->physical_phase_ != PhysicalPhase::open)
@@ -1246,6 +1268,18 @@ peer_connection::handle_read_header(
                                         "packet header extension read", ec);
                                     self->fail_and_close(ec);
                                 }
+                                return;
+                            }
+                            if (n != 4 || !self->consume_inbound_frame_bytes(n))
+                            {
+                                auto const contract_error =
+                                    boost::system::errc::make_error_code(
+                                        boost::system::errc::protocol_error);
+                                self->note_connect_failure(
+                                    "packet header extension successful read "
+                                    "size mismatch",
+                                    contract_error);
+                                self->fail_and_close(contract_error);
                                 return;
                             }
                             self->current_header_.uncompressed_size =
@@ -1316,7 +1350,7 @@ peer_connection::read_or_drain_payload()
             current_header_.uncompressed_size,
             " buffered_limit=",
             kMaxBufferedManifestBytes);
-        drain_payload(payload_size);
+        read_payload_chunks(PayloadStorage::discarded, 0, payload_size);
         return;
     }
 
@@ -1364,44 +1398,15 @@ peer_connection::read_or_drain_payload()
     }
     inbound_charge_.store(payload_size, std::memory_order_relaxed);
 
-    // Read payload
+    // Retain buffered frames in their admitted allocation, but expose honest
+    // per-chunk transport progress just like the discard path.
     payload_buffer_.resize(payload_size);
-    try
+    if (payload_size == 0)
     {
-        initiate_transport_operation(
-            TransportOperationKind::payload_read,
-            [self = shared_from_this()](TransportOperationId read_id) {
-                auto const buffer = asio::buffer(self->payload_buffer_);
-                test_read_completion completion =
-                    [self, read_id](
-                        boost::system::error_code ec,
-                        std::size_t bytes_transferred) {
-                        TransportOperationCompletion read_complete{
-                            self.get(), read_id};
-                        if (self->physical_phase_ != PhysicalPhase::open)
-                            return;
-                        self->handle_read_payload(ec, bytes_transferred);
-                    };
-                if (self->read_initiator_for_test_)
-                {
-                    self->read_initiator_for_test_(
-                        test_read_stage::payload,
-                        buffer,
-                        std::move(completion));
-                }
-                else
-                {
-                    asio::async_read(
-                        *self->socket_, buffer, std::move(completion));
-                }
-            });
+        handle_read_payload({}, 0);
+        return;
     }
-    catch (...)
-    {
-        auto const start_error = current_exception_error();
-        note_connect_failure("packet payload read initiation", start_error);
-        fail_and_close(start_error);
-    }
+    read_payload_chunks(PayloadStorage::buffered, 0, payload_size);
 }
 
 void
@@ -1479,33 +1484,40 @@ peer_connection::handle_read_payload(
 }
 
 void
-peer_connection::drain_payload(std::size_t remaining)
+peer_connection::read_payload_chunks(
+    PayloadStorage storage,
+    std::size_t offset,
+    std::size_t remaining)
 {
     if (physical_phase_ != PhysicalPhase::open)
         return;
 
     if (remaining == 0)
     {
-        // Whole frame consumed and discarded — resume the header loop.
-        async_read_header();
+        if (storage == PayloadStorage::buffered)
+            handle_read_payload({}, offset);
+        else
+            async_read_header();
         return;
     }
 
-    // Reuse the read buffer at a bounded chunk size — this is what stops a
-    // drained frame from ever allocating (or retaining) its full size.
-    constexpr std::size_t kDrainChunk = 64u * 1024;
-    std::size_t const chunk = remaining < kDrainChunk ? remaining : kDrainChunk;
-    payload_buffer_.resize(chunk);
+    constexpr std::size_t kPayloadChunk = 64u * 1024;
+    auto const chunk = std::min(remaining, kPayloadChunk);
+    if (storage == PayloadStorage::discarded)
+        payload_buffer_.resize(chunk);
     try
     {
         initiate_transport_operation(
-            TransportOperationKind::payload_drain,
-            [self = shared_from_this(), remaining, chunk](
+            storage == PayloadStorage::buffered
+                ? TransportOperationKind::payload_read
+                : TransportOperationKind::payload_drain,
+            [self = shared_from_this(), storage, offset, remaining, chunk](
                 TransportOperationId read_id) {
-                auto const buffer =
-                    asio::buffer(self->payload_buffer_.data(), chunk);
+                auto* const destination = self->payload_buffer_.data() +
+                    (storage == PayloadStorage::buffered ? offset : 0);
+                auto const buffer = asio::buffer(destination, chunk);
                 test_read_completion completion =
-                    [self, remaining, read_id](
+                    [self, storage, offset, remaining, chunk, read_id](
                         boost::system::error_code ec, std::size_t n) {
                         TransportOperationCompletion read_complete{
                             self.get(), read_id};
@@ -1516,17 +1528,31 @@ peer_connection::drain_payload(std::size_t remaining)
                             if (ec != asio::error::operation_aborted)
                             {
                                 self->note_connect_failure(
-                                    "manifest drain", ec);
+                                    "packet payload chunk read", ec);
                                 self->fail_and_close(ec);
                             }
                             return;
                         }
-                        self->drain_payload(remaining - n);
+                        if (n != chunk || !self->consume_inbound_frame_bytes(n))
+                        {
+                            auto const contract_error =
+                                boost::system::errc::make_error_code(
+                                    boost::system::errc::protocol_error);
+                            self->note_connect_failure(
+                                "packet payload successful read size mismatch",
+                                contract_error);
+                            self->fail_and_close(contract_error);
+                            return;
+                        }
+                        self->read_payload_chunks(
+                            storage, offset + n, remaining - n);
                     };
                 if (self->read_initiator_for_test_)
                 {
                     self->read_initiator_for_test_(
-                        test_read_stage::payload_drain,
+                        storage == PayloadStorage::buffered
+                            ? test_read_stage::payload
+                            : test_read_stage::payload_drain,
                         buffer,
                         std::move(completion));
                 }
@@ -1540,9 +1566,49 @@ peer_connection::drain_payload(std::size_t remaining)
     catch (...)
     {
         auto const start_error = current_exception_error();
-        note_connect_failure("manifest drain initiation", start_error);
+        note_connect_failure(
+            "packet payload chunk read initiation", start_error);
         fail_and_close(start_error);
     }
+}
+
+//@@authority transition=prv.T0229 status=provisional scope=function
+// bind=catl::peer_client::begin_inbound_frame@44ab9c78861b09ea
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// touches=prv.S0078
+// label=publish_accepted_inbound_frame_generation_and_declared_wire_work
+bool
+peer_connection::begin_inbound_frame(std::uint32_t bytes_remaining) noexcept
+{
+    if (inbound_frame_generation_ == std::numeric_limits<std::uint32_t>::max())
+        return false;
+    ++inbound_frame_generation_;
+    inbound_frame_remaining_ = bytes_remaining;
+    inbound_frame_progress_.store(
+        InboundFrameProgress{
+            inbound_frame_generation_, inbound_frame_remaining_}
+            .packed(),
+        std::memory_order_release);
+    return true;
+}
+
+//@@authority transition=prv.T0230 status=provisional scope=function
+// bind=catl::peer_client::consume_inbound_frame_bytes@4dbad812251b6c6a
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// touches=prv.S0078
+// label=decrease_inbound_frame_remaining_by_exact_received_bytes
+bool
+peer_connection::consume_inbound_frame_bytes(std::size_t bytes) noexcept
+{
+    if (bytes > inbound_frame_remaining_)
+        return false;
+    inbound_frame_remaining_ -= static_cast<std::uint32_t>(bytes);
+    inbound_frame_progress_.store(
+        InboundFrameProgress{
+            inbound_frame_generation_, inbound_frame_remaining_}
+            .packed(),
+        std::memory_order_release);
+    return true;
 }
 
 //@@authority transition=peer_client.admit_write owner=peer_client commit=strand

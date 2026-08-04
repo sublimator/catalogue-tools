@@ -207,6 +207,7 @@ struct ReadHarness
     int packet_calls = 0;
     packet_header last_header{};
     std::vector<std::uint8_t> last_payload;
+    InboundFrameProgress progress_in_packet_handler{};
     bool close_in_packet_handler = false;
     bool drained_inside_packet_handler = false;
 
@@ -235,6 +236,7 @@ struct ReadHarness
             ++packet_calls;
             last_header = header;
             last_payload = payload;
+            progress_in_packet_handler = conn->inbound_frame_progress();
             if (close_in_packet_handler)
             {
                 conn->close();
@@ -259,6 +261,14 @@ struct ReadHarness
         auto const type_value = static_cast<std::uint16_t>(type);
         bytes[4] = static_cast<std::uint8_t>(type_value >> 8);
         bytes[5] = static_cast<std::uint8_t>(type_value & 0xFF);
+    }
+
+    void
+    mark_header_compressed(std::size_t index)
+    {
+        auto* bytes =
+            static_cast<std::uint8_t*>(in_flight[index].buffer.data());
+        bytes[0] |= 0x10;
     }
 
     void
@@ -1146,4 +1156,161 @@ TEST(
         h.last_header.type, static_cast<std::uint16_t>(packet_type::ping));
     EXPECT_EQ(h.last_payload, std::vector<std::uint8_t>(kPingBody, 0xA5));
     EXPECT_TRUE(h.socket_open());
+}
+
+TEST(ConnectionWriteLifecycle, InboundFrameProjectionTracksDiscardAndSuccessor)
+{
+    constexpr std::uint32_t kManifestBody = 86'704'128u;
+    constexpr std::uint32_t kPingBody = 8u;
+
+    ReadHarness h;
+    h.start();
+    h.write_header(0, kManifestBody, packet_type::manifests);
+    h.complete_on_strand(0, {}, 6);
+
+    auto progress = h.conn->inbound_frame_progress();
+    EXPECT_EQ(progress.generation, 1u);
+    EXPECT_EQ(progress.bytes_remaining, kManifestBody);
+
+    ASSERT_EQ(
+        h.in_flight.back().stage,
+        peer_connection::test_read_stage::payload_drain);
+    auto const first_chunk = h.in_flight.back().buffer.size();
+    auto const first_chunk_index = h.in_flight.size() - 1;
+    h.fill(first_chunk_index, 0xCD);
+    h.complete_on_strand(first_chunk_index, {}, first_chunk);
+    progress = h.conn->inbound_frame_progress();
+    EXPECT_EQ(progress.generation, 1u);
+    EXPECT_EQ(progress.bytes_remaining, kManifestBody - first_chunk);
+
+    std::size_t body_bytes = 0;
+    std::size_t max_chunk = 0;
+    ASSERT_TRUE(h.drain_body_until_header(body_bytes, max_chunk));
+    EXPECT_EQ(body_bytes + first_chunk, kManifestBody);
+    progress = h.conn->inbound_frame_progress();
+    EXPECT_EQ(progress, (InboundFrameProgress{1, 0}));
+
+    auto const next_header = h.in_flight.size() - 1;
+    h.write_header(next_header, kPingBody, packet_type::ping);
+    h.complete_on_strand(next_header, {}, 6);
+    EXPECT_EQ(
+        h.conn->inbound_frame_progress(), (InboundFrameProgress{2, kPingBody}));
+}
+
+TEST(ConnectionWriteLifecycle, BufferedAndCompressedReadsPublishExactProgress)
+{
+    constexpr std::uint32_t kBody = 2u * 64u * 1024u + 7u;
+
+    ReadHarness h;
+    h.start();
+    h.write_header(0, kBody, packet_type::ping);
+    h.mark_header_compressed(0);
+    h.complete_on_strand(0, {}, 6);
+
+    EXPECT_EQ(
+        h.conn->inbound_frame_progress(), (InboundFrameProgress{1, kBody + 4}));
+    ASSERT_EQ(
+        h.in_flight.back().stage,
+        peer_connection::test_read_stage::header_extension);
+    auto const extension = h.in_flight.size() - 1;
+    auto* extension_bytes =
+        static_cast<std::uint8_t*>(h.in_flight[extension].buffer.data());
+    catl::common::put_uint32_be(extension_bytes, kBody);
+    h.complete_on_strand(extension, {}, 4);
+    EXPECT_EQ(
+        h.conn->inbound_frame_progress(), (InboundFrameProgress{1, kBody}));
+
+    for (std::uint32_t remaining = kBody; remaining != 0;)
+    {
+        auto const index = h.in_flight.size() - 1;
+        ASSERT_EQ(
+            h.in_flight[index].stage,
+            peer_connection::test_read_stage::payload);
+        auto const chunk = h.in_flight[index].buffer.size();
+        h.fill(index, 0xA7);
+        h.complete_on_strand(index, {}, chunk);
+        remaining -= static_cast<std::uint32_t>(chunk);
+        EXPECT_EQ(
+            h.conn->inbound_frame_progress(),
+            (InboundFrameProgress{1, remaining}));
+    }
+
+    EXPECT_EQ(h.packet_calls, 1);
+    EXPECT_EQ(h.progress_in_packet_handler, (InboundFrameProgress{1, 0}));
+    EXPECT_EQ(h.last_payload.size(), kBody);
+}
+
+TEST(ConnectionWriteLifecycle, EmptyPayloadDispatchesWithoutEmptyRead)
+{
+    ReadHarness h;
+    h.start();
+    h.write_header(0, 0, packet_type::ping);
+    h.complete_on_strand(0, {}, 6);
+
+    EXPECT_EQ(h.packet_calls, 1);
+    EXPECT_EQ(h.last_payload.size(), 0u);
+    EXPECT_EQ(h.progress_in_packet_handler, (InboundFrameProgress{1, 0}));
+    ASSERT_EQ(h.in_flight.size(), 2u);
+    EXPECT_EQ(
+        h.in_flight.back().stage, peer_connection::test_read_stage::header);
+}
+
+TEST(ConnectionWriteLifecycle, SuccessfulReadSizeMismatchClosesAtEveryStage)
+{
+    auto expect_header_refusal = [](std::size_t reported) {
+        ReadHarness h;
+        h.start();
+        h.write_header(0, 4, packet_type::ping);
+        h.complete_on_strand(0, {}, reported);
+        EXPECT_FALSE(h.socket_open());
+        EXPECT_EQ(h.packet_calls, 0);
+    };
+    for (auto const reported : {0u, 5u, 7u})
+        expect_header_refusal(reported);
+
+    auto expect_extension_refusal = [](std::size_t reported) {
+        ReadHarness h;
+        h.start();
+        h.write_header(0, 4, packet_type::ping);
+        h.mark_header_compressed(0);
+        h.complete_on_strand(0, {}, 6);
+        auto const extension = h.in_flight.size() - 1;
+        h.complete_on_strand(extension, {}, reported);
+        EXPECT_FALSE(h.socket_open());
+        EXPECT_EQ(h.packet_calls, 0);
+    };
+    for (auto const reported : {0u, 3u, 5u})
+        expect_extension_refusal(reported);
+
+    auto expect_body_refusal = [](bool discard, std::size_t delta) {
+        ReadHarness h;
+        h.start();
+        auto const size = discard ? kMaxBufferedManifestBytes + 1u : 8u;
+        h.write_header(
+            0, size, discard ? packet_type::manifests : packet_type::ping);
+        h.complete_on_strand(0, {}, 6);
+        auto const body = h.in_flight.size() - 1;
+        auto const requested = h.in_flight[body].buffer.size();
+        h.complete_on_strand(body, {}, requested + delta);
+        EXPECT_FALSE(h.socket_open());
+        EXPECT_EQ(h.packet_calls, 0);
+    };
+    for (auto const delta : {std::size_t(-1), std::size_t{1}})
+    {
+        expect_body_refusal(false, delta);
+        expect_body_refusal(true, delta);
+    }
+}
+
+TEST(ConnectionWriteLifecycle, FailedPartialReadPublishesNoProgress)
+{
+    ReadHarness h;
+    h.start();
+    h.write_header(0, 8, packet_type::ping);
+    h.complete_on_strand(0, {}, 6);
+    auto const before = h.conn->inbound_frame_progress();
+    auto const body = h.in_flight.size() - 1;
+    h.complete_on_strand(body, asio::error::connection_reset, 3);
+    EXPECT_EQ(h.conn->inbound_frame_progress(), before);
+    EXPECT_FALSE(h.socket_open());
 }

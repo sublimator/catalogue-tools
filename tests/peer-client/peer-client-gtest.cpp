@@ -22,6 +22,8 @@
 #include <thread>
 
 namespace catl::peer_client {
+using namespace std::chrono_literals;
+
 TEST(PeerClientLifecycle, PublicCoConnectFunctionTypeRemainsStable)
 {
     using PublicCoConnect = asio::awaitable<std::uint32_t> (*)(
@@ -670,6 +672,141 @@ TEST(ConnectAttemptState, FirstDeadlineGrantsPostHandshakeGrace)
     EXPECT_EQ(terminal->kind, detail::ConnectAttemptTerminalKind::deadline);
     EXPECT_EQ(terminal->deadline_seconds, 15);
 
+    deadline->cancel();
+    io.restart();
+    io.run();
+}
+
+TEST(ConnectDeadlinePolicy, ActiveFrameProgressSurvivesOldBoundButNotAbsolute)
+{
+    using Clock = std::chrono::steady_clock;
+    auto const start = Clock::time_point{};
+    detail::ConnectDeadlinePolicy policy{10s, 15s, start + 60s};
+
+    auto decision = policy.start(start, false);
+    EXPECT_EQ(decision.kind, detail::ConnectDeadlineDecisionKind::arm_at);
+    EXPECT_EQ(decision.arm_time, start + 10s);
+
+    decision =
+        policy.evaluate(start + 10s, State::ExchangingStatus, false, {1, 100});
+    EXPECT_EQ(decision.kind, detail::ConnectDeadlineDecisionKind::arm_at);
+    EXPECT_EQ(decision.arm_time, start + 25s);
+
+    decision =
+        policy.evaluate(start + 25s, State::ExchangingStatus, false, {1, 90});
+    EXPECT_EQ(decision.kind, detail::ConnectDeadlineDecisionKind::arm_at);
+    EXPECT_EQ(decision.arm_time, start + 40s);
+
+    decision =
+        policy.evaluate(start + 40s, State::ExchangingStatus, false, {1, 80});
+    EXPECT_EQ(decision.kind, detail::ConnectDeadlineDecisionKind::arm_at);
+    EXPECT_EQ(decision.arm_time, start + 55s);
+
+    decision =
+        policy.evaluate(start + 55s, State::ExchangingStatus, false, {1, 70});
+    EXPECT_EQ(decision.kind, detail::ConnectDeadlineDecisionKind::arm_at);
+    EXPECT_EQ(decision.arm_time, start + 60s);
+
+    decision =
+        policy.evaluate(start + 60s, State::ExchangingStatus, false, {1, 60});
+    EXPECT_EQ(
+        decision.kind,
+        detail::ConnectDeadlineDecisionKind::commit_absolute_timeout);
+}
+
+TEST(ConnectDeadlinePolicy, BaselineIdleAndGenerationRulesAreExplicit)
+{
+    using Clock = std::chrono::steady_clock;
+    auto const start = Clock::time_point{};
+
+    detail::ConnectDeadlinePolicy idle{10s, 15s, start + 60s};
+    EXPECT_EQ(
+        idle.start(start, false).kind,
+        detail::ConnectDeadlineDecisionKind::arm_at);
+    auto decision =
+        idle.evaluate(start + 10s, State::Connected, false, {4, 20});
+    EXPECT_EQ(decision.kind, detail::ConnectDeadlineDecisionKind::arm_at);
+    decision =
+        idle.evaluate(start + 25s, State::ExchangingStatus, false, {4, 20});
+    EXPECT_EQ(
+        decision.kind,
+        detail::ConnectDeadlineDecisionKind::commit_inactivity_timeout);
+
+    detail::ConnectDeadlinePolicy generation{10s, 15s, start + 60s};
+    generation.start(start, false);
+    generation.evaluate(start + 10s, State::Connected, false, {1, 5});
+    decision = generation.evaluate(
+        start + 25s, State::ExchangingStatus, false, {2, 100});
+    EXPECT_EQ(decision.kind, detail::ConnectDeadlineDecisionKind::arm_at)
+        << "a successor frame is progress even when it declares more work";
+    decision = generation.evaluate(
+        start + 40s, State::ExchangingStatus, false, {2, 100});
+    EXPECT_EQ(
+        decision.kind,
+        detail::ConnectDeadlineDecisionKind::commit_inactivity_timeout);
+
+    detail::ConnectDeadlinePolicy initial{10s, 15s, start + 60s};
+    initial.start(start, false);
+    EXPECT_EQ(
+        initial.evaluate(start + 10s, State::Connecting, false, {}).kind,
+        detail::ConnectDeadlineDecisionKind::commit_initial_timeout);
+    EXPECT_EQ(
+        initial.evaluate(start + 60s, State::Connecting, true, {}).kind,
+        detail::ConnectDeadlineDecisionKind::stop)
+        << "an existing terminal wins even at the absolute deadline";
+}
+
+TEST(ConnectDeadlineController, AdapterUsesExactAbsoluteExpiry)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Connecting);
+    auto attempt = client->initial_connect_attempt();
+    auto const absolute =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    auto deadline = std::make_shared<detail::ConnectDeadlineController>(
+        io.get_executor(),
+        attempt,
+        client,
+        10,
+        15s,
+        15,
+        detail::ConnectDeadlineController::BeforeArmHook{},
+        absolute);
+    deadline->start();
+    ASSERT_EQ(io.poll_one(), 1u);
+    EXPECT_EQ(deadline->expiry_for_test(), absolute);
+    deadline->cancel();
+    io.restart();
+    io.run();
+}
+
+TEST(ConnectDeadlineController, TerminalDuringRearmCannotBeRewritten)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Connected);
+    auto attempt = client->initial_connect_attempt();
+    auto deadline = std::make_shared<detail::ConnectDeadlineController>(
+        io.get_executor(),
+        attempt,
+        client,
+        0,
+        1ms,
+        1,
+        [attempt](bool initial_phase) {
+            if (!initial_phase)
+            {
+                attempt->try_commit_initial(
+                    {detail::ConnectAttemptTerminalKind::peer_failure,
+                     asio::error::connection_reset},
+                    []() noexcept {});
+            }
+        });
+
+    deadline->start();
+    io.run_for(20ms);
+    auto const terminal = attempt->snapshot();
+    ASSERT_TRUE(terminal);
+    EXPECT_EQ(terminal->kind, detail::ConnectAttemptTerminalKind::peer_failure);
     deadline->cancel();
     io.restart();
     io.run();

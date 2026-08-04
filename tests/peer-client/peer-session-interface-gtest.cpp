@@ -3042,7 +3042,7 @@ TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
         [](std::string const& event) {
             return event ==
                 "peer history search ledger 500: candidates=0/0, "
-                "in_flight=0, connected=4, remaining=0s";
+                "queued=0, in_flight=0, connected=4, remaining=0s";
         }))
         << "the request context must survive the PeerSet strand hop";
     EXPECT_TRUE(

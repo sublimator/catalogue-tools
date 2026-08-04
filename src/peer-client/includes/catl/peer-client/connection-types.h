@@ -196,6 +196,41 @@ struct packet_header
     std::uint32_t uncompressed_size;
 };
 
+/// Coherent cross-strand observation of the currently admitted inbound frame.
+/// The generation changes when a complete base header is accepted; remaining
+/// work decreases only after an exact successful read completion.
+struct InboundFrameProgress
+{
+    std::uint32_t generation = 0;
+    std::uint32_t bytes_remaining = 0;
+
+    friend bool
+    operator==(InboundFrameProgress const&, InboundFrameProgress const&) =
+        default;
+
+    bool
+    advanced_from(InboundFrameProgress const& older) const noexcept
+    {
+        return generation != older.generation ||
+            (generation == older.generation &&
+             bytes_remaining < older.bytes_remaining);
+    }
+
+    std::uint64_t
+    packed() const noexcept
+    {
+        return (std::uint64_t{generation} << 32) | bytes_remaining;
+    }
+
+    static InboundFrameProgress
+    from_packed(std::uint64_t value) noexcept
+    {
+        return {
+            static_cast<std::uint32_t>(value >> 32),
+            static_cast<std::uint32_t>(value)};
+    }
+};
+
 inline bool
 should_drain_manifest_payload(packet_header const& header)
 {

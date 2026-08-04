@@ -59,6 +59,13 @@ enum class ConnectAttemptTerminalKind : std::uint8_t {
     infrastructure_failure,
 };
 
+enum class ConnectDeadlineReason : std::uint8_t {
+    none,
+    initial,
+    sampled_inactivity,
+    absolute,
+};
+
 struct ConnectAttemptTerminal
 {
     ConnectAttemptTerminal(
@@ -66,12 +73,14 @@ struct ConnectAttemptTerminal
         boost::system::error_code error = {},
         std::uint32_t peer_seq = 0,
         int deadline_seconds = 0,
-        std::exception_ptr failure = {})
+        std::exception_ptr failure = {},
+        ConnectDeadlineReason deadline_reason = ConnectDeadlineReason::none)
         : kind(kind)
         , error(error)
         , peer_seq(peer_seq)
         , deadline_seconds(deadline_seconds)
         , failure(std::move(failure))
+        , deadline_reason(deadline_reason)
     {
     }
 
@@ -80,6 +89,7 @@ struct ConnectAttemptTerminal
     uint32_t peer_seq = 0;
     int deadline_seconds = 0;
     std::exception_ptr failure;
+    ConnectDeadlineReason deadline_reason = ConnectDeadlineReason::none;
 };
 
 enum class ConnectAttemptPublication : std::uint8_t {
@@ -359,6 +369,8 @@ public:
         std::shared_ptr<EndpointTracker> tracker{};
         UnsolicitedHandler unsolicited_handler{};
         DisconnectCallback on_disconnect{};
+        std::optional<std::chrono::steady_clock::time_point>
+            initial_connect_absolute_deadline{};
     };
 
     /// Connect to a peer. Returns immediately. All handlers are installed
@@ -552,6 +564,13 @@ public:
     raw_connection()
     {
         return *connection_;
+    }
+
+    InboundFrameProgress
+    inbound_frame_progress() const noexcept
+    {
+        return connection_ ? connection_->inbound_frame_progress()
+                           : InboundFrameProgress{};
     }
 
     /// The PeerClient's strand. Callers can use this to hop to the

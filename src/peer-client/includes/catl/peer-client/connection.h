@@ -60,6 +60,13 @@ public:
     void
     start_read(packet_handler handler);
 
+    InboundFrameProgress
+    inbound_frame_progress() const noexcept
+    {
+        return InboundFrameProgress::from_packed(
+            inbound_frame_progress_.load(std::memory_order_acquire));
+    }
+
     // Send packet
     SendAdmission
     async_send_packet(
@@ -288,12 +295,19 @@ private:
     void
     read_or_drain_payload();
 
-    // Read and discard `remaining` payload bytes in small chunks (reusing the
-    // read buffer at a bounded size), then resume the header loop. Used to
-    // consume a frame we don't want to keep (e.g. an oversized manifest dump)
-    // without allocating the full payload or dropping the peer.
+    enum class PayloadStorage : std::uint8_t { buffered, discarded };
+
     void
-    drain_payload(std::size_t remaining);
+    read_payload_chunks(
+        PayloadStorage storage,
+        std::size_t offset,
+        std::size_t remaining);
+
+    bool
+    begin_inbound_frame(std::uint32_t bytes_remaining) noexcept;
+
+    bool
+    consume_inbound_frame_bytes(std::size_t bytes) noexcept;
 
     void
     perform_http_upgrade(const connection_handler& handler);
@@ -333,6 +347,17 @@ private:
     std::array<std::uint8_t, 10> header_buffer_;
     std::vector<std::uint8_t> payload_buffer_;
     packet_header current_header_;
+
+    // Coherent observation only: the connection strand is the sole writer;
+    // deadline policy may sample the packed projection from another strand.
+    //@@authority state=prv.S0078 status=provisional scope=field
+    // bind=catl::peer_client::peer_connection::inbound_frame_progress_@a03f99eae74b0e48
+    // owner=unresolved owner_hypothesis=peer_connection
+    // observed_home=peer_connection
+    // label=packed_inbound_frame_generation_and_bytes_remaining_projection
+    std::atomic<std::uint64_t> inbound_frame_progress_{0};
+    std::uint32_t inbound_frame_generation_ = 0;
+    std::uint32_t inbound_frame_remaining_ = 0;
 
     // Bytes reserved from the process-wide inbound budget for the in-flight
     // frame (security #0055); released on dispatch or teardown. Atomic so the

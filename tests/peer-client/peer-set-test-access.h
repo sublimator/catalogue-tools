@@ -12,6 +12,8 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -127,6 +129,10 @@ public:
     {
         run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
             set.queued_.insert(endpoint);
+            auto& authority = set.targeted_connects_[endpoint];
+            authority.ordinary_discovery_authorized = true;
+            authority.ordinary_deadline =
+                std::chrono::steady_clock::now() + set.kOrdinaryConnectDeadline;
         });
     }
 
@@ -639,13 +645,110 @@ public:
                 targeted =
                     it != set.targeted_connects_.end() &&
                     std::any_of(
-                        it->second.begin(),
-                        it->second.end(),
+                        it->second.target_authorizations.begin(),
+                        it->second.target_authorizations.end(),
                         [](auto const& authorization) {
                             return authorization && authorization->is_active();
                         });
             });
         return targeted;
+    }
+
+    static bool
+    is_queued_connect(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        bool queued = false;
+        run_on_strand(
+            io, peers, [&queued, endpoint = std::move(endpoint)](auto& set) {
+                queued = set.queued_.count(endpoint) != 0 &&
+                    std::ranges::find(set.pending_connects_, endpoint) !=
+                        set.pending_connects_.end();
+            });
+        return queued;
+    }
+
+    struct ClaimedConnectAuthorityProbe
+    {
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+        std::size_t leases = 0;
+    };
+
+    static ClaimedConnectAuthorityProbe
+    claim_connect_authority(
+        std::chrono::steady_clock::time_point now,
+        bool ordinary,
+        std::chrono::steady_clock::time_point ordinary_deadline,
+        std::vector<std::chrono::steady_clock::time_point> target_deadlines,
+        std::vector<bool> target_active = {})
+    {
+        using PeerSet = catl::peer_client::PeerSet;
+        PeerSet::QueuedConnectAuthority authority;
+        authority.ordinary_discovery_authorized = ordinary;
+        authority.ordinary_deadline = ordinary_deadline;
+        for (std::size_t i = 0; i < target_deadlines.size(); ++i)
+        {
+            auto authorization =
+                std::make_shared<PeerSet::TargetedConnectAuthorization>(
+                    static_cast<std::uint32_t>(i + 1),
+                    std::unordered_set<std::string>{},
+                    target_deadlines[i]);
+            if (i < target_active.size() && !target_active[i])
+                authorization->close(true);
+            authority.target_authorizations.push_back(std::move(authorization));
+        }
+        auto claimed =
+            PeerSet::claim_queued_connect_authority(std::move(authority), now);
+        return {claimed.absolute_deadline, claimed.admission_leases.size()};
+    }
+
+    static std::vector<bool>
+    queue_target_authorizations(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::size_t count)
+    {
+        std::vector<bool> accepted;
+        run_on_strand(
+            io,
+            peers,
+            [&accepted, endpoint = std::move(endpoint), count](auto& set) {
+                accepted.reserve(count);
+                for (std::size_t i = 0; i < count; ++i)
+                {
+                    auto authorization =
+                        std::make_shared<catl::peer_client::PeerSet::
+                                             TargetedConnectAuthorization>(
+                            static_cast<std::uint32_t>(i + 1),
+                            std::unordered_set<std::string>{});
+                    accepted.push_back(
+                        set.queue_targeted_connect(endpoint, authorization));
+                }
+            });
+        return accepted;
+    }
+
+    static bool
+    queue_targeted_authorization(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        catl::peer_client::PeerSet::TargetedConnectAuthorizationPtr
+            authorization)
+    {
+        bool accepted = false;
+        run_on_strand(
+            io,
+            peers,
+            [&accepted,
+             endpoint = std::move(endpoint),
+             authorization = std::move(authorization)](auto& set) {
+                accepted = set.queue_targeted_connect(endpoint, authorization);
+            });
+        return accepted;
     }
 
     static std::shared_ptr<boost::asio::steady_timer>
@@ -788,6 +891,10 @@ public:
         run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
             set.pending_connects_.push_back(endpoint);
             set.queued_.insert(endpoint);
+            auto& authority = set.targeted_connects_[endpoint];
+            authority.ordinary_discovery_authorized = true;
+            authority.ordinary_deadline =
+                std::chrono::steady_clock::now() + set.kOrdinaryConnectDeadline;
         });
     }
 
@@ -1356,6 +1463,10 @@ public:
                 set.fail_connect_servant_launches_for_test_ = 1;
                 set.pending_connects_.push_back(key);
                 set.queued_.insert(key);
+                auto& authority = set.targeted_connects_[key];
+                authority.ordinary_discovery_authorized = true;
+                authority.ordinary_deadline = std::chrono::steady_clock::now() +
+                    set.kOrdinaryConnectDeadline;
                 set.pump_connects();
                 result.exact_row_consumed = set.in_flight_.count(key) == 0;
                 set.fail_connect_servant_launches_for_test_ = 0;

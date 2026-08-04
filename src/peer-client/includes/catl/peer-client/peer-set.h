@@ -422,19 +422,32 @@ private:
     {
         TargetedConnectAuthorization(
             uint32_t ledger_seq_,
-            std::unordered_set<std::string> excluded_)
-            : ledger_seq(ledger_seq_), excluded(std::move(excluded_))
+            std::unordered_set<std::string> excluded_,
+            std::chrono::steady_clock::time_point deadline_ =
+                std::chrono::steady_clock::now() + std::chrono::seconds(60))
+            : ledger_seq(ledger_seq_)
+            , excluded(std::move(excluded_))
+            , deadline(deadline_)
         {
         }
 
         bool
         is_active() const noexcept
         {
-            return accepting.load(std::memory_order_acquire);
+            return is_active_at(std::chrono::steady_clock::now());
+        }
+
+        bool
+        is_active_at(std::chrono::steady_clock::time_point now) const noexcept
+        {
+            return accepting.load(std::memory_order_acquire) && now < deadline;
         }
 
         TargetedAdmissionLeasePtr
         claim();
+
+        TargetedAdmissionLeasePtr
+        claim_at(std::chrono::steady_clock::time_point now);
 
         void
         close(bool revoke_claimed) noexcept;
@@ -447,10 +460,32 @@ private:
 
         uint32_t ledger_seq;
         std::unordered_set<std::string> excluded;
+        std::chrono::steady_clock::time_point deadline;
         std::atomic<bool> accepting{true};
         std::mutex leases_mutex;
         std::vector<std::weak_ptr<TargetedAdmissionLease>> leases;
     };
+
+    static constexpr std::size_t kMaxQueuedTargetAuthorizations = 64;
+    static constexpr auto kOrdinaryConnectDeadline = std::chrono::seconds(60);
+
+    struct QueuedConnectAuthority
+    {
+        bool ordinary_discovery_authorized = false;
+        std::chrono::steady_clock::time_point ordinary_deadline{};
+        std::vector<TargetedConnectAuthorizationPtr> target_authorizations;
+    };
+
+    struct ClaimedConnectAuthority
+    {
+        std::optional<std::chrono::steady_clock::time_point> absolute_deadline;
+        std::vector<TargetedAdmissionLeasePtr> admission_leases;
+    };
+
+    static ClaimedConnectAuthority
+    claim_queued_connect_authority(
+        QueuedConnectAuthority authority,
+        std::chrono::steady_clock::time_point now);
 
     struct RotationTarget
     {
@@ -466,7 +501,9 @@ private:
     try_connect_on_strand(
         std::string host,
         uint16_t port,
-        std::vector<TargetedAdmissionLeasePtr> admission_leases);
+        std::vector<TargetedAdmissionLeasePtr> admission_leases,
+        std::optional<std::chrono::steady_clock::time_point> absolute_deadline =
+            std::nullopt);
 
     boost::asio::awaitable<PeerSessionPtr>
     wait_for_any_peer_on_strand(
@@ -671,6 +708,11 @@ private:
 
     void
     queue_connect(std::string const& endpoint);
+
+    bool
+    queue_targeted_connect(
+        std::string const& endpoint,
+        TargetedConnectAuthorizationPtr const& authorization);
 
     void
     queue_crawl(std::string const& endpoint);
@@ -993,13 +1035,13 @@ private:
     // label=owned_background_connect_servant_census_cancel_and_terminal_handoff
     std::map<std::string, ConnectServant> in_flight_;  // currently connecting
     std::set<std::string> queued_;
-    // Request-scoped authority for queued ledger-specific replacement probes.
+    // Provenance for every queued connection: ordinary discovery authority,
+    // bounded target-request authorities, and their immutable deadlines.
     //@@authority state=prv.S0009 status=provisional scope=field
-    // bind=catl::peer_client::PeerSet::targeted_connects_@41d9a4f852dd7280
+    // bind=catl::peer_client::PeerSet::targeted_connects_@2feca8aa2d8a41ab
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
-    // label=queued_history_targeted_connection_authorities
-    std::map<std::string, std::vector<TargetedConnectAuthorizationPtr>>
-        targeted_connects_;
+    // label=queued_ordinary_and_history_target_connection_authorities
+    std::map<std::string, QueuedConnectAuthority> targeted_connects_;
     std::vector<std::string> pending_connects_;
     struct CrawlServant
     {

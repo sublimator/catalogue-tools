@@ -793,6 +793,90 @@ TEST(PeerSetPruning, TargetedQueuedCandidateExtendsVisibleWaitBound)
     EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(io, peers, ledger_seq));
 }
 
+TEST(PeerSetPruning, ConnectDeadlineUsesOnlyLiveQueuedAuthority)
+{
+    using namespace std::chrono_literals;
+    auto const now = std::chrono::steady_clock::now();
+
+    auto claimed = PeerSetTestAccess::claim_connect_authority(
+        now, false, {}, {now + 5s, now + 20s});
+    ASSERT_TRUE(claimed.deadline);
+    EXPECT_EQ(*claimed.deadline, now + 20s);
+    EXPECT_EQ(claimed.leases, 2u);
+
+    claimed = PeerSetTestAccess::claim_connect_authority(
+        now, false, {}, {now + 120s});
+    ASSERT_TRUE(claimed.deadline);
+    EXPECT_EQ(*claimed.deadline, now + 60s)
+        << "request authority cannot extend the ordinary absolute maximum";
+
+    claimed = PeerSetTestAccess::claim_connect_authority(
+        now, false, {}, {now - 1s, now + 10s}, {true, false});
+    EXPECT_FALSE(claimed.deadline);
+    EXPECT_EQ(claimed.leases, 0u);
+
+    claimed = PeerSetTestAccess::claim_connect_authority(
+        now, true, now + 30s, {now + 20s});
+    ASSERT_TRUE(claimed.deadline);
+    EXPECT_EQ(*claimed.deadline, now + 30s);
+    EXPECT_EQ(claimed.leases, 1u);
+}
+
+TEST(PeerSetPruning, TargetedQueueCapacityRefusesWithoutFalseSelection)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto const endpoint = std::string("bounded-targets.example.com:1");
+    auto const accepted =
+        PeerSetTestAccess::queue_target_authorizations(io, peers, endpoint, 65);
+    ASSERT_EQ(accepted.size(), 65u);
+    EXPECT_TRUE(std::ranges::all_of(
+        accepted.begin(), accepted.begin() + 64, [](bool value) {
+            return value;
+        }));
+    EXPECT_FALSE(accepted.back());
+    EXPECT_TRUE(PeerSetTestAccess::is_queued_connect(io, peers, endpoint));
+}
+
+TEST(PeerSetPruning, TargetCleanupRemovesOnlyTargetOnlyQueueRows)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    auto const target_only = std::string("target-only.example.com:1");
+    auto target_authorization =
+        PeerSetTestAccess::acquire_targeted_wanted_ledger(io, peers, 500);
+    ASSERT_TRUE(PeerSetTestAccess::queue_targeted_authorization(
+        io, peers, target_only, target_authorization));
+    ASSERT_TRUE(PeerSetTestAccess::is_queued_connect(io, peers, target_only));
+    PeerSetTestAccess::release_targeted_wanted_ledger(
+        io, peers, std::move(target_authorization));
+    EXPECT_FALSE(PeerSetTestAccess::is_queued_connect(io, peers, target_only));
+
+    auto const ordinary = std::string("ordinary-plus-target.example.com:1");
+    PeerSetTestAccess::push_pending_connect(io, peers, ordinary);
+    auto joined_authorization =
+        PeerSetTestAccess::acquire_targeted_wanted_ledger(io, peers, 501);
+    ASSERT_TRUE(PeerSetTestAccess::queue_targeted_authorization(
+        io, peers, ordinary, joined_authorization));
+    PeerSetTestAccess::release_targeted_wanted_ledger(
+        io, peers, std::move(joined_authorization));
+    EXPECT_TRUE(PeerSetTestAccess::is_queued_connect(io, peers, ordinary));
+    EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, ordinary));
+}
+
 TEST(PeerSetPruning, AsioCanceledWaitRevokesReplacementProbe)
 {
     using namespace std::chrono_literals;

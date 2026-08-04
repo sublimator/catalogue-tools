@@ -2088,8 +2088,16 @@ PeerSet::queue_connect(std::string const& endpoint)
     auto key = std::move(*normalized);
     auto const now = std::chrono::steady_clock::now();
 
-    if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
+    if (connections_.count(key) || in_flight_.count(key))
         return;
+
+    if (queued_.count(key))
+    {
+        auto& authority = targeted_connects_[key];
+        authority.ordinary_discovery_authorized = true;
+        authority.ordinary_deadline = now + kOrdinaryConnectDeadline;
+        return;
+    }
 
     auto failed = retry_gates_.find(key);
     if (failed != retry_gates_.end())
@@ -2101,9 +2109,124 @@ PeerSet::queue_connect(std::string const& endpoint)
         }
     }
 
-    pending_connects_.push_back(key);
-    queued_.insert(key);
+    QueuedConnectAuthority authority;
+    authority.ordinary_discovery_authorized = true;
+    authority.ordinary_deadline = now + kOrdinaryConnectDeadline;
+    try
+    {
+        targeted_connects_.emplace(key, std::move(authority));
+        queued_.insert(key);
+        pending_connects_.push_back(key);
+    }
+    catch (...)
+    {
+        targeted_connects_.erase(key);
+        queued_.erase(key);
+        std::erase(pending_connects_, key);
+        throw;
+    }
     sort_pending_connects();
+}
+
+//@@authority transition=prv.T0027 status=provisional scope=function
+// bind=catl::peer_client::queue_targeted_connect@596394d6699d659d
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0008,prv.S0009
+// label=queue_bounded_history_targeted_connection_authority
+bool
+PeerSet::queue_targeted_connect(
+    std::string const& endpoint,
+    TargetedConnectAuthorizationPtr const& authorization)
+{
+    ASSERT_ON_STRAND();
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        !authorization || !authorization->is_active())
+        return false;
+
+    auto normalized = EndpointTracker::normalize_endpoint_identity(endpoint);
+    if (!normalized)
+        return false;
+    auto key = std::move(*normalized);
+    auto const now = std::chrono::steady_clock::now();
+    if (connections_.count(key) || in_flight_.count(key))
+        return false;
+
+    if (queued_.count(key))
+    {
+        auto row = targeted_connects_.find(key);
+        if (row == targeted_connects_.end())
+            return false;
+        auto& authorizations = row->second.target_authorizations;
+        if (std::find(
+                authorizations.begin(), authorizations.end(), authorization) !=
+            authorizations.end())
+            return true;
+        if (authorizations.size() >= kMaxQueuedTargetAuthorizations)
+            return false;
+        try
+        {
+            authorizations.push_back(authorization);
+        }
+        catch (...)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    if (auto failed = retry_gates_.find(key); failed != retry_gates_.end())
+    {
+        if (now - failed->second.failed_at < retry_backoff_for(key))
+            return false;
+    }
+
+    QueuedConnectAuthority authority;
+    try
+    {
+        authority.target_authorizations.push_back(authorization);
+        targeted_connects_.emplace(key, std::move(authority));
+        queued_.insert(key);
+        pending_connects_.push_back(key);
+        sort_pending_connects();
+    }
+    catch (...)
+    {
+        targeted_connects_.erase(key);
+        queued_.erase(key);
+        std::erase(pending_connects_, key);
+        return false;
+    }
+    return true;
+}
+
+PeerSet::ClaimedConnectAuthority
+PeerSet::claim_queued_connect_authority(
+    QueuedConnectAuthority authority,
+    std::chrono::steady_clock::time_point now)
+{
+    ClaimedConnectAuthority claimed;
+    if (authority.ordinary_discovery_authorized &&
+        authority.ordinary_deadline > now)
+        claimed.absolute_deadline = authority.ordinary_deadline;
+
+    for (auto& authorization : authority.target_authorizations)
+    {
+        if (!authorization)
+            continue;
+        if (auto lease = authorization->claim_at(now))
+        {
+            claimed.absolute_deadline = claimed.absolute_deadline
+                ? std::max(*claimed.absolute_deadline, authorization->deadline)
+                : authorization->deadline;
+            claimed.admission_leases.push_back(std::move(lease));
+        }
+    }
+    if (claimed.absolute_deadline)
+    {
+        *claimed.absolute_deadline = std::min(
+            *claimed.absolute_deadline, now + kOrdinaryConnectDeadline);
+    }
+    return claimed;
 }
 
 void
@@ -2150,7 +2273,7 @@ PeerSet::queue_crawl(std::string const& endpoint)
 //@@authority transition=prv.T0087 status=provisional scope=function
 // bind=catl::peer_client::pump_connects@29dc9a52e35a56eb
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0034,prv.S0037
+// touches=prv.S0009,prv.S0034,prv.S0037
 // label=admit_owned_background_connect_servant
 void
 PeerSet::pump_connects()
@@ -2169,20 +2292,20 @@ PeerSet::pump_connects()
         auto key = pending_connects_.front();
         pending_connects_.erase(pending_connects_.begin());
         queued_.erase(key);
-        std::vector<TargetedAdmissionLeasePtr> admission_leases;
-        if (auto targeted = targeted_connects_.find(key);
-            targeted != targeted_connects_.end())
-        {
-            for (auto& authorization : targeted->second)
-            {
-                if (authorization)
-                {
-                    if (auto lease = authorization->claim())
-                        admission_leases.push_back(std::move(lease));
-                }
-            }
-            targeted_connects_.erase(targeted);
-        }
+        auto queued_authority = targeted_connects_.find(key);
+        if (queued_authority == targeted_connects_.end())
+            continue;
+        auto authority = std::move(queued_authority->second);
+        targeted_connects_.erase(queued_authority);
+
+        auto const now = std::chrono::steady_clock::now();
+        auto claimed =
+            claim_queued_connect_authority(std::move(authority), now);
+        if (!claimed.absolute_deadline)
+            continue;
+        auto const absolute_deadline = *claimed.absolute_deadline;
+        auto admission_leases = std::move(claimed.admission_leases);
+
         std::vector<uint32_t> targeted_ledgers;
         targeted_ledgers.reserve(admission_leases.size());
         for (auto const& lease : admission_leases)
@@ -2200,7 +2323,6 @@ PeerSet::pump_connects()
         if (!EndpointTracker::parse_endpoint(key, host, port))
             continue;
 
-        auto const now = std::chrono::steady_clock::now();
         if (connections_.count(key) || in_flight_.count(key))
             continue;
 
@@ -2219,13 +2341,14 @@ PeerSet::pump_connects()
              host,
              port,
              key,
+             absolute_deadline,
              admission_leases = std::move(
                  admission_leases)]() mutable -> boost::asio::awaitable<void> {
             std::exception_ptr failure;
             try
             {
                 co_await self->try_connect_on_strand(
-                    host, port, std::move(admission_leases));
+                    host, port, std::move(admission_leases), absolute_deadline);
             }
             catch (...)
             {
@@ -2809,7 +2932,8 @@ boost::asio::awaitable<PeerSessionPtr>
 PeerSet::try_connect_on_strand(
     std::string host,
     uint16_t port,
-    std::vector<TargetedAdmissionLeasePtr> admission_leases)
+    std::vector<TargetedAdmissionLeasePtr> admission_leases,
+    std::optional<std::chrono::steady_clock::time_point> absolute_deadline)
 {
     ASSERT_ON_STRAND();
     if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
@@ -2876,6 +3000,7 @@ PeerSet::try_connect_on_strand(
         PeerClient::ConnectOptions connect_opts;
         connect_opts.network_id = network_id_;
         connect_opts.tracker = tracker_;
+        connect_opts.initial_connect_absolute_deadline = absolute_deadline;
         {
             std::lock_guard lock(unsolicited_handler_mutex_);
             connect_opts.unsolicited_handler = unsolicited_handler_;
@@ -2886,7 +3011,7 @@ PeerSet::try_connect_on_strand(
         // admission then consumes as a stale instance instead of erasing
         // whichever peer currently owns the key.
         //@@authority transition=peer_set.mint_connection_generation v4=T31
-        // bind=catl::peer_client::try_connect_on_strand@78b31effce858424
+        // bind=catl::peer_client::try_connect_on_strand@25dde5fb60e86460
         // owner=peer_set commit=strand
         if (next_connection_generation_ ==
             std::numeric_limits<std::uint64_t>::max())
@@ -3373,8 +3498,15 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
 PeerSet::TargetedAdmissionLeasePtr
 PeerSet::TargetedConnectAuthorization::claim()
 {
+    return claim_at(std::chrono::steady_clock::now());
+}
+
+PeerSet::TargetedAdmissionLeasePtr
+PeerSet::TargetedConnectAuthorization::claim_at(
+    std::chrono::steady_clock::time_point now)
+{
     std::lock_guard lock(leases_mutex);
-    if (!accepting.load(std::memory_order_acquire))
+    if (!is_active_at(now))
         return nullptr;
 
     auto lease = std::make_shared<TargetedAdmissionLease>(shared_from_this());
@@ -3459,7 +3591,7 @@ PeerSet::finish_targeted_authorization(
     authorization->close(revoke_claimed);
     for (auto it = targeted_connects_.begin(); it != targeted_connects_.end();)
     {
-        auto& authorizations = it->second;
+        auto& authorizations = it->second.target_authorizations;
         authorizations.erase(
             std::remove_if(
                 authorizations.begin(),
@@ -3469,8 +3601,12 @@ PeerSet::finish_targeted_authorization(
                         current == authorization;
                 }),
             authorizations.end());
-        if (authorizations.empty())
+        if (authorizations.empty() && !it->second.ordinary_discovery_authorized)
+        {
+            queued_.erase(it->first);
+            std::erase(pending_connects_, it->first);
             it = targeted_connects_.erase(it);
+        }
         else
             ++it;
     }
@@ -3590,11 +3726,6 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
     return candidates;
 }
 
-//@@authority transition=prv.T0027 status=provisional scope=function
-// bind=catl::peer_client::try_candidates_for@2f8a29b36dd49275
-// owner=unresolved owner_hypothesis=peer_set commit=strand
-// touches=prv.S0008,prv.S0009
-// label=queue_bounded_history_targeted_connections
 std::vector<std::string>
 PeerSet::try_candidates_for(
     TargetedConnectAuthorizationPtr const& authorization,
@@ -3748,26 +3879,8 @@ PeerSet::try_candidates_for(
         if (queued.size() >= connect_budget)
             break;
         auto const key = canonical_endpoint(endpoint);
-        if (queued_.count(key))
-        {
-            auto& authorizations = targeted_connects_[key];
-            if (std::find(
-                    authorizations.begin(),
-                    authorizations.end(),
-                    authorization) == authorizations.end())
-            {
-                authorizations.push_back(authorization);
-            }
+        if (queue_targeted_connect(key, authorization))
             queued.push_back(key);
-            continue;
-        }
-        auto const before = queued_.size();
-        queue_connect(key);
-        if (queued_.size() != before)
-        {
-            targeted_connects_[key].push_back(authorization);
-            queued.push_back(key);
-        }
     }
 
     sort_pending_connects();
@@ -4304,9 +4417,21 @@ PeerSet::wait_for_covering_peer_on_strand(
         (cancel && cancel->load(std::memory_order_relaxed)))
         co_return nullptr;
 
+    auto const timeout_ms = timeout_secs * 1000;
+    auto const start = std::chrono::steady_clock::now();
+    auto const deadline = start + std::chrono::milliseconds(timeout_ms);
+    auto const completion_deadline = timeout_secs > 0
+        ? deadline + std::chrono::milliseconds(timeout_ms)
+        : deadline;
+    // Stable request-visible terminal bound, also carried by every targeted
+    // queue authorization minted by this request.
+    auto const progress_deadline = options_.max_targeted_connect_attempts > 0
+        ? completion_deadline
+        : deadline;
+
     auto self = shared_from_this();
-    auto authorization =
-        std::make_shared<TargetedConnectAuthorization>(ledger_seq, excluded);
+    auto authorization = std::make_shared<TargetedConnectAuthorization>(
+        ledger_seq, excluded, progress_deadline);
     struct WaitTargetCleanup
     {
         std::weak_ptr<PeerSet> self;
@@ -4375,10 +4500,6 @@ PeerSet::wait_for_covering_peer_on_strand(
     // concurrent requests for the same ledger cannot clear each other.
     acquire_wanted_ledger(ledger_seq, authorization);
 
-    auto const timeout_ms = timeout_secs * 1000;
-    auto const start = std::chrono::steady_clock::now();
-    auto const deadline = start + std::chrono::milliseconds(timeout_ms);
-
     auto snapshot_peers = [&]() -> std::vector<PeerCandidate> {
         auto const now = std::chrono::steady_clock::now();
         std::vector<PeerCandidate> candidates;
@@ -4414,17 +4535,6 @@ PeerSet::wait_for_covering_peer_on_strand(
     std::unordered_set<std::string> targeted_candidates;
     std::size_t targeted_connects = 0;
     bool targeted_budget_reported = false;
-    auto const completion_deadline = timeout_secs > 0
-        ? deadline + std::chrono::milliseconds(timeout_ms)
-        : deadline;
-    // This deadline is request-visible through SSE progress events and
-    // therefore also gates terminal failure. It must be a stable fact for the
-    // whole search; otherwise the browser can observe either a countdown jump
-    // when selected targeted work first appears, or a terminal error while the
-    // displayed countdown still has time remaining.
-    auto const progress_deadline = options_.max_targeted_connect_attempts > 0
-        ? completion_deadline
-        : deadline;
     bool zero_countdown_published = false;
     auto emit_search_progress = [&](std::chrono::steady_clock::time_point now) {
         auto const remaining_ms = std::max<std::int64_t>(
@@ -4452,11 +4562,13 @@ PeerSet::wait_for_covering_peer_on_strand(
                << ", in_flight=" << targeted_in_flight
                << ", connected=" << connections_.size()
                << ", remaining=" << remaining_secs << 's';
-        //@@authority transition=prv.T0226 status=provisional scope=statement bind=emit_status@5c5110c03f0c10b2
+        //@@authority transition=prv.T0226 status=provisional scope=statement
+        // bind=emit_status@5c5110c03f0c10b2
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_history_search_progress_and_latch_zero_if_exhausted
-        catl::core::emit_status(status.str()); //@@authority-target ids=prv.T0226
+        catl::core::emit_status(
+            status.str());  //@@authority-target ids=prv.T0226
     };
     auto emit_terminal_zero_progress = [&]() {
         if (!zero_countdown_published)
@@ -4521,11 +4633,12 @@ PeerSet::wait_for_covering_peer_on_strand(
     emit_search_progress(start);
 
     auto publish_no_covering_peer_after_zero = [&]() {
-        //@@authority transition=prv.T0227 status=provisional scope=statement bind=expression_statement@14b56be20164f4b7
+        //@@authority transition=prv.T0227 status=provisional scope=statement
+        // bind=expression_statement@14b56be20164f4b7
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=peer_set_strand touches=prv.S0077
         // label=establish_zero_countdown_before_no_covering_peer_status
-        emit_terminal_zero_progress(); //@@authority-target ids=prv.T0227
+        emit_terminal_zero_progress();  //@@authority-target ids=prv.T0227
         cleanup.clean_now();
         auto const elapsed_secs =
             std::chrono::duration_cast<std::chrono::seconds>(
@@ -4562,11 +4675,13 @@ PeerSet::wait_for_covering_peer_on_strand(
                << ": no covering peer after " << elapsed_secs
                << "s; candidates=" << selected_candidates.size() << '/'
                << options_.max_targeted_connect_attempts;
-        //@@authority transition=prv.T0228 status=provisional scope=statement bind=emit_status@5c5110c03f0c10b2
+        //@@authority transition=prv.T0228 status=provisional scope=statement
+        // bind=emit_status@5c5110c03f0c10b2
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_no_covering_peer_status_after_zero_countdown
-        catl::core::emit_status(status.str()); //@@authority-target ids=prv.T0228
+        catl::core::emit_status(
+            status.str());  //@@authority-target ids=prv.T0228
     };
 
     PLOGI(
@@ -5042,11 +5157,12 @@ PeerSet::snapshot_unsafe() const
     out.crawl_in_flight = crawl_in_flight_.size();
     out.queued_crawls = pending_crawls_.size();
     std::unordered_set<std::string> targeted_endpoints;
-    for (auto const& [key, authorizations] : targeted_connects_)
+    for (auto const& [key, authority] : targeted_connects_)
     {
-        if (std::ranges::any_of(authorizations, [](auto const& authorization) {
-                return authorization && authorization->is_active();
-            }))
+        if (std::ranges::any_of(
+                authority.target_authorizations, [](auto const& authorization) {
+                    return authorization && authorization->is_active();
+                }))
         {
             targeted_endpoints.insert(key);
         }
@@ -5152,7 +5268,8 @@ PeerSet::snapshot_unsafe() const
         if (auto targeted = targeted_connects_.find(key);
             targeted != targeted_connects_.end())
         {
-            for (auto const& authorization : targeted->second)
+            for (auto const& authorization :
+                 targeted->second.target_authorizations)
             {
                 if (authorization && authorization->is_active())
                     entry.targeted_ledgers.push_back(authorization->ledger_seq);
