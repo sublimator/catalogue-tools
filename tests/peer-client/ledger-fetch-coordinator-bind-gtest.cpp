@@ -51,6 +51,51 @@ namespace asio = boost::asio;
 
 namespace {
 
+void
+settle_coordinator(
+    asio::io_context& io,
+    std::shared_ptr<LedgerFetchCoordinator> const& coord)
+{
+    bool exhausted_safety_bound = true;
+    for (int i = 0; i < 256; ++i)
+    {
+        io.restart();
+        if (io.poll() != 0)
+            continue;
+
+        // A duration is the wrong condition: on a loaded Linux runner the
+        // run deadline can win even when a 0ms retry is already due. Once the
+        // owner says a timer is due, run_one cannot wait on a long production
+        // backoff and must deliver some ready work.
+        if (!Access::owns_due_timer(coord))
+        {
+            exhausted_safety_bound = false;
+            break;
+        }
+        io.restart();
+        if (io.run_one() == 0)
+        {
+            ADD_FAILURE()
+                << "a due coordinator timer produced no reactor completion";
+            exhausted_safety_bound = false;
+            break;
+        }
+    }
+    if (exhausted_safety_bound)
+    {
+        // The final permitted handler may itself establish quiescence. Probe
+        // once without waiting so an exact-boundary workload is not rejected.
+        io.restart();
+        if (io.poll() == 0 && !Access::owns_due_timer(coord))
+            exhausted_safety_bound = false;
+    }
+    EXPECT_FALSE(exhausted_safety_bound)
+        << "settle_coordinator exhausted its safety bound before proving quiescence";
+    // poll()/run_one() may leave the context stopped. Keep it runnable for
+    // PeerSetTestAccess::run_on_strand, which advances this same context.
+    io.restart();
+}
+
 struct CoordFixture
 {
     asio::io_context io;
@@ -146,23 +191,7 @@ struct CoordFixture
     void
     settle()
     {
-        for (int i = 0; i < 256; ++i)
-        {
-            io.restart();
-            if (io.poll() != 0)
-                continue;
-
-            // A duration is the wrong condition: on a loaded Linux runner the
-            // run deadline can win even when a 0ms retry is already due. Once
-            // the owner says a timer is due, run_one cannot wait on a long
-            // production backoff and must deliver some ready work.
-            if (!Access::owns_due_timer(coord))
-                break;
-            io.restart();
-            if (io.run_one() == 0)
-                break;
-        }
-        io.restart();
+        settle_coordinator(io, coord);
     }
 };
 
@@ -1368,15 +1397,7 @@ struct PublishFixture
     void
     settle()
     {
-        for (int i = 0; i < 256; ++i)
-        {
-            io.restart();
-            if (io.poll() == 0)
-            {
-                break;
-            }
-        }
-        io.restart();
+        settle_coordinator(io, coord);
     }
 
     ~PublishFixture()
