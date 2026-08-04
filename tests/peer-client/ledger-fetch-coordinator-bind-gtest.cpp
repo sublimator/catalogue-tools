@@ -153,11 +153,12 @@ struct CoordFixture
                 continue;
 
             // Linux's timer reactor need not surface a timer expiring "now"
-            // to a non-blocking poll. Enter it briefly so 0ms test deadlines
-            // have deterministic semantics without advancing the ordinary
-            // 5ms/250ms production backoffs.
+            // to a non-blocking poll, and a 1ms run deadline can land on the
+            // same rounded tick as that timer. Give the reactor one tick of
+            // daylight while staying below the ordinary 5ms/250ms production
+            // backoffs.
             io.restart();
-            if (io.run_one_for(std::chrono::milliseconds{1}) == 0)
+            if (io.run_one_for(std::chrono::milliseconds{2}) == 0)
                 break;
         }
         io.restart();
