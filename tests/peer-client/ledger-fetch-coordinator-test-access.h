@@ -207,6 +207,34 @@ public:
         c->retry_backoff_ = backoff;
     }
 
+    /// Whether the coordinator owns a timer that is already due. This lets the
+    /// single-threaded controls enter the reactor with run_one() only when an
+    /// operation is guaranteed to complete, instead of racing an arbitrary
+    /// run_for deadline against the platform timer resolution.
+    static bool
+    owns_due_timer(std::shared_ptr<Coordinator> const& c)
+    {
+        auto const now = std::chrono::steady_clock::now();
+        for (auto const& row : c->rows_)
+        {
+            if (row.retired)
+            {
+                continue;
+            }
+            if (row.retry && row.retry_kind != Row::Retry::none &&
+                row.retry->expiry() <= now)
+            {
+                return true;
+            }
+            if (row.deadline && (row.bind_open || row.publish_open) &&
+                row.deadline->expiry() <= now)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Force ONE repair round. With a zero repair backoff a poll-driven settle runs
     /// the loop to completion, which is right for production and useless for
     /// observing an intermediate state — so a control that needs exactly one round

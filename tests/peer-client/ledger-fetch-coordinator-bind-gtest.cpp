@@ -11,10 +11,10 @@
 /// ones that force those two failures and require recovery.
 ///
 /// Interleavings are forced by stepping the io_context ONE handler at a time.
-/// Where a real 0ms timer is part of the contract, the settle loop gives the
-/// reactor one bounded wait after the immediately-ready queue is empty. A plain
-/// poll() is not portable here: an already-expired timer may not become ready
-/// until the reactor is entered.
+/// Where a real 0ms timer is part of the contract, the settle loop enters the
+/// reactor only after the test seam proves the coordinator owns a due timer. A
+/// plain poll() is not portable here: an already-expired timer may not become
+/// ready until the reactor is entered.
 ///
 /// Single-threaded throughout, which is what makes the direct (non-hopping) test
 /// access sound: the strand only ever runs on the test thread.
@@ -152,13 +152,14 @@ struct CoordFixture
             if (io.poll() != 0)
                 continue;
 
-            // Linux's timer reactor need not surface a timer expiring "now"
-            // to a non-blocking poll, and a 1ms run deadline can land on the
-            // same rounded tick as that timer. Give the reactor one tick of
-            // daylight while staying below the ordinary 5ms/250ms production
-            // backoffs.
+            // A duration is the wrong condition: on a loaded Linux runner the
+            // run deadline can win even when a 0ms retry is already due. Once
+            // the owner says a timer is due, run_one cannot wait on a long
+            // production backoff and must deliver some ready work.
+            if (!Access::owns_due_timer(coord))
+                break;
             io.restart();
-            if (io.run_one_for(std::chrono::milliseconds{2}) == 0)
+            if (io.run_one() == 0)
                 break;
         }
         io.restart();
