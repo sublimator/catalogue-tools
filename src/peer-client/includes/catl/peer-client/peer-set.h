@@ -324,9 +324,6 @@ public:
     void
     set_unsolicited_handler(UnsolicitedHandler handler);
 
-    void
-    set_packet_stream_factory(PacketStreamFactory factory);
-
     /// Try to connect to an endpoint. Returns nullptr on failure.
     /// Redirect IPs from 503 are fed into the tracker + tried immediately.
     boost::asio::awaitable<PeerGenerationPin>
@@ -1047,7 +1044,6 @@ private:
     std::shared_ptr<boost::asio::steady_timer> wait_signal_;
     mutable std::mutex unsolicited_handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
-    PacketStreamFactory packet_stream_factory_;
 };
 
 }  // namespace catl::peer_client

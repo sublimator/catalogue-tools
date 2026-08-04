@@ -11,14 +11,11 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
-#include <condition_variable>
 #include <limits>
 #include <pthread.h>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
-
-#include <google/protobuf/io/zero_copy_stream.h>
 
 namespace xprv {
 
@@ -96,182 +93,6 @@ private:
     bool started_ = false;
 };
 
-class ManifestStreamPipe final
-    : public catl::peer_client::PacketStreamSink,
-      public google::protobuf::io::ZeroCopyInputStream
-{
-public:
-    static void
-    invoke(ConsumedHandler& handler, boost::system::error_code ec) noexcept
-    {
-        if (!handler)
-            return;
-        try
-        {
-            handler(ec);
-        }
-        catch (...)
-        {
-        }
-    }
-
-    void
-    consume(
-        std::shared_ptr<std::vector<std::uint8_t> const> chunk,
-        bool final,
-        ConsumedHandler on_consumed) override
-    {
-        boost::system::error_code refusal;
-        {
-            std::lock_guard lock(mutex_);
-            if (closed_ || slot_)
-                refusal = asio::error::operation_aborted;
-            else
-            {
-                slot_ = std::move(chunk);
-                slot_final_ = final;
-                slot_done_ = std::move(on_consumed);
-                ready_.notify_one();
-                return;
-            }
-        }
-        invoke(on_consumed, refusal);
-    }
-
-    void
-    cancel() noexcept override
-    {
-        finish(asio::error::operation_aborted);
-    }
-
-    bool
-    Next(void const** data, int* size) override
-    {
-        ConsumedHandler released;
-        bool released_final = false;
-        {
-            std::unique_lock lock(mutex_);
-            if (backup_ != 0 && current_)
-            {
-                auto const offset = current_->size() - backup_;
-                *data = current_->data() + offset;
-                *size = static_cast<int>(backup_);
-                backup_ = 0;
-                return true;
-            }
-
-            if (current_)
-            {
-                byte_count_ += static_cast<std::int64_t>(current_->size());
-                released = std::exchange(current_done_, {});
-                released_final = current_final_;
-                current_.reset();
-                current_final_ = false;
-            }
-        }
-        invoke(released, {});
-
-        std::unique_lock lock(mutex_);
-        if (released_final)
-            closed_ = true;
-        if (!closed_)
-            ready_.wait(lock, [this]() { return closed_ || slot_; });
-
-        if (!closed_ && slot_)
-        {
-            current_ = std::move(slot_);
-            current_final_ = slot_final_;
-            current_done_ = std::exchange(slot_done_, {});
-            slot_final_ = false;
-            *data = current_->data();
-            *size = static_cast<int>(current_->size());
-        }
-        else
-        {
-            *data = nullptr;
-            *size = 0;
-        }
-        return *size != 0;
-    }
-
-    void
-    BackUp(int count) override
-    {
-        std::lock_guard lock(mutex_);
-        if (!current_ || count < 0 ||
-            static_cast<std::size_t>(count) > current_->size())
-            return;
-        backup_ = static_cast<std::size_t>(count);
-    }
-
-    bool
-    Skip(int count) override
-    {
-        if (count < 0)
-            return false;
-        int remaining = count;
-        while (remaining != 0)
-        {
-            void const* data = nullptr;
-            int size = 0;
-            if (!Next(&data, &size))
-                return false;
-            if (size > remaining)
-            {
-                BackUp(size - remaining);
-                remaining = 0;
-            }
-            else
-            {
-                remaining -= size;
-            }
-        }
-        return true;
-    }
-
-    std::int64_t
-    ByteCount() const override
-    {
-        std::lock_guard lock(mutex_);
-        auto count = byte_count_;
-        if (current_)
-            count += static_cast<std::int64_t>(current_->size() - backup_);
-        return count;
-    }
-
-    void
-    finish(boost::system::error_code ec) noexcept
-    {
-        ConsumedHandler current_done;
-        ConsumedHandler slot_done;
-        {
-            std::lock_guard lock(mutex_);
-            if (closed_ && !current_ && !slot_)
-                return;
-            closed_ = true;
-            current_done = std::exchange(current_done_, {});
-            slot_done = std::exchange(slot_done_, {});
-            slot_.reset();
-            ready_.notify_all();
-        }
-        invoke(current_done, ec);
-        invoke(slot_done, ec);
-    }
-
-private:
-    mutable std::mutex mutex_;
-    std::condition_variable ready_;
-    std::shared_ptr<std::vector<std::uint8_t> const> slot_;
-    bool slot_final_ = false;
-    ConsumedHandler slot_done_;
-    std::shared_ptr<std::vector<std::uint8_t> const> current_;
-    bool current_final_ = false;
-    ConsumedHandler current_done_;
-    std::size_t backup_ = 0;
-    std::int64_t byte_count_ = 0;
-    bool closed_ = false;
-};
-
 LogPartition ValidationBuffer::log_("val-buffer", LogLevel::INHERIT);
 
 ValidationBuffer::ValidationBuffer(
@@ -317,13 +138,11 @@ ValidationBuffer::stop()
 void
 ValidationBuffer::seal_admission_and_join_worker()
 {
-    std::shared_ptr<catl::peer_client::PacketStreamSink> stream;
     {
         std::lock_guard publication_lock(publication_mutex_);
         std::lock_guard admission_lock(admission_mutex_);
         stopped_ = true;
         pending_unl_updates_ = 0;
-        stream = std::move(manifest_stream_);
         abandon_manifest_packets_locked();
         validation_drain_scheduled_ = false;
         validation_drain_priority_ = false;
@@ -336,8 +155,6 @@ ValidationBuffer::seal_admission_and_join_worker()
         {
         }
     }
-    if (stream)
-        stream->cancel();
     if (manifest_worker_)
         manifest_worker_->stop();
 }
@@ -531,145 +348,6 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 
     if (schedule_drain)
         schedule_validation_drain();
-}
-
-std::shared_ptr<catl::peer_client::PacketStreamSink>
-ValidationBuffer::open_packet_stream(
-    catl::peer_client::packet_header const& header)
-{
-    auto const manifest_type =
-        static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
-    if (header.type != manifest_type || header.compressed)
-        return {};
-
-    auto pipe = std::make_shared<ManifestStreamPipe>();
-    {
-        std::lock_guard publication_lock(publication_mutex_);
-        std::lock_guard admission_lock(admission_mutex_);
-        if (stopped_)
-            return {};
-        ++manifest_packets_received_;
-        if (validation_drain_priority_ || manifest_in_flight_)
-        {
-            ++manifest_packets_dropped_;
-            return {};
-        }
-        manifest_in_flight_ = true;
-        manifest_pending_admitted_ = false;
-        manifest_stream_ = pipe;
-        ++manifest_packets_admitted_;
-        ++trust_admission_generation_;
-    }
-
-    auto self = shared_from_this();
-    try
-    {
-        asio::post(strand_, [self, pipe]() {
-            {
-                std::lock_guard lock(self->admission_mutex_);
-                if (self->stopped_)
-                {
-                    pipe->cancel();
-                    return;
-                }
-            }
-            auto trusted = self->collector_.trusted_master_keys();
-            auto const protocol = self->protocol_;
-            auto const weak = self->weak_from_this();
-            auto service_work =
-                asio::make_work_guard(self->strand_.get_inner_executor());
-#ifdef XPRV_TESTING
-            auto parse_hook = self->manifest_parse_hook_for_test_;
-#endif
-            bool const accepted = self->manifest_worker_->post(
-                [weak,
-                 pipe,
-                 protocol,
-                 trusted = std::move(trusted),
-                 service_work = std::move(service_work)
-#ifdef XPRV_TESTING
-                     ,
-                 parse_hook = std::move(parse_hook)
-#endif
-            ]() mutable {
-                    ValidationCollector::ManifestPacketResult parsed;
-                    try
-                    {
-#ifdef XPRV_TESTING
-                        if (parse_hook)
-                            parse_hook();
-#endif
-                        parsed =
-                            ValidationCollector::parse_trusted_manifests_stream(
-                                *pipe, trusted, *protocol);
-                    }
-                    catch (...)
-                    {
-                    }
-                    pipe->finish({});
-
-                    auto self = weak.lock();
-                    if (!self)
-                        return;
-                    try
-                    {
-                        asio::post(
-                            self->strand_,
-                            [self, parsed = std::move(parsed)]() mutable {
-                                bool schedule_drain = false;
-                                {
-                                    std::lock_guard publication_lock(
-                                        self->publication_mutex_);
-                                    bool apply = false;
-                                    {
-                                        std::lock_guard admission_lock(
-                                            self->admission_mutex_);
-                                        apply = !self->stopped_;
-                                    }
-                                    if (apply)
-                                    {
-                                        PLOGD(
-                                            ValidationBuffer::log_,
-                                            "[",
-                                            self->net_label_,
-                                            "] streamed manifests: ",
-                                            parsed.total_entries,
-                                            " entries -> ",
-                                            parsed.trusted_entries,
-                                            " trusted, ",
-                                            parsed.manifests.size(),
-                                            " verified");
-                                        self->collector_.apply_peer_manifests(
-                                            std::move(parsed.manifests));
-                                    }
-                                    self->manifest_stream_.reset();
-                                    (void)self->finish_manifest_packet_locked(
-                                        schedule_drain);
-                                }
-                                if (schedule_drain)
-                                    self->schedule_validation_drain();
-                            });
-                    }
-                    catch (...)
-                    {
-                        self->finish_manifest_packet();
-                    }
-                    service_work.reset();
-                });
-            if (!accepted)
-            {
-                pipe->cancel();
-                self->finish_manifest_packet();
-            }
-        });
-    }
-    catch (...)
-    {
-        pipe->cancel();
-        finish_manifest_packet();
-        return {};
-    }
-    return pipe;
 }
 
 void
@@ -1054,7 +732,6 @@ ValidationBuffer::finish_manifest_packet_locked(bool& schedule_drain)
     schedule_drain = false;
     {
         std::lock_guard admission_lock(admission_mutex_);
-        manifest_stream_.reset();
         if (stopped_)
         {
             abandon_manifest_packets_locked();

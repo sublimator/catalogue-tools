@@ -1,6 +1,5 @@
 #pragma once
 
-#include "connection-types.h"
 #include "node-transport.h"
 #include "types.h"
 
@@ -132,11 +131,6 @@ public:
 
     virtual void
     set_unsolicited_handler(UnsolicitedHandler handler) = 0;
-
-    virtual void
-    set_packet_stream_factory(PacketStreamFactory)
-    {
-    }
 
     virtual void
     set_node_response_handler(NodeResponseHandler handler) = 0;

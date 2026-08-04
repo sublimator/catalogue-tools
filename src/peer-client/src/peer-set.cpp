@@ -1053,29 +1053,6 @@ PeerSet::set_unsolicited_handler(UnsolicitedHandler handler)
     });
 }
 
-void
-PeerSet::set_packet_stream_factory(PacketStreamFactory factory)
-{
-    {
-        std::lock_guard lock(unsolicited_handler_mutex_);
-        packet_stream_factory_ = std::move(factory);
-    }
-
-    auto self = shared_from_this();
-    asio::post(strand_, [self]() {
-        PacketStreamFactory current;
-        {
-            std::lock_guard lock(self->unsolicited_handler_mutex_);
-            current = self->packet_stream_factory_;
-        }
-        for (auto& [_, entry] : self->connections_)
-        {
-            if (entry.session)
-                entry.session->set_packet_stream_factory(current);
-        }
-    });
-}
-
 std::int64_t
 PeerSet::now_unix()
 {
@@ -2902,7 +2879,6 @@ PeerSet::try_connect_on_strand(
         {
             std::lock_guard lock(unsolicited_handler_mutex_);
             connect_opts.unsolicited_handler = unsolicited_handler_;
-            connect_opts.packet_stream_factory = packet_stream_factory_;
         }
         // Mint this candidate's instance identity before any handler can
         // fire. The generation travels both in terminal closures and in the
@@ -4476,13 +4452,11 @@ PeerSet::wait_for_covering_peer_on_strand(
                << ", in_flight=" << targeted_in_flight
                << ", connected=" << connections_.size()
                << ", remaining=" << remaining_secs << 's';
-        //@@authority transition=prv.T0226 status=provisional scope=statement
-        //bind=emit_status@5c5110c03f0c10b2
+        //@@authority transition=prv.T0226 status=provisional scope=statement bind=emit_status@5c5110c03f0c10b2
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_history_search_progress_and_latch_zero_if_exhausted
-        catl::core::emit_status(
-            status.str());  //@@authority-target ids=prv.T0226
+        catl::core::emit_status(status.str()); //@@authority-target ids=prv.T0226
     };
     auto emit_terminal_zero_progress = [&]() {
         if (!zero_countdown_published)
@@ -4547,12 +4521,11 @@ PeerSet::wait_for_covering_peer_on_strand(
     emit_search_progress(start);
 
     auto publish_no_covering_peer_after_zero = [&]() {
-        //@@authority transition=prv.T0227 status=provisional scope=statement
-        //bind=expression_statement@14b56be20164f4b7
+        //@@authority transition=prv.T0227 status=provisional scope=statement bind=expression_statement@14b56be20164f4b7
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=peer_set_strand touches=prv.S0077
         // label=establish_zero_countdown_before_no_covering_peer_status
-        emit_terminal_zero_progress();  //@@authority-target ids=prv.T0227
+        emit_terminal_zero_progress(); //@@authority-target ids=prv.T0227
         cleanup.clean_now();
         auto const elapsed_secs =
             std::chrono::duration_cast<std::chrono::seconds>(
@@ -4589,13 +4562,11 @@ PeerSet::wait_for_covering_peer_on_strand(
                << ": no covering peer after " << elapsed_secs
                << "s; candidates=" << selected_candidates.size() << '/'
                << options_.max_targeted_connect_attempts;
-        //@@authority transition=prv.T0228 status=provisional scope=statement
-        //bind=emit_status@5c5110c03f0c10b2
+        //@@authority transition=prv.T0228 status=provisional scope=statement bind=emit_status@5c5110c03f0c10b2
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_no_covering_peer_status_after_zero_countdown
-        catl::core::emit_status(
-            status.str());  //@@authority-target ids=prv.T0228
+        catl::core::emit_status(status.str()); //@@authority-target ids=prv.T0228
     };
 
     PLOGI(

@@ -7,8 +7,6 @@
 
 #include "ripple.pb.h"
 
-#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
-
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
 
@@ -202,40 +200,6 @@ TEST(ValidationCollector, ManifestPacketVerifiesOneCandidatePerTrustedMaster)
     ASSERT_EQ(parsed.manifests.size(), 1u);
     EXPECT_EQ(
         parsed.manifests.front().master_key_hex(), manifest.master_key_hex());
-}
-
-TEST(ValidationCollector, ManifestStreamAcceptsEveryChunkBoundary)
-{
-    auto const xrpl_protocol = test_protocol();
-    auto const anchor = load_anchor_fixture();
-    std::string const blob_text(anchor.blob.begin(), anchor.blob.end());
-    auto const blob = boost::json::parse(blob_text).as_object();
-    auto const& first = blob.at("validators").as_array().front().as_object();
-    auto const raw =
-        catl::base64_decode(std::string(first.at("manifest").as_string()));
-    auto const manifest = catl::vl::parse_manifest(raw);
-
-    protocol::TMManifests packet;
-    for (int i = 0; i < 3; ++i)
-        packet.add_list()->set_stobject(std::string(raw.begin(), raw.end()));
-    std::string bytes;
-    ASSERT_TRUE(packet.SerializeToString(&bytes));
-
-    for (int const block_size : {1, 2, 3, 7, 64})
-    {
-        google::protobuf::io::ArrayInputStream input(
-            bytes.data(), static_cast<int>(bytes.size()), block_size);
-        auto const parsed =
-            xprv::ValidationCollector::parse_trusted_manifests_stream(
-                input, {manifest.master_key_hex()}, xrpl_protocol);
-        EXPECT_EQ(parsed.total_entries, 3u) << block_size;
-        EXPECT_EQ(parsed.trusted_entries, 3u) << block_size;
-        ASSERT_EQ(parsed.manifests.size(), 1u) << block_size;
-        EXPECT_EQ(
-            parsed.manifests.front().master_key_hex(),
-            manifest.master_key_hex())
-            << block_size;
-    }
 }
 
 TEST(ValidationCollector, PeerManifestRejectsCrossValidatorKeyReuse)

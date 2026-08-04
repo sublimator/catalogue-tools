@@ -13,10 +13,6 @@
 
 #include "ripple.pb.h"
 
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
-#include <google/protobuf/wire_format_lite.h>
-
 #include <algorithm>
 #include <iomanip>
 #include <optional>
@@ -730,66 +726,68 @@ ValidationCollector::parse_trusted_manifests_packet(
     std::set<std::string> const& trusted_master_keys,
     catl::xdata::Protocol const& protocol)
 {
-    google::protobuf::io::ArrayInputStream input(
-        data.data(), static_cast<int>(data.size()));
-    return parse_trusted_manifests_stream(input, trusted_master_keys, protocol);
-}
-
-ValidationCollector::ManifestPacketResult
-ValidationCollector::parse_trusted_manifests_stream(
-    google::protobuf::io::ZeroCopyInputStream& source,
-    std::set<std::string> const& trusted_master_keys,
-    catl::xdata::Protocol const& protocol)
-{
     ManifestPacketResult result;
+    if (trusted_master_keys.empty())
+        return result;
 
     struct Candidate
     {
         std::uint32_t sequence = 0;
-        std::vector<std::uint8_t> raw;
+        std::span<const std::uint8_t> raw;
         bool ambiguous = false;
     };
     std::map<std::string, Candidate> candidates;
-    google::protobuf::io::CodedInputStream input(&source);
-    constexpr std::uint32_t kListTag = (1u << 3) | 2u;
-    constexpr std::uint32_t kMaxManifestEntryBytes = 1024u * 1024u;
+    std::span<const std::uint8_t> const packet(data.data(), data.size());
 
     try
     {
-        for (;;)
+        std::size_t pos = 0;
+        while (pos < packet.size())
         {
-            auto const tag = input.ReadTag();
-            if (tag == 0)
-                break;
-            if (tag != kListTag)
+            auto const tag = catl::shamap::leb128_decode(packet, pos);
+            auto const wire = static_cast<std::uint32_t>(tag & 0x7u);
+            bool const is_list = (tag >> 3) == 1 && wire == 2;
+
+            if (!is_list)
             {
-                if (!google::protobuf::internal::WireFormatLite::SkipField(
-                        &input, tag))
+                if (wire == 0)
+                    (void)catl::shamap::leb128_decode(packet, pos);
+                else if (wire == 2)
+                {
+                    auto const len = catl::shamap::leb128_decode(packet, pos);
+                    if (len > packet.size() - pos)
+                        break;
+                    pos += len;
+                }
+                else if (wire == 5 && packet.size() - pos >= 4)
+                    pos += 4;
+                else if (wire == 1 && packet.size() - pos >= 8)
+                    pos += 8;
+                else
                     break;
                 continue;
             }
 
-            std::uint32_t entry_len = 0;
-            if (!input.ReadVarint32(&entry_len))
+            auto const entry_len = catl::shamap::leb128_decode(packet, pos);
+            if (entry_len > packet.size() - pos)
                 break;
-            if (entry_len > kMaxManifestEntryBytes)
-            {
-                if (!input.Skip(entry_len))
-                    break;
-                continue;
-            }
+            std::span<const std::uint8_t> const entry(
+                packet.data() + pos, entry_len);
+            pos += entry_len;
 
-            auto const limit = input.PushLimit(static_cast<int>(entry_len));
-            protocol::TMManifest entry;
-            bool const parsed = entry.ParseFromCodedStream(&input) &&
-                input.ConsumedEntireMessage();
-            input.PopLimit(limit);
-            if (!parsed || !entry.has_stobject())
+            std::size_t entry_pos = 0;
+            if (entry.empty())
                 continue;
-
-            auto const& raw = entry.stobject();
+            auto const entry_tag =
+                catl::shamap::leb128_decode(entry, entry_pos);
+            if ((entry_tag >> 3) != 1 || (entry_tag & 0x7u) != 2)
+                continue;
+            auto const object_len =
+                catl::shamap::leb128_decode(entry, entry_pos);
+            if (object_len > entry.size() - entry_pos)
+                continue;
             std::span<const std::uint8_t> const object(
-                reinterpret_cast<std::uint8_t const*>(raw.data()), raw.size());
+                entry.data() + entry_pos, object_len);
             ++result.total_entries;
 
             struct IdentityVisitor
@@ -846,17 +844,13 @@ ValidationCollector::parse_trusted_manifests_stream(
                 continue;
             ++result.trusted_entries;
 
-            std::vector<std::uint8_t> owned(object.begin(), object.end());
             auto [it, inserted] = candidates.try_emplace(
-                master, Candidate{identity.sequence, std::move(owned), false});
+                master, Candidate{identity.sequence, object, false});
             if (inserted || identity.sequence < it->second.sequence)
                 continue;
             if (identity.sequence > it->second.sequence)
             {
-                it->second = Candidate{
-                    identity.sequence,
-                    std::vector<std::uint8_t>(object.begin(), object.end()),
-                    false};
+                it->second = Candidate{identity.sequence, object, false};
                 continue;
             }
 
@@ -880,9 +874,7 @@ ValidationCollector::parse_trusted_manifests_stream(
             continue;
         try
         {
-            auto manifest =
-                catl::vl::parse_manifest(std::span<const std::uint8_t>(
-                    candidate.raw.data(), candidate.raw.size()));
+            auto manifest = catl::vl::parse_manifest(candidate.raw);
             if (manifest.sequence != candidate.sequence ||
                 manifest.master_key_hex() != master ||
                 !verify_manifest(manifest, protocol))

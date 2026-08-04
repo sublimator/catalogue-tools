@@ -19,10 +19,6 @@
 #include <utility>
 #include <vector>
 
-namespace google::protobuf::io {
-class ZeroCopyInputStream;
-}
-
 namespace xprv {
 
 class ValidationCollector
@@ -131,12 +127,6 @@ public:
     static ManifestPacketResult
     parse_trusted_manifests_packet(
         std::vector<uint8_t> const& data,
-        std::set<std::string> const& trusted_master_keys,
-        catl::xdata::Protocol const& protocol);
-
-    static ManifestPacketResult
-    parse_trusted_manifests_stream(
-        google::protobuf::io::ZeroCopyInputStream& input,
         std::set<std::string> const& trusted_master_keys,
         catl::xdata::Protocol const& protocol);
 

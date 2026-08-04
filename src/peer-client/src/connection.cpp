@@ -1092,26 +1092,12 @@ peer_connection::handle_http_response(const connection_handler& handler)
 }
 
 void
-peer_connection::start_read(
-    packet_handler handler,
-    PacketStreamFactory stream_factory)
+peer_connection::start_read(packet_handler handler)
 {
     if (physical_phase_ != PhysicalPhase::open)
         return;
     packet_handler_ = std::move(handler);
-    stream_factory_ = std::move(stream_factory);
     async_read_header();
-}
-
-void
-peer_connection::set_packet_stream_factory(PacketStreamFactory factory)
-{
-    asio::post(
-        strand_,
-        [self = shared_from_this(), factory = std::move(factory)]() mutable {
-            if (self->physical_phase_ == PhysicalPhase::open)
-                self->stream_factory_ = std::move(factory);
-        });
 }
 
 void
@@ -1313,29 +1299,6 @@ peer_connection::read_or_drain_payload()
     // to a peer-selected size, then continue reading subsequent peer traffic.
     if (should_drain_manifest_payload(current_header_))
     {
-        if (!current_header_.compressed && stream_factory_)
-        {
-            try
-            {
-                active_stream_ = stream_factory_(current_header_);
-            }
-            catch (...)
-            {
-                active_stream_.reset();
-            }
-            if (active_stream_)
-            {
-                PLOGI(
-                    log_,
-                    remote_endpoint(),
-                    " streaming manifest frame: wire_payload_size=",
-                    payload_size,
-                    " chunk_limit=65536");
-                stream_payload(payload_size);
-                return;
-            }
-        }
-
         // Optional manifest history is consumed raw, without inflating or
         // reserving the peer-selected size in the process-wide buffer budget.
         // This branch must precede the general frame cap: real XRPL peers can
@@ -1513,121 +1476,6 @@ peer_connection::handle_read_payload(
 
     // Continue reading
     async_read_header();
-}
-
-void
-peer_connection::stream_payload(std::size_t remaining)
-{
-    if (physical_phase_ != PhysicalPhase::open || !active_stream_)
-        return;
-    if (remaining == 0)
-    {
-        active_stream_.reset();
-        async_read_header();
-        return;
-    }
-
-    constexpr std::size_t kStreamChunk = 64u * 1024;
-    auto const chunk_size = std::min(remaining, kStreamChunk);
-    auto chunk = std::make_shared<std::vector<std::uint8_t>>(chunk_size);
-    try
-    {
-        initiate_transport_operation(
-            TransportOperationKind::payload_drain,
-            [self = shared_from_this(),
-             remaining,
-             chunk_size,
-             chunk = std::move(chunk)](TransportOperationId read_id) mutable {
-                auto const buffer = asio::buffer(*chunk);
-                test_read_completion completion = [self,
-                                                   remaining,
-                                                   chunk_size,
-                                                   chunk = std::move(chunk),
-                                                   read_id](
-                                                      boost::system::error_code
-                                                          ec,
-                                                      std::size_t n) mutable {
-                    TransportOperationCompletion read_complete{
-                        self.get(), read_id};
-                    if (self->physical_phase_ != PhysicalPhase::open)
-                        return;
-                    if (ec || n != chunk_size)
-                    {
-                        if (!ec)
-                            ec = asio::error::message_size;
-                        if (self->active_stream_)
-                            self->active_stream_->cancel();
-                        self->active_stream_.reset();
-                        if (ec != asio::error::operation_aborted)
-                        {
-                            self->note_connect_failure(
-                                "manifest stream read", ec);
-                            self->fail_and_close(ec);
-                        }
-                        return;
-                    }
-
-                    auto const final = n == remaining;
-                    auto const immutable = std::const_pointer_cast<
-                        std::vector<std::uint8_t> const>(chunk);
-                    auto sink = self->active_stream_;
-                    sink->consume(
-                        immutable,
-                        final,
-                        [weak = self->weak_from_this(), next = remaining - n](
-                            boost::system::error_code consumed_ec) noexcept {
-                            if (auto locked = weak.lock())
-                            {
-                                try
-                                {
-                                    asio::post(
-                                        locked->strand_,
-                                        [locked, consumed_ec, next]() {
-                                            if (locked->physical_phase_ !=
-                                                PhysicalPhase::open)
-                                                return;
-                                            if (consumed_ec)
-                                            {
-                                                if (locked->active_stream_)
-                                                    locked->active_stream_
-                                                        ->cancel();
-                                                locked->active_stream_.reset();
-                                                locked->drain_payload(next);
-                                                return;
-                                            }
-                                            locked->stream_payload(next);
-                                        });
-                                }
-                                catch (...)
-                                {
-                                    locked->close();
-                                }
-                            }
-                        });
-                };
-                if (self->read_initiator_for_test_)
-                {
-                    self->read_initiator_for_test_(
-                        test_read_stage::payload_drain,
-                        buffer,
-                        std::move(completion));
-                }
-                else
-                {
-                    asio::async_read(
-                        *self->socket_, buffer, std::move(completion));
-                }
-            });
-    }
-    catch (...)
-    {
-        if (active_stream_)
-            active_stream_->cancel();
-        active_stream_.reset();
-        auto const start_error = current_exception_error();
-        note_connect_failure("manifest stream initiation", start_error);
-        fail_and_close(start_error);
-    }
 }
 
 void
@@ -2515,10 +2363,6 @@ peer_connection::settle_and_close(
     // capture shared_ptr<PeerClient> which holds shared_ptr<peer_connection>.
     // Taken by move so the cycle is broken before the callback runs, and so a
     // re-entrant teardown cannot fire the same disconnect twice.
-    if (active_stream_)
-        active_stream_->cancel();
-    active_stream_.reset();
-    stream_factory_ = nullptr;
     packet_handler_ = nullptr;
     auto disconnect = std::move(disconnect_handler_);
     disconnect_handler_ = nullptr;

@@ -44,9 +44,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
-#include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 using namespace catl::peer_client;
@@ -207,6 +205,8 @@ struct ReadHarness
     std::vector<InFlight> in_flight;
 
     int packet_calls = 0;
+    packet_header last_header{};
+    std::vector<std::uint8_t> last_payload;
     bool close_in_packet_handler = false;
     bool drained_inside_packet_handler = false;
 
@@ -229,16 +229,19 @@ struct ReadHarness
     void
     start()
     {
-        conn->start_read(
-            [this](packet_header const&, std::vector<std::uint8_t> const&) {
-                ++packet_calls;
-                if (close_in_packet_handler)
-                {
-                    conn->close();
-                    drained_inside_packet_handler =
-                        conn->physical_transport_drained_for_test();
-                }
-            });
+        conn->start_read([this](
+                             packet_header const& header,
+                             std::vector<std::uint8_t> const& payload) {
+            ++packet_calls;
+            last_header = header;
+            last_payload = payload;
+            if (close_in_packet_handler)
+            {
+                conn->close();
+                drained_inside_packet_handler =
+                    conn->physical_transport_drained_for_test();
+            }
+        });
     }
 
     void
@@ -276,6 +279,30 @@ struct ReadHarness
         asio::post(strand, [completion, ec, bytes] { completion(ec, bytes); });
         io.restart();
         io.run();
+    }
+
+    bool
+    drain_body_until_header(std::size_t& body_bytes, std::size_t& max_chunk)
+    {
+        body_bytes = 0;
+        max_chunk = 0;
+        for (;;)
+        {
+            if (in_flight.empty())
+                return false;
+            auto const index = in_flight.size() - 1;
+            if (in_flight[index].stage ==
+                peer_connection::test_read_stage::header)
+                return true;
+            if (in_flight[index].stage !=
+                peer_connection::test_read_stage::payload_drain)
+                return false;
+            auto const bytes = in_flight[index].buffer.size();
+            max_chunk = std::max(max_chunk, bytes);
+            fill(index, 0xCC);
+            complete_on_strand(index, {}, bytes);
+            body_bytes += bytes;
+        }
     }
 
     bool
@@ -1081,282 +1108,15 @@ TEST(ConnectionWriteLifecycle, DeliberateCloseKeepsItsOwnQuietDisposition)
     EXPECT_EQ(h.handler_calls[0], asio::error::operation_aborted);
 }
 
-// ─── Manifest stream: consumer abort drains remainder, next header parses ───
-
-namespace {
-
-/// Sink that refuses every consume. Models ValidationBuffer seal/cancel or a
-/// closed pipe: transport must not fail_and_close; it must drain the unread
-/// body and resume the header loop.
-class AbortingStreamSink final : public PacketStreamSink
-{
-public:
-    int consume_calls = 0;
-    int cancel_calls = 0;
-
-    void
-    consume(
-        std::shared_ptr<std::vector<std::uint8_t> const> /*chunk*/,
-        bool /*final*/,
-        ConsumedHandler on_consumed) override
-    {
-        ++consume_calls;
-        if (on_consumed)
-            on_consumed(asio::error::operation_aborted);
-    }
-
-    void
-    cancel() noexcept override
-    {
-        ++cancel_calls;
-    }
-};
-
-/// Sink that acks every chunk immediately (success). Used for full-frame stream
-/// smoke without retaining the body.
-class AckingStreamSink final : public PacketStreamSink
-{
-public:
-    int consume_calls = 0;
-    std::size_t bytes_acked = 0;
-
-    void
-    consume(
-        std::shared_ptr<std::vector<std::uint8_t> const> chunk,
-        bool /*final*/,
-        ConsumedHandler on_consumed) override
-    {
-        ++consume_calls;
-        if (chunk)
-            bytes_acked += chunk->size();
-        if (on_consumed)
-            on_consumed({});
-    }
-
-    void
-    cancel() noexcept override
-    {
-    }
-};
-
-/// Read harness with an optional packet-stream factory and packet capture.
-struct StreamReadHarness
-{
-    asio::io_context io;
-    asio::ssl::context ssl{asio::ssl::context::tlsv12_client};
-    asio::strand<asio::io_context::executor_type> strand{
-        asio::make_strand(io.get_executor())};
-    std::shared_ptr<peer_connection> conn;
-
-    struct InFlight
-    {
-        peer_connection::test_read_stage stage;
-        asio::mutable_buffer buffer;
-        peer_connection::test_read_completion complete;
-    };
-    std::vector<InFlight> in_flight;
-
-    int packet_calls = 0;
-    packet_header last_header{};
-    std::vector<std::uint8_t> last_payload;
-
-    StreamReadHarness()
-    {
-        peer_config config;
-        conn =
-            std::make_shared<peer_connection>(strand, ssl, std::move(config));
-        boost::system::error_code ec;
-        conn->socket().lowest_layer().open(boost::asio::ip::tcp::v4(), ec);
-        conn->set_read_initiator_for_test(
-            [this](
-                peer_connection::test_read_stage stage,
-                asio::mutable_buffer buffer,
-                peer_connection::test_read_completion complete) {
-                in_flight.push_back({stage, buffer, std::move(complete)});
-            });
-    }
-
-    void
-    start(PacketStreamFactory stream_factory)
-    {
-        conn->start_read(
-            [this](
-                packet_header const& header,
-                std::vector<std::uint8_t> const& payload) {
-                ++packet_calls;
-                last_header = header;
-                last_payload = payload;
-            },
-            std::move(stream_factory));
-    }
-
-    void
-    write_header(
-        std::size_t index,
-        std::uint32_t payload_size,
-        packet_type type)
-    {
-        ASSERT_LT(index, in_flight.size());
-        ASSERT_EQ(
-            in_flight[index].stage, peer_connection::test_read_stage::header);
-        ASSERT_GE(in_flight[index].buffer.size(), 6u);
-        auto* bytes =
-            static_cast<std::uint8_t*>(in_flight[index].buffer.data());
-        catl::common::put_uint32_be(bytes, payload_size);
-        auto const type_value = static_cast<std::uint16_t>(type);
-        bytes[4] = static_cast<std::uint8_t>(type_value >> 8);
-        bytes[5] = static_cast<std::uint8_t>(type_value & 0xFF);
-    }
-
-    void
-    fill(std::size_t index, std::uint8_t value)
-    {
-        auto* bytes =
-            static_cast<std::uint8_t*>(in_flight[index].buffer.data());
-        std::fill_n(bytes, in_flight[index].buffer.size(), value);
-    }
-
-    void
-    complete_on_strand(
-        std::size_t index,
-        boost::system::error_code ec,
-        std::size_t bytes)
-    {
-        auto completion = in_flight[index].complete;
-        asio::post(strand, [completion, ec, bytes] { completion(ec, bytes); });
-        io.restart();
-        io.run();
-    }
-
-    /// Drive every outstanding payload_drain initiation to success until the
-    /// connection re-arms a header read. Fills body_bytes / max_chunk.
-    /// Returns false if the stage sequence is not stream/drain body → header.
-    bool
-    complete_body_drains_until_header(
-        std::size_t& body_bytes,
-        std::size_t& max_chunk)
-    {
-        body_bytes = 0;
-        max_chunk = 0;
-        for (;;)
-        {
-            if (in_flight.empty())
-                return false;
-            auto const index = in_flight.size() - 1;
-            if (in_flight[index].stage ==
-                peer_connection::test_read_stage::header)
-                return true;
-            if (in_flight[index].stage !=
-                peer_connection::test_read_stage::payload_drain)
-                return false;
-            auto const n = in_flight[index].buffer.size();
-            max_chunk = std::max(max_chunk, n);
-            fill(index, 0xCC);
-            complete_on_strand(index, {}, n);
-            body_bytes += n;
-        }
-    }
-
-    bool
-    socket_open() const
-    {
-        return conn->socket().lowest_layer().is_open();
-    }
-};
-
-}  // namespace
-
 TEST(
     ConnectionWriteLifecycle,
-    ManifestStreamConsumerAbortDrainsExactRemainderThenParsesNextHeader)
+    OversizedManifestDrainsBoundedlyThenParsesSuccessorFrame)
 {
-    // Acceptance control for da92300 successor:
-    // consumer refusal must drain exactly the unread body and re-arm headers
-    // without fail_and_close. A following small ping must dispatch normally.
-    constexpr std::uint32_t kManifestBody =
-        kMaxBufferedManifestBytes + 1000u;  // force stream/drain path
-    constexpr std::uint32_t kPingBody = 4u;
-    constexpr std::uint8_t kPingFill = 0x5A;
-
-    auto aborting = std::make_shared<AbortingStreamSink>();
-    StreamReadHarness h;
-    h.start([aborting, kManifestBody](packet_header const& header) {
-        EXPECT_EQ(
-            header.type, static_cast<std::uint16_t>(packet_type::manifests));
-        EXPECT_FALSE(header.compressed);
-        EXPECT_EQ(header.payload_size, kManifestBody);
-        return aborting;
-    });
-
-    ASSERT_EQ(h.in_flight.size(), 1u);
-    h.write_header(0, kManifestBody, packet_type::manifests);
-    h.complete_on_strand(0, {}, 6);
-
-    std::size_t body_bytes = 0;
-    std::size_t max_chunk = 0;
-    // First payload_drain is the stream chunk the sink refuses; stream and pure
-    // drain share that stage, so capture size before driving the body loop.
-    ASSERT_FALSE(h.in_flight.empty());
-    ASSERT_EQ(
-        h.in_flight.back().stage,
-        peer_connection::test_read_stage::payload_drain);
-    auto const first_stream_chunk = h.in_flight.back().buffer.size();
-    ASSERT_TRUE(h.complete_body_drains_until_header(body_bytes, max_chunk));
-    EXPECT_EQ(body_bytes, kManifestBody)
-        << "streamed + drained body must equal the wire payload size exactly";
-    EXPECT_EQ(first_stream_chunk, 64u * 1024u);
-    EXPECT_EQ(
-        body_bytes - first_stream_chunk,
-        static_cast<std::size_t>(kManifestBody) - 64u * 1024u)
-        << "remainder after refused stream chunk must match wire body - chunk";
-    EXPECT_LE(max_chunk, 64u * 1024u)
-        << "no single body read may retain the peer-selected frame size";
-    EXPECT_EQ(aborting->consume_calls, 1);
-    EXPECT_GE(aborting->cancel_calls, 1)
-        << "production abort path must cancel the sink before remainder drain";
-    EXPECT_TRUE(h.socket_open())
-        << "consumer abort must not tear down the peer";
-    EXPECT_EQ(h.packet_calls, 0)
-        << "oversized streamed manifests are not dispatched as packets";
-
-    // Next header on the same connection must parse and deliver.
-    auto const header_index = h.in_flight.size() - 1;
-    h.write_header(header_index, kPingBody, packet_type::ping);
-    h.complete_on_strand(header_index, {}, 6);
-
-    ASSERT_EQ(
-        h.in_flight.back().stage, peer_connection::test_read_stage::payload);
-    auto const payload_index = h.in_flight.size() - 1;
-    h.fill(payload_index, kPingFill);
-    h.complete_on_strand(payload_index, {}, kPingBody);
-
-    EXPECT_EQ(h.packet_calls, 1);
-    EXPECT_EQ(
-        h.last_header.type, static_cast<std::uint16_t>(packet_type::ping));
-    EXPECT_EQ(h.last_header.payload_size, kPingBody);
-    ASSERT_EQ(h.last_payload.size(), kPingBody);
-    EXPECT_TRUE(std::all_of(
-        h.last_payload.begin(),
-        h.last_payload.end(),
-        [](std::uint8_t b) { return b == kPingFill; }));
-    EXPECT_TRUE(h.socket_open());
-}
-
-TEST(
-    ConnectionWriteLifecycle,
-    LargeManifestStreamAcksEntireBodyWithBoundedChunksThenParsesNextHeader)
-{
-    // Synthetic 82.7 MiB frame through the production stream path with a sink
-    // that acks immediately. Proves body byte accounting, 64 KiB chunk cap,
-    // and clean successor framing without allocating the full frame once.
-    // Synthetic ~82.7 MiB wire body (exact integer; not a float cast).
     constexpr std::uint32_t kManifestBody = 86'704'128u;
     constexpr std::uint32_t kPingBody = 8u;
-    constexpr std::uint8_t kPingFill = 0xA5;
 
-    auto acking = std::make_shared<AckingStreamSink>();
-    StreamReadHarness h;
-    h.start([acking](packet_header const&) { return acking; });
+    ReadHarness h;
+    h.start();
 
     ASSERT_EQ(h.in_flight.size(), 1u);
     h.write_header(0, kManifestBody, packet_type::manifests);
@@ -1364,31 +1124,26 @@ TEST(
 
     std::size_t body_bytes = 0;
     std::size_t max_chunk = 0;
-    ASSERT_TRUE(h.complete_body_drains_until_header(body_bytes, max_chunk));
+    ASSERT_TRUE(h.drain_body_until_header(body_bytes, max_chunk));
     EXPECT_EQ(body_bytes, kManifestBody);
-    EXPECT_EQ(acking->bytes_acked, kManifestBody);
     EXPECT_LE(max_chunk, 64u * 1024u);
-    EXPECT_GT(acking->consume_calls, 1);
-    EXPECT_TRUE(h.socket_open());
     EXPECT_EQ(h.packet_calls, 0);
+    EXPECT_TRUE(h.socket_open());
 
     auto const header_index = h.in_flight.size() - 1;
     h.write_header(header_index, kPingBody, packet_type::ping);
     h.complete_on_strand(header_index, {}, 6);
+
     auto const payload_index = h.in_flight.size() - 1;
     ASSERT_EQ(
         h.in_flight[payload_index].stage,
         peer_connection::test_read_stage::payload);
-    h.fill(payload_index, kPingFill);
+    h.fill(payload_index, 0xA5);
     h.complete_on_strand(payload_index, {}, kPingBody);
 
     EXPECT_EQ(h.packet_calls, 1);
     EXPECT_EQ(
         h.last_header.type, static_cast<std::uint16_t>(packet_type::ping));
-    ASSERT_EQ(h.last_payload.size(), kPingBody);
-    EXPECT_TRUE(std::all_of(
-        h.last_payload.begin(),
-        h.last_payload.end(),
-        [](std::uint8_t b) { return b == kPingFill; }));
+    EXPECT_EQ(h.last_payload, std::vector<std::uint8_t>(kPingBody, 0xA5));
     EXPECT_TRUE(h.socket_open());
 }

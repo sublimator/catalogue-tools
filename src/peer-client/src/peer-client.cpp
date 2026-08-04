@@ -873,7 +873,6 @@ PeerClient::connect(
         std::lock_guard lock(client->handler_mutex_);
         client->tracker_ = std::move(opts.tracker);
         client->unsolicited_handler_ = std::move(opts.unsolicited_handler);
-        client->packet_stream_factory_ = std::move(opts.packet_stream_factory);
     }
     client->connection_generation_ = opts.connection_generation;
     client->on_disconnect_ = std::move(opts.on_disconnect);
@@ -907,19 +906,6 @@ PeerClient::set_unsolicited_handler(UnsolicitedHandler handler)
 {
     std::lock_guard lock(handler_mutex_);
     unsolicited_handler_ = std::move(handler);
-}
-
-void
-PeerClient::set_packet_stream_factory(PacketStreamFactory factory)
-{
-    PacketStreamFactory installed;
-    {
-        std::lock_guard lock(handler_mutex_);
-        packet_stream_factory_ = std::move(factory);
-        installed = packet_stream_factory_;
-    }
-    if (connection_)
-        connection_->set_packet_stream_factory(std::move(installed));
 }
 
 void
@@ -1787,18 +1773,12 @@ PeerClient::on_connected(ReadyCallback on_ready)
     // Packet handler fires on the strand (socket is strand-aware).
     // Uses weak_ptr to avoid shared_ptr cycle:
     // peer_connection -> packet_handler_ -> PeerClient -> connection_
-    PacketStreamFactory stream_factory;
-    {
-        std::lock_guard lock(handler_mutex_);
-        stream_factory = packet_stream_factory_;
-    }
     connection_->start_read(
         [weak = weak_from_this()](
             packet_header const& header, std::vector<uint8_t> const& payload) {
             if (auto self = weak.lock())
                 self->on_packet(header, payload);
-        },
-        std::move(stream_factory));
+        });
 
     send_monitoring_status();
 }
@@ -3298,7 +3278,7 @@ PeerClient::get_tx_proof_path_on_strand(
             if (auto self = weak.lock())
             {
                 //@@authority transition=prv.T0205 status=provisional
-                // bind=expression_statement@71a1b1d7568d95d3
+                //bind=expression_statement@71a1b1d7568d95d3
                 // scope=statement owner=unresolved
                 // owner_hypothesis=peer_client commit=strand
                 // touches=prv.S0065
@@ -3412,7 +3392,7 @@ PeerClient::get_state_proof_path_on_strand(
             if (auto self = weak.lock())
             {
                 //@@authority transition=prv.T0206 status=provisional
-                // bind=expression_statement@f8a084d8a0a7f248
+                //bind=expression_statement@f8a084d8a0a7f248
                 // scope=statement owner=unresolved
                 // owner_hypothesis=peer_client commit=strand
                 // touches=prv.S0065
@@ -3505,7 +3485,7 @@ PeerClient::send_ping_request_on_strand(
             if (auto self = weak.lock())
             {
                 //@@authority transition=prv.T0207 status=provisional
-                // bind=expression_statement@0eea5f51802de08a
+                //bind=expression_statement@0eea5f51802de08a
                 // scope=statement owner=unresolved
                 // owner_hypothesis=peer_client commit=strand
                 // touches=prv.S0065
