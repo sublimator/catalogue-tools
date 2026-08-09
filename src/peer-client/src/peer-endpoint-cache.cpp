@@ -5,16 +5,93 @@
 #include <algorithm>
 #include <exception>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <sqlite3.h>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 
 namespace catl::peer_client {
 
 namespace {
 
 LogPartition log_("peer-cache", LogLevel::INHERIT);
+
+class SqliteError final : public std::runtime_error
+{
+public:
+    SqliteError(int code, std::string message)
+        : std::runtime_error(std::move(message)), code_(code)
+    {
+    }
+
+    int
+    code() const noexcept
+    {
+        return code_;
+    }
+
+private:
+    int code_;
+};
+
+[[noreturn]] void
+throw_sqlite(sqlite3* db, int code, std::string message = {})
+{
+    if (message.empty())
+        message = db ? sqlite3_errmsg(db) : "sqlite failure";
+    throw SqliteError(code, std::move(message));
+}
+
+bool
+current_failure_is_transient_sqlite() noexcept
+{
+    try
+    {
+        auto failure = std::current_exception();
+        if (!failure)
+            return false;
+        std::rethrow_exception(std::move(failure));
+    }
+    catch (SqliteError const& e)
+    {
+        auto const primary = e.code() & 0xff;
+        return primary == SQLITE_BUSY || primary == SQLITE_LOCKED;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+struct CacheRegistry
+{
+    std::mutex mutex;
+    std::unordered_map<std::string, std::weak_ptr<PeerEndpointCache>> caches;
+};
+
+CacheRegistry&
+cache_registry()
+{
+    static CacheRegistry registry;
+    return registry;
+}
+
+std::string
+canonical_cache_path(std::string const& path)
+{
+    if (path == ":memory:" || path.rfind("file:", 0) == 0)
+        return path;
+
+    std::error_code ec;
+    auto absolute = std::filesystem::absolute(path, ec);
+    if (ec)
+        absolute = std::filesystem::path(path);
+    auto canonical = std::filesystem::weakly_canonical(absolute, ec);
+    return (ec ? absolute.lexically_normal() : canonical).string();
+}
 
 std::optional<std::string>
 persistent_cache_endpoint(std::string const& endpoint)
@@ -53,7 +130,7 @@ exec_sql(sqlite3* db, char const* sql)
         {
             sqlite3_free(err);
         }
-        throw std::runtime_error(message);
+        throw_sqlite(db, rc, std::move(message));
     }
 }
 
@@ -65,7 +142,7 @@ public:
         auto const rc = sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr);
         if (rc != SQLITE_OK)
         {
-            throw std::runtime_error(sqlite3_errmsg(db));
+            throw_sqlite(db, rc);
         }
     }
 
@@ -120,7 +197,7 @@ void
 require_rows_complete(sqlite3* db, int rc)
 {
     if (rc != SQLITE_DONE)
-        throw std::runtime_error(sqlite3_errmsg(db));
+        throw_sqlite(db, rc);
 }
 
 //@@authority transition=prv.T0222 status=provisional scope=function
@@ -136,8 +213,9 @@ prune_network_rows(sqlite3* db, std::string_view table, uint32_t network_id)
             std::string(table) + " WHERE network_id = ?";
         Statement count(db, count_sql.c_str());
         sqlite3_bind_int(count.get(), 1, static_cast<int>(network_id));
-        if (sqlite3_step(count.get()) != SQLITE_ROW)
-            throw std::runtime_error(sqlite3_errmsg(db));
+        auto const rc = sqlite3_step(count.get());
+        if (rc != SQLITE_ROW)
+            throw_sqlite(db, rc);
         if (sqlite3_column_int64(count.get(), 0) <=
             static_cast<sqlite3_int64>(
                 PeerEndpointCache::max_endpoints_per_network))
@@ -178,8 +256,9 @@ prune_network_rows(sqlite3* db, std::string_view table, uint32_t network_id)
         2,
         static_cast<sqlite3_int64>(
             PeerEndpointCache::max_endpoints_per_network));
-    if (sqlite3_step(prune.get()) != SQLITE_DONE)
-        throw std::runtime_error(sqlite3_errmsg(db));
+    auto const rc = sqlite3_step(prune.get());
+    if (rc != SQLITE_DONE)
+        throw_sqlite(db, rc);
 }
 
 void
@@ -310,8 +389,9 @@ migrate_legacy_to_v3(sqlite3* db)
                     column + 1,
                     sqlite3_column_value(rows.get(), column));
             }
-            if (sqlite3_step(merge.get()) != SQLITE_DONE)
-                throw std::runtime_error(sqlite3_errmsg(db));
+            auto const merge_rc = sqlite3_step(merge.get());
+            if (merge_rc != SQLITE_DONE)
+                throw_sqlite(db, merge_rc);
             sqlite3_reset(merge.get());
             sqlite3_clear_bindings(merge.get());
         }
@@ -336,7 +416,25 @@ migrate_legacy_to_v3(sqlite3* db)
 std::shared_ptr<PeerEndpointCache>
 PeerEndpointCache::open(std::string const& path)
 {
-    return std::shared_ptr<PeerEndpointCache>(new PeerEndpointCache(path));
+    auto const canonical = canonical_cache_path(path);
+    if (canonical == ":memory:")
+        return std::shared_ptr<PeerEndpointCache>(
+            new PeerEndpointCache(canonical));
+
+    auto& registry = cache_registry();
+    std::lock_guard lock(registry.mutex);
+    if (auto found = registry.caches.find(canonical);
+        found != registry.caches.end())
+    {
+        if (auto existing = found->second.lock())
+            return existing;
+        registry.caches.erase(found);
+    }
+
+    auto cache =
+        std::shared_ptr<PeerEndpointCache>(new PeerEndpointCache(canonical));
+    registry.caches.emplace(canonical, cache);
+    return cache;
 }
 
 PeerEndpointCache::PeerEndpointCache(std::string path) : path_(std::move(path))
@@ -361,7 +459,7 @@ PeerEndpointCache::PeerEndpointCache(std::string path) : path_(std::move(path))
             sqlite3_close(db_);
             db_ = nullptr;
         }
-        throw std::runtime_error(message);
+        throw SqliteError(rc, std::move(message));
     }
 
     try
@@ -397,8 +495,9 @@ PeerEndpointCache::initialize_schema()
     int schema_version = 0;
     {
         Statement version(db_, "PRAGMA user_version");
-        if (sqlite3_step(version.get()) != SQLITE_ROW)
-            throw std::runtime_error(sqlite3_errmsg(db_));
+        auto const rc = sqlite3_step(version.get());
+        if (rc != SQLITE_ROW)
+            throw_sqlite(db_, rc);
         schema_version = sqlite3_column_int(version.get(), 0);
     }
 
@@ -591,7 +690,8 @@ PeerEndpointCache::load_bootstrap_candidates(
     }
     catch (...)
     {
-        const_cast<PeerEndpointCache*>(this)->disable();
+        if (!current_failure_is_transient_sqlite())
+            const_cast<PeerEndpointCache*>(this)->disable();
         throw;
     }
 }
@@ -665,7 +765,8 @@ PeerEndpointCache::load_covering_candidates(
     }
     catch (...)
     {
-        const_cast<PeerEndpointCache*>(this)->disable();
+        if (!current_failure_is_transient_sqlite())
+            const_cast<PeerEndpointCache*>(this)->disable();
         throw;
     }
 }
@@ -706,7 +807,8 @@ PeerEndpointCache::load_active_failures(uint32_t network_id) const
     }
     catch (...)
     {
-        const_cast<PeerEndpointCache*>(this)->disable();
+        if (!current_failure_is_transient_sqlite())
+            const_cast<PeerEndpointCache*>(this)->disable();
         throw;
     }
 }
@@ -723,16 +825,18 @@ PeerEndpointCache::count_endpoints(uint32_t network_id) const
             db_, "SELECT COUNT(*) FROM peer_endpoints WHERE network_id = ?");
         sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
 
-        if (sqlite3_step(stmt.get()) != SQLITE_ROW)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_ROW)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
 
         return static_cast<std::size_t>(sqlite3_column_int64(stmt.get(), 0));
     }
     catch (...)
     {
-        const_cast<PeerEndpointCache*>(this)->disable();
+        if (!current_failure_is_transient_sqlite())
+            const_cast<PeerEndpointCache*>(this)->disable();
         throw;
     }
 }
@@ -774,15 +878,17 @@ PeerEndpointCache::remember_discovered(
             stmt.get(), 2, cache_key->c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt.get(), 3, now_unix());
 
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_DONE)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
         prune_network_rows(db_, "peer_endpoints", network_id);
     }
     catch (...)
     {
-        disable();
+        if (!current_failure_is_transient_sqlite())
+            disable();
         throw;
     }
 }
@@ -825,15 +931,17 @@ PeerEndpointCache::remember_status(
             stmt.get(), 5, static_cast<sqlite3_int64>(status.current_seq));
         sqlite3_bind_int64(stmt.get(), 6, now_unix());
 
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_DONE)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
         prune_network_rows(db_, "peer_endpoints", network_id);
     }
     catch (...)
     {
-        disable();
+        if (!current_failure_is_transient_sqlite())
+            disable();
         throw;
     }
 }
@@ -881,15 +989,17 @@ PeerEndpointCache::remember_connect_success(
         sqlite3_bind_int64(stmt.get(), 6, now);
         sqlite3_bind_int64(stmt.get(), 7, now);
 
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_DONE)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
         prune_network_rows(db_, "peer_endpoints", network_id);
     }
     catch (...)
     {
-        disable();
+        if (!current_failure_is_transient_sqlite())
+            disable();
         throw;
     }
 }
@@ -927,15 +1037,17 @@ PeerEndpointCache::remember_connect_failure(
         sqlite3_bind_int64(stmt.get(), 3, now);
         sqlite3_bind_int64(stmt.get(), 4, now);
 
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_DONE)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
         prune_network_rows(db_, "peer_endpoints", network_id);
     }
     catch (...)
     {
-        disable();
+        if (!current_failure_is_transient_sqlite())
+            disable();
         throw;
     }
 }
@@ -968,15 +1080,17 @@ PeerEndpointCache::remember_seen_crawl(
             stmt.get(), 2, cache_key->c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt.get(), 3, now_unix());
 
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_DONE)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
         prune_network_rows(db_, "peer_endpoints", network_id);
     }
     catch (...)
     {
-        disable();
+        if (!current_failure_is_transient_sqlite())
+            disable();
         throw;
     }
 }
@@ -1009,15 +1123,17 @@ PeerEndpointCache::remember_seen_endpoints(
             stmt.get(), 2, cache_key->c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt.get(), 3, now_unix());
 
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_DONE)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
         prune_network_rows(db_, "peer_endpoints", network_id);
     }
     catch (...)
     {
-        disable();
+        if (!current_failure_is_transient_sqlite())
+            disable();
         throw;
     }
 }
@@ -1050,15 +1166,17 @@ PeerEndpointCache::remember_seen_redirect(
             stmt.get(), 2, cache_key->c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt.get(), 3, now_unix());
 
-        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        auto const rc = sqlite3_step(stmt.get());
+        if (rc != SQLITE_DONE)
         {
-            throw std::runtime_error(sqlite3_errmsg(db_));
+            throw_sqlite(db_, rc);
         }
         prune_network_rows(db_, "peer_endpoints", network_id);
     }
     catch (...)
     {
-        disable();
+        if (!current_failure_is_transient_sqlite())
+            disable();
         throw;
     }
 }

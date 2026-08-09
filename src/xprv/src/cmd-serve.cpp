@@ -19,6 +19,7 @@
 #include <memory>
 #include <pthread.h>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <sys/resource.h>
 #include <thread>
@@ -461,16 +462,8 @@ static std::shared_ptr<xprv::ProofEngine>
 make_engine(
     boost::asio::io_context& io,
     xprv::Config const& config,
-    uint32_t network_id)
+    xprv::NetworkConfig net_config)
 {
-    auto net_config = xprv::NetworkConfig::for_network(network_id);
-
-    // If this is the primary network, use any user-overridden endpoints
-    if (network_id == config.network_id)
-    {
-        net_config = xprv::to_network_config(config);
-    }
-
     auto engine = xprv::ProofEngine::create(io, std::move(net_config));
     if (config.no_cache)
         engine->set_cache_enabled(false);
@@ -496,6 +489,18 @@ cmd_serve()
     // server-side configuration.
     xprv::dump_config(config, std::cerr);
 
+    // Resolve and validate the complete engine set before raising limits,
+    // binding, opening caches, or starting any network work.
+    std::map<uint32_t, xprv::NetworkConfig> engine_configs;
+    if (config.enabled_networks.empty())
+        throw std::invalid_argument("enabled network list must not be empty");
+    for (auto network_id : config.enabled_networks)
+    {
+        engine_configs.emplace(
+            network_id,
+            xprv::resolve_engine_network_config(config, network_id));
+    }
+
     // Raise fd limit for server mode (only increase, never lower)
     if (config.fd_limit > 0)
     {
@@ -519,7 +524,7 @@ cmd_serve()
 
     // Create engines for all enabled networks
     std::map<uint32_t, std::shared_ptr<xprv::ProofEngine>> engines;
-    for (auto network_id : config.enabled_networks)
+    for (auto& [network_id, net_config] : engine_configs)
     {
         PLOGI(
             log_,
@@ -528,7 +533,7 @@ cmd_serve()
             " (",
             xprv::NetworkConfig::for_network(network_id).peer_host,
             ")");
-        engines[network_id] = make_engine(io, config, network_id);
+        engines[network_id] = make_engine(io, config, std::move(net_config));
     }
 
     xprv::HttpServerOptions http_opts;

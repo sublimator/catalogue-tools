@@ -8,6 +8,8 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
+#include <utility>
 
 // toml++ — header-only TOML parser
 #define TOML_EXCEPTIONS 1
@@ -350,6 +352,58 @@ to_network_config(Config const& config)
     nc.archival_range_threshold = config.archival_range_threshold;
     nc.fd_limit = config.fd_limit;
     return nc;
+}
+
+NetworkConfig
+resolve_engine_network_config(Config const& config, uint32_t network_id)
+{
+    if (config.enabled_networks.empty())
+        throw std::invalid_argument("enabled network list must not be empty");
+
+    std::unordered_set<uint32_t> enabled;
+    enabled.reserve(config.enabled_networks.size());
+    for (auto id : config.enabled_networks)
+    {
+        if (!enabled.insert(id).second)
+            throw std::invalid_argument(
+                "enabled network list contains duplicate id " +
+                std::to_string(id));
+    }
+    if (!enabled.contains(config.network_id))
+        throw std::invalid_argument(
+            "enabled network list does not contain primary network " +
+            std::to_string(config.network_id));
+    if (!enabled.contains(network_id))
+        throw std::invalid_argument(
+            "requested engine network is not enabled: " +
+            std::to_string(network_id));
+
+    auto resolved = NetworkConfig::for_network(network_id);
+    if (network_id == config.network_id)
+    {
+        resolved = to_network_config(config);
+        resolved.apply_defaults();
+    }
+
+    // Service policy is shared. Resolve the cache location once from the
+    // primary network so every engine opens the same canonical registry owner.
+    auto primary_defaults = NetworkConfig::for_network(config.network_id);
+    resolved.peer_cache_path = config.peer_cache_path.empty()
+        ? std::move(primary_defaults.peer_cache_path)
+        : config.peer_cache_path;
+    resolved.peers_server = {
+        config.peers_server.max_hub_peers,
+        config.peers_server.max_archival_peers,
+        config.peers_server.max_in_flight_connects,
+        config.peers_server.max_in_flight_crawls};
+    resolved.peers_cli = {
+        config.peers_cli.max_hub_peers,
+        config.peers_cli.max_archival_peers,
+        config.peers_cli.max_in_flight_connects,
+        config.peers_cli.max_in_flight_crawls};
+    resolved.archival_range_threshold = config.archival_range_threshold;
+    resolved.fd_limit = config.fd_limit;
+    return resolved;
 }
 
 void

@@ -49,6 +49,8 @@ public:
         bool connected_ok = false;    // we successfully connected
     };
 
+    /// Return the process-wide owner for a canonical file path. Network ids
+    /// partition rows inside that owner; :memory: remains private per call.
     static std::shared_ptr<PeerEndpointCache>
     open(std::string const& path);
 

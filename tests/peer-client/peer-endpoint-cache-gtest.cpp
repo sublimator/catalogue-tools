@@ -96,6 +96,91 @@ drain_io(boost::asio::io_context& io)
 
 }  // namespace
 
+TEST(PeerEndpointCache, CanonicalPathSharesOneProcessOwner)
+{
+    TempCachePath temp{"peer-endpoint-cache-owner"};
+    auto const absolute = std::filesystem::path(temp.string());
+    auto const aliased = absolute.parent_path() / "." / absolute.filename();
+
+    auto first = PeerEndpointCache::open(absolute.string());
+    auto second = PeerEndpointCache::open(aliased.string());
+
+    EXPECT_EQ(first.get(), second.get());
+    EXPECT_EQ(
+        first->path(), std::filesystem::weakly_canonical(absolute).string());
+}
+
+TEST(PeerEndpointCache, SharedOwnerSerializesAndPartitionsNetworks)
+{
+    TempCachePath temp{"peer-endpoint-cache-dual-network"};
+    auto xrpl = PeerEndpointCache::open(temp.string());
+    auto xahau = PeerEndpointCache::open(temp.string());
+    ASSERT_EQ(xrpl.get(), xahau.get());
+
+    std::thread xrpl_writer([&] {
+        for (std::size_t i = 0; i < 64; ++i)
+        {
+            xrpl->remember_status(
+                0,
+                "xrpl-" + std::to_string(i) + ".example.com:51235",
+                PeerStatus{
+                    .first_seq = 1, .last_seq = 100, .current_seq = 100});
+        }
+    });
+    std::thread xahau_writer([&] {
+        for (std::size_t i = 0; i < 64; ++i)
+        {
+            xahau->remember_status(
+                21337,
+                "xahau-" + std::to_string(i) + ".example.com:21337",
+                PeerStatus{
+                    .first_seq = 200, .last_seq = 300, .current_seq = 300});
+        }
+    });
+    xrpl_writer.join();
+    xahau_writer.join();
+
+    EXPECT_EQ(xrpl->count_endpoints(0), 64u);
+    EXPECT_EQ(xahau->count_endpoints(21337), 64u);
+    EXPECT_TRUE(xrpl->load_covering_candidates(0, 50, 64).size() == 64u);
+    EXPECT_TRUE(xahau->load_covering_candidates(21337, 250, 64).size() == 64u);
+    EXPECT_TRUE(xrpl->load_covering_candidates(0, 250, 64).empty());
+    EXPECT_TRUE(xahau->load_covering_candidates(21337, 50, 64).empty());
+}
+
+TEST(PeerEndpointCache, TransientBusyDoesNotDisableSharedOwner)
+{
+    TempCachePath temp{"peer-endpoint-cache-busy"};
+    auto cache = PeerEndpointCache::open(temp.string());
+
+    sqlite3* blocker = nullptr;
+    ASSERT_EQ(
+        sqlite3_open_v2(
+            temp.string().c_str(),
+            &blocker,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nullptr),
+        SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(blocker, "BEGIN EXCLUSIVE;", nullptr, nullptr, nullptr),
+        SQLITE_OK);
+
+    EXPECT_THROW(
+        cache->remember_discovered(0, "busy.example.com:51235"),
+        std::exception);
+    EXPECT_TRUE(cache->health().available);
+
+    ASSERT_EQ(
+        sqlite3_exec(blocker, "ROLLBACK;", nullptr, nullptr, nullptr),
+        SQLITE_OK);
+    sqlite3_close(blocker);
+
+    EXPECT_NO_THROW(
+        cache->remember_discovered(0, "recovered.example.com:51235"));
+    EXPECT_TRUE(cache->health().available);
+    EXPECT_EQ(cache->count_endpoints(0), 1u);
+}
+
 TEST(PeerEndpointCache, ConnectFailureClearsConnectedOkAndKeepsSourceFlags)
 {
     TempCachePath temp{"peer-endpoint-cache-flags"};

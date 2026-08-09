@@ -149,6 +149,14 @@ load_config(uint32_t network_id_hint = 0);
 NetworkConfig
 to_network_config(Config const& config);
 
+/// Resolve one engine from a validated multi-network service configuration.
+/// Network-specific endpoints and publisher identity apply only to the primary;
+/// pool policy and the one resolved peer-cache artifact apply to every engine.
+/// Throws std::invalid_argument for an empty/duplicate network set, a missing
+/// primary, or a requested network outside the enabled set.
+NetworkConfig
+resolve_engine_network_config(Config const& config, uint32_t network_id);
+
 /// Dump resolved config as TOML to a stream (cout, log, file, etc).
 void
 dump_config(Config const& config, std::ostream& os);
