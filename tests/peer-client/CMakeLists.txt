@@ -26,6 +26,10 @@ add_executable(peer-lifecycle-gtest peer-lifecycle-gtest.cpp)
 target_link_libraries(peer-lifecycle-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
 
+add_executable(peer-use-gtest peer-use-gtest.cpp)
+target_link_libraries(peer-use-gtest PRIVATE catl::peer-client
+                                             GTest::gtest_main)
+
 add_executable(node-cache-signal-gtest node-cache-signal-gtest.cpp)
 target_link_libraries(node-cache-signal-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
@@ -96,6 +100,7 @@ set(CATL_PEER_CLIENT_TEST_TARGETS
     peer-selector-gtest
     peer-set-pruning-gtest
     peer-lifecycle-gtest
+    peer-use-gtest
     node-cache-signal-gtest
     peer-session-interface-gtest
     node-credentials-gtest

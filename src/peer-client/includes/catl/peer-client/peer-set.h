@@ -16,7 +16,9 @@
 #include "peer-generation-pin.h"
 #include "peer-lifecycle.h"
 #include "peer-session.h"
+#include "peer-use.h"
 
+#include <array>
 #include <atomic>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_signal.hpp>
@@ -374,6 +376,11 @@ public:
         int max_count,
         std::unordered_set<std::string> excluded);
 
+    /// Revalidate one inert generation reference and install exactly one
+    /// request-scoped use before the caller may touch the pooled session.
+    boost::asio::awaitable<PeerUse>
+    co_acquire_peer_use(PeerGenerationRef generation, PeerUseRequest request);
+
     /// A receipt for every generation-pin release command posted before this
     /// call. This does not assert that unrelated pins are absent; it proves
     /// only that PeerSet has consumed the causally preceding releases.
@@ -549,6 +556,23 @@ private:
     // commit=strand
     PeerGenerationPin
     make_peer_pin(PeerSessionPtr const& expected_session);
+
+    PeerGenerationRef
+    make_generation_ref(PeerSessionPtr const& expected_session) const;
+
+    PeerUse
+    make_peer_use(
+        PeerGenerationRef const& generation,
+        PeerUseRequest const& request);
+
+    void
+    finish_peer_use(PeerUseTicket ticket, PeerUseOutcome outcome) noexcept;
+
+    void
+    expire_peer_use(PeerUseTicket ticket) noexcept;
+
+    void
+    cancel_all_peer_uses_for_shutdown() noexcept;
 
     /// Default-inert initiation failpoint, settable only through the declared
     /// test seam. Proving that a failed projection returns false requires a
@@ -1056,9 +1080,10 @@ private:
 
         PeerGenerationLifecycle lifecycle;
         PeerSessionPtr session;
+        std::set<std::uint64_t> active_use_ids;
     };
     //@@authority state=prv.S0088 status=provisional scope=field
-    //bind=catl::peer_client::PeerSet::peer_generations_@221008d6ea60dbb8
+    // bind=catl::peer_client::PeerSet::peer_generations_@221008d6ea60dbb8
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=canonical_live_peer_generation_rows
     std::map<std::string, PeerGeneration> peer_generations_;
@@ -1068,10 +1093,35 @@ private:
         PeerSessionPtr session;
     };
     //@@authority state=prv.S0089 status=provisional scope=field
-    //bind=catl::peer_client::PeerSet::draining_generations_@03c0b4d86b3916ae
+    // bind=catl::peer_client::PeerSet::draining_generations_@03c0b4d86b3916ae
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=terminal_peer_generations_retained_until_disconnect_receipt
     std::map<std::uint64_t, DrainingGeneration> draining_generations_;
+    struct ActivePeerUse
+    {
+        std::string endpoint;
+        std::uint64_t connection_generation = 0;
+        PeerUseRequest request;
+        std::weak_ptr<detail::PeerUseState> live_handle;
+        std::shared_ptr<boost::asio::steady_timer> deadline;
+    };
+    //@@authority state=prv.S0090 status=provisional scope=field bind=catl::peer_client::PeerSet::active_peer_uses_@640d1f613cb1b089
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=authoritative_exact_generation_active_peer_uses
+    std::map<std::uint64_t, ActivePeerUse> active_peer_uses_;
+    //@@authority state=prv.S0091 status=provisional scope=field bind=catl::peer_client::PeerSet::next_peer_use_id_@ce26f1fbcb41802d
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=monotonic_nonreused_peer_use_identity_mint
+    std::uint64_t next_peer_use_id_ = 0;
+    //@@authority state=prv.S0092 status=provisional scope=field bind=catl::peer_client::PeerSet::peer_use_outcomes_@9e34f82e34c11789
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=classified_terminal_peer_use_outcomes
+    std::array<std::uint64_t, static_cast<std::size_t>(PeerUseOutcome::count)>
+        peer_use_outcomes_{};
+    //@@authority state=prv.S0093 status=provisional scope=field bind=catl::peer_client::PeerSet::peer_set_instance_id_@564c32da7db0f1b9
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=process_unique_peer_set_instance_identity
+    std::uint64_t peer_set_instance_id_ = 0;
     struct ActivePeerPin
     {
         std::string endpoint;

@@ -1252,6 +1252,76 @@ public:
         return generation;
     }
 
+    static catl::peer_client::PeerGenerationRef
+    generation_ref(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSessionPtr const& peer)
+    {
+        catl::peer_client::PeerGenerationRef result;
+        run_on_strand(io, peers, [&result, &peer](auto& set) {
+            result = set.make_generation_ref(peer);
+        });
+        return result;
+    }
+
+    static std::size_t
+    active_peer_use_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count](auto& set) {
+            count = set.active_peer_uses_.size();
+        });
+        return count;
+    }
+
+    static bool
+    generation_has_use(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::uint64_t generation)
+    {
+        bool found = false;
+        run_on_strand(io, peers, [&found, generation](auto& set) {
+            auto const row = std::ranges::find_if(
+                set.peer_generations_,
+                [generation](auto const& item) {
+                    return item.second.lifecycle.generation() == generation;
+                });
+            found = row != set.peer_generations_.end() &&
+                !row->second.active_use_ids.empty();
+        });
+        return found;
+    }
+
+    static void
+    expire_peer_use(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerUseTicket ticket)
+    {
+        run_on_strand(io, peers, [ticket](auto& set) {
+            set.expire_peer_use(ticket);
+        });
+    }
+
+    static std::uint64_t
+    peer_use_outcome_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerUseOutcome outcome)
+    {
+        std::uint64_t count = 0;
+        run_on_strand(io, peers, [&count, outcome](auto& set) {
+            auto const index = static_cast<std::size_t>(outcome);
+            if (index < set.peer_use_outcomes_.size())
+                count = set.peer_use_outcomes_[index];
+        });
+        return count;
+    }
+
     /// Deliberately bypass production admission to attack the post-await exact
     /// tuple guards. This may be used only after a stop driver has snapshotted
     /// the incumbent row and suspended on its physical receipt.
@@ -1869,6 +1939,11 @@ private:
                 done.set_value();
             });
 
+        // A previous non-blocking poll may have observed an empty queue and
+        // put the context into its stopped state. Posting does not restart an
+        // io_context, so restart before the first poll as well as after the
+        // helper completes.
+        io.restart();
         while (fut.wait_for(std::chrono::milliseconds(1)) !=
                std::future_status::ready)
         {

@@ -58,6 +58,30 @@
 
 namespace catl::peer_client {
 
+namespace {
+
+std::atomic<std::uint64_t> next_peer_set_instance_id{0};
+
+std::uint64_t
+mint_peer_set_instance_id() noexcept
+{
+    auto current = next_peer_set_instance_id.load(std::memory_order_relaxed);
+    while (current != std::numeric_limits<std::uint64_t>::max())
+    {
+        if (next_peer_set_instance_id.compare_exchange_weak(
+                current,
+                current + 1,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed))
+        {
+            return current + 1;
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
 static LogPartition log_("peer-set", LogLevel::INHERIT);
 
 #define PEER_SET_TRACE(...)           \
@@ -400,6 +424,7 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
     , network_id_(options.network_id)
     , net_label_(peer_net_label(options.network_id))
     , tracker_(std::make_shared<EndpointTracker>())
+    , peer_set_instance_id_(mint_peer_set_instance_id())
 {
     options_.cached_endpoint_limit = std::min(
         options_.cached_endpoint_limit,
@@ -492,6 +517,10 @@ PeerSet::co_stop()
                 self->strand_, asio::steady_timer::time_point::max());
             self->shutdown_waiters_.push_back(progress);
             self->begin_stop_on_strand();
+            // Stop makes every transport callback for a pooled use inert
+            // before admitted sessions begin their physical close. The close
+            // receipt below remains responsible for draining socket work.
+            self->cancel_all_peer_uses_for_shutdown();
             PEER_SET_TRACE(
                 "[",
                 self->net_label_,
@@ -548,7 +577,7 @@ PeerSet::co_stop()
                     // mutation_class=stop_driver calls=co_disconnect
                     // label=join_exact_session_physical_drain_receipt
                     co_await session
-                        ->co_disconnect();  //@@authority-target ids=prv.T0147
+                        ->co_disconnect(); //@@authority-target ids=prv.T0147
                 }
                 assert(self->strand_.running_in_this_thread());
 
@@ -674,7 +703,7 @@ PeerSet::begin_stop_on_strand()
             // commit=peer_set_strand touches=prv.S0037
             // calls=disconnect
             // label=request_connect_servant_cancellation_without_retirement
-            servant.session->disconnect();  //@@authority-target ids=prv.T0182
+            servant.session->disconnect(); //@@authority-target ids=prv.T0182
         }
         catch (...)
         {
@@ -766,7 +795,7 @@ PeerSet::complete_connect_servant(
     // bind=expression_statement@6f2db77abd01a92f
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0037 label=consume_background_connect_servant_receipt
-    in_flight_.erase(key);  //@@authority-target ids=prv.T0091
+    in_flight_.erase(key); //@@authority-target ids=prv.T0091
     notify_shutdown_progress();
     PEER_SET_TRACE(
         "[",
@@ -869,7 +898,7 @@ PeerSet::finish_connect_servant(
                 // calls=co_disconnect
                 // label=join_escaped_connect_servant_physical_receipt
                 co_await session
-                    ->co_disconnect();  //@@authority-target ids=prv.T0183
+                    ->co_disconnect(); //@@authority-target ids=prv.T0183
             }
             catch (...)
             {
@@ -992,7 +1021,7 @@ PeerSet::ready_status_for(PeerSessionPtr const& session) const noexcept
 }
 
 //@@authority transition=prv.T0241 status=provisional scope=function
-//bind=catl::peer_client::start_generation_drain@c638162a9a293954
+// bind=catl::peer_client::start_generation_drain@c638162a9a293954
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0088,prv.S0089
 // label=retain_terminal_generation_until_disconnect_receipt
@@ -1052,7 +1081,7 @@ PeerSet::start_generation_drain(
 }
 
 //@@authority transition=prv.T0242 status=provisional scope=function
-//bind=catl::peer_client::consume_lifecycle_event@fbb8acfd936ed751
+// bind=catl::peer_client::consume_lifecycle_event@fbb8acfd936ed751
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0088
 // label=apply_generation_event_before_selection_wake_or_terminal_removal
@@ -1191,7 +1220,7 @@ PeerSet::complete_crawl_servant(
     // bind=expression_statement@caf7c41aa56bab58
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
-    crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
+    crawl_in_flight_.erase(key); //@@authority-target ids=prv.T0092
     try
     {
         PLOGD(
@@ -1338,8 +1367,8 @@ PeerSet::shutdown_drained_on_strand() const noexcept
 {
     ASSERT_ON_STRAND();
     return connections_.empty() && active_peer_pins_.empty() &&
-        draining_generations_.empty() && in_flight_.empty() &&
-        queued_.empty() && pending_connects_.empty() &&
+        active_peer_uses_.empty() && draining_generations_.empty() &&
+        in_flight_.empty() && queued_.empty() && pending_connects_.empty() &&
         //@@mutation-site crawl-physical-receipt-required-for-terminal
         crawl_in_flight_.empty() && crawl_queued_.empty() &&
         //@@mutation-end crawl-physical-receipt-required-for-terminal
@@ -4878,6 +4907,215 @@ PeerSet::make_peer_pin(PeerSessionPtr const& expected_session)
     return pin;
 }
 
+PeerGenerationRef
+PeerSet::make_generation_ref(PeerSessionPtr const& expected_session) const
+{
+    ASSERT_ON_STRAND();
+    if (!expected_session || peer_set_instance_id_ == 0)
+        return {};
+
+    auto const key = canonical_endpoint(expected_session->endpoint());
+    auto const connection = connections_.find(key);
+    if (connection == connections_.end() || !connection->second.session ||
+        connection->second.session != expected_session)
+    {
+        return {};
+    }
+    auto const* status = ready_status_for(key, connection->second.generation);
+    if (!status)
+        return {};
+    return PeerGenerationRef{
+        peer_set_instance_id_, key, connection->second.generation, *status};
+}
+
+//@@authority transition=prv.T0243 status=provisional scope=function bind=catl::peer_client::make_peer_use@85a104e0fee81e6f
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0090,prv.S0091,prv.S0093
+// label=install_exact_generation_peer_use_before_caller_resumes
+PeerUse
+PeerSet::make_peer_use(
+    PeerGenerationRef const& generation,
+    PeerUseRequest const& request)
+{
+    ASSERT_ON_STRAND();
+    auto const now = std::chrono::steady_clock::now();
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        !generation || generation.peer_set_instance_ != peer_set_instance_id_ ||
+        peer_set_instance_id_ == 0 ||
+        request.absolute_deadline == std::chrono::steady_clock::time_point{} ||
+        request.absolute_deadline <= now ||
+        next_peer_use_id_ == std::numeric_limits<std::uint64_t>::max())
+    {
+        return {};
+    }
+
+    auto const connection = connections_.find(generation.endpoint_);
+    auto const generation_row = peer_generations_.find(generation.endpoint_);
+    if (connection == connections_.end() || !connection->second.session ||
+        connection->second.generation != generation.generation_ ||
+        generation_row == peer_generations_.end() ||
+        generation_row->second.lifecycle.generation() !=
+            generation.generation_ ||
+        !generation_row->second.lifecycle.ready())
+    {
+        return {};
+    }
+
+    auto const use_id = next_peer_use_id_ + 1;
+    PeerUseTicket const ticket{
+        peer_set_instance_id_, use_id, generation.generation_};
+    auto weak = weak_from_this();
+    auto state = std::make_shared<detail::PeerUseState>();
+    state->session = connection->second.session;
+    state->generation = generation;
+    state->ticket = ticket;
+    state->owner = weak;
+    state->finish = [weak, ticket](PeerUseOutcome outcome) {
+        if (auto self = weak.lock())
+        {
+            asio::post(self->strand_, [self, ticket, outcome]() noexcept {
+                self->finish_peer_use(ticket, outcome);
+            });
+        }
+    };
+
+    auto deadline = std::make_shared<asio::steady_timer>(
+        strand_, request.absolute_deadline);
+    deadline->async_wait(
+        [weak, ticket](boost::system::error_code const& ec) noexcept {
+            if (ec == asio::error::operation_aborted)
+                return;
+            if (auto self = weak.lock())
+                self->expire_peer_use(ticket);
+        });
+
+    auto [active, inserted] = active_peer_uses_.emplace(
+        use_id,
+        ActivePeerUse{
+            .endpoint = generation.endpoint_,
+            .connection_generation = generation.generation_,
+            .request = request,
+            .live_handle = state,
+            .deadline = std::move(deadline),
+        });
+    if (!inserted)
+        return {};
+
+    try
+    {
+        auto const [_, generation_inserted] =
+            generation_row->second.active_use_ids.insert(use_id);
+        if (!generation_inserted)
+        {
+            active_peer_uses_.erase(active);
+            return {};
+        }
+    }
+    catch (...)
+    {
+        active_peer_uses_.erase(active);
+        return {};
+    }
+
+    next_peer_use_id_ = use_id;
+    return PeerUse{std::move(state)};
+}
+
+boost::asio::awaitable<PeerUse>
+PeerSet::co_acquire_peer_use(
+    PeerGenerationRef generation,
+    PeerUseRequest request)
+{
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        co_return PeerUse{};
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self,
+         generation = std::move(generation),
+         request]() mutable -> asio::awaitable<PeerUse> {
+            co_return self->make_peer_use(generation, request);
+        },
+        asio::use_awaitable);
+}
+
+//@@authority transition=prv.T0244 status=provisional scope=function bind=catl::peer_client::finish_peer_use@0e9e75db0459454b
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0090,prv.S0092
+// label=classify_and_release_exact_peer_use_once
+void
+PeerSet::finish_peer_use(PeerUseTicket ticket, PeerUseOutcome outcome) noexcept
+{
+    ASSERT_ON_STRAND();
+    if (ticket.peer_set_instance != peer_set_instance_id_)
+        return;
+    auto use = active_peer_uses_.find(ticket.use_id);
+    if (use == active_peer_uses_.end() ||
+        use->second.connection_generation != ticket.generation)
+    {
+        return;
+    }
+
+    auto generation = peer_generations_.find(use->second.endpoint);
+    if (generation != peer_generations_.end() &&
+        generation->second.lifecycle.generation() == ticket.generation)
+    {
+        generation->second.active_use_ids.erase(ticket.use_id);
+    }
+    if (use->second.deadline)
+    {
+        try
+        {
+            use->second.deadline->cancel();
+        }
+        catch (...)
+        {
+        }
+    }
+    auto const outcome_index = static_cast<std::size_t>(outcome);
+    if (outcome_index < peer_use_outcomes_.size())
+        ++peer_use_outcomes_[outcome_index];
+    active_peer_uses_.erase(use);
+    notify_shutdown_progress();
+}
+
+void
+PeerSet::expire_peer_use(PeerUseTicket ticket) noexcept
+{
+    ASSERT_ON_STRAND();
+    if (ticket.peer_set_instance != peer_set_instance_id_)
+        return;
+    auto use = active_peer_uses_.find(ticket.use_id);
+    if (use == active_peer_uses_.end() ||
+        use->second.connection_generation != ticket.generation)
+    {
+        return;
+    }
+    if (auto state = use->second.live_handle.lock())
+    {
+        if (!state->try_claim())
+            return;
+    }
+    finish_peer_use(ticket, PeerUseOutcome::timeout);
+}
+
+void
+PeerSet::cancel_all_peer_uses_for_shutdown() noexcept
+{
+    ASSERT_ON_STRAND();
+    while (!active_peer_uses_.empty())
+    {
+        auto const use = active_peer_uses_.begin();
+        PeerUseTicket const ticket{
+            peer_set_instance_id_,
+            use->first,
+            use->second.connection_generation};
+        if (auto state = use->second.live_handle.lock())
+            (void)state->try_claim();
+        finish_peer_use(ticket, PeerUseOutcome::shutdown);
+    }
+}
+
 void
 PeerSet::release_peer_pin(
     std::uint64_t pin_id,
@@ -4908,9 +5146,19 @@ PeerSet::generation_has_active_pin(std::uint64_t connection_generation) const
 {
     ASSERT_ON_STRAND();
     prune_expired_peer_pins();
+    if (std::any_of(
+            active_peer_pins_.begin(),
+            active_peer_pins_.end(),
+            [connection_generation](auto const& entry) {
+                return entry.second.connection_generation ==
+                    connection_generation;
+            }))
+    {
+        return true;
+    }
     return std::any_of(
-        active_peer_pins_.begin(),
-        active_peer_pins_.end(),
+        active_peer_uses_.begin(),
+        active_peer_uses_.end(),
         [connection_generation](auto const& entry) {
             return entry.second.connection_generation == connection_generation;
         });
@@ -5337,7 +5585,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_history_search_progress_and_latch_zero_if_exhausted
         catl::core::emit_status(
-            status.str());  //@@authority-target ids=prv.T0226
+            status.str()); //@@authority-target ids=prv.T0226
     };
     auto emit_terminal_zero_progress = [&]() {
         if (!zero_countdown_published)
@@ -5407,7 +5655,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=peer_set_strand touches=prv.S0077
         // label=establish_zero_countdown_before_no_covering_peer_status
-        emit_terminal_zero_progress();  //@@authority-target ids=prv.T0227
+        emit_terminal_zero_progress(); //@@authority-target ids=prv.T0227
         cleanup.clean_now();
         auto const elapsed_secs =
             std::chrono::duration_cast<std::chrono::seconds>(
@@ -5450,7 +5698,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_no_covering_peer_status_after_zero_countdown
         catl::core::emit_status(
-            status.str());  //@@authority-target ids=prv.T0228
+            status.str()); //@@authority-target ids=prv.T0228
     };
 
     PLOGI(
