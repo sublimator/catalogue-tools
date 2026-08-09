@@ -4,6 +4,8 @@
 //
 // Collects STValidation messages from the peer network, maintains a ring
 // buffer of recent quorum entries, and services proof requests.
+// TODO: Evaluate extracting only the generic ingress/worker/timer/barrier
+// mechanics; see extract-common-ingress-mechanics-from-validation-quorum-tracker.md.
 //
 // Collector and quorum mutation happens on the strand. Packet admission is
 // bounded under a separate mutex before work reaches that strand. Coroutine
