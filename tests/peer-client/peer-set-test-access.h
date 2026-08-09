@@ -26,6 +26,49 @@ class PeerSetTestAccess
 public:
     static constexpr std::size_t max_tracked_endpoints = 4096;
 
+    /// Install the same exact-generation ready value that production receives
+    /// from PeerClient before admitting a session. Selection tests must not
+    /// manufacture a connections_ row while bypassing the lifecycle authority
+    /// they are intended to exercise.
+    static std::uint64_t
+    install_ready_generation_on_strand(
+        catl::peer_client::PeerSet& set,
+        catl::peer_client::PeerSessionPtr const& peer,
+        std::optional<std::uint64_t> requested_generation = std::nullopt)
+    {
+        auto const key = catl::peer_client::EndpointTracker::canonical_endpoint(
+            peer->endpoint());
+        auto const generation = requested_generation
+            ? *requested_generation
+            : ++set.next_connection_generation_;
+        if (generation == 0)
+            throw std::logic_error("test peer generation must be non-zero");
+        if (requested_generation)
+            set.next_connection_generation_ =
+                std::max(set.next_connection_generation_, generation);
+
+        set.peer_generations_.insert_or_assign(
+            key,
+            catl::peer_client::PeerSet::PeerGeneration{key, generation});
+        set.install_generation_session(key, generation, peer);
+        set.consume_lifecycle_event(
+            {.endpoint = key,
+             .generation = generation,
+             .event_sequence = 1,
+             .lifecycle = catl::peer_client::PeerLifecycle::connecting});
+        auto const range = peer->advertised_ledger_range();
+        set.consume_lifecycle_event(
+            {.endpoint = key,
+             .generation = generation,
+             .event_sequence = 2,
+             .lifecycle = catl::peer_client::PeerLifecycle::ready,
+             .status =
+                 {.current_seq = peer->peer_ledger_seq(),
+                  .advertised_range = range,
+                  .headers = peer->peer_headers()}});
+        return generation;
+    }
+
     static void
     set_before_generation_pin_release_barrier_return(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
@@ -451,19 +494,19 @@ public:
                     admission_leases.push_back(authorization->claim());
                 }
                 auto const key = peer->endpoint();
+                auto const generation =
+                    install_ready_generation_on_strand(set, peer);
                 admitted = set.make_room_for_peer(key, peer, admission_leases);
                 if (!admitted)
+                {
+                    set.peer_generations_.erase(
+                        catl::peer_client::EndpointTracker::canonical_endpoint(
+                            key));
                     return;
+                }
                 set.connections_[key] =
                     catl::peer_client::PeerSet::ConnectionEntry{
-                        peer, ++set.next_connection_generation_};
-                auto const range = peer->advertised_ledger_range();
-                set.note_connect_success(
-                    key,
-                    {.first_seq = range.first_seq,
-                     .last_seq = range.last_seq,
-                     .current_seq = peer->peer_ledger_seq()});
-                set.notify_waiters();
+                        peer, generation};
             });
         return admitted;
     }
@@ -497,11 +540,17 @@ public:
                 leases.push_back(std::move(lease));
 
                 auto const key = peer->endpoint();
+                auto const generation =
+                    install_ready_generation_on_strand(set, peer);
                 admitted = set.make_room_for_peer(key, peer, leases);
                 if (admitted)
                     set.connections_[key] =
                         catl::peer_client::PeerSet::ConnectionEntry{
-                            peer, ++set.next_connection_generation_};
+                            peer, generation};
+                else
+                    set.peer_generations_.erase(
+                        catl::peer_client::EndpointTracker::canonical_endpoint(
+                            key));
             });
         return admitted;
     }
@@ -1159,15 +1208,10 @@ public:
     {
         run_on_strand(io, peers, [peer = std::move(peer)](auto& set) {
             auto const key = peer->endpoint();
+            auto const generation =
+                install_ready_generation_on_strand(set, peer);
             set.connections_[key] = catl::peer_client::PeerSet::ConnectionEntry{
-                peer, ++set.next_connection_generation_};
-            auto const range = peer->advertised_ledger_range();
-            set.note_connect_success(
-                key,
-                {.first_seq = range.first_seq,
-                 .last_seq = range.last_seq,
-                 .current_seq = peer->peer_ledger_seq()});
-            set.notify_waiters();
+                peer, generation};
         });
     }
 
@@ -1179,14 +1223,10 @@ public:
     {
         run_on_strand(io, peers, [peer = std::move(peer)](auto& set) {
             auto const key = peer->endpoint();
+            auto const generation =
+                install_ready_generation_on_strand(set, peer);
             set.connections_[key] = catl::peer_client::PeerSet::ConnectionEntry{
-                peer, ++set.next_connection_generation_};
-            auto const range = peer->advertised_ledger_range();
-            set.note_connect_success(
-                key,
-                {.first_seq = range.first_seq,
-                 .last_seq = range.last_seq,
-                 .current_seq = peer->peer_ledger_seq()});
+                peer, generation};
             set.remove_peer(key);
         });
     }
@@ -1204,17 +1244,10 @@ public:
         run_on_strand(
             io, peers, [&generation, peer = std::move(peer)](auto& set) {
                 auto const key = peer->endpoint();
-                generation = ++set.next_connection_generation_;
+                generation = install_ready_generation_on_strand(set, peer);
                 set.connections_[key] =
                     catl::peer_client::PeerSet::ConnectionEntry{
                         peer, generation};
-                auto const range = peer->advertised_ledger_range();
-                set.note_connect_success(
-                    key,
-                    {.first_seq = range.first_seq,
-                     .last_seq = range.last_seq,
-                     .current_seq = peer->peer_ledger_seq()});
-                set.notify_waiters();
             });
         return generation;
     }
@@ -1269,6 +1302,36 @@ public:
                 it != set.connections_.end() ? it->second.generation : 0;
         });
         return generation;
+    }
+
+    static void
+    consume_lifecycle_event(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerLifecycleEvent event)
+    {
+        run_on_strand(
+            io, peers, [event = std::move(event)](auto& set) mutable {
+                set.consume_lifecycle_event(std::move(event));
+            });
+    }
+
+    static std::optional<catl::peer_client::PeerStatusSnapshot>
+    canonical_ready_status(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key,
+        std::uint64_t generation)
+    {
+        std::optional<catl::peer_client::PeerStatusSnapshot> status;
+        run_on_strand(
+            io,
+            peers,
+            [&status, key = std::move(key), generation](auto& set) {
+                if (auto const* ready = set.ready_status_for(key, generation))
+                    status = *ready;
+            });
+        return status;
     }
 
     static catl::peer_client::PeerGenerationPin

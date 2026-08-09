@@ -14,6 +14,7 @@
 #include "peer-crawl-client.h"
 #include "peer-endpoint-cache.h"
 #include "peer-generation-pin.h"
+#include "peer-lifecycle.h"
 #include "peer-session.h"
 
 #include <atomic>
@@ -633,6 +634,32 @@ private:
     bool
     generation_has_active_pin(std::uint64_t connection_generation) const;
 
+    void
+    consume_lifecycle_event(PeerLifecycleEvent event);
+
+    void
+    install_generation_session(
+        std::string const& key,
+        std::uint64_t generation,
+        PeerSessionPtr const& session) noexcept;
+
+    void
+    begin_generation_close(
+        std::string const& key,
+        std::uint64_t generation) noexcept;
+
+    PeerStatusSnapshot const*
+    ready_status_for(std::string const& key, std::uint64_t generation)
+        const noexcept;
+
+    PeerStatusSnapshot const*
+    ready_status_for(PeerSessionPtr const& session) const noexcept;
+
+    void
+    start_generation_drain(
+        std::string const& key,
+        std::uint64_t generation) noexcept;
+
     /// Remove a peer by PeerSet's own decision (eviction, tests). For
     /// deaths reported by the connection itself, use consume_peer_terminal.
     //@@authority transition=peer_set.remove_peer owner=peer_set commit=strand
@@ -1020,6 +1047,31 @@ private:
     std::map<std::string, ConnectionEntry> connections_;
     /// Strand-confined mint for connection-instance identity. Non-reused.
     std::uint64_t next_connection_generation_ = 0;
+    struct PeerGeneration
+    {
+        PeerGeneration(std::string endpoint, std::uint64_t generation)
+            : lifecycle(std::move(endpoint), generation)
+        {
+        }
+
+        PeerGenerationLifecycle lifecycle;
+        PeerSessionPtr session;
+    };
+    //@@authority state=prv.S0088 status=provisional scope=field
+    //bind=catl::peer_client::PeerSet::peer_generations_@221008d6ea60dbb8
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=canonical_live_peer_generation_rows
+    std::map<std::string, PeerGeneration> peer_generations_;
+    struct DrainingGeneration
+    {
+        std::string endpoint;
+        PeerSessionPtr session;
+    };
+    //@@authority state=prv.S0089 status=provisional scope=field
+    //bind=catl::peer_client::PeerSet::draining_generations_@03c0b4d86b3916ae
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=terminal_peer_generations_retained_until_disconnect_receipt
+    std::map<std::uint64_t, DrainingGeneration> draining_generations_;
     struct ActivePeerPin
     {
         std::string endpoint;
@@ -1127,7 +1179,7 @@ private:
     // Diagnostic-only reporter claims. No selector or connection-admission
     // function reads this table.
     //@@authority state=prv.S0081 status=provisional scope=field
-    //bind=catl::peer_client::PeerSet::crawl_observation_batches_@b76408793188153d
+    // bind=catl::peer_client::PeerSet::crawl_observation_batches_@b76408793188153d
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=bounded_ephemeral_untrusted_crawl_observation_batches
     std::map<std::string, CrawlObservationBatch> crawl_observation_batches_;

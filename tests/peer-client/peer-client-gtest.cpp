@@ -1164,6 +1164,7 @@ TEST(PeerClientLifecycle, ReadyObserversRunBeforeStickyPublication)
     asio::io_context io;
     std::shared_ptr<PeerClient> client;
     std::vector<std::string> observer_order;
+    std::vector<PeerLifecycleEvent> lifecycle_events;
     std::optional<std::uint32_t> result;
     std::exception_ptr completion_failure;
 
@@ -1171,6 +1172,10 @@ TEST(PeerClientLifecycle, ReadyObserversRunBeforeStickyPublication)
         io,
         [&]() -> asio::awaitable<void> {
             PeerClient::ConnectOptions options;
+            options.connection_generation = 41;
+            options.on_lifecycle = [&](PeerLifecycleEvent event) {
+                lifecycle_events.push_back(std::move(event));
+            };
             result = co_await co_connect(
                 io,
                 "ready-observer-order.invalid",
@@ -1211,6 +1216,24 @@ TEST(PeerClientLifecycle, ReadyObserversRunBeforeStickyPublication)
     EXPECT_EQ(terminal->kind, detail::ConnectAttemptTerminalKind::ready);
     EXPECT_EQ(
         client->terminal_cause(), PeerLogicalTerminalCause::owner_disconnect);
+
+    ASSERT_GE(lifecycle_events.size(), 3u);
+    for (std::size_t i = 0; i != lifecycle_events.size(); ++i)
+    {
+        EXPECT_EQ(lifecycle_events[i].generation, 41u);
+        EXPECT_EQ(lifecycle_events[i].endpoint, "ready-observer-order.invalid:443");
+        EXPECT_EQ(lifecycle_events[i].event_sequence, i + 1);
+    }
+    auto const ready = std::ranges::find(
+        lifecycle_events, PeerLifecycle::ready, &PeerLifecycleEvent::lifecycle);
+    ASSERT_NE(ready, lifecycle_events.end());
+    EXPECT_EQ(ready->generation, 41u);
+    EXPECT_NE(
+        std::ranges::find(
+            lifecycle_events,
+            PeerLifecycle::closing,
+            &PeerLifecycleEvent::lifecycle),
+        lifecycle_events.end());
 }
 
 TEST(PeerClientLifecycle, ReadyObserverReleasesCaptureWhenConsumed)
@@ -1453,8 +1476,13 @@ TEST(
     bool observed_installed_authority = false;
     bool completion_on_strand = false;
     std::vector<boost::system::error_code> completions;
+    std::vector<PeerLifecycleEvent> lifecycle_events;
 
     PeerClient::ConnectOptions opts;
+    opts.connection_generation = 55;
+    opts.on_lifecycle = [&](PeerLifecycleEvent event) {
+        lifecycle_events.push_back(std::move(event));
+    };
     opts.on_complete = [&](boost::system::error_code ec, std::uint32_t) {
         completion_on_strand = client->strand().running_in_this_thread();
         completions.push_back(ec);
@@ -1485,6 +1513,13 @@ TEST(
     EXPECT_FALSE(client->raw_connection().resolver_installed_for_test());
     EXPECT_FALSE(
         client->raw_connection().physical_transport_drained_for_test());
+    ASSERT_GE(lifecycle_events.size(), 2u);
+    EXPECT_EQ(lifecycle_events.front().lifecycle, PeerLifecycle::connecting);
+    EXPECT_EQ(lifecycle_events.back().lifecycle, PeerLifecycle::failed);
+    EXPECT_EQ(lifecycle_events.back().generation, 55u);
+    EXPECT_GT(
+        lifecycle_events.back().event_sequence,
+        lifecycle_events.front().event_sequence);
 
     int joins = 0;
     std::exception_ptr join_failure;

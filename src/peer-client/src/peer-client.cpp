@@ -876,6 +876,7 @@ PeerClient::connect(
     }
     client->connection_generation_ = opts.connection_generation;
     client->on_disconnect_ = std::move(opts.on_disconnect);
+    client->on_lifecycle_ = std::move(opts.on_lifecycle);
     client->do_connect(
         host,
         port,
@@ -967,6 +968,9 @@ PeerClient::co_disconnect()
             self->disconnect_on_strand();
             if (connection)
                 co_await connection->co_close();
+            self->publish_lifecycle(
+                PeerLifecycle::closed,
+                {boost::asio::error::operation_aborted, "owner disconnect"});
             co_return;
         },
         asio::use_awaitable);
@@ -995,6 +999,10 @@ PeerClient::disconnect_on_strand()
         });  //@@authority-target ids=prv.T0184
     if (!commit.event_committed)
         previous = state_.exchange(State::Disconnected);
+
+    publish_lifecycle(
+        PeerLifecycle::closing,
+        {boost::asio::error::operation_aborted, "owner disconnect"});
 
     if (previous != State::Disconnected && previous != State::Failed)
         complete_all_pending(Error::Cancelled);
@@ -1614,10 +1622,18 @@ PeerClient::do_connect(
             return;
 
         auto const previous = self->commit_failed_on_strand(ec);
-        if (!previous)
-            return;
+        if (previous)
+            self->complete_all_pending(Error::Disconnected);
 
-        self->complete_all_pending(Error::Disconnected);
+        PeerTerminalReason reason{
+            ec,
+            self->connection_ ? self->connection_->connect_failure_detail()
+                              : std::string{}};
+        auto const owner_closed = self->terminal_cause() ==
+            PeerLogicalTerminalCause::owner_disconnect;
+        self->publish_lifecycle(
+            owner_closed ? PeerLifecycle::closed : PeerLifecycle::failed,
+            reason);
 
         // Always notify the observer (PeerSet needs to know). The
         // terminal fact is formed here, once, on the client strand —
@@ -1625,12 +1641,9 @@ PeerClient::do_connect(
         //@@authority channel=peer_client.terminal_export owner=peer_client
         // bind=catl::peer_client::do_connect@e37232fc24310fa4
         // commit=client-strand
-        if (self->on_disconnect_)
+        if (self->on_disconnect_ && !self->disconnect_observer_published_)
         {
-            PeerTerminalReason reason{
-                ec,
-                self->connection_ ? self->connection_->connect_failure_detail()
-                                  : std::string{}};
+            self->disconnect_observer_published_ = true;
             try
             {
                 self->on_disconnect_(reason);
@@ -1645,6 +1658,9 @@ PeerClient::do_connect(
                 PLOGE(PeerClient::log_, "disconnect observer threw");
             }
         }
+
+        if (!previous)
+            return;
 
         if (*previous == State::Ready)
             return;
@@ -1682,7 +1698,7 @@ PeerClient::do_connect(
     auto self = shared_from_this();
     auto connection = connection_;
     //@@authority transition=prv.T0148 status=provisional scope=statement
-    // bind=expression_statement@808245b5e3cf12b7
+    // bind=expression_statement@6c4ac50921b683e2
     // owner=unresolved owner_hypothesis=peer_client
     // commit=peer_client_strand mutation_class=running_guarded
     // label=enter_owner_strand_before_physical_connection_admission
@@ -1691,6 +1707,7 @@ PeerClient::do_connect(
         [self,
          connection = std::move(connection),
          on_ready = std::move(on_ready)]() mutable {
+            self->publish_lifecycle(PeerLifecycle::connecting);
             // Connect callback runs on this same strand, including a
             // synchronous initiation refusal.
             connection->async_connect(
@@ -1714,6 +1731,12 @@ PeerClient::do_connect(
                             self->complete_connect(ec);
                             return;
                         }
+                        self->publish_lifecycle(
+                            PeerLifecycle::failed,
+                            {ec,
+                             self->connection_
+                                 ? self->connection_->connect_failure_detail()
+                                 : std::string{}});
                         self->complete_all_pending(Error::Disconnected);
                         self->complete_connect(ec);
                         return;
@@ -1864,6 +1887,73 @@ PeerClient::publish_advertised_ledger_range(
 }
 
 void
+PeerClient::publish_lifecycle(
+    PeerLifecycle lifecycle,
+    PeerTerminalReason reason) noexcept
+{
+    assert(strand_.running_in_this_thread());
+    if (!on_lifecycle_ || connection_generation_ == 0)
+        return;
+    if (lifecycle_terminal_published_)
+        return;
+    if (lifecycle_event_sequence_ == std::numeric_limits<std::uint64_t>::max())
+    {
+        lifecycle_terminal_published_ = true;
+        PLOGE(log_, "peer lifecycle event sequence exhausted");
+        return;
+    }
+
+    try
+    {
+        // Build every allocating value before committing the publication
+        // sequence or terminal fence. A failed snapshot is a dropped
+        // observation, never a half-committed lifecycle transition.
+        PeerStatusSnapshot status;
+        if (lifecycle == PeerLifecycle::ready)
+        {
+            status.current_seq =
+                peer_ledger_seq_.load(std::memory_order_acquire);
+            status.advertised_range = advertised_ledger_range();
+            if (connection_)
+            {
+                status.headers = connection_->upgrade_headers();
+                status.authenticated_node_key =
+                    connection_->authenticated_peer_node_key();
+            }
+        }
+
+        PeerLifecycleEvent event{
+            .endpoint = endpoint_str_,
+            .generation = connection_generation_,
+            .event_sequence = lifecycle_event_sequence_ + 1,
+            .lifecycle = lifecycle,
+            .status = std::move(status),
+            .reason = std::move(reason),
+        };
+        //@@authority transition=prv.T0237 status=provisional scope=statement
+        //bind=expression_statement@89402eb4644fe6d2
+        // owner=unresolved owner_hypothesis=peer_client
+        // commit=peer_client_strand touches=prv.S0083,prv.S0084
+        // label=publish_immutable_generation_tagged_lifecycle_event
+        ++lifecycle_event_sequence_;  //@@authority-target ids=prv.T0237
+        if (lifecycle == PeerLifecycle::closed ||
+            lifecycle == PeerLifecycle::failed)
+        {
+            lifecycle_terminal_published_ = true;
+        }
+        on_lifecycle_(std::move(event));
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "lifecycle observer threw: ", e.what());
+    }
+    catch (...)
+    {
+        PLOGE(log_, "lifecycle observer threw");
+    }
+}
+
+void
 PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
 {
     protocol::TMStatusChange status;
@@ -1932,6 +2022,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
                  .current_seq = peer_ledger_seq_});
         }
     }
+
+    if (state_ == State::Ready)
+        publish_lifecycle(PeerLifecycle::ready);
 
     // Mirror status back
     connection_->async_send_packet(
@@ -2020,6 +2113,8 @@ PeerClient::become_ready()
         detail::ConnectAttemptPublication::deferred);
     if (!ready.event_committed)
         return;
+
+    publish_lifecycle(PeerLifecycle::ready);
 
     PLOGI(
         log_,
@@ -3278,7 +3373,7 @@ PeerClient::get_tx_proof_path_on_strand(
             if (auto self = weak.lock())
             {
                 //@@authority transition=prv.T0205 status=provisional
-                //bind=expression_statement@71a1b1d7568d95d3
+                // bind=expression_statement@71a1b1d7568d95d3
                 // scope=statement owner=unresolved
                 // owner_hypothesis=peer_client commit=strand
                 // touches=prv.S0065
@@ -3392,7 +3487,7 @@ PeerClient::get_state_proof_path_on_strand(
             if (auto self = weak.lock())
             {
                 //@@authority transition=prv.T0206 status=provisional
-                //bind=expression_statement@f8a084d8a0a7f248
+                // bind=expression_statement@f8a084d8a0a7f248
                 // scope=statement owner=unresolved
                 // owner_hypothesis=peer_client commit=strand
                 // touches=prv.S0065
@@ -3485,7 +3580,7 @@ PeerClient::send_ping_request_on_strand(
             if (auto self = weak.lock())
             {
                 //@@authority transition=prv.T0207 status=provisional
-                //bind=expression_statement@0eea5f51802de08a
+                // bind=expression_statement@0eea5f51802de08a
                 // scope=statement owner=unresolved
                 // owner_hypothesis=peer_client commit=strand
                 // touches=prv.S0065

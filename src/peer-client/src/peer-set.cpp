@@ -536,6 +536,8 @@ PeerSet::co_stop()
                 auto const generation = current->second.generation;
                 auto const session = current->second.session;
 
+                self->begin_generation_close(endpoint, generation);
+
                 if (session)
                 {
                     //@@authority transition=prv.T0147 status=provisional
@@ -549,6 +551,14 @@ PeerSet::co_stop()
                         ->co_disconnect();  //@@authority-target ids=prv.T0147
                 }
                 assert(self->strand_.running_in_this_thread());
+
+                if (auto generation_row =
+                        self->peer_generations_.find(endpoint);
+                    generation_row != self->peer_generations_.end() &&
+                    generation_row->second.lifecycle.generation() == generation)
+                {
+                    generation_row->second.session.reset();
+                }
 
                 auto live = self->connections_.find(endpoint);
                 if (live != self->connections_.end() &&
@@ -920,6 +930,180 @@ PeerSet::install_connect_servant_session(
     row->second.generation = generation;
 }
 
+void
+PeerSet::install_generation_session(
+    std::string const& key,
+    std::uint64_t generation,
+    PeerSessionPtr const& session) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto row = peer_generations_.find(key);
+    if (row == peer_generations_.end() ||
+        row->second.lifecycle.generation() != generation ||
+        row->second.lifecycle.terminal())
+    {
+        return;
+    }
+    row->second.session = session;
+}
+
+void
+PeerSet::begin_generation_close(
+    std::string const& key,
+    std::uint64_t generation) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto row = peer_generations_.find(key);
+    if (row == peer_generations_.end() ||
+        row->second.lifecycle.generation() != generation)
+    {
+        return;
+    }
+    (void)row->second.lifecycle.begin_local_close();
+}
+
+PeerStatusSnapshot const*
+PeerSet::ready_status_for(std::string const& key, std::uint64_t generation)
+    const noexcept
+{
+    ASSERT_ON_STRAND();
+    auto const row = peer_generations_.find(key);
+    if (row == peer_generations_.end() ||
+        row->second.lifecycle.generation() != generation ||
+        !row->second.lifecycle.ready())
+    {
+        return nullptr;
+    }
+    return &*row->second.lifecycle.status();
+}
+
+PeerStatusSnapshot const*
+PeerSet::ready_status_for(PeerSessionPtr const& session) const noexcept
+{
+    ASSERT_ON_STRAND();
+    if (!session)
+        return nullptr;
+    auto const key = canonical_endpoint(session->endpoint());
+    auto const generation = peer_generations_.find(key);
+    if (generation == peer_generations_.end() ||
+        generation->second.session != session)
+        return nullptr;
+    return ready_status_for(key, generation->second.lifecycle.generation());
+}
+
+//@@authority transition=prv.T0241 status=provisional scope=function
+//bind=catl::peer_client::start_generation_drain@c638162a9a293954
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0088,prv.S0089
+// label=retain_terminal_generation_until_disconnect_receipt
+void
+PeerSet::start_generation_drain(
+    std::string const& key,
+    std::uint64_t generation) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto row = peer_generations_.find(key);
+    if (row == peer_generations_.end() ||
+        row->second.lifecycle.generation() != generation ||
+        !row->second.lifecycle.terminal() || !row->second.session ||
+        draining_generations_.count(generation))
+    {
+        return;
+    }
+
+    auto session = std::move(row->second.session);
+    try
+    {
+        draining_generations_.emplace(
+            generation, DrainingGeneration{key, session});
+        auto self = shared_from_this();
+        asio::co_spawn(
+            strand_,
+            [self, generation, session]() -> asio::awaitable<void> {
+                try
+                {
+                    co_await session->co_disconnect();
+                }
+                catch (std::exception const& e)
+                {
+                    PLOGE(
+                        log_,
+                        "generation drain failed gen=",
+                        generation,
+                        ": ",
+                        e.what());
+                }
+                catch (...)
+                {
+                    PLOGE(log_, "generation drain failed gen=", generation);
+                }
+                self->draining_generations_.erase(generation);
+                self->notify_shutdown_progress();
+            },
+            asio::detached);
+    }
+    catch (...)
+    {
+        // Restore the one retained owner if initiation failed. A later stop
+        // must observe the unresolved drain instead of reporting false-empty.
+        row->second.session = std::move(session);
+        draining_generations_.erase(generation);
+    }
+}
+
+//@@authority transition=prv.T0242 status=provisional scope=function
+//bind=catl::peer_client::consume_lifecycle_event@fbb8acfd936ed751
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0088
+// label=apply_generation_event_before_selection_wake_or_terminal_removal
+void
+PeerSet::consume_lifecycle_event(PeerLifecycleEvent event)
+{
+    ASSERT_ON_STRAND();
+    auto const key = canonical_endpoint(event.endpoint);
+    auto row = peer_generations_.find(key);
+    if (row == peer_generations_.end())
+        return;
+    event.endpoint = key;
+    PeerLifecycleApply applied = PeerLifecycleApply::illegal_transition;
+    try
+    {
+        applied = row->second.lifecycle.apply(event);
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "lifecycle event projection failed: ", e.what());
+        return;
+    }
+    catch (...)
+    {
+        PLOGE(log_, "lifecycle event projection failed");
+        return;
+    }
+    if (applied != PeerLifecycleApply::accepted)
+        return;
+
+    if (event.lifecycle == PeerLifecycle::ready)
+    {
+        auto const& status = event.status;
+        note_status(
+            key,
+            {.first_seq = status.advertised_range.first_seq,
+             .last_seq = status.advertised_range.last_seq,
+             .current_seq = status.current_seq});
+        note_peer_headers(key, status.headers);
+        notify_waiters();
+        return;
+    }
+
+    if (event.lifecycle == PeerLifecycle::closed ||
+        event.lifecycle == PeerLifecycle::failed)
+    {
+        consume_peer_terminal(key, event.generation, std::move(event.reason));
+        start_generation_drain(key, event.generation);
+    }
+}
+
 //@@authority transition=prv.T0187 status=provisional scope=function
 // bind=catl::peer_client::classify_unadmitted_connect_terminal@7cb2098a2e785948
 // owner=unresolved owner_hypothesis=peer_set
@@ -1154,7 +1338,8 @@ PeerSet::shutdown_drained_on_strand() const noexcept
 {
     ASSERT_ON_STRAND();
     return connections_.empty() && active_peer_pins_.empty() &&
-        in_flight_.empty() && queued_.empty() && pending_connects_.empty() &&
+        draining_generations_.empty() && in_flight_.empty() &&
+        queued_.empty() && pending_connects_.empty() &&
         //@@mutation-site crawl-physical-receipt-required-for-terminal
         crawl_in_flight_.empty() && crawl_queued_.empty() &&
         //@@mutation-end crawl-physical-receipt-required-for-terminal
@@ -1517,8 +1702,8 @@ PeerSet::select_covering_peers_for(
 
     // Budget: never use more than 1/3 of ready peers, cap at 4
     int ready = 0;
-    for (auto const& [_, c] : connections_)
-        if (c.session && c.session->is_ready())
+    for (auto const& [key, c] : connections_)
+        if (c.session && ready_status_for(key, c.generation))
             ++ready;
     int budget = std::min({max_count, std::max(1, ready / 3), 4});
 
@@ -1535,7 +1720,8 @@ PeerSet::select_covering_peers_for(
     for (auto const& [key, client_entry] : connections_)
     {
         auto const& client = client_entry.session;
-        if (!client || !client->is_ready())
+        auto const* status = ready_status_for(key, client_entry.generation);
+        if (!client || !status)
             continue;
         if (excluded.count(key))
             continue;
@@ -1543,7 +1729,7 @@ PeerSet::select_covering_peers_for(
             continue;
 
         uint64_t span = 0;
-        auto const range = client->advertised_ledger_range();
+        auto const range = status->advertised_range;
         if (!range.contains(ledger_seq))
             continue;
         if (range.last_seq > range.first_seq)
@@ -1657,11 +1843,13 @@ PeerSet::co_history_coverage()
                 if (!peer)
                     continue;
                 ++coverage.connected_peers;
-                if (!peer->is_ready())
+                auto const* status =
+                    self->ready_status_for(_, entry.generation);
+                if (!status)
                     continue;
                 ++coverage.ready_peers;
 
-                auto const range = peer->advertised_ledger_range();
+                auto const range = status->advertised_range;
                 if (!range.valid())
                     continue;
                 ++coverage.advertising_peers;
@@ -1763,7 +1951,7 @@ PeerSet::choose_any_peer(std::unordered_set<std::string> const& excluded)
         auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
-        if (!client || !client->is_ready())
+        if (!client || !ready_status_for(key, client_entry.generation))
             continue;
 
         if (!best)
@@ -1825,10 +2013,11 @@ PeerSet::choose_peer_for(
         auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
-        if (!client || !client->is_ready())
+        auto const* status = ready_status_for(key, client_entry.generation);
+        if (!client || !status)
             continue;
 
-        auto const range = client->advertised_ledger_range();
+        auto const range = status->advertised_range;
         if (!range.contains(ledger_seq))
             continue;
 
@@ -2051,8 +2240,9 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     // so allow known-good cached peers to race in even before they have been
     // proven to cover the target ledger.
     auto const has_ready_peer = std::any_of(
-        connections_.begin(), connections_.end(), [](auto const& entry) {
-            return entry.second.session && entry.second.session->is_ready();
+        connections_.begin(), connections_.end(), [this](auto const& entry) {
+            return entry.second.session &&
+                ready_status_for(entry.first, entry.second.generation);
         });
     if (!has_ready_peer && (endpoint_has_range(key) || has_success))
         return true;
@@ -3353,7 +3543,8 @@ PeerSet::try_connect_on_strand(
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
-        co_return (it->second.session && it->second.session->is_ready())
+        co_return (
+            it->second.session && ready_status_for(key, it->second.generation))
             ? it->second.session
             : nullptr;
     }
@@ -3430,19 +3621,30 @@ PeerSet::try_connect_on_strand(
             co_return nullptr;
         }
         auto const generation = ++next_connection_generation_;
+        if (auto prior = peer_generations_.find(key);
+            prior != peer_generations_.end() &&
+            !prior->second.lifecycle.terminal())
+        {
+            PLOGW(
+                log_,
+                "[",
+                net_label_,
+                "] refusing a second live generation for ",
+                key);
+            co_return nullptr;
+        }
+        peer_generations_.insert_or_assign(
+            key, PeerGeneration{key, generation});
         connect_opts.connection_generation = generation;
         {
             auto self_weak = weak_from_this();
-            auto owned_key2 = key;
-            connect_opts.on_disconnect = [self_weak, owned_key2, generation](
-                                             PeerTerminalReason const& reason) {
+            connect_opts.on_lifecycle = [self_weak](PeerLifecycleEvent event) {
                 if (auto self2 = self_weak.lock())
                 {
                     asio::post(
                         self2->strand_,
-                        [self2, owned_key2, generation, reason]() {
-                            self2->consume_peer_terminal(
-                                owned_key2, generation, reason);
+                        [self2, event = std::move(event)]() mutable {
+                            self2->consume_lifecycle_event(std::move(event));
                         });
                 }
             };
@@ -3457,7 +3659,13 @@ PeerSet::try_connect_on_strand(
             [self = shared_from_this(), key, generation](
                 std::shared_ptr<PeerClient> const& created) noexcept {
                 self->install_connect_servant_session(key, generation, created);
+                self->install_generation_session(key, generation, created);
             });
+        ASSERT_ON_STRAND();
+        // The client publishes Ready before completing the connect bridge.
+        // Yield once on this strand so that value event is consumed before
+        // admission consults the canonical generation record.
+        co_await asio::post(strand_, asio::use_awaitable);
         ASSERT_ON_STRAND();
         if (after_connect_ready_before_admission_for_test_)
         {
@@ -3495,7 +3703,10 @@ PeerSet::try_connect_on_strand(
             co_return existing->second.session;
         }
 
-        if (!client || !client->is_ready())
+        auto generation_row = peer_generations_.find(key);
+        if (!client || generation_row == peer_generations_.end() ||
+            generation_row->second.lifecycle.generation() != generation ||
+            !generation_row->second.lifecycle.ready())
         {
             PLOGD(
                 log_,
@@ -3530,7 +3741,8 @@ PeerSet::try_connect_on_strand(
         connections_[key] = ConnectionEntry{client, generation};
         ++total_connects_;
         retry_gates_.erase(key);
-        auto const advertised_range = client->advertised_ledger_range();
+        auto const& ready_status = *generation_row->second.lifecycle.status();
+        auto const advertised_range = ready_status.advertised_range;
         PEER_SET_TRACE(
             "[",
             net_label_,
@@ -3544,8 +3756,8 @@ PeerSet::try_connect_on_strand(
             key,
             {.first_seq = advertised_range.first_seq,
              .last_seq = advertised_range.last_seq,
-             .current_seq = client->peer_ledger_seq()});
-        note_peer_headers(key, client->peer_headers());
+             .current_seq = ready_status.current_seq});
+        note_peer_headers(key, ready_status.headers);
         if (endpoint_cache_)
         {
             try
@@ -3555,7 +3767,7 @@ PeerSet::try_connect_on_strand(
                     key,
                     {.first_seq = advertised_range.first_seq,
                      .last_seq = advertised_range.last_seq,
-                     .current_seq = client->peer_ledger_seq()});
+                     .current_seq = ready_status.current_seq});
             }
             catch (std::exception const& e)
             {
@@ -4585,7 +4797,7 @@ PeerSet::seal_node_batch_command_on_strand(
     if (connection == connections_.end() || !connection->second.session ||
         connection->second.session.get() != pin.get() ||
         connection->second.generation != pin.connection_generation() ||
-        !connection->second.session->is_ready())
+        !ready_status_for(pin.endpoint(), connection->second.generation))
     {
         return std::nullopt;
     }
@@ -4628,7 +4840,7 @@ PeerSet::make_peer_pin(PeerSessionPtr const& expected_session)
     auto connection = connections_.find(key);
     if (connection == connections_.end() || !connection->second.session ||
         connection->second.session != expected_session ||
-        !expected_session->is_ready())
+        !ready_status_for(key, connection->second.generation))
     {
         return {};
     }
@@ -4738,9 +4950,10 @@ PeerSet::peer_for(
         auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
-        if (!client || !client->is_ready())
+        auto const* status = ready_status_for(key, client_entry.generation);
+        if (!client || !status)
             continue;
-        if (client->advertised_ledger_range().contains(ledger_seq))
+        if (status->advertised_range.contains(ledger_seq))
         {
             if (!best || candidate_better(key, best_key))
             {
@@ -4927,7 +5140,8 @@ PeerSet::wait_for_covering_peer(
                 std::move(cancel));
             if (!client)
                 co_return PeerGenerationPin{};
-            if (!client->advertised_ledger_range().contains(ledger_seq))
+            auto const* status = self->ready_status_for(client);
+            if (!status || !status->advertised_range.contains(ledger_seq))
                 co_return PeerGenerationPin{};
             co_return self->make_peer_pin(client);
         },
@@ -5047,7 +5261,8 @@ PeerSet::wait_for_covering_peer_on_strand(
         for (auto const& [key, client_entry] : connections_)
         {
             auto const& client = client_entry.session;
-            if (!client)
+            auto const* live = ready_status_for(key, client_entry.generation);
+            if (!client || !live)
                 continue;
             auto& stats = endpoint_stats_[key];
             // Check if this peer has a recent failure for the target
@@ -5060,13 +5275,13 @@ PeerSet::wait_for_covering_peer_on_strand(
                 else
                     stats.failed_ledgers.erase(it);  // expired, clean up
             }
-            auto const range = client->advertised_ledger_range();
+            auto const range = live->advertised_range;
             candidates.push_back(
                 {key,
                  range.first_seq,
                  range.last_seq,
                  stats.selection_count,
-                 client->is_ready(),
+                 true,
                  failed});
         }
         return candidates;
@@ -5302,10 +5517,12 @@ PeerSet::wait_for_covering_peer_on_strand(
         {
             case PeerDecision::use_range_match: {
                 auto it = connections_.find(sel.endpoint);
-                if (it != connections_.end() && it->second.session)
+                auto const* status = it != connections_.end()
+                    ? ready_status_for(sel.endpoint, it->second.generation)
+                    : nullptr;
+                if (it != connections_.end() && it->second.session && status)
                 {
-                    auto const range =
-                        it->second.session->advertised_ledger_range();
+                    auto const range = status->advertised_range;
                     PLOGI(
                         log_,
                         "[",
@@ -5411,7 +5628,7 @@ PeerSet::any_peer(std::unordered_set<std::string> const& excluded)
         auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
-        if (client && client->is_ready())
+        if (client && ready_status_for(key, client_entry.generation))
         {
             if (!best || candidate_better(key, best_key))
             {
@@ -5443,10 +5660,10 @@ PeerSet::connected_count() const
 {
     ASSERT_ON_STRAND();
     size_t count = 0;
-    for (auto const& [_, client_entry] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
         auto const& client = client_entry.session;
-        if (client && client->is_ready())
+        if (client && ready_status_for(key, client_entry.generation))
         {
             count++;
         }
@@ -5493,12 +5710,13 @@ PeerSet::archival_peer_count() const
 {
     ASSERT_ON_STRAND();
     size_t count = 0;
-    for (auto const& [_, client_entry] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
         auto const& client = client_entry.session;
-        if (!client || !client->is_ready())
+        auto const* status = ready_status_for(key, client_entry.generation);
+        if (!client || !status)
             continue;
-        auto const range = client->advertised_ledger_range();
+        auto const range = status->advertised_range;
         if (range.valid() &&
             (range.last_seq - range.first_seq) >
                 options_.archival_range_threshold)
@@ -5513,9 +5731,10 @@ bool
 PeerSet::peer_is_archival(PeerSessionPtr const& peer) const
 {
     ASSERT_ON_STRAND();
-    if (!peer || !peer->is_ready())
+    auto const* status = ready_status_for(peer);
+    if (!peer || !status)
         return false;
-    auto const range = peer->advertised_ledger_range();
+    auto const range = status->advertised_range;
     return range.valid() && range.last_seq > range.first_seq &&
         (range.last_seq - range.first_seq) > options_.archival_range_threshold;
 }
@@ -5530,11 +5749,12 @@ PeerSet::has_usable_covering_peer(
     for (auto const& [key, peer_entry] : connections_)
     {
         auto const& peer = peer_entry.session;
-        if (!peer || !peer->is_ready())
+        auto const* status = ready_status_for(key, peer_entry.generation);
+        if (!peer || !status)
             continue;
         if (excluded.count(key))
             continue;
-        if (peer->advertised_ledger_range().contains(ledger_seq) &&
+        if (status->advertised_range.contains(ledger_seq) &&
             !peer_failed_for_ledger(key, ledger_seq, now))
         {
             return true;
@@ -5554,10 +5774,11 @@ PeerSet::would_drop_wanted_coverage(
     if (!victim)
         return false;
 
-    auto covers = [](PeerSessionPtr const& peer, uint32_t ledger_seq) {
-        if (!peer || !peer->is_ready())
+    auto covers = [this](PeerSessionPtr const& peer, uint32_t ledger_seq) {
+        auto const* status = ready_status_for(peer);
+        if (!peer || !status)
             return false;
-        return peer->advertised_ledger_range().contains(ledger_seq);
+        return status->advertised_range.contains(ledger_seq);
     };
     auto usable = [&](std::string const& key,
                       PeerSessionPtr const& peer,
@@ -5624,10 +5845,11 @@ PeerSet::rotation_target_for(
     std::vector<TargetedAdmissionLeasePtr> const& admission_leases) const
 {
     ASSERT_ON_STRAND();
-    if (!candidate || !candidate->is_ready())
+    auto const* status = ready_status_for(candidate);
+    if (!candidate || !status)
         return std::nullopt;
 
-    auto const range = candidate->advertised_ledger_range();
+    auto const range = status->advertised_range;
 
     auto const candidate_covers = [&](uint32_t ledger_seq) {
         return range.contains(ledger_seq);
@@ -5666,7 +5888,7 @@ PeerSet::make_room_for_peer(
     std::vector<TargetedAdmissionLeasePtr> const& admission_leases)
 {
     ASSERT_ON_STRAND();
-    if (!candidate || !candidate->is_ready())
+    if (!candidate || !ready_status_for(candidate))
         return false;
 
     auto const archival = peer_is_archival(candidate);
@@ -5679,7 +5901,7 @@ PeerSet::make_room_for_peer(
     if (!target)
         return false;
 
-    if (!candidate->is_ready() || !target->lease ||
+    if (!ready_status_for(candidate) || !target->lease ||
         !target->lease->try_consume())
         return false;
 
@@ -5900,18 +6122,16 @@ PeerSet::snapshot_unsafe() const
             conn_it != connections_.end())
         {
             entry.connected = true;
-            if (conn_it->second.session)
+            auto const* live =
+                ready_status_for(key, conn_it->second.generation);
+            if (live)
             {
-                entry.peer_headers = conn_it->second.session->peer_headers();
-            }
-            if (conn_it->second.session && conn_it->second.session->is_ready())
-            {
+                entry.peer_headers = live->headers;
                 entry.ready = true;
-                auto const range =
-                    conn_it->second.session->advertised_ledger_range();
+                auto const range = live->advertised_range;
                 entry.first_seq = range.first_seq;
                 entry.last_seq = range.last_seq;
-                entry.current_seq = conn_it->second.session->peer_ledger_seq();
+                entry.current_seq = live->current_seq;
                 entry.range_is_persistent_hint = false;
                 out.ready_peers++;
             }
@@ -5949,12 +6169,13 @@ PeerSet::evict_hub_for(RotationTarget const& target)
     for (auto const& [key, client_entry] : connections_)
     {
         auto const& client = client_entry.session;
-        if (!client || !client->is_ready() || peer_is_archival(client))
+        auto const* status = ready_status_for(key, client_entry.generation);
+        if (!client || !status || peer_is_archival(client))
             continue;
         if (generation_has_active_pin(client_entry.generation))
             continue;
 
-        auto const range = client->advertised_ledger_range();
+        auto const range = status->advertised_range;
         auto const covers =
             target.ledger_seq != 0 && range.contains(target.ledger_seq);
         auto const failed = peer_failed_for_ledger(key, target.ledger_seq, now);
@@ -6014,13 +6235,14 @@ PeerSet::evict_archival_for(RotationTarget const& target)
     for (auto const& [key, client_entry] : connections_)
     {
         auto const& client = client_entry.session;
-        if (!client || !client->is_ready() || !peer_is_archival(client) ||
+        auto const* status = ready_status_for(key, client_entry.generation);
+        if (!client || !status || !peer_is_archival(client) ||
             generation_has_active_pin(client_entry.generation))
         {
             continue;
         }
 
-        auto const range = client->advertised_ledger_range();
+        auto const range = status->advertised_range;
         auto const covers =
             target.ledger_seq != 0 && range.contains(target.ledger_seq);
         auto const failed = peer_failed_for_ledger(key, target.ledger_seq, now);
@@ -6081,6 +6303,7 @@ PeerSet::remove_peer(std::string const& key, bool forget_endpoint)
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
+        begin_generation_close(key, it->second.generation);
         PLOGI(log_, "[", net_label_, "] Removing dead peer: ", key);
         if (!forget_endpoint)
             tracker_->add_discovered(key);

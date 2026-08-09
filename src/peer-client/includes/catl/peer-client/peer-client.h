@@ -2,6 +2,7 @@
 
 #include "connection.h"
 #include "endpoint-tracker.h"
+#include "peer-lifecycle.h"
 #include "peer-session.h"
 #include "types.h"
 
@@ -357,6 +358,7 @@ public:
     /// fact for this connection instance. The observer must not assume the
     /// session is still registered anywhere when this runs.
     using DisconnectCallback = std::function<void(PeerTerminalReason const&)>;
+    using LifecycleCallback = std::function<void(PeerLifecycleEvent)>;
 
     /// Pre-connect configuration. Set these before the read loop starts
     /// to avoid cross-strand races.
@@ -369,6 +371,7 @@ public:
         std::shared_ptr<EndpointTracker> tracker{};
         UnsolicitedHandler unsolicited_handler{};
         DisconnectCallback on_disconnect{};
+        LifecycleCallback on_lifecycle{};
         std::optional<std::chrono::steady_clock::time_point>
             initial_connect_absolute_deadline{};
     };
@@ -635,6 +638,11 @@ private:
 
     void
     become_ready();
+
+    void
+    publish_lifecycle(
+        PeerLifecycle lifecycle,
+        PeerTerminalReason reason = {}) noexcept;
 
     // ---------------------------------------------------------------
     // Packet dispatch
@@ -952,6 +960,18 @@ private:
     std::shared_ptr<EndpointTracker> tracker_;
 
     DisconnectCallback on_disconnect_;
+    LifecycleCallback on_lifecycle_;
+    //@@authority state=prv.S0083 status=provisional scope=field
+    //bind=catl::peer_client::PeerClient::lifecycle_event_sequence_@25b625f665c52b63
+    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
+    // label=next_peer_client_lifecycle_event_sequence
+    std::uint64_t lifecycle_event_sequence_ = 0;
+    //@@authority state=prv.S0084 status=provisional scope=field
+    //bind=catl::peer_client::PeerClient::lifecycle_terminal_published_@2635661b3f45709b
+    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
+    // label=peer_client_terminal_publication_fence
+    bool lifecycle_terminal_published_ = false;
+    bool disconnect_observer_published_ = false;
     //@@authority state=prv.S0007 status=provisional scope=field
     // bind=catl::peer_client::PeerClient::node_response_observer_@4ed65a4019fccdea
     // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client

@@ -499,7 +499,11 @@ peer_connection::generate_node_keys()
     // per-handshake would spam Cloud Run logs.
 }
 
-void
+//@@authority transition=prv.T0236 status=provisional scope=function
+//bind=catl::peer_client::verify_peer_session_signature@d20100fa040c4e60
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// label=verify_remote_session_signature_into_authenticated_identity_evidence
+std::optional<std::string>
 peer_connection::verify_peer_session_signature(
     std::string const& public_key_b58,
     std::string const& session_signature_b64)
@@ -514,7 +518,7 @@ peer_connection::verify_peer_session_signature(
             config_.port,
             "] peer omitted Public-Key/Session-Signature; "
             "cannot verify session identity");
-        return;
+        return std::nullopt;
     }
 
     // Decode the peer's node public key (base58, NODE_PUBLIC version → 33 B).
@@ -528,7 +532,7 @@ peer_connection::verify_peer_session_signature(
             ":",
             config_.port,
             "] peer Public-Key not decodable; skipping session-sig verify");
-        return;
+        return std::nullopt;
     }
 
     // Decode the base64 (original variant) Session-Signature → DER bytes.
@@ -553,7 +557,7 @@ peer_connection::verify_peer_session_signature(
             config_.port,
             "] could not decode peer Session-Signature (bad base64 or too "
             "long); skipping verify");
-        return;
+        return std::nullopt;
     }
 
     // The signature is over the 32-byte shared cookie DIRECTLY (the cookie is
@@ -589,6 +593,7 @@ peer_connection::verify_peer_session_signature(
             "] session-signature verified (",
             public_key_b58,
             ")");
+        return public_key_b58;
     }
     else
     {
@@ -603,6 +608,7 @@ peer_connection::verify_peer_session_signature(
             " — peer may not control the advertised node key "
             "(continuing; no trust decision keys off this)");
     }
+    return std::nullopt;
 }
 
 void
@@ -814,7 +820,8 @@ peer_connection::handle_http_request(const connection_handler& handler)
         if (auto it = http_request_.find("Session-Signature");
             it != http_request_.end())
             peer_sig = std::string(it->value());
-        verify_peer_session_signature(peer_pubkey, peer_sig);
+        authenticated_peer_node_key_ =
+            verify_peer_session_signature(peer_pubkey, peer_sig);
     }
 
     // Send upgrade response
@@ -1070,7 +1077,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
     }
 
     // Verify the peer authenticated the TLS session with its node key
-    // (sec #0053). Detection-only — see verify_peer_session_signature.
+    // (sec #0053); retain successful identity evidence for this connection.
     {
         std::string peer_pubkey;
         std::string peer_sig;
@@ -1080,7 +1087,8 @@ peer_connection::handle_http_response(const connection_handler& handler)
         if (auto it = http_response_.find("Session-Signature");
             it != http_response_.end())
             peer_sig = std::string(it->value());
-        verify_peer_session_signature(peer_pubkey, peer_sig);
+        authenticated_peer_node_key_ =
+            verify_peer_session_signature(peer_pubkey, peer_sig);
     }
 
     http_upgraded_ = true;

@@ -7434,6 +7434,97 @@ TEST(PeerSessionInterface, ActivePeerGenerationPinPinsUntilFinalShareReleases)
         PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
 }
 
+TEST(PeerSessionInterface, PriorGenerationEventsCannotRewriteReplacement)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto old_session = std::make_shared<FakePeerSession>(
+        io, "generation-guard:1", true, 600, 400, 600);
+    auto replacement = std::make_shared<FakePeerSession>(
+        io, "generation-guard:1", true, 900, 700, 900);
+
+    auto const old_generation = PeerSetTestAccess::insert_ready_peer_with_generation(
+        io, peers, old_session);
+    PeerSetTestAccess::remove_peer_for_test(
+        io, peers, old_session->endpoint(), false);
+    auto const replacement_generation =
+        PeerSetTestAccess::insert_ready_peer_with_generation(
+            io, peers, replacement);
+    ASSERT_GT(replacement_generation, old_generation);
+
+    //@@mutation-site prior-generation-status-rewrites-current-generation
+    PeerSetTestAccess::consume_lifecycle_event(
+        io,
+        peers,
+        {.endpoint = old_session->endpoint(),
+         .generation = old_generation,
+         .event_sequence = 99,
+         .lifecycle = PeerLifecycle::ready,
+         .status =
+             {.current_seq = 1,
+              .advertised_range = {.first_seq = 1, .last_seq = 1}}});
+    //@@mutation-end prior-generation-status-rewrites-current-generation
+    //@@mutation-site prior-generation-terminal-removes-current-generation
+    PeerSetTestAccess::consume_lifecycle_event(
+        io,
+        peers,
+        {.endpoint = old_session->endpoint(),
+         .generation = old_generation,
+         .event_sequence = 100,
+         .lifecycle = PeerLifecycle::failed});
+    //@@mutation-end prior-generation-terminal-removes-current-generation
+
+    auto const status = PeerSetTestAccess::canonical_ready_status(
+        io, peers, replacement->endpoint(), replacement_generation);
+    ASSERT_TRUE(status);
+    EXPECT_EQ(status->current_seq, 900u);
+    EXPECT_EQ(status->advertised_range.first_seq, 700u);
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(
+            io, peers, replacement->endpoint()),
+        replacement_generation);
+}
+
+TEST(PeerSessionInterface, TerminalInvalidatesBeforeSelectionWake)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "terminal-before-wake:1", true, 600, 400, 600);
+    auto const generation = PeerSetTestAccess::insert_ready_peer_with_generation(
+        io, peers, session);
+
+    PeerSetTestAccess::consume_lifecycle_event(
+        io,
+        peers,
+        {.endpoint = session->endpoint(),
+         .generation = generation,
+         .event_sequence = 3,
+         .lifecycle = PeerLifecycle::failed});
+
+    //@@mutation-site terminal-wake-precedes-live-evidence-invalidation
+    EXPECT_FALSE(PeerSetTestAccess::canonical_ready_status(
+        io, peers, session->endpoint(), generation));
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()),
+        0u);
+    EXPECT_FALSE(PeerSetTestAccess::make_peer_pin_for_session(
+        io, peers, session));
+    //@@mutation-end terminal-wake-precedes-live-evidence-invalidation
+}
+
 TEST(PeerSessionInterface, StalePinReleaseCannotConsumeReplacementGeneration)
 {
     asio::io_context io;

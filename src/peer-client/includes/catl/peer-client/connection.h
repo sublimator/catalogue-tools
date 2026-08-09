@@ -111,6 +111,12 @@ public:
         return upgrade_headers_;
     }
 
+    std::optional<std::string> const&
+    authenticated_peer_node_key() const noexcept
+    {
+        return authenticated_peer_node_key_;
+    }
+
     // Send transaction query
     void
     send_transaction_query(
@@ -323,11 +329,10 @@ private:
     generate_node_keys();
 
     // Verify the peer's Session-Signature against the shared TLS cookie
-    // (sec #0053). Logs a warning on mismatch but does NOT drop the
-    // connection — we make no trust decision off this signature, and a
-    // false-reject would sever a legitimate peer. Detection-only for now;
-    // tighten to a hard reject once live traffic confirms zero warnings.
-    void
+    // (sec #0053). A mismatch is reported but does not reject the connection;
+    // a successful result supplies the authenticated node identity used by
+    // the peer-generation model.
+    std::optional<std::string>
     verify_peer_session_signature(
         std::string const& public_key_b58,
         std::string const& session_signature_b64);
@@ -374,6 +379,12 @@ private:
     std::array<std::uint8_t, 32> secret_key_;
     std::array<std::uint8_t, 33> public_key_compressed_;
     std::string node_public_key_b58_;
+    //@@authority state=prv.S0082 status=provisional scope=field
+    //bind=catl::peer_client::peer_connection::authenticated_peer_node_key_@c2210786517ef962
+    // owner=unresolved owner_hypothesis=peer_connection
+    // observed_home=peer_connection
+    // label=cryptographically_verified_remote_node_identity
+    std::optional<std::string> authenticated_peer_node_key_;
 
     // Connection state
     bool connected_ = false;
