@@ -202,6 +202,59 @@ discovery_source_label(bool seen_crawl, bool seen_endpoints, bool seen_redirect)
     return label;
 }
 
+bool
+reported_intervals_touch(
+    CrawlLedgerRange const& lhs,
+    CrawlLedgerRange const& rhs)
+{
+    return rhs.first_seq <= lhs.last_seq ||
+        (lhs.last_seq != std::numeric_limits<uint32_t>::max() &&
+         rhs.first_seq == lhs.last_seq + 1);
+}
+
+std::size_t
+merge_reported_intervals(
+    std::vector<CrawlLedgerRange>& retained,
+    std::vector<CrawlLedgerRange> const& incoming)
+{
+    std::size_t truncated = 0;
+    for (auto const& range : incoming)
+    {
+        auto position = std::lower_bound(
+            retained.begin(),
+            retained.end(),
+            range.first_seq,
+            [](CrawlLedgerRange const& current, uint32_t first_seq) {
+                return current.last_seq !=
+                    std::numeric_limits<uint32_t>::max() &&
+                    current.last_seq + 1 < first_seq;
+            });
+
+        if (position == retained.end() ||
+            !reported_intervals_touch(range, *position))
+        {
+            if (retained.size() >= kMaxCrawlIntervalsPerPeer)
+            {
+                ++truncated;
+                continue;
+            }
+            retained.insert(position, range);
+            continue;
+        }
+
+        position->first_seq = std::min(position->first_seq, range.first_seq);
+        position->last_seq = std::max(position->last_seq, range.last_seq);
+        auto next = position + 1;
+        while (next != retained.end() &&
+               reported_intervals_touch(*position, *next))
+        {
+            position->last_seq = std::max(position->last_seq, next->last_seq);
+            next = retained.erase(next);
+        }
+    }
+    return truncated;
+}
+
 std::string
 trim_copy(std::string_view text)
 {
@@ -415,7 +468,7 @@ PeerSet::co_stop()
     // cross into HTTPS after it observes the sealed boundary.
     // clang-format off
     //@@authority transition=prv.T0190 status=provisional scope=statement
-    // bind=expression_statement@46b6d04e8bcc7736
+    // bind=expression_statement@ee69b19653a17ebe
     // owner=unresolved owner_hypothesis=peer_set
     // commit=caller_thread_stop_state touches=prv.S0062
     // label=publish_retained_crawl_stop_fact_before_ingress_seal
@@ -951,7 +1004,7 @@ PeerSet::complete_crawl_servant(
     // As above, optional retention and diagnostics cannot sit between census
     // consumption and the shared stop wake.
     //@@authority transition=prv.T0092 status=provisional scope=statement
-    // bind=expression_statement@660eab6dbbe007d7
+    // bind=expression_statement@caf7c41aa56bab58
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
     crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
@@ -1063,7 +1116,12 @@ PeerSet::complete_crawl_servant(
                 outcome.ranged,
                 " with ledger ranges, ",
                 outcome.filtered,
-                " filtered");
+                " filtered, truncation peers=",
+                outcome.truncated_peer_rows,
+                " intervals=",
+                outcome.truncated_interval_rows,
+                " keys=",
+                outcome.truncated_public_keys);
         }
         catch (...)
         {
@@ -2565,6 +2623,193 @@ PeerSet::pump_connects()
     }
 }
 
+//@@authority transition=prv.T0235 status=provisional scope=function
+// bind=catl::peer_client::capture_crawl_observations@d7ff56a15d21a61b
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0081
+// label=replace_reporter_scoped_bounded_crawl_observation_batch
+bool
+PeerSet::capture_crawl_observations(
+    std::string const& reporter,
+    CrawlResponse const& response) noexcept
+{
+    ASSERT_ON_STRAND();
+    if (!options_.capture_crawl_observations)
+        return true;
+
+    try
+    {
+        if (before_crawl_observation_build_for_test_)
+            before_crawl_observation_build_for_test_();
+
+        auto const now = std::chrono::steady_clock::now();
+        std::size_t aggregate_truncated_intervals = 0;
+        std::map<std::string, CrawlObservation> deduplicated;
+        for (auto const& peer : response.peers)
+        {
+            auto normalized =
+                EndpointTracker::normalize_discovered_endpoint(peer.endpoint);
+            if (!normalized)
+                continue;
+
+            auto [position, inserted] = deduplicated.try_emplace(
+                *normalized,
+                CrawlObservation{
+                    .subject_endpoint = *normalized,
+                    .reported_subject_key = peer.reported_public_key,
+                    .intervals = peer.reported_intervals,
+                    .truncated = peer.truncated});
+            if (inserted)
+                continue;
+
+            auto& retained = position->second;
+            if (retained.reported_subject_key && peer.reported_public_key &&
+                retained.reported_subject_key != peer.reported_public_key)
+            {
+                retained.reported_subject_key.reset();
+                retained.reported_key_conflict = true;
+            }
+            else if (
+                !retained.reported_subject_key &&
+                !retained.reported_key_conflict && peer.reported_public_key)
+            {
+                retained.reported_subject_key = peer.reported_public_key;
+            }
+            auto const dropped = merge_reported_intervals(
+                retained.intervals, peer.reported_intervals);
+            aggregate_truncated_intervals += dropped;
+            retained.truncated =
+                retained.truncated || peer.truncated || dropped != 0;
+        }
+
+        std::size_t retained_elsewhere = 0;
+        for (auto const& [key, batch] : crawl_observation_batches_)
+        {
+            if (key == reporter || now - batch.observed_at >= kCrawlRetention)
+                continue;
+            auto const remaining = kMaxCrawlObservations - retained_elsewhere;
+            retained_elsewhere = batch.observations.size() >= remaining
+                ? kMaxCrawlObservations
+                : retained_elsewhere + batch.observations.size();
+        }
+        auto const available = retained_elsewhere >= kMaxCrawlObservations
+            ? 0
+            : kMaxCrawlObservations - retained_elsewhere;
+
+        CrawlObservationBatch batch;
+        batch.observed_at = now;
+        batch.observed_at_unix =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        batch.crawl_epoch = next_crawl_observation_epoch_ + 1;
+        batch.observations.reserve(std::min(available, deduplicated.size()));
+        std::size_t truncated_observations = 0;
+        for (auto& [_, observation] : deduplicated)
+        {
+            if (batch.observations.size() >= available)
+            {
+                ++truncated_observations;
+                continue;
+            }
+            batch.observations.push_back(std::move(observation));
+        }
+
+        // Allocate the replacement map node before touching the published
+        // table. merge() then commits that prepared node without allocation.
+        std::map<std::string, CrawlObservationBatch> staged;
+        if (!batch.observations.empty())
+            staged.emplace(reporter, std::move(batch));
+
+        if (before_crawl_observation_commit_for_test_)
+            before_crawl_observation_commit_for_test_();
+
+        for (auto it = crawl_observation_batches_.begin();
+             it != crawl_observation_batches_.end();)
+        {
+            if (now - it->second.observed_at >= kCrawlRetention)
+                it = crawl_observation_batches_.erase(it);
+            else
+                ++it;
+        }
+        crawl_observation_batches_.erase(reporter);
+        crawl_observation_batches_.merge(staged);
+
+        ++next_crawl_observation_epoch_;
+        crawl_truncated_peer_rows_ += response.truncated_peer_rows;
+        crawl_truncated_interval_rows_ +=
+            response.truncated_interval_rows + aggregate_truncated_intervals;
+        crawl_truncated_public_keys_ += response.truncated_public_keys;
+        crawl_invalid_public_keys_ += response.invalid_public_keys;
+        crawl_malformed_interval_tokens_ += response.malformed_interval_tokens;
+        crawl_truncated_observations_ += truncated_observations;
+        return true;
+    }
+    catch (...)
+    {
+        ++crawl_observation_capture_failures_;
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] Ignoring crawl observation capture failure reporter=",
+            reporter);
+        return false;
+    }
+}
+
+void
+PeerSet::apply_crawl_response(
+    std::string const& reporter,
+    CrawlResponse const& response,
+    CrawlServantOutcome& outcome)
+{
+    ASSERT_ON_STRAND();
+    outcome.raw = response.reported_peer_rows;
+    outcome.used_tls = response.used_tls;
+    outcome.truncated_peer_rows = response.truncated_peer_rows;
+    outcome.truncated_interval_rows = response.truncated_interval_rows;
+    outcome.truncated_public_keys = response.truncated_public_keys;
+
+    // Preserve the legacy projection exactly until Cut 4. Diagnostic capture
+    // is deliberately last and noexcept, so it cannot suppress discovery.
+    for (auto const& peer : response.peers)
+    {
+        if (peer.endpoint.empty())
+            continue;
+
+        auto normalized =
+            EndpointTracker::normalize_discovered_endpoint(peer.endpoint);
+        if (!normalized)
+        {
+            ++outcome.filtered;
+            continue;
+        }
+
+        ++outcome.accepted;
+        if (endpoint_cache_)
+        {
+            try
+            {
+                endpoint_cache_->remember_seen_crawl(network_id_, *normalized);
+            }
+            catch (...)
+            {
+            }
+        }
+
+        if (auto status = choose_crawl_status(peer.complete_ledgers))
+        {
+            ++outcome.ranged;
+            tracker_->update(*normalized, *status);
+        }
+        else
+        {
+            tracker_->add_discovered(*normalized, DiscoverySource::Crawl);
+        }
+    }
+    capture_crawl_observations(reporter, response);
+}
+
 //@@authority transition=prv.T0088 status=provisional scope=function
 // bind=catl::peer_client::pump_crawls@98ba9d5913454cfb
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
@@ -2611,6 +2856,7 @@ PeerSet::pump_crawls()
         auto before_stop_check = before_crawl_fallback_stop_check_for_test_;
         auto before_https_fallback = before_crawl_https_fallback_for_test_;
         auto servant = [self,
+                        key,
                         host,
                         port,
                         stop_token,
@@ -2636,49 +2882,7 @@ PeerSet::pump_crawls()
                     .before_stop_check = std::move(before_stop_check),
                     .before_https_fallback = std::move(before_https_fallback)});
 
-            outcome.raw = response.peers.size();
-            outcome.used_tls = response.used_tls;
-            for (auto const& peer : response.peers)
-            {
-                if (peer.endpoint.empty())
-                    continue;
-
-                auto normalized =
-                    EndpointTracker::normalize_discovered_endpoint(
-                        peer.endpoint);
-                if (!normalized)
-                {
-                    ++outcome.filtered;
-                    continue;
-                }
-
-                ++outcome.accepted;
-
-                // Mark as seen in crawl
-                if (self->endpoint_cache_)
-                {
-                    try
-                    {
-                        self->endpoint_cache_->remember_seen_crawl(
-                            self->network_id_, *normalized);
-                    }
-                    catch (...)
-                    {
-                    }
-                }
-
-                if (auto status =
-                        self->choose_crawl_status(peer.complete_ledgers))
-                {
-                    ++outcome.ranged;
-                    self->tracker_->update(*normalized, *status);
-                }
-                else
-                {
-                    self->tracker_->add_discovered(
-                        *normalized, DiscoverySource::Crawl);
-                }
-            }
+            self->apply_crawl_response(key, response, outcome);
             co_return outcome;
         };
 
@@ -5496,6 +5700,35 @@ PeerSet::snapshot_unsafe() const
     out.known_endpoints = tracker_->size();
     out.tracked_endpoints = endpoint_stats_.size();
     out.crawled_size = crawled_.size();
+    out.crawl_truncated_peer_rows = crawl_truncated_peer_rows_;
+    out.crawl_truncated_interval_rows = crawl_truncated_interval_rows_;
+    out.crawl_truncated_public_keys = crawl_truncated_public_keys_;
+    out.crawl_invalid_public_keys = crawl_invalid_public_keys_;
+    out.crawl_malformed_interval_tokens = crawl_malformed_interval_tokens_;
+    out.crawl_truncated_observations = crawl_truncated_observations_;
+    out.crawl_observation_capture_failures =
+        crawl_observation_capture_failures_;
+    for (auto const& [reporter, batch] : crawl_observation_batches_)
+    {
+        if (now - batch.observed_at >= kCrawlRetention)
+            continue;
+        ++out.crawl_observation_batches;
+        out.crawl_observation_count += batch.observations.size();
+        for (auto const& observation : batch.observations)
+        {
+            out.reported_crawl_observations.push_back(
+                Snapshot::ReportedCrawlObservation{
+                    .reporter_endpoint = reporter,
+                    .subject_endpoint = observation.subject_endpoint,
+                    .reported_subject_key = observation.reported_subject_key,
+                    .intervals = observation.intervals,
+                    .observed_at = batch.observed_at_unix,
+                    .crawl_epoch = batch.crawl_epoch,
+                    .truncated = observation.truncated,
+                    .reported_key_conflict =
+                        observation.reported_key_conflict});
+        }
+    }
     out.failed_at_size = retry_gates_.size();
     out.connected_peers = connections_.size();
     out.hub_peers = hub_peer_count();
@@ -6009,8 +6242,8 @@ PeerSet::prune_endpoint_stats()
 //@@authority transition=prv.T0223 status=provisional scope=function
 // bind=catl::peer_client::prune_discovery_state@2e89ccf0752f0eab
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0076
-// label=expire_and_bound_owned_endpoint_retry_gates
+// touches=prv.S0076,prv.S0081
+// label=expire_and_bound_owned_discovery_and_observation_diagnostics
 void
 PeerSet::prune_discovery_state()
 {
@@ -6019,6 +6252,7 @@ PeerSet::prune_discovery_state()
     auto const now = std::chrono::steady_clock::now();
     size_t tracker_removed = 0;
     size_t crawled_removed = 0;
+    size_t crawl_observation_batches_removed = 0;
     size_t failed_removed = 0;
 
     std::unordered_set<std::string> active;
@@ -6037,6 +6271,20 @@ PeerSet::prune_discovery_state()
         {
             it = crawled_.erase(it);
             ++crawled_removed;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    for (auto it = crawl_observation_batches_.begin();
+         it != crawl_observation_batches_.end();)
+    {
+        if (now - it->second.observed_at >= kCrawlRetention)
+        {
+            it = crawl_observation_batches_.erase(it);
+            ++crawl_observation_batches_removed;
         }
         else
         {
@@ -6185,7 +6433,8 @@ PeerSet::prune_discovery_state()
         }
     }
 
-    if (tracker_removed > 0 || crawled_removed > 0 || failed_removed > 0)
+    if (tracker_removed > 0 || crawled_removed > 0 ||
+        crawl_observation_batches_removed > 0 || failed_removed > 0)
     {
         PLOGI(
             log_,
@@ -6195,6 +6444,8 @@ PeerSet::prune_discovery_state()
             tracker_removed,
             " crawled=",
             crawled_removed,
+            " crawl_observations=",
+            crawl_observation_batches_removed,
             " failed=",
             failed_removed,
             " (known=",

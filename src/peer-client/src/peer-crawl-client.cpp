@@ -1,5 +1,6 @@
 #include <catl/peer-client/peer-crawl-client.h>
 
+#include <catl/base58/base58.h>
 #include <catl/core/logger.h>
 
 #include <boost/asio/connect.hpp>
@@ -14,7 +15,8 @@
 
 #include <algorithm>
 #include <cctype>
-#include <sstream>
+#include <charconv>
+#include <limits>
 #include <stdexcept>
 
 namespace catl::peer_client {
@@ -112,6 +114,108 @@ format_endpoint(std::string const& host, uint16_t port)
     return host + ":" + std::to_string(port);
 }
 
+bool
+parse_decimal_u32(std::string_view text, uint32_t& value)
+{
+    if (text.empty())
+        return false;
+    auto const [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    return error == std::errc{} && end == text.data() + text.size();
+}
+
+bool
+ranges_touch(CrawlLedgerRange const& lhs, CrawlLedgerRange const& rhs)
+{
+    return rhs.first_seq <= lhs.last_seq ||
+        (lhs.last_seq != std::numeric_limits<uint32_t>::max() &&
+         rhs.first_seq == lhs.last_seq + 1);
+}
+
+struct ParsedLedgerRanges
+{
+    std::vector<CrawlLedgerRange> legacy_ranges;
+    std::vector<CrawlLedgerRange> reported_ranges;
+    std::size_t malformed = 0;
+    std::size_t truncated = 0;
+};
+
+ParsedLedgerRanges
+parse_complete_ledgers_bounded(std::string_view value, std::size_t limit)
+{
+    ParsedLedgerRanges out;
+    std::size_t begin = 0;
+    while (begin <= value.size())
+    {
+        auto const comma = value.find(',', begin);
+        auto const end = comma == std::string_view::npos ? value.size() : comma;
+        auto const token = trim_copy(value.substr(begin, end - begin));
+        begin = comma == std::string_view::npos ? value.size() + 1 : comma + 1;
+
+        if (token.empty() || token == "empty")
+            continue;
+
+        auto const dash = token.find('-');
+        if (dash != std::string::npos &&
+            token.find('-', dash + 1) != std::string::npos)
+        {
+            ++out.malformed;
+            continue;
+        }
+
+        auto const first_text = dash == std::string::npos
+            ? std::string_view(token)
+            : std::string_view(token).substr(0, dash);
+        auto const last_text = dash == std::string::npos
+            ? std::string_view(token)
+            : std::string_view(token).substr(dash + 1);
+        uint32_t first = 0;
+        uint32_t last = 0;
+        if (!parse_decimal_u32(first_text, first) ||
+            !parse_decimal_u32(last_text, last) || first == 0 || last == 0 ||
+            first > last)
+        {
+            ++out.malformed;
+            continue;
+        }
+
+        CrawlLedgerRange incoming{.first_seq = first, .last_seq = last};
+        if (out.legacy_ranges.size() >= limit)
+        {
+            ++out.truncated;
+            continue;
+        }
+        out.legacy_ranges.push_back(incoming);
+
+        auto position = std::lower_bound(
+            out.reported_ranges.begin(),
+            out.reported_ranges.end(),
+            incoming.first_seq,
+            [](CrawlLedgerRange const& range, uint32_t first_seq) {
+                return range.last_seq != std::numeric_limits<uint32_t>::max() &&
+                    range.last_seq + 1 < first_seq;
+            });
+
+        if (position == out.reported_ranges.end() ||
+            !ranges_touch(incoming, *position))
+        {
+            out.reported_ranges.insert(position, incoming);
+            continue;
+        }
+
+        position->first_seq = std::min(position->first_seq, incoming.first_seq);
+        position->last_seq = std::max(position->last_seq, incoming.last_seq);
+        auto next = position + 1;
+        while (next != out.reported_ranges.end() &&
+               ranges_touch(*position, *next))
+        {
+            position->last_seq = std::max(position->last_seq, next->last_seq);
+            next = out.reported_ranges.erase(next);
+        }
+    }
+    return out;
+}
+
 template <class Stream>
 boost::asio::awaitable<CrawlResponse>
 read_crawl_response(
@@ -137,102 +241,47 @@ read_crawl_response(
     }
 
     beast::flat_buffer buffer;
-    http::response<http::string_body> res;
+    http::response_parser<http::string_body> parser;
+    parser.body_limit(kMaxCrawlBodyBytes);
     try
     {
         tcp_stream.expires_after(std::chrono::seconds(10));
         co_await http::async_read(
-            stream, buffer, res, boost::asio::use_awaitable);
+            stream, buffer, parser, boost::asio::use_awaitable);
     }
     catch (std::exception const& e)
     {
         throw make_crawl_stage_error(std::string(scheme) + "-read", e.what());
     }
 
+    auto res = parser.release();
+
     if (res.result() != http::status::ok)
     {
         throw make_crawl_http_error(std::string(scheme) + "-read", res);
     }
 
-    boost::json::value root;
+    CrawlResponse response;
     try
     {
-        root = boost::json::parse(res.body());
+        response = parse_peer_crawl_body(res.body());
     }
     catch (std::exception const& e)
     {
         throw make_crawl_stage_error(std::string(scheme) + "-parse", e.what());
     }
-    auto const* root_obj = root.if_object();
-    if (!root_obj)
-    {
-        throw std::runtime_error(
-            "crawl " + std::string(scheme) +
-            "-parse: response root is not an object");
-    }
-
-    std::vector<CrawlPeer> peers;
-
-    auto const* overlay = root_obj->if_contains("overlay");
-    if (overlay && overlay->is_object())
-    {
-        auto const* active = overlay->as_object().if_contains("active");
-        if (active && active->is_array())
-        {
-            for (auto const& item : active->as_array())
-            {
-                auto const* obj = item.if_object();
-                if (!obj)
-                    continue;
-
-                auto const* ip_value = obj->if_contains("ip");
-                auto const* port_value = obj->if_contains("port");
-                if (!ip_value || !port_value || !ip_value->is_string() ||
-                    !port_value->is_string())
-                {
-                    continue;
-                }
-
-                auto const host_part =
-                    std::string(ip_value->as_string().c_str());
-                auto const port_part =
-                    std::string(port_value->as_string().c_str());
-
-                uint16_t port = 0;
-                try
-                {
-                    port = static_cast<uint16_t>(std::stoul(port_part));
-                }
-                catch (...)
-                {
-                    continue;
-                }
-
-                CrawlPeer peer;
-                peer.endpoint = format_endpoint(host_part, port);
-
-                if (auto const* ledgers = obj->if_contains("complete_ledgers");
-                    ledgers && ledgers->is_string())
-                {
-                    peer.complete_ledgers =
-                        parse_complete_ledgers(ledgers->as_string().c_str());
-                }
-
-                peers.push_back(std::move(peer));
-            }
-        }
-    }
+    response.used_tls = used_tls;
 
     PLOGD(
         log_,
         "Crawl ",
         host,
         " returned ",
-        peers.size(),
+        response.peers.size(),
         " public peers via ",
         used_tls ? "HTTPS" : "HTTP");
 
-    co_return CrawlResponse{.used_tls = used_tls, .peers = std::move(peers)};
+    co_return response;
 }
 
 boost::asio::awaitable<CrawlResponse>
@@ -337,37 +386,114 @@ fetch_crawl_http(std::string const& host, uint16_t port)
 std::vector<CrawlLedgerRange>
 parse_complete_ledgers(std::string_view value)
 {
-    std::vector<CrawlLedgerRange> ranges;
-    std::string current;
-    std::stringstream ss{std::string(value)};
+    return parse_complete_ledgers_bounded(value, kMaxCrawlIntervalsPerPeer)
+        .legacy_ranges;
+}
 
-    while (std::getline(ss, current, ','))
+CrawlResponse
+parse_peer_crawl_body(std::string_view body, CrawlParseLimits const& limits)
+{
+    if (body.size() > kMaxCrawlBodyBytes)
+        throw std::length_error("crawl response body exceeds 4 MiB limit");
+
+    auto const root = boost::json::parse(body);
+    auto const* root_obj = root.if_object();
+    if (!root_obj)
+        throw std::runtime_error("response root is not an object");
+
+    CrawlResponse response;
+    auto const effective_limits = CrawlParseLimits{
+        .peers = std::min(limits.peers, kMaxCrawlPeersPerBatch),
+        .intervals_per_peer =
+            std::min(limits.intervals_per_peer, kMaxCrawlIntervalsPerPeer),
+        .public_key_chars =
+            std::min(limits.public_key_chars, kMaxCrawlPublicKeyChars)};
+    auto const* overlay = root_obj->if_contains("overlay");
+    if (!overlay || !overlay->is_object())
+        return response;
+    auto const* active = overlay->as_object().if_contains("active");
+    if (!active || !active->is_array())
+        return response;
+
+    auto const& rows = active->as_array();
+    response.reported_peer_rows = rows.size();
+    auto const retained_rows = std::min(rows.size(), effective_limits.peers);
+    response.truncated_peer_rows = rows.size() - retained_rows;
+    response.peers.reserve(retained_rows);
+
+    for (std::size_t index = 0; index < retained_rows; ++index)
     {
-        auto token = trim_copy(current);
-        if (token.empty() || token == "empty")
+        auto const* obj = rows[index].if_object();
+        if (!obj)
             continue;
 
-        auto dash = token.find('-');
-        auto first_text =
-            dash == std::string::npos ? token : token.substr(0, dash);
-        auto last_text =
-            dash == std::string::npos ? token : token.substr(dash + 1);
-
-        try
-        {
-            auto const first = static_cast<uint32_t>(std::stoul(first_text));
-            auto const last = static_cast<uint32_t>(std::stoul(last_text));
-            if (first == 0 || last == 0 || first > last)
-                continue;
-            ranges.push_back({.first_seq = first, .last_seq = last});
-        }
-        catch (...)
+        auto const* ip_value = obj->if_contains("ip");
+        auto const* port_value = obj->if_contains("port");
+        if (!ip_value || !port_value || !ip_value->is_string() ||
+            !port_value->is_string())
         {
             continue;
         }
+
+        auto const& host_json = ip_value->as_string();
+        auto const& port_json = port_value->as_string();
+        auto const host_view =
+            std::string_view(host_json.data(), host_json.size());
+        auto const port_view =
+            std::string_view(port_json.data(), port_json.size());
+        if (host_view.find('\0') != std::string_view::npos)
+            continue;
+        uint32_t parsed_port = 0;
+        if (!parse_decimal_u32(port_view, parsed_port) || parsed_port == 0 ||
+            parsed_port > std::numeric_limits<uint16_t>::max())
+        {
+            continue;
+        }
+
+        CrawlPeer peer;
+        peer.endpoint = format_endpoint(
+            std::string(host_view), static_cast<uint16_t>(parsed_port));
+
+        if (auto const* key = obj->if_contains("public_key");
+            key && key->is_string())
+        {
+            auto const& key_json = key->as_string();
+            auto const key_view =
+                std::string_view(key_json.data(), key_json.size());
+            if (key_view.size() > effective_limits.public_key_chars)
+            {
+                peer.truncated = true;
+                ++response.truncated_public_keys;
+            }
+            else if (auto reported = std::string(key_view);
+                     base58::decode_node_public(reported))
+            {
+                peer.reported_public_key = std::move(reported);
+            }
+            else
+            {
+                ++response.invalid_public_keys;
+            }
+        }
+
+        if (auto const* ledgers = obj->if_contains("complete_ledgers");
+            ledgers && ledgers->is_string())
+        {
+            auto const& ledgers_json = ledgers->as_string();
+            auto parsed = parse_complete_ledgers_bounded(
+                std::string_view(ledgers_json.data(), ledgers_json.size()),
+                effective_limits.intervals_per_peer);
+            peer.complete_ledgers = std::move(parsed.legacy_ranges);
+            peer.reported_intervals = std::move(parsed.reported_ranges);
+            peer.truncated = peer.truncated || parsed.truncated != 0;
+            response.truncated_interval_rows += parsed.truncated;
+            response.malformed_interval_tokens += parsed.malformed;
+        }
+
+        response.peers.push_back(std::move(peer));
     }
 
-    return ranges;
+    return response;
 }
 
 std::string

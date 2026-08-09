@@ -114,6 +114,281 @@ TEST(PeerSetPruning, WaitSignalWakesOnDiscoveryAcrossThreads)
     EXPECT_TRUE(woke_on_signal);
 }
 
+TEST(PeerSetPruning, CrawlObservationsStayOutsideSelectionState)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    CrawlResponse response;
+    response.peers = {
+        CrawlPeer{
+            .endpoint = "subject.example.com:51235",
+            .reported_public_key = "reported-key-a",
+            .complete_ledgers = {{.first_seq = 100, .last_seq = 200}},
+            .reported_intervals = {{.first_seq = 100, .last_seq = 200}}},
+        CrawlPeer{
+            .endpoint = "subject.example.com:51235",
+            .reported_public_key = "reported-key-b",
+            .complete_ledgers = {{.first_seq = 202, .last_seq = 300}},
+            .reported_intervals = {{.first_seq = 202, .last_seq = 300}}},
+        CrawlPeer{
+            .endpoint = "alias.example.com:51235",
+            .reported_public_key = "reported-key-a",
+            .complete_ledgers = {{.first_seq = 400, .last_seq = 500}},
+            .reported_intervals = {{.first_seq = 400, .last_seq = 500}}},
+    };
+    PeerSetTestAccess::capture_crawl_observations(
+        io, peers, "reporter.example.com:51235", response);
+
+    auto snapshot = PeerSetTestAccess::snapshot(io, peers);
+    EXPECT_EQ(snapshot.known_endpoints, 0u);
+    EXPECT_EQ(snapshot.tracked_endpoints, 0u);
+    EXPECT_TRUE(snapshot.peers.empty());
+    EXPECT_EQ(snapshot.crawl_observation_batches, 1u);
+    ASSERT_EQ(snapshot.reported_crawl_observations.size(), 2u);
+
+    auto const& alias = snapshot.reported_crawl_observations[0];
+    auto const& subject = snapshot.reported_crawl_observations[1];
+    EXPECT_EQ(alias.subject_endpoint, "alias.example.com:51235");
+    EXPECT_EQ(subject.subject_endpoint, "subject.example.com:51235");
+    EXPECT_TRUE(subject.reported_key_conflict);
+    EXPECT_FALSE(subject.reported_subject_key.has_value());
+    ASSERT_EQ(subject.intervals.size(), 2u);
+    EXPECT_EQ(subject.intervals[0].last_seq, 200u);
+    EXPECT_EQ(subject.intervals[1].first_seq, 202u);
+
+    auto disabled = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .capture_crawl_observations = false,
+        });
+    PeerSetTestAccess::capture_crawl_observations(
+        io, disabled, "reporter.example.com:51235", std::move(response));
+    auto disabled_snapshot = PeerSetTestAccess::snapshot(io, disabled);
+    EXPECT_EQ(disabled_snapshot.known_endpoints, snapshot.known_endpoints);
+    EXPECT_EQ(disabled_snapshot.tracked_endpoints, snapshot.tracked_endpoints);
+    EXPECT_EQ(disabled_snapshot.queued_connects, snapshot.queued_connects);
+    EXPECT_EQ(
+        disabled_snapshot.in_flight_connects, snapshot.in_flight_connects);
+    EXPECT_TRUE(disabled_snapshot.reported_crawl_observations.empty());
+}
+
+TEST(PeerSetPruning, CanonicalCrawlDiagnosticsDoNotChangeLegacyProjection)
+{
+    asio::io_context io;
+    auto const options = PeerSetOptions{
+        .network_id = 0,
+        .endpoint_cache_path = ":memory:",
+        .max_in_flight_connects = 0,
+        .max_in_flight_crawls = 0,
+    };
+    auto enabled = PeerSet::create(io, options);
+    auto disabled_options = options;
+    disabled_options.capture_crawl_observations = false;
+    auto disabled = PeerSet::create(io, disabled_options);
+
+    auto const response = parse_peer_crawl_body(R"json({"overlay":{"active":[{
+        "ip":"subject.example.com","port":"51235",
+        "complete_ledgers":"1-10,11-20"
+    }]}})json");
+    PeerSetTestAccess::apply_crawl_response(
+        io, enabled, "reporter.example.com:51235", response);
+    PeerSetTestAccess::apply_crawl_response(
+        io, disabled, "reporter.example.com:51235", response);
+
+    auto const enabled_snapshot = PeerSetTestAccess::snapshot(io, enabled);
+    auto const disabled_snapshot = PeerSetTestAccess::snapshot(io, disabled);
+    EXPECT_EQ(
+        enabled_snapshot.known_endpoints, disabled_snapshot.known_endpoints);
+    EXPECT_EQ(
+        enabled_snapshot.tracked_endpoints,
+        disabled_snapshot.tracked_endpoints);
+    EXPECT_EQ(
+        enabled_snapshot.queued_connects, disabled_snapshot.queued_connects);
+    EXPECT_EQ(
+        enabled_snapshot.in_flight_connects,
+        disabled_snapshot.in_flight_connects);
+
+    auto const enabled_status = PeerSetTestAccess::crawl_tracker_status(
+        io, enabled, "subject.example.com:51235");
+    auto const disabled_status = PeerSetTestAccess::crawl_tracker_status(
+        io, disabled, "subject.example.com:51235");
+    ASSERT_TRUE(enabled_status.has_value());
+    ASSERT_TRUE(disabled_status.has_value());
+    EXPECT_EQ(enabled_status->first_seq, 11u);
+    EXPECT_EQ(enabled_status->last_seq, 20u);
+    EXPECT_EQ(enabled_status->first_seq, disabled_status->first_seq);
+    EXPECT_EQ(enabled_status->last_seq, disabled_status->last_seq);
+    EXPECT_TRUE(PeerSetTestAccess::cached_endpoint_seen_crawl(
+        io, enabled, "subject.example.com:51235"));
+    EXPECT_TRUE(PeerSetTestAccess::cached_endpoint_seen_crawl(
+        io, disabled, "subject.example.com:51235"));
+
+    ASSERT_EQ(enabled_snapshot.reported_crawl_observations.size(), 1u);
+    auto const& reported = enabled_snapshot.reported_crawl_observations.front();
+    ASSERT_EQ(reported.intervals.size(), 1u);
+    EXPECT_EQ(reported.intervals.front().first_seq, 1u);
+    EXPECT_EQ(reported.intervals.front().last_seq, 20u);
+    EXPECT_TRUE(disabled_snapshot.reported_crawl_observations.empty());
+}
+
+TEST(PeerSetPruning, CrawlCaptureFailurePreservesLegacyAndPriorBatch)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    CrawlResponse original;
+    original.peers.push_back(CrawlPeer{
+        .endpoint = "old.example.com:51235",
+        .reported_intervals = {{.first_seq = 1, .last_seq = 2}}});
+    ASSERT_TRUE(PeerSetTestAccess::capture_crawl_observations(
+        io, peers, "reporter.example.com:51235", original));
+
+    PeerSetTestAccess::set_before_crawl_observation_build(
+        peers, []() { throw std::runtime_error("capture build failpoint"); });
+    auto build_response = parse_peer_crawl_body(R"json({"overlay":{"active":[{
+        "ip":"build.example.com","port":"51235","complete_ledgers":"10-20"
+    }]}})json");
+    PeerSetTestAccess::apply_crawl_response(
+        io, peers, "reporter.example.com:51235", build_response);
+    PeerSetTestAccess::set_before_crawl_observation_build(peers, {});
+
+    PeerSetTestAccess::set_before_crawl_observation_commit(
+        peers, []() { throw std::runtime_error("capture commit failpoint"); });
+    auto commit_response = parse_peer_crawl_body(R"json({"overlay":{"active":[{
+        "ip":"commit.example.com","port":"51235","complete_ledgers":"30-40"
+    }]}})json");
+    PeerSetTestAccess::apply_crawl_response(
+        io, peers, "reporter.example.com:51235", commit_response);
+    PeerSetTestAccess::set_before_crawl_observation_commit(peers, {});
+
+    auto const snapshot = PeerSetTestAccess::snapshot(io, peers);
+    EXPECT_TRUE(PeerSetTestAccess::crawl_tracker_status(
+                    io, peers, "build.example.com:51235")
+                    .has_value());
+    EXPECT_TRUE(PeerSetTestAccess::crawl_tracker_status(
+                    io, peers, "commit.example.com:51235")
+                    .has_value());
+    EXPECT_TRUE(PeerSetTestAccess::cached_endpoint_seen_crawl(
+        io, peers, "build.example.com:51235"));
+    EXPECT_TRUE(PeerSetTestAccess::cached_endpoint_seen_crawl(
+        io, peers, "commit.example.com:51235"));
+    EXPECT_EQ(snapshot.crawl_observation_capture_failures, 2u);
+    ASSERT_EQ(snapshot.reported_crawl_observations.size(), 1u);
+    EXPECT_EQ(
+        snapshot.reported_crawl_observations.front().subject_endpoint,
+        "old.example.com:51235");
+}
+
+TEST(PeerSetPruning, CountsDuplicateSubjectAggregateIntervalTruncation)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    CrawlPeer first{.endpoint = "subject.example.com:51235"};
+    first.reported_intervals.reserve(kMaxCrawlIntervalsPerPeer);
+    for (std::size_t i = 0; i < kMaxCrawlIntervalsPerPeer; ++i)
+    {
+        auto const seq = static_cast<uint32_t>(i * 2 + 1);
+        first.reported_intervals.push_back({.first_seq = seq, .last_seq = seq});
+    }
+    CrawlPeer second{
+        .endpoint = "subject.example.com:51235",
+        .reported_intervals = {{.first_seq = 1000, .last_seq = 1000}}};
+    CrawlResponse response;
+    response.peers = {std::move(first), std::move(second)};
+
+    ASSERT_TRUE(PeerSetTestAccess::capture_crawl_observations(
+        io, peers, "reporter.example.com:51235", std::move(response)));
+    auto const snapshot = PeerSetTestAccess::snapshot(io, peers);
+    EXPECT_EQ(snapshot.crawl_truncated_interval_rows, 1u);
+    ASSERT_EQ(snapshot.reported_crawl_observations.size(), 1u);
+    EXPECT_TRUE(snapshot.reported_crawl_observations.front().truncated);
+    EXPECT_EQ(
+        snapshot.reported_crawl_observations.front().intervals.size(),
+        kMaxCrawlIntervalsPerPeer);
+}
+
+TEST(PeerSetPruning, CrawlObservationBatchReplacesExpiresAndSaturates)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    CrawlResponse first;
+    first.peers.push_back(CrawlPeer{
+        .endpoint = "old.example.com:51235",
+        .complete_ledgers = {{.first_seq = 1, .last_seq = 10}},
+        .reported_intervals = {{.first_seq = 1, .last_seq = 10}}});
+    PeerSetTestAccess::capture_crawl_observations(
+        io, peers, "reporter.example.com:51235", std::move(first));
+    auto first_snapshot = PeerSetTestAccess::snapshot(io, peers);
+    ASSERT_EQ(first_snapshot.reported_crawl_observations.size(), 1u);
+    auto const first_epoch =
+        first_snapshot.reported_crawl_observations.front().crawl_epoch;
+
+    CrawlResponse replacement;
+    replacement.peers.push_back(CrawlPeer{
+        .endpoint = "new.example.com:51235",
+        .complete_ledgers = {{.first_seq = 20, .last_seq = 30}},
+        .reported_intervals = {{.first_seq = 20, .last_seq = 30}}});
+    PeerSetTestAccess::capture_crawl_observations(
+        io, peers, "reporter.example.com:51235", std::move(replacement));
+    auto replaced = PeerSetTestAccess::snapshot(io, peers);
+    ASSERT_EQ(replaced.reported_crawl_observations.size(), 1u);
+    EXPECT_EQ(
+        replaced.reported_crawl_observations.front().subject_endpoint,
+        "new.example.com:51235");
+    EXPECT_GT(
+        replaced.reported_crawl_observations.front().crawl_epoch, first_epoch);
+
+    PeerSetTestAccess::expire_crawl_observations(io, peers);
+    EXPECT_TRUE(PeerSetTestAccess::snapshot(io, peers)
+                    .reported_crawl_observations.empty());
+
+    CrawlResponse saturated;
+    saturated.peers.reserve(kMaxCrawlObservations + 1);
+    for (std::size_t i = 0; i < kMaxCrawlObservations + 1; ++i)
+    {
+        saturated.peers.push_back(CrawlPeer{
+            .endpoint = "peer-" + std::to_string(i) + ".example.com:51235",
+            .complete_ledgers = {{.first_seq = 1, .last_seq = 2}},
+            .reported_intervals = {{.first_seq = 1, .last_seq = 2}}});
+    }
+    PeerSetTestAccess::capture_crawl_observations(
+        io, peers, "bulk-reporter.example.com:51235", std::move(saturated));
+    auto capped = PeerSetTestAccess::snapshot(io, peers);
+    EXPECT_EQ(capped.crawl_observation_count, kMaxCrawlObservations);
+    EXPECT_EQ(capped.crawl_truncated_observations, 1u);
+}
+
 TEST(PeerSetPruning, WaitSignalWakesOnStatusUpdate)
 {
     asio::io_context io;

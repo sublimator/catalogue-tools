@@ -150,6 +150,49 @@ peer_snapshot_to_json(
     if (!snapshot.endpoint_cache_error.empty())
         body["endpoint_cache_error"] = snapshot.endpoint_cache_error;
 
+    body["reported_crawl_observation_batches"] =
+        snapshot.crawl_observation_batches;
+    body["reported_crawl_observation_count"] = snapshot.crawl_observation_count;
+    boost::json::object crawl_truncation;
+    crawl_truncation["peer_rows"] = snapshot.crawl_truncated_peer_rows;
+    crawl_truncation["interval_rows"] = snapshot.crawl_truncated_interval_rows;
+    crawl_truncation["public_keys"] = snapshot.crawl_truncated_public_keys;
+    crawl_truncation["global_observations"] =
+        snapshot.crawl_truncated_observations;
+    crawl_truncation["invalid_public_keys"] =
+        snapshot.crawl_invalid_public_keys;
+    crawl_truncation["malformed_interval_tokens"] =
+        snapshot.crawl_malformed_interval_tokens;
+    crawl_truncation["capture_failures"] =
+        snapshot.crawl_observation_capture_failures;
+    body["reported_crawl_truncation"] = std::move(crawl_truncation);
+
+    boost::json::array crawl_observations;
+    for (auto const& observation : snapshot.reported_crawl_observations)
+    {
+        boost::json::object item;
+        item["evidence"] = "reported_unverified";
+        item["reporter_endpoint"] = observation.reporter_endpoint;
+        item["subject_endpoint"] = observation.subject_endpoint;
+        if (observation.reported_subject_key)
+            item["reported_subject_key"] = *observation.reported_subject_key;
+        item["observed_at"] = observation.observed_at;
+        item["crawl_epoch"] = observation.crawl_epoch;
+        item["truncated"] = observation.truncated;
+        item["reported_key_conflict"] = observation.reported_key_conflict;
+        boost::json::array intervals;
+        for (auto const& interval : observation.intervals)
+        {
+            boost::json::object range;
+            range["first_seq"] = interval.first_seq;
+            range["last_seq"] = interval.last_seq;
+            intervals.push_back(std::move(range));
+        }
+        item["reported_intervals"] = std::move(intervals);
+        crawl_observations.push_back(std::move(item));
+    }
+    body["reported_crawl_observations"] = std::move(crawl_observations);
+
     boost::json::array wanted_ledgers;
     for (auto ledger_seq : snapshot.wanted_ledgers)
         wanted_ledgers.push_back(ledger_seq);

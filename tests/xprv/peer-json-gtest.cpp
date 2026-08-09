@@ -87,6 +87,55 @@ TEST(PeerJson, IncludesPeerHeadersWhenPresent)
     EXPECT_FALSE(headers.if_contains("Session-Signature"));
 }
 
+TEST(PeerJson, LabelsCrawlClaimsAsReportedAndUnverified)
+{
+    catl::peer_client::PeerSet::Snapshot snapshot;
+    snapshot.crawl_observation_batches = 1;
+    snapshot.crawl_observation_count = 1;
+    snapshot.crawl_truncated_interval_rows = 3;
+    snapshot.crawl_observation_capture_failures = 2;
+    snapshot.reported_crawl_observations.push_back(
+        catl::peer_client::PeerSet::Snapshot::ReportedCrawlObservation{
+            .reporter_endpoint = "reporter.example.com:51235",
+            .subject_endpoint = "subject.example.com:51235",
+            .reported_subject_key = "nReportedOnly",
+            .intervals = {{.first_seq = 100, .last_seq = 200}},
+            .observed_at = 1234,
+            .crawl_epoch = 7,
+            .truncated = true});
+
+    auto body = xprv::peer_snapshot_to_json(
+        snapshot, 0, xprv::PeerSnapshotFilters{}, true);
+
+    EXPECT_EQ(
+        body.at("reported_crawl_observation_count").to_number<std::size_t>(),
+        1u);
+    EXPECT_EQ(
+        body.at("reported_crawl_truncation")
+            .as_object()
+            .at("interval_rows")
+            .to_number<std::uint64_t>(),
+        3u);
+    EXPECT_EQ(
+        body.at("reported_crawl_truncation")
+            .as_object()
+            .at("capture_failures")
+            .to_number<std::uint64_t>(),
+        2u);
+    auto const& observation =
+        body.at("reported_crawl_observations").as_array().front().as_object();
+    EXPECT_EQ(observation.at("evidence").as_string(), "reported_unverified");
+    EXPECT_EQ(
+        observation.at("reporter_endpoint").as_string(),
+        "reporter.example.com:51235");
+    EXPECT_EQ(
+        observation.at("reported_subject_key").as_string(), "nReportedOnly");
+    auto const& range =
+        observation.at("reported_intervals").as_array().front().as_object();
+    EXPECT_EQ(range.at("first_seq").to_number<uint32_t>(), 100u);
+    EXPECT_EQ(range.at("last_seq").to_number<uint32_t>(), 200u);
+}
+
 TEST(PeerJson, DistinguishesPersistentHintsFromLiveAdvertisedRanges)
 {
     catl::peer_client::PeerSet::Snapshot snapshot;

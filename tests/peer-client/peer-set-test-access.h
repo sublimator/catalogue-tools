@@ -868,6 +868,83 @@ public:
         return snapshot;
     }
 
+    static std::optional<catl::peer_client::PeerStatus>
+    crawl_tracker_status(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::optional<catl::peer_client::PeerStatus> status;
+        run_on_strand(
+            io, peers, [&status, endpoint = std::move(endpoint)](auto& set) {
+                status = set.tracker_->get_status(endpoint);
+            });
+        return status;
+    }
+
+    static bool
+    capture_crawl_observations(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string reporter,
+        catl::peer_client::CrawlResponse response)
+    {
+        bool captured = false;
+        run_on_strand(
+            io,
+            peers,
+            [&captured,
+             reporter = std::move(reporter),
+             response = std::move(response)](auto& set) {
+                captured = set.capture_crawl_observations(reporter, response);
+            });
+        return captured;
+    }
+
+    static void
+    apply_crawl_response(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string reporter,
+        catl::peer_client::CrawlResponse response)
+    {
+        run_on_strand(
+            io,
+            peers,
+            [reporter = std::move(reporter),
+             response = std::move(response)](auto& set) {
+                catl::peer_client::PeerSet::CrawlServantOutcome outcome;
+                set.apply_crawl_response(reporter, response, outcome);
+            });
+    }
+
+    static void
+    set_before_crawl_observation_build(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        peers->before_crawl_observation_build_for_test_ = std::move(hook);
+    }
+
+    static void
+    set_before_crawl_observation_commit(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        peers->before_crawl_observation_commit_for_test_ = std::move(hook);
+    }
+
+    static void
+    expire_crawl_observations(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        run_on_strand(io, peers, [](auto& set) {
+            for (auto& [_, batch] : set.crawl_observation_batches_)
+                batch.observed_at -= std::chrono::minutes(31);
+        });
+    }
+
     static std::chrono::steady_clock::duration
     retry_backoff_for(
         boost::asio::io_context& io,
@@ -1320,6 +1397,29 @@ public:
                 count = entry->failure_count;
         });
         return count;
+    }
+
+    static bool
+    cached_endpoint_seen_crawl(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& key)
+    {
+        bool seen = false;
+        run_on_strand(io, peers, [&seen, key](auto& set) {
+            if (!set.endpoint_cache_)
+                return;
+            auto entries = set.endpoint_cache_->load_bootstrap_candidates(
+                set.network_id_,
+                catl::peer_client::PeerEndpointCache::
+                    max_endpoints_per_network);
+            auto const entry = std::ranges::find(
+                entries,
+                key,
+                &catl::peer_client::PeerEndpointCache::Entry::endpoint);
+            seen = entry != entries.end() && entry->seen_crawl;
+        });
+        return seen;
     }
 
     static void

@@ -2,6 +2,10 @@ add_executable(peer-client-gtest peer-client-gtest.cpp)
 target_link_libraries(peer-client-gtest PRIVATE catl::peer-client
                                                 GTest::gtest_main)
 
+add_executable(peer-crawl-client-gtest peer-crawl-client-gtest.cpp)
+target_link_libraries(peer-crawl-client-gtest
+                      PRIVATE catl::peer-client GTest::gtest_main)
+
 add_executable(peer-endpoint-cache-gtest peer-endpoint-cache-gtest.cpp)
 target_link_libraries(peer-endpoint-cache-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
@@ -82,6 +86,7 @@ set(CATL_PEER_CLIENT_TEST_TARGETS
     ledger-fetch-coordinator-bind-gtest
     connection-write-lifecycle-gtest
     peer-client-gtest
+    peer-crawl-client-gtest
     peer-endpoint-cache-gtest
     tree-walk-state-gtest
     peer-selector-gtest

@@ -76,6 +76,10 @@ struct PeerSetOptions
     /// Maximum new endpoints one ledger-specific wait may probe. Existing
     /// connected peers are handled separately by the node/header fan-out.
     std::size_t max_targeted_connect_attempts = 3;
+
+    /// Retain bounded /crawl claims for diagnostics. This side table has no
+    /// path into discovery, ranking, dial admission, or persistent storage.
+    bool capture_crawl_observations = true;
 };
 
 /// Read-only diagnostic projection of the currently connected peer set.
@@ -281,6 +285,18 @@ public:
 
     struct Snapshot
     {
+        struct ReportedCrawlObservation
+        {
+            std::string reporter_endpoint;
+            std::string subject_endpoint;
+            std::optional<std::string> reported_subject_key;
+            std::vector<CrawlLedgerRange> intervals;
+            std::int64_t observed_at = 0;
+            std::uint64_t crawl_epoch = 0;
+            bool truncated = false;
+            bool reported_key_conflict = false;
+        };
+
         struct FailureBucket
         {
             std::string kind;
@@ -311,10 +327,20 @@ public:
         uint64_t total_connects = 0;
         uint64_t total_disconnects = 0;
         size_t crawled_size = 0;
+        size_t crawl_observation_batches = 0;
+        size_t crawl_observation_count = 0;
+        std::uint64_t crawl_truncated_peer_rows = 0;
+        std::uint64_t crawl_truncated_interval_rows = 0;
+        std::uint64_t crawl_truncated_public_keys = 0;
+        std::uint64_t crawl_invalid_public_keys = 0;
+        std::uint64_t crawl_malformed_interval_tokens = 0;
+        std::uint64_t crawl_truncated_observations = 0;
+        std::uint64_t crawl_observation_capture_failures = 0;
         size_t failed_at_size = 0;
         std::vector<uint32_t> wanted_ledgers;
         std::vector<FailureBucket> recent_failures;
         std::vector<FailureEndpoint> top_failing_endpoints;
+        std::vector<ReportedCrawlObservation> reported_crawl_observations;
         std::vector<SnapshotEntry> peers;
     };
 
@@ -560,6 +586,8 @@ private:
     std::function<void()> before_crawl_fallback_stop_check_for_test_;
     std::function<void()> before_crawl_https_fallback_for_test_;
     std::function<void()> after_crawl_ingress_seal_for_test_;
+    std::function<void()> before_crawl_observation_build_for_test_;
+    std::function<void()> before_crawl_observation_commit_for_test_;
     std::function<void(std::string const&, std::function<void()>)>
         defer_crawl_servant_receipt_for_test_;
     /// Pause after one owner-strand generation-pin barrier has consumed its
@@ -735,8 +763,22 @@ private:
         std::size_t accepted = 0;
         std::size_t ranged = 0;
         std::size_t filtered = 0;
+        std::size_t truncated_peer_rows = 0;
+        std::size_t truncated_interval_rows = 0;
+        std::size_t truncated_public_keys = 0;
         bool used_tls = false;
     };
+
+    bool
+    capture_crawl_observations(
+        std::string const& reporter,
+        CrawlResponse const& response) noexcept;
+
+    void
+    apply_crawl_response(
+        std::string const& reporter,
+        CrawlResponse const& response,
+        CrawlServantOutcome& outcome);
 
     enum class SuccessorPump : std::uint8_t { run, defer };
 
@@ -1067,6 +1109,36 @@ private:
     std::set<std::string> crawl_queued_;
     std::map<std::string, std::chrono::steady_clock::time_point> crawled_;
     std::vector<std::string> pending_crawls_;
+    struct CrawlObservation
+    {
+        std::string subject_endpoint;
+        std::optional<std::string> reported_subject_key;
+        std::vector<CrawlLedgerRange> intervals;
+        bool truncated = false;
+        bool reported_key_conflict = false;
+    };
+    struct CrawlObservationBatch
+    {
+        std::chrono::steady_clock::time_point observed_at;
+        std::int64_t observed_at_unix = 0;
+        std::uint64_t crawl_epoch = 0;
+        std::vector<CrawlObservation> observations;
+    };
+    // Diagnostic-only reporter claims. No selector or connection-admission
+    // function reads this table.
+    //@@authority state=prv.S0081 status=provisional scope=field
+    //bind=catl::peer_client::PeerSet::crawl_observation_batches_@b76408793188153d
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=bounded_ephemeral_untrusted_crawl_observation_batches
+    std::map<std::string, CrawlObservationBatch> crawl_observation_batches_;
+    std::uint64_t next_crawl_observation_epoch_ = 0;
+    std::uint64_t crawl_truncated_peer_rows_ = 0;
+    std::uint64_t crawl_truncated_interval_rows_ = 0;
+    std::uint64_t crawl_truncated_public_keys_ = 0;
+    std::uint64_t crawl_invalid_public_keys_ = 0;
+    std::uint64_t crawl_malformed_interval_tokens_ = 0;
+    std::uint64_t crawl_truncated_observations_ = 0;
+    std::uint64_t crawl_observation_capture_failures_ = 0;
     // Active target ledgers from in-flight wait_for_covering_peer calls.
     // Used by candidate admission and same-pool rotation to prioritize peers
     // that can serve any active target. Counts preserve concurrent waiters.
