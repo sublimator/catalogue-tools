@@ -705,6 +705,15 @@ PeerSet::complete_connect_servant(
     // touches=prv.S0037 label=consume_background_connect_servant_receipt
     in_flight_.erase(key);  //@@authority-target ids=prv.T0091
     notify_shutdown_progress();
+    PEER_SET_TRACE(
+        "[",
+        net_label_,
+        "] targeted connect completion endpoint=",
+        key,
+        " outcome=",
+        failure ? "failed" : "completed",
+        " in_flight_remaining=",
+        in_flight_.size());
 
     try
     {
@@ -2210,43 +2219,111 @@ PeerSet::queue_targeted_connect(
     ASSERT_ON_STRAND();
     if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
         !authorization || !authorization->is_active())
+    {
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted queue rejected endpoint=",
+            endpoint,
+            " reason=inactive_or_shutdown");
         return false;
+    }
 
     auto normalized = EndpointTracker::normalize_endpoint_identity(endpoint);
     if (!normalized)
+    {
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted queue rejected endpoint=",
+            endpoint,
+            " reason=invalid_endpoint");
         return false;
+    }
     auto key = std::move(*normalized);
     auto const now = std::chrono::steady_clock::now();
     if (connections_.count(key) || in_flight_.count(key))
+    {
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted queue rejected endpoint=",
+            key,
+            " reason=already_connected_or_in_flight");
         return false;
+    }
 
     if (queued_.count(key))
     {
         auto row = targeted_connects_.find(key);
         if (row == targeted_connects_.end())
+        {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted queue rejected endpoint=",
+                key,
+                " reason=queued_authority_missing");
             return false;
+        }
         auto& authorizations = row->second.target_authorizations;
         if (std::find(
                 authorizations.begin(), authorizations.end(), authorization) !=
             authorizations.end())
+        {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted queue accepted endpoint=",
+                key,
+                " outcome=already_claimed");
             return true;
+        }
         if (authorizations.size() >= kMaxQueuedTargetAuthorizations)
+        {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted queue rejected endpoint=",
+                key,
+                " reason=authorization_cap");
             return false;
+        }
         try
         {
             authorizations.push_back(authorization);
         }
         catch (...)
         {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted queue rejected endpoint=",
+                key,
+                " reason=allocation_failure");
             return false;
         }
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted queue accepted endpoint=",
+            key,
+            " outcome=joined_existing");
         return true;
     }
 
     if (auto failed = retry_gates_.find(key); failed != retry_gates_.end())
     {
         if (now - failed->second.failed_at < retry_backoff_for(key))
+        {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted queue rejected endpoint=",
+                key,
+                " reason=retry_backoff");
             return false;
+        }
     }
 
     QueuedConnectAuthority authority;
@@ -2265,6 +2342,12 @@ PeerSet::queue_targeted_connect(
         std::erase(pending_connects_, key);
         return false;
     }
+    PEER_SET_TRACE(
+        "[",
+        net_label_,
+        "] targeted queue accepted endpoint=",
+        key,
+        " outcome=new_pending");
     return true;
 }
 
@@ -2371,7 +2454,22 @@ PeerSet::pump_connects()
         auto claimed =
             claim_queued_connect_authority(std::move(authority), now);
         if (!claimed.absolute_deadline)
+        {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted connect claim rejected endpoint=",
+                key,
+                " reason=expired_or_no_active_authorization");
             continue;
+        }
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted connect claim accepted endpoint=",
+            key,
+            " leases=",
+            claimed.admission_leases.size());
         auto const absolute_deadline = *claimed.absolute_deadline;
         auto admission_leases = std::move(claimed.admission_leases);
 
@@ -2390,7 +2488,15 @@ PeerSet::pump_connects()
         std::string host;
         uint16_t port = 0;
         if (!EndpointTracker::parse_endpoint(key, host, port))
+        {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted connect claim rejected endpoint=",
+                key,
+                " reason=parse_failure");
             continue;
+        }
 
         if (connections_.count(key) || in_flight_.count(key))
             continue;
@@ -2400,6 +2506,12 @@ PeerSet::pump_connects()
         {
             if (now - failed->second.failed_at < retry_backoff_for(key))
             {
+                PEER_SET_TRACE(
+                    "[",
+                    net_label_,
+                    "] targeted connect claim rejected endpoint=",
+                    key,
+                    " reason=retry_backoff");
                 continue;
             }
         }
@@ -3215,6 +3327,15 @@ PeerSet::try_connect_on_strand(
         ++total_connects_;
         retry_gates_.erase(key);
         auto const advertised_range = client->advertised_ledger_range();
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted connect handshake endpoint=",
+            key,
+            " outcome=live range=",
+            advertised_range.first_seq,
+            "-",
+            advertised_range.last_seq);
         note_connect_success(
             key,
             {.first_seq = advertised_range.first_seq,
@@ -3259,6 +3380,13 @@ PeerSet::try_connect_on_strand(
     }
     catch (PeerClientException const& e)
     {
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted connect handshake endpoint=",
+            key,
+            " outcome=failed detail=",
+            e.what());
         auto const stop_owned_cancellation = [&]() {
             if (!client ||
                 //@@mutation-site connect-stop-requires-explicit-owner-cause
@@ -3380,6 +3508,13 @@ PeerSet::try_connect_on_strand(
     }
     catch (std::exception const& e)
     {
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted connect handshake endpoint=",
+            key,
+            " outcome=failed detail=",
+            e.what());
         PLOGW(
             log_,
             "[",
@@ -3757,6 +3892,17 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
             continue;
 
         auto const& key = *normalized;
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted ledger ",
+            ledger_seq,
+            " candidate ",
+            key,
+            " provenance=persistent_hint remembered_range=",
+            entry.status.first_seq,
+            "-",
+            entry.status.last_seq);
         // A persisted range is a search hint, not a fresh observation. Keep
         // any current owner-local range intact, but let the hint fill an
         // otherwise unknown range so a recently rediscovered endpoint can be
@@ -3912,16 +4058,69 @@ PeerSet::try_candidates_for(
                     range_authorizes_hard_exclusion && has_known_range &&
                     (ledger_seq < status.first_seq ||
                      ledger_seq > status.last_seq);
-                if (key.empty() || selection_excluded.count(key) ||
-                    connections_.count(key) || in_flight_.count(key) ||
-                    peer_failed_for_ledger(key, ledger_seq, now) ||
-                    known_not_covering)
+                auto const provenance = stats && stats->range_is_current_live
+                    ? "current_live"
+                    : stats && stats->range_is_persistent_hint
+                    ? "persistent_hint"
+                    : "unknown";
+                auto const covering = has_known_range &&
+                    ledger_seq >= status.first_seq &&
+                    ledger_seq <= status.last_seq;
+                char const* reason = nullptr;
+                if (key.empty())
+                    reason = "invalid";
+                else if (selection_excluded.count(key))
+                    reason = "excluded";
+                else if (connections_.count(key))
+                    reason = "already_connected";
+                else if (in_flight_.count(key))
+                    reason = "in_flight";
+                else if (peer_failed_for_ledger(key, ledger_seq, now))
+                    reason = "ledger_failed";
+                else if (known_not_covering)
+                    reason = "noncovering";
+                if (reason)
                 {
+                    PEER_SET_TRACE(
+                        "[",
+                        net_label_,
+                        "] targeted ledger ",
+                        ledger_seq,
+                        " candidate ",
+                        key,
+                        " provenance=",
+                        provenance,
+                        " remembered_range=",
+                        status.first_seq,
+                        "-",
+                        status.last_seq,
+                        " covering=",
+                        covering ? "yes" : "no",
+                        " exclusion=",
+                        reason);
                     return true;
                 }
                 auto failed = retry_gates_.find(key);
-                return failed != retry_gates_.end() &&
+                auto const backed_off = failed != retry_gates_.end() &&
                     now - failed->second.failed_at < retry_backoff_for(key);
+                if (backed_off)
+                    PEER_SET_TRACE(
+                        "[",
+                        net_label_,
+                        "] targeted ledger ",
+                        ledger_seq,
+                        " candidate ",
+                        key,
+                        " provenance=",
+                        provenance,
+                        " remembered_range=",
+                        status.first_seq,
+                        "-",
+                        status.last_seq,
+                        " covering=",
+                        covering ? "yes" : "no",
+                        " exclusion=retry_backoff");
+                return backed_off;
             }),
         candidates.end());
 
@@ -3963,13 +4162,61 @@ PeerSet::try_candidates_for(
         });
 
     std::vector<std::string> queued;
+    std::size_t rank = 0;
     for (auto const& endpoint : candidates)
     {
         if (queued.size() >= connect_budget)
             break;
         auto const key = canonical_endpoint(endpoint);
+        auto const status = range_for(key);
+        auto const* candidate_stats = stats_for(key);
+        auto const provenance =
+            candidate_stats && candidate_stats->range_is_current_live
+            ? "current_live"
+            : candidate_stats && candidate_stats->range_is_persistent_hint
+            ? "persistent_hint"
+            : "unknown";
+        auto const covering = status.first_seq != 0 && status.last_seq != 0 &&
+            ledger_seq >= status.first_seq && ledger_seq <= status.last_seq;
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] targeted ledger ",
+            ledger_seq,
+            " candidate ",
+            key,
+            " provenance=",
+            provenance,
+            " rank=",
+            rank++,
+            " covering=",
+            covering ? "yes" : "no",
+            " remembered_range=",
+            status.first_seq,
+            "-",
+            status.last_seq,
+            " queue_attempt");
         if (queue_targeted_connect(key, authorization))
+        {
             queued.push_back(key);
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted ledger ",
+                ledger_seq,
+                " candidate ",
+                key,
+                " queue=claimed");
+        }
+        else
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted ledger ",
+                ledger_seq,
+                " candidate ",
+                key,
+                " queue=rejected");
     }
 
     sort_pending_connects();
@@ -4651,6 +4898,20 @@ PeerSet::wait_for_covering_peer_on_strand(
                << ", in_flight=" << targeted_in_flight
                << ", connected=" << connections_.size()
                << ", remaining=" << remaining_secs << 's';
+        PEER_SET_TRACE(
+            "[",
+            net_label_,
+            "] waiting for covering peer ledger=",
+            ledger_seq,
+            " reason=search_in_progress candidates=",
+            targeted_candidates.size(),
+            " queued=",
+            targeted_queued,
+            " in_flight=",
+            targeted_in_flight,
+            " remaining=",
+            remaining_secs,
+            "s");
         //@@authority transition=prv.T0226 status=provisional scope=statement
         // bind=emit_status@5c5110c03f0c10b2
         // owner=unresolved owner_hypothesis=peer_history_search_frame
