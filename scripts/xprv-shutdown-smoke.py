@@ -30,6 +30,7 @@ from typing import Any
 
 ENGINE_FENCE = re.compile(r"\[engine\]\s+\[([^]]+)\]\s+Engine draining\.\.\.")
 HEARTBEAT_EFFECT = re.compile(r"\[quorum-tracker\]\s+\[([^]]+)\]\s+no quorum for ")
+SERVICE_FORCED = "Service shutdown forced before all drains completed"
 STARTUP_FORBIDDEN = ("Peer pool", "Resolved RPC", "Engine started")
 
 
@@ -162,23 +163,41 @@ def start_server(
     network_ids: list[int],
     threads: int,
     run_dir: Path,
+    trace_shutdown: bool,
 ) -> RunningProcess:
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "server.log"
     log_file = log_path.open("wb")
     peer_cache = run_dir / "peer-endpoints.sqlite3"
-    command = [
-        str(xprv),
-        "serve",
-        "--bind",
-        f"{host}:{port}",
-        "--network",
-        str(primary_network),
-        "--threads",
-        str(threads),
-        "--peer-cache-path",
-        str(peer_cache),
-    ]
+    command = [str(xprv)]
+    if trace_shutdown:
+        command.extend(
+            [
+                "--log",
+                "engine=DEBUG",
+                "--log",
+                "vl-cache=DEBUG",
+                "--log",
+                "vl-client=DEBUG",
+                "--log",
+                "peer-set=DEBUG",
+                "--log",
+                "peer-crawl=DEBUG",
+            ]
+        )
+    command.extend(
+        [
+            "serve",
+            "--bind",
+            f"{host}:{port}",
+            "--network",
+            str(primary_network),
+            "--threads",
+            str(threads),
+            "--peer-cache-path",
+            str(peer_cache),
+        ]
+    )
     env = os.environ.copy()
     env["XPRV_NETWORKS"] = ",".join(str(item) for item in network_ids)
     try:
@@ -329,6 +348,10 @@ def fences_pass(fences: dict[str, dict[str, Any]]) -> tuple[bool, str | None]:
     return True, None
 
 
+def server_forced_shutdown(log_text: str) -> bool:
+    return SERVICE_FORCED in log_text
+
+
 def record_shutdown_event(
     events: list[dict[str, Any]], action: str, reason: str
 ) -> None:
@@ -461,6 +484,7 @@ def run_shutdown_case(
             network_ids=args.network_ids,
             threads=threads,
             run_dir=run_dir,
+            trace_shutdown=args.trace_shutdown,
         )
         health = wait_for_health(running, args.startup_timeout)
         raw_build_id = health.get("build_id")
@@ -503,6 +527,10 @@ def run_shutdown_case(
             error = f"xprv exited with status {exit_code} after SIGINT"
         running.close_log()
         text = running.log_path.read_text(encoding="utf-8", errors="replace")
+        if server_forced_shutdown(text):
+            graceful = False
+            forced = True
+            error = "server forced shutdown after its service drain deadline"
         fences = parse_network_fences(text, log_labels)
         fence_ok, fence_error = fences_pass(fences)
         if error is None:
@@ -713,6 +741,11 @@ def self_test() -> None:
     )
     assert fences_pass(missing)[0] is False
     assert network_health_slug(0) == "xrpl-mainnet"
+    assert server_forced_shutdown(
+        "Service shutdown forced before all drains completed: "
+        "service shutdown deadline expired"
+    )
+    assert not server_forced_shutdown("Graceful service drain complete")
 
     def row(
         *,
@@ -788,6 +821,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--startup-timeout", type=float, default=20.0)
     parser.add_argument("--proof-timeout", type=float, default=20.0)
     parser.add_argument("--graceful-budget", type=float, default=35.0)
+    parser.add_argument(
+        "--trace-shutdown",
+        action="store_true",
+        help="enable engine, VL, peer-set, and peer-crawl DEBUG diagnostics",
+    )
     parser.add_argument("--artifact-dir", type=Path)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
