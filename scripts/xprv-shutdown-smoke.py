@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 ENGINE_FENCE = re.compile(r"\[engine\]\s+\[([^]]+)\]\s+Engine draining\.\.\.")
-HEARTBEAT_EFFECT = re.compile(r"\[val-buffer\]\s+\[([^]]+)\]\s+no quorum for ")
+HEARTBEAT_EFFECT = re.compile(r"\[quorum-tracker\]\s+\[([^]]+)\]\s+no quorum for ")
 STARTUP_FORBIDDEN = ("Peer pool", "Resolved RPC", "Engine started")
 
 
@@ -695,9 +695,9 @@ def self_test() -> None:
     assert nearest_rank_p99(list(range(100))) == 98
     assert nearest_rank_p99(list(range(101))) == 99
     log = """[engine] [xrpl] Engine draining...
-[val-buffer] [xahau] no quorum for 1s
+[quorum-tracker] [xahau] no quorum for 1s
 [engine] [xahau] Engine draining...
-[val-buffer] [xrpl] no quorum for 1s"""
+[quorum-tracker] [xrpl] no quorum for 1s"""
     parsed = parse_network_fences(log, ["xrpl", "xahau"])
     assert parsed["xrpl"]["post_fence_heartbeat_lines"] == [4]
     assert parsed["xahau"]["post_fence_heartbeat_lines"] == []

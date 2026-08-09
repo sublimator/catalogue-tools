@@ -384,16 +384,16 @@ co_report_service_status(
         status.vl_loaded = health.vl_loaded;
         status.has_quorum = health.latest_quorum_seq.has_value();
         status.latest_quorum_seq = health.latest_quorum_seq.value_or(0);
-        status.validation_waiters = health.validation_buffer.pending_callbacks;
-        status.recent_quorums = health.validation_buffer.recent_quorums;
-        status.collector_ledgers = health.validation_buffer.collector_ledgers;
+        status.validation_waiters = health.validation_quorum_tracker.pending_callbacks;
+        status.recent_quorums = health.validation_quorum_tracker.recent_quorums;
+        status.collector_ledgers = health.validation_quorum_tracker.collector_ledgers;
         status.collector_validations =
-            health.validation_buffer.collector_validations;
-        status.queued_validations = health.validation_buffer.queued_validations;
+            health.validation_quorum_tracker.collector_validations;
+        status.queued_validations = health.validation_quorum_tracker.queued_validations;
         status.validation_packets_deduplicated =
-            health.validation_buffer.validation_packets_deduplicated;
+            health.validation_quorum_tracker.validation_packets_deduplicated;
         status.validation_packets_dropped =
-            health.validation_buffer.validation_packets_dropped;
+            health.validation_quorum_tracker.validation_packets_dropped;
         status.proof_cache_entries = proof_cache.entries;
         status.node_cache_entries = node_cache.entries;
         status.node_cache_resident_entries = node_cache.resident_entries;

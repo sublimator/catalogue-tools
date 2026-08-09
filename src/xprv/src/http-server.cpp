@@ -174,7 +174,7 @@ generate_request_id()
 // ═══════════════════════════════════════════════════════════════════════
 
 static boost::json::object
-validation_buffer_json(ValidationBuffer::Stats const& stats)
+validation_quorum_tracker_json(ValidationQuorumTracker::Stats const& stats)
 {
     boost::json::object result;
     result["recent_quorums"] = stats.recent_quorums;
@@ -1306,8 +1306,8 @@ HttpServer::handle_session(
                     body["vl_loaded"] = status.vl_loaded;
                     if (status.latest_quorum_seq)
                         body["latest_quorum_seq"] = *status.latest_quorum_seq;
-                    body["validation_buffer"] =
-                        validation_buffer_json(status.validation_buffer);
+                    body["validation_quorum_tracker"] =
+                        validation_quorum_tracker_json(status.validation_quorum_tracker);
 
                     boost::json::object cache;
                     cache["entries"] = cs.entries;
@@ -1348,8 +1348,8 @@ HttpServer::handle_session(
                         if (status.latest_quorum_seq)
                             net_body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
-                        net_body["validation_buffer"] =
-                            validation_buffer_json(status.validation_buffer);
+                        net_body["validation_quorum_tracker"] =
+                            validation_quorum_tracker_json(status.validation_quorum_tracker);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;
@@ -1407,8 +1407,8 @@ HttpServer::handle_session(
                         if (status.latest_quorum_seq)
                             body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
-                        body["validation_buffer"] =
-                            validation_buffer_json(status.validation_buffer);
+                        body["validation_quorum_tracker"] =
+                            validation_quorum_tracker_json(status.validation_quorum_tracker);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;

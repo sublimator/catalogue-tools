@@ -79,10 +79,10 @@ ProofEngine::start()
         });
     vl_cache_->start();
 
-    // Validation buffer
-    val_buffer_ = ValidationBuffer::create(io_, protocol_, config_.network_id);
+    // Validation quorum tracker
+    quorum_tracker_ = ValidationQuorumTracker::create(io_, protocol_, config_.network_id);
 
-    // Wire VL → validation buffer: when VL loads, push UNL keys
+    // Wire VL → quorum tracker: when VL loads, push UNL keys
     // We do this via a one-shot fetch, then the refresh will re-push.
     // For now, the VL co_get in prove() handles the initial UNL push.
 
@@ -133,7 +133,7 @@ ProofEngine::start()
     // Node cache (content-addressed wire node store). The optional coordinator
     // is selected once here; request callsites do not branch on server mode.
     //@@authority transition=prv.T0004 status=provisional scope=statement
-    // bind=create@c881629500fe6506
+    // bind=create@0bf3d062cfeb1a36
     // owner=unresolved owner_hypothesis=ledger_data_provider
     // commit=startup_coroutine calls=create
     // label=construct_live_node_cache_with_selected_transport_capability
@@ -145,8 +145,8 @@ ProofEngine::start()
          .fetch_stale_multiplier = fetch_stale_multiplier_},
         ledger_fetch_coordinator_); //@@authority-target ids=prv.T0004
 
-    // Wire peers → validation buffer: unsolicited validations
-    auto vbuf = val_buffer_;
+    // Wire peers → quorum tracker: unsolicited validations
+    auto vbuf = quorum_tracker_;
     peers_->set_unsolicited_handler(
         [vbuf](uint16_t type, std::vector<uint8_t> const& data) {
             vbuf->on_packet(type, data);
@@ -158,7 +158,7 @@ ProofEngine::start()
     // Bootstrap peer discovery
     peers_->bootstrap();
 
-    // Push UNL to validation buffer on every VL load (initial + refresh).
+    // Push UNL to quorum tracker on every VL load (initial + refresh).
     // set_unl() clears the quorum cache, so this must only fire on actual
     // VL changes — not per-request.
     vl_cache_->set_on_refresh([vbuf](catl::vl::ValidatorList const& vl) {
@@ -229,9 +229,9 @@ ProofEngine::stop()
     {
         vl_cache_->stop();
     }
-    if (val_buffer_)
+    if (quorum_tracker_)
     {
-        val_buffer_->stop();
+        quorum_tracker_->stop();
     }
     if (ledger_fetch_coordinator_)
     {
@@ -296,7 +296,7 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     struct InstalledDrainPopulation
     {
         std::shared_ptr<VlCache> vl_cache;
-        std::shared_ptr<ValidationBuffer> validation_buffer;
+        std::shared_ptr<ValidationQuorumTracker> validation_quorum_tracker;
         std::shared_ptr<NodeCache> node_cache;
         std::shared_ptr<LedgerFetchCoordinator> ledger_fetch_coordinator;
         std::shared_ptr<PeerSet> peer_set;
@@ -305,34 +305,34 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     // Snapshot the complete installed child population once. The coroutine
     // frame owns these exact capabilities until every admitted receipt has
     // returned; later member reads cannot silently change the census.
-    //@@authority transition=prv.T0165 status=provisional scope=statement bind=declaration@c4b499cb4eb1e0d4
+    //@@authority transition=prv.T0165 status=provisional scope=statement bind=declaration@cc899b39a5e62e1a
     // owner=unresolved owner_hypothesis=proof_engine_drain_frame
     // commit=proof_engine_drain_coroutine touches=prv.S0056
     // population_ref=proof_engine.installed_drain_population
-    // population_members=proof_engine.vl_cache,proof_engine.validation_buffer,proof_engine.node_cache,proof_engine.ledger_fetch_coordinator,proof_engine.peer_set
+    // population_members=proof_engine.vl_cache,proof_engine.validation_quorum_tracker,proof_engine.node_cache,proof_engine.ledger_fetch_coordinator,proof_engine.peer_set
     // label=snapshot_exact_proof_engine_installed_drain_population
     auto const population = InstalledDrainPopulation{
         .vl_cache = vl_cache_,
-        .validation_buffer = val_buffer_,
+        .validation_quorum_tracker = quorum_tracker_,
         .node_cache = node_cache_,
         .ledger_fetch_coordinator = ledger_fetch_coordinator_,
         .peer_set = peers_,
     }; //@@authority-target ids=prv.T0165
 
-    // Seal externally admitted ValidationBuffer work before publishing the
+    // Seal externally admitted ValidationQuorumTracker work before publishing the
     // engine drain fence. This is intentionally not its drain receipt: T0168
     // still crosses the owner strand after the producer (VlCache) has stopped.
-    if (population.validation_buffer)
+    if (population.validation_quorum_tracker)
     {
         //@@authority transition=prv.T0233 status=provisional scope=statement
-        // bind=seal_admission_and_join_worker@066633e7dde14f4d
+        // bind=seal_admission_and_join_worker@e4a4fb28b1ae6561
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=seal_admission_and_join_worker
         // touches=prv.S0056
         // population_ref=proof_engine.installed_drain_population
-        // member_guard=proof_engine.validation_buffer
+        // member_guard=proof_engine.validation_quorum_tracker
         // label=consume_validation_admission_seal_before_engine_drain_fence
-        population.validation_buffer
+        population.validation_quorum_tracker
             ->seal_admission_and_join_worker(); //@@authority-target ids=prv.T0233
     }
 
@@ -356,18 +356,18 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         co_await population.vl_cache
             ->co_stop(); //@@authority-target ids=prv.T0167
     }
-    if (population.validation_buffer)
+    if (population.validation_quorum_tracker)
     {
         //@@authority transition=prv.T0168 status=provisional scope=statement
-        //bind=co_stop@72491148edf6933d
+        //bind=co_stop@243fe7baa255156c
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=co_stop
-        // touches=prv.S0056 boundary_ref=validation_buffer.co_stop
-        // receipt=validation_buffer.stop_receipt receipt_role=consume
+        // touches=prv.S0056 boundary_ref=validation_quorum_tracker.co_stop
+        // receipt=validation_quorum_tracker.stop_receipt receipt_role=consume
         // population_ref=proof_engine.installed_drain_population
-        // member_guard=proof_engine.validation_buffer
-        // label=consume_validation_buffer_stop_receipt
-        co_await population.validation_buffer
+        // member_guard=proof_engine.validation_quorum_tracker
+        // label=consume_validation_quorum_tracker_stop_receipt
+        co_await population.validation_quorum_tracker
             ->co_stop(); //@@authority-target ids=prv.T0168
     }
 
@@ -546,7 +546,7 @@ ProofEngine::prove(
     {
         vl = std::make_shared<catl::vl::ValidatorList>(
             co_await vl_cache_->co_get());
-        if (co_await val_buffer_->co_sync_unl(vl->validators, vl->sequence))
+        if (co_await quorum_tracker_->co_sync_unl(vl->validators, vl->sequence))
             break;
         vl.reset();
     }
@@ -830,10 +830,10 @@ ProofEngine::co_health()
 
     status.vl_loaded = co_await vl_cache_->co_is_loaded();
 
-    auto latest = co_await val_buffer_->co_latest_quorum();
+    auto latest = co_await quorum_tracker_->co_latest_quorum();
     if (latest)
         status.latest_quorum_seq = latest->ledger_seq;
-    status.validation_buffer = co_await val_buffer_->co_stats();
+    status.validation_quorum_tracker = co_await quorum_tracker_->co_stats();
 
     if (ledger_fetch_coordinator_)
     {
@@ -867,7 +867,7 @@ ProofEngine::get_or_reuse_anchor(
     if (!vl)
         throw std::runtime_error("validator list snapshot is missing");
     auto const quorum_threshold =
-        ValidationBuffer::proof_quorum_threshold(vl->validators.size());
+        ValidationQuorumTracker::proof_quorum_threshold(vl->validators.size());
     if (quorum_threshold == 0)
         throw std::runtime_error("validator list contains no validators");
 
@@ -880,7 +880,7 @@ ProofEngine::get_or_reuse_anchor(
     // TODO: why wait for a NEW quorum at all? recent_quorums_ already has
     // the last 30 finalized quorums. The one at .back() is at most ~4s old
     // and already has 34-35/35 validations. Just use it:
-    //   auto latest = co_await val_buffer_->co_latest_quorum();
+    //   auto latest = co_await quorum_tracker_->co_latest_quorum();
     //   if (latest) → use it, skip co_wait_best_quorum entirely
     //   else → cold start, wait for first quorum
     // Pick the most recent entry with the highest validation count.
@@ -941,7 +941,7 @@ ProofEngine::get_or_reuse_anchor(
     }
     if (reusable)
     {
-        if (!co_await val_buffer_->co_sync_unl(vl->validators, vl->sequence))
+        if (!co_await quorum_tracker_->co_sync_unl(vl->validators, vl->sequence))
         {
             throw std::runtime_error(
                 "validator list changed while reusing proof anchor");
@@ -951,7 +951,7 @@ ProofEngine::get_or_reuse_anchor(
 
     // Use the last full quorum if available — no waiting needed.
     // Fall back to co_wait_best_quorum only on cold start.
-    auto full = co_await val_buffer_->co_last_full_quorum(
+    auto full = co_await quorum_tracker_->co_last_full_quorum(
         std::chrono::seconds(max_age_secs > 0 ? max_age_secs : 10),
         vl->sequence);
     if (full)
@@ -978,7 +978,7 @@ ProofEngine::get_or_reuse_anchor(
             "[",
             net_label_,
             "] get_or_reuse_anchor: no full quorum yet, waiting...");
-        auto collected = co_await val_buffer_->co_wait_best_quorum(
+        auto collected = co_await quorum_tracker_->co_wait_best_quorum(
             std::chrono::seconds(30), vl->sequence);
         if (collected.stop_reason ==
             QuorumCollectStopReason::validator_list_changed)
@@ -1035,7 +1035,7 @@ ProofEngine::get_or_reuse_anchor(
         throw std::runtime_error(
             "anchor is outside validator list validity interval");
     }
-    if (!co_await val_buffer_->co_sync_unl(vl->validators, vl->sequence))
+    if (!co_await quorum_tracker_->co_sync_unl(vl->validators, vl->sequence))
     {
         throw std::runtime_error(
             "validator list changed while building proof anchor");

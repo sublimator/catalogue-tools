@@ -43,7 +43,7 @@ target_sources(
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-resolver.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-steps.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/vl-cache.cpp
-                       ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-buffer.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-quorum-tracker.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)
 
 add_dependencies(xprv-gtest xprv_web_assets)

@@ -9,7 +9,7 @@
 //      Used by the engine for persistent peer pool + cached VL.
 
 #include "proof-chain.h"
-#include "validation-buffer.h"
+#include "validation-quorum-tracker.h"
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>

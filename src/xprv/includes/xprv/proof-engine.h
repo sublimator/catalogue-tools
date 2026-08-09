@@ -14,7 +14,7 @@
 
 #include "network-config.h"
 #include "proof-chain.h"
-#include "validation-buffer.h"
+#include "validation-quorum-tracker.h"
 #include "vl-cache.h"
 
 #include <catl/peer-client/ledger-fetch-coordinator.h>
@@ -270,7 +270,7 @@ public:
         uint64_t total_disconnects = 0;
         bool vl_loaded = false;
         std::optional<uint32_t> latest_quorum_seq;
-        ValidationBuffer::Stats validation_buffer;
+        ValidationQuorumTracker::Stats validation_quorum_tracker;
         Coordinator ledger_fetch_coordinator;
     };
     boost::asio::awaitable<Status>
@@ -287,10 +287,10 @@ public:
     {
         return vl_cache_;
     }
-    std::shared_ptr<ValidationBuffer>
-    val_buffer()
+    std::shared_ptr<ValidationQuorumTracker>
+    quorum_tracker()
     {
-        return val_buffer_;
+        return quorum_tracker_;
     }
 
     NetworkConfig const&
@@ -404,7 +404,7 @@ private:
     std::shared_ptr<catl::peer_client::NodeCache> node_cache_;
     std::shared_ptr<catl::rpc::RpcClient> rpc_;
     std::shared_ptr<VlCache> vl_cache_;
-    std::shared_ptr<ValidationBuffer> val_buffer_;
+    std::shared_ptr<ValidationQuorumTracker> quorum_tracker_;
 
     // LRU proof cache: tx_hash → ProveResult.
     // Proofs are immutable — a tx is in exactly one ledger forever.
@@ -437,7 +437,7 @@ private:
     // Production leaves this empty.
     std::function<void()> before_drain_receipt_publish_for_test_;
     // Test-only observation point at the real engine-drain diagnostic, after
-    // the ValidationBuffer pre-fence seal has returned.
+    // the ValidationQuorumTracker pre-fence seal has returned.
     std::function<void()> before_engine_draining_log_for_test_;
     std::atomic<size_t> cache_hits_{0};
     std::atomic<size_t> cache_misses_{0};

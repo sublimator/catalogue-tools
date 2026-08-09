@@ -1,6 +1,6 @@
 #include "xprv/proof-chain-json.h"
-#include "xprv/validation-buffer.h"
 #include "xprv/validation-collector.h"
+#include "xprv/validation-quorum-tracker.h"
 
 #include <catl/core/base64.h>
 #include <catl/peer-client/connection-types.h>
@@ -155,13 +155,13 @@ prepare_quorum_fixture(
     return fixture;
 }
 
-xprv::ValidationBuffer::Stats
+xprv::ValidationQuorumTracker::Stats
 drain_validation_ingress(
     asio::io_context& io,
-    std::shared_ptr<xprv::ValidationBuffer> const& buffer,
+    std::shared_ptr<xprv::ValidationQuorumTracker> const& buffer,
     std::size_t expected_packets)
 {
-    xprv::ValidationBuffer::Stats final_stats;
+    xprv::ValidationQuorumTracker::Stats final_stats;
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
@@ -197,10 +197,10 @@ drain_validation_ingress(
 
 }  // namespace
 
-TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
+TEST(ValidationQuorumTracker, BestQuorumTimesOutWithNoValidations)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
     bool done = false;
     xprv::QuorumCollectStopReason stop_reason =
@@ -225,14 +225,14 @@ TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
     EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::timeout);
 }
 
-TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
+TEST(ValidationQuorumTracker, BestQuorumCancelledWaiterIsRemoved)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
     bool done = false;
     bool cancel_branch_won = false;
-    xprv::ValidationBuffer::Stats stats;
+    xprv::ValidationQuorumTracker::Stats stats;
 
     asio::co_spawn(
         io,
@@ -279,14 +279,14 @@ TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
     EXPECT_EQ(stats.pending_callbacks, 0u);
 }
 
-TEST(ValidationBuffer, BestQuorumCleanupStaysOnOwnerStrand)
+TEST(ValidationQuorumTracker, BestQuorumCleanupStaysOnOwnerStrand)
 {
     using namespace std::chrono_literals;
 
     asio::io_context io;
     auto work = asio::make_work_guard(io);
     auto caller_strand = asio::make_strand(io);
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     std::atomic<bool> resumed_on_owner{false};
     std::atomic<bool> returned_on_caller{false};
     std::promise<void> done;
@@ -356,13 +356,13 @@ TEST(ValidationBuffer, BestQuorumCleanupStaysOnOwnerStrand)
     second_runner.join();
 }
 
-TEST(ValidationBuffer, TransientOwnerHopStillUsesOwnerCoroutine)
+TEST(ValidationQuorumTracker, TransientOwnerHopStillUsesOwnerCoroutine)
 {
     using namespace std::chrono_literals;
 
     asio::io_context io;
     auto work = asio::make_work_guard(io);
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     std::atomic<bool> entered_during_owner_dispatch{false};
     std::atomic<bool> cleanup_on_owner{false};
     std::promise<void> done;
@@ -416,8 +416,7 @@ TEST(ValidationBuffer, TransientOwnerHopStillUsesOwnerCoroutine)
     EXPECT_EQ(status, std::future_status::ready);
     if (status == std::future_status::ready)
         EXPECT_NO_THROW(done_future.get());
-    EXPECT_TRUE(
-        entered_during_owner_dispatch.load(std::memory_order_acquire));
+    EXPECT_TRUE(entered_during_owner_dispatch.load(std::memory_order_acquire));
     EXPECT_TRUE(cleanup_on_owner.load(std::memory_order_acquire));
 
     work.reset();
@@ -426,13 +425,13 @@ TEST(ValidationBuffer, TransientOwnerHopStillUsesOwnerCoroutine)
     second_runner.join();
 }
 
-TEST(ValidationBuffer, PendingIdentityExhaustionRefusesBeforeMutation)
+TEST(ValidationQuorumTracker, PendingIdentityExhaustionRefusesBeforeMutation)
 {
     using namespace std::chrono_literals;
 
     asio::io_context io;
     auto caller_strand = asio::make_strand(io);
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     bool saw_overflow = false;
     bool returned_on_caller = false;
     std::size_t pending_after = 1;
@@ -474,25 +473,23 @@ TEST(ValidationBuffer, PendingIdentityExhaustionRefusesBeforeMutation)
 
     EXPECT_TRUE(saw_overflow);
     EXPECT_EQ(pending_after, 0u);
-    EXPECT_EQ(
-        identity_after, std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(identity_after, std::numeric_limits<std::uint64_t>::max());
     EXPECT_TRUE(returned_on_caller);
 }
 
-TEST(ValidationBuffer, DeadlineArmFailureRollsBackExactPendingRow)
+TEST(ValidationQuorumTracker, DeadlineArmFailureRollsBackExactPendingRow)
 {
     using namespace std::chrono_literals;
 
     asio::io_context io;
     auto caller_strand = asio::make_strand(io);
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     bool saw_failure = false;
     bool returned_on_caller = false;
     std::size_t pending_after = 1;
 
-    buffer->set_quorum_deadline_arm_hook_for_test([]() {
-        throw std::runtime_error("forced deadline arm failure");
-    });
+    buffer->set_quorum_deadline_arm_hook_for_test(
+        []() { throw std::runtime_error("forced deadline arm failure"); });
 
     asio::co_spawn(
         caller_strand,
@@ -517,11 +514,11 @@ TEST(ValidationBuffer, DeadlineArmFailureRollsBackExactPendingRow)
     EXPECT_TRUE(returned_on_caller);
 }
 
-TEST(ValidationBuffer, ListChangeCancelsMismatchedProofWaiter)
+TEST(ValidationQuorumTracker, ListChangeCancelsMismatchedProofWaiter)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     buffer->set_unl({}, 1);
     io.run();
     io.restart();
@@ -557,11 +554,11 @@ TEST(ValidationBuffer, ListChangeCancelsMismatchedProofWaiter)
         stop_reason, xprv::QuorumCollectStopReason::validator_list_changed);
 }
 
-TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
+TEST(ValidationQuorumTracker, BestQuorumCollectsAndFinalizesAtFullQuorum)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const anchor = load_anchor_fixture();
     ASSERT_FALSE(anchor.validations.empty());
 
@@ -622,10 +619,10 @@ TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
     EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::full);
 }
 
-TEST(ValidationBuffer, LockedQuorumSurvivesVoteRetention)
+TEST(ValidationQuorumTracker, LockedQuorumSurvivesVoteRetention)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
     auto make_key = [](uint8_t marker) {
         std::vector<uint8_t> key(33, 0);
@@ -688,8 +685,8 @@ TEST(ValidationBuffer, LockedQuorumSurvivesVoteRetention)
             for (uint8_t marker = 10; marker <= 12; ++marker)
             {
                 auto const inserted =
-                    co_await buffer->co_insert_validation_for_test(make_entry(
-                        make_hash(marker), 100, manifests.back()));
+                    co_await buffer->co_insert_validation_for_test(
+                        make_entry(make_hash(marker), 100, manifests.back()));
                 all_inserted = inserted && all_inserted;
             }
             for (std::size_t i = 0; i < 8; ++i)
@@ -727,11 +724,11 @@ TEST(ValidationBuffer, LockedQuorumSurvivesVoteRetention)
         }));
 }
 
-TEST(ValidationBuffer, ManifestWorkerReplaysRotationAcrossListRefresh)
+TEST(ValidationQuorumTracker, ManifestWorkerReplaysRotationAcrossListRefresh)
 {
     asio::io_context io;
     auto const xrpl_protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, xrpl_protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, xrpl_protocol, 0);
     auto const anchor = load_anchor_fixture();
 
     std::string const blob_text(anchor.blob.begin(), anchor.blob.end());
@@ -817,10 +814,10 @@ TEST(ValidationBuffer, ManifestWorkerReplaysRotationAcrossListRefresh)
     EXPECT_TRUE(observed);
 }
 
-TEST(ValidationBuffer, ConcurrentDuplicateIngressIsCoalesced)
+TEST(ValidationQuorumTracker, ConcurrentDuplicateIngressIsCoalesced)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const packet_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::validation);
     std::vector<uint8_t> const packet(52, 0);
@@ -849,11 +846,11 @@ TEST(ValidationBuffer, ConcurrentDuplicateIngressIsCoalesced)
     EXPECT_EQ(stats.queued_validation_bytes, 0u);
 }
 
-TEST(ValidationBuffer, ManifestAdmissionPrecedesQuorumPublication)
+TEST(ValidationQuorumTracker, ManifestAdmissionPrecedesQuorumPublication)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const anchor = load_anchor_fixture();
     auto const fixture = prepare_quorum_fixture(protocol, anchor.validations);
     ASSERT_FALSE(fixture.manifests.empty());
@@ -960,11 +957,11 @@ TEST(ValidationBuffer, ManifestAdmissionPrecedesQuorumPublication)
     EXPECT_EQ(collected->stop_reason, xprv::QuorumCollectStopReason::full);
 }
 
-TEST(ValidationBuffer, FailedManifestFlushPreservesActiveListWaiter)
+TEST(ValidationQuorumTracker, FailedManifestFlushPreservesActiveListWaiter)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const fixture =
         prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
     ASSERT_GE(fixture.manifests.size(), 2u);
@@ -1098,11 +1095,11 @@ TEST(ValidationBuffer, FailedManifestFlushPreservesActiveListWaiter)
     EXPECT_EQ(unbound_collected->quorum.validations.size(), 1u);
 }
 
-TEST(ValidationBuffer, PublicationGateExcludesLateManifestAdmission)
+TEST(ValidationQuorumTracker, PublicationGateExcludesLateManifestAdmission)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const fixture =
         prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
     ASSERT_FALSE(fixture.manifests.empty());
@@ -1169,11 +1166,11 @@ TEST(ValidationBuffer, PublicationGateExcludesLateManifestAdmission)
     EXPECT_TRUE(manifest_returned_after_release);
 }
 
-TEST(ValidationBuffer, PublicationGateExcludesLateStop)
+TEST(ValidationQuorumTracker, PublicationGateExcludesLateStop)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const fixture =
         prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
     ASSERT_FALSE(fixture.manifests.empty());
@@ -1238,10 +1235,10 @@ TEST(ValidationBuffer, PublicationGateExcludesLateStop)
     EXPECT_TRUE(stop_returned_after_release);
 }
 
-TEST(ValidationBuffer, DeadlinePublicationGateExcludesLateStop)
+TEST(ValidationQuorumTracker, DeadlinePublicationGateExcludesLateStop)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
     std::promise<void> publish_entered_promise;
     auto publish_entered = publish_entered_promise.get_future();
@@ -1307,11 +1304,11 @@ TEST(ValidationBuffer, DeadlinePublicationGateExcludesLateStop)
     EXPECT_EQ(collected->stop_reason, xprv::QuorumCollectStopReason::timeout);
 }
 
-TEST(ValidationBuffer, ValidatorListAdmissionAdvancesValidationEpoch)
+TEST(ValidationQuorumTracker, ValidatorListAdmissionAdvancesValidationEpoch)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const fixture =
         prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
     ASSERT_GE(fixture.manifests.size(), 2u);
@@ -1350,7 +1347,7 @@ TEST(ValidationBuffer, ValidatorListAdmissionAdvancesValidationEpoch)
     }
     validation_release_promise.set_value();
 
-    xprv::ValidationBuffer::Stats stats;
+    xprv::ValidationQuorumTracker::Stats stats;
     std::optional<xprv::QuorumEntry> quorum;
     std::promise<void> observed_promise;
     auto observed = observed_promise.get_future();
@@ -1391,11 +1388,11 @@ TEST(ValidationBuffer, ValidatorListAdmissionAdvancesValidationEpoch)
     EXPECT_EQ(quorum->ledger_seq, fixture.quorum_seq);
 }
 
-TEST(ValidationBuffer, ValidatorListAdmissionBlocksNewEpochDrain)
+TEST(ValidationQuorumTracker, ValidatorListAdmissionBlocksNewEpochDrain)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const fixture =
         prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
     ASSERT_GE(fixture.manifests.size(), 2u);
@@ -1445,7 +1442,7 @@ TEST(ValidationBuffer, ValidatorListAdmissionBlocksNewEpochDrain)
     bool const drained_after_apply =
         validation_entered.wait_for(timeout) == std::future_status::ready;
 
-    xprv::ValidationBuffer::Stats stats;
+    xprv::ValidationQuorumTracker::Stats stats;
     std::optional<xprv::QuorumEntry> quorum;
     std::promise<void> observed_promise;
     auto observed = observed_promise.get_future();
@@ -1487,11 +1484,11 @@ TEST(ValidationBuffer, ValidatorListAdmissionBlocksNewEpochDrain)
     EXPECT_EQ(quorum->vl_sequence, 2u);
 }
 
-TEST(ValidationBuffer, ValidationBeforeListIsNotRetained)
+TEST(ValidationQuorumTracker, ValidationBeforeListIsNotRetained)
 {
     asio::io_context io;
     auto const protocol = test_protocol();
-    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, protocol, 0);
     auto const fixture =
         prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
     ASSERT_FALSE(fixture.quorum_packets.empty());
@@ -1506,10 +1503,10 @@ TEST(ValidationBuffer, ValidationBeforeListIsNotRetained)
     EXPECT_EQ(stats.recent_quorums, 0u);
 }
 
-TEST(ValidationBuffer, ValidationIngressEvictsAndReadmitsAtCountLimit)
+TEST(ValidationQuorumTracker, ValidationIngressEvictsAndReadmitsAtCountLimit)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const packet_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::validation);
 
@@ -1540,10 +1537,10 @@ TEST(ValidationBuffer, ValidationIngressEvictsAndReadmitsAtCountLimit)
     EXPECT_EQ(stats.queued_validation_bytes, 0u);
 }
 
-TEST(ValidationBuffer, ValidationIngressEvictsOldestAtByteLimit)
+TEST(ValidationQuorumTracker, ValidationIngressEvictsOldestAtByteLimit)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const packet_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::validation);
 
@@ -1564,10 +1561,10 @@ TEST(ValidationBuffer, ValidationIngressEvictsOldestAtByteLimit)
     EXPECT_EQ(stats.queued_validation_bytes, 0u);
 }
 
-TEST(ValidationBuffer, ManifestAdmissionIsBoundedAndResumesValidations)
+TEST(ValidationQuorumTracker, ManifestAdmissionIsBoundedAndResumesValidations)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const manifest_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
     auto const validation_type =
@@ -1589,10 +1586,10 @@ TEST(ValidationBuffer, ManifestAdmissionIsBoundedAndResumesValidations)
     EXPECT_EQ(stats.validation_packets_processed, 1u);
 }
 
-TEST(ValidationBuffer, StopCancelsHeartbeatWork)
+TEST(ValidationQuorumTracker, StopCancelsHeartbeatWork)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const validation_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::validation);
     buffer->on_packet(validation_type, std::vector<uint8_t>(52, 0));
@@ -1619,10 +1616,10 @@ TEST(ValidationBuffer, StopCancelsHeartbeatWork)
     io.stop();
 }
 
-TEST(ValidationBuffer, CoStopConsumesPendingWaiterBeforeReceipt)
+TEST(ValidationQuorumTracker, CoStopConsumesPendingWaiterBeforeReceipt)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
     bool done = false;
     std::size_t pending_at_receipt = 1;
@@ -1656,7 +1653,7 @@ TEST(ValidationBuffer, CoStopConsumesPendingWaiterBeforeReceipt)
     EXPECT_EQ(pending_at_receipt, 0u);
 }
 
-TEST(ValidationBuffer, CoStopCannotOvertakeQueuedOwnerWork)
+TEST(ValidationQuorumTracker, CoStopCannotOvertakeQueuedOwnerWork)
 {
     using namespace std::chrono_literals;
 
@@ -1666,7 +1663,8 @@ TEST(ValidationBuffer, CoStopCannotOvertakeQueuedOwnerWork)
 
         asio::io_context io;
         auto work = asio::make_work_guard(io);
-        auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+        auto buffer =
+            xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
         std::promise<void> owner_entered;
         std::promise<void> release_owner;
@@ -1708,10 +1706,10 @@ TEST(ValidationBuffer, CoStopCannotOvertakeQueuedOwnerWork)
     }
 }
 
-TEST(ValidationBuffer, WaitAfterStopReturnsImmediately)
+TEST(ValidationQuorumTracker, WaitAfterStopReturnsImmediately)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     buffer->stop();
 
     bool done = false;
@@ -1733,10 +1731,10 @@ TEST(ValidationBuffer, WaitAfterStopReturnsImmediately)
     EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::timeout);
 }
 
-TEST(ValidationBuffer, StopAccountsQueuedValidationsAsDropped)
+TEST(ValidationQuorumTracker, StopAccountsQueuedValidationsAsDropped)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const validation_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::validation);
 
@@ -1749,7 +1747,7 @@ TEST(ValidationBuffer, StopAccountsQueuedValidationsAsDropped)
     }
     buffer->stop();
 
-    xprv::ValidationBuffer::Stats stats;
+    xprv::ValidationQuorumTracker::Stats stats;
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
@@ -1767,10 +1765,10 @@ TEST(ValidationBuffer, StopAccountsQueuedValidationsAsDropped)
     EXPECT_EQ(stats.queued_validation_bytes, 0u);
 }
 
-TEST(ValidationBuffer, StopDuringActiveValidationCleansAdmissionState)
+TEST(ValidationQuorumTracker, StopDuringActiveValidationCleansAdmissionState)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const validation_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::validation);
 
@@ -1791,7 +1789,7 @@ TEST(ValidationBuffer, StopDuringActiveValidationCleansAdmissionState)
         entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
     buffer->stop();
 
-    std::promise<xprv::ValidationBuffer::Stats> stats_promise;
+    std::promise<xprv::ValidationQuorumTracker::Stats> stats_promise;
     auto stats = stats_promise.get_future();
     asio::co_spawn(
         io,
@@ -1803,7 +1801,7 @@ TEST(ValidationBuffer, StopDuringActiveValidationCleansAdmissionState)
 
     bool const stats_ready =
         stats.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
-    std::optional<xprv::ValidationBuffer::Stats> final_stats;
+    std::optional<xprv::ValidationQuorumTracker::Stats> final_stats;
     if (stats_ready)
         final_stats = stats.get();
 
@@ -1821,10 +1819,10 @@ TEST(ValidationBuffer, StopDuringActiveValidationCleansAdmissionState)
     EXPECT_EQ(final_stats->queued_validation_bytes, 0u);
 }
 
-TEST(ValidationBuffer, StopAccountsAdmittedManifestsAsAbandoned)
+TEST(ValidationQuorumTracker, StopAccountsAdmittedManifestsAsAbandoned)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
     auto const manifest_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
 
@@ -1833,7 +1831,7 @@ TEST(ValidationBuffer, StopAccountsAdmittedManifestsAsAbandoned)
         buffer->on_packet(manifest_type, {});
     buffer->stop();
 
-    xprv::ValidationBuffer::Stats stats;
+    xprv::ValidationQuorumTracker::Stats stats;
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
@@ -1852,7 +1850,7 @@ TEST(ValidationBuffer, StopAccountsAdmittedManifestsAsAbandoned)
     EXPECT_FALSE(stats.manifest_pending);
 }
 
-TEST(ValidationBuffer, HeartbeatEffectWinsBeforeAdmissionSeal)
+TEST(ValidationQuorumTracker, HeartbeatEffectWinsBeforeAdmissionSeal)
 {
     using namespace std::chrono_literals;
 
@@ -1862,7 +1860,8 @@ TEST(ValidationBuffer, HeartbeatEffectWinsBeforeAdmissionSeal)
 
         asio::io_context io;
         auto work = asio::make_work_guard(io);
-        auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+        auto buffer =
+            xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
         std::promise<void> publication_entered;
         auto entered = publication_entered.get_future();
@@ -1905,7 +1904,7 @@ TEST(ValidationBuffer, HeartbeatEffectWinsBeforeAdmissionSeal)
     }
 }
 
-TEST(ValidationBuffer, AdmissionSealWinsBeforeHeartbeatEffect)
+TEST(ValidationQuorumTracker, AdmissionSealWinsBeforeHeartbeatEffect)
 {
     using namespace std::chrono_literals;
 
@@ -1915,7 +1914,8 @@ TEST(ValidationBuffer, AdmissionSealWinsBeforeHeartbeatEffect)
 
         asio::io_context io;
         auto work = asio::make_work_guard(io);
-        auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+        auto buffer =
+            xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
 
         std::promise<void> before_publication;
         auto entered = before_publication.get_future();

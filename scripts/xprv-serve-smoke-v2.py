@@ -1246,10 +1246,10 @@ def test_health_shape(health: dict[str, Any]) -> None:
     assert cache["max_entries"] >= 1
     assert cache["hits"] >= 0
     assert cache["misses"] >= 0
-    validation_buffer = health.get("validation_buffer")
+    validation_quorum_tracker = health.get("validation_quorum_tracker")
     assert isinstance(
-        validation_buffer, dict
-    ), f"/health missing validation_buffer: {health}"
+        validation_quorum_tracker, dict
+    ), f"/health missing validation_quorum_tracker: {health}"
     for key in (
         "queued_validations",
         "queued_validation_bytes",
@@ -1263,37 +1263,37 @@ def test_health_shape(health: dict[str, Any]) -> None:
         "manifest_packets_dropped",
         "manifest_packets_abandoned",
     ):
-        assert isinstance(validation_buffer.get(key), int), (
-            f"/health validation_buffer.{key} is not an integer: "
-            f"{validation_buffer}"
+        assert isinstance(validation_quorum_tracker.get(key), int), (
+            f"/health validation_quorum_tracker.{key} is not an integer: "
+            f"{validation_quorum_tracker}"
         )
-        assert validation_buffer[key] >= 0
-    assert isinstance(validation_buffer.get("manifest_in_flight"), bool)
-    assert isinstance(validation_buffer.get("manifest_pending"), bool)
+        assert validation_quorum_tracker[key] >= 0
+    assert isinstance(validation_quorum_tracker.get("manifest_in_flight"), bool)
+    assert isinstance(validation_quorum_tracker.get("manifest_pending"), bool)
     assert (
-        validation_buffer["manifest_packets_admitted"]
-        + validation_buffer["manifest_packets_dropped"]
-        == validation_buffer["manifest_packets_received"]
+        validation_quorum_tracker["manifest_packets_admitted"]
+        + validation_quorum_tracker["manifest_packets_dropped"]
+        == validation_quorum_tracker["manifest_packets_received"]
     )
     assert (
-        validation_buffer["manifest_packets_processed"]
-        <= validation_buffer["manifest_packets_admitted"]
+        validation_quorum_tracker["manifest_packets_processed"]
+        <= validation_quorum_tracker["manifest_packets_admitted"]
     )
-    active_manifests = int(validation_buffer["manifest_in_flight"]) + int(
-        validation_buffer["manifest_pending"]
+    active_manifests = int(validation_quorum_tracker["manifest_in_flight"]) + int(
+        validation_quorum_tracker["manifest_pending"]
     )
     assert (
-        validation_buffer["manifest_packets_processed"]
-        + validation_buffer["manifest_packets_abandoned"]
+        validation_quorum_tracker["manifest_packets_processed"]
+        + validation_quorum_tracker["manifest_packets_abandoned"]
         + active_manifests
-        == validation_buffer["manifest_packets_admitted"]
+        == validation_quorum_tracker["manifest_packets_admitted"]
     )
     assert (
-        validation_buffer["validation_packets_processed"]
-        + validation_buffer["validation_packets_deduplicated"]
-        + validation_buffer["validation_packets_dropped"]
-        + validation_buffer["queued_validations"]
-        == validation_buffer["validation_packets_received"]
+        validation_quorum_tracker["validation_packets_processed"]
+        + validation_quorum_tracker["validation_packets_deduplicated"]
+        + validation_quorum_tracker["validation_packets_dropped"]
+        + validation_quorum_tracker["queued_validations"]
+        == validation_quorum_tracker["validation_packets_received"]
     )
     if "latest_quorum_seq" in health:
         assert isinstance(health["latest_quorum_seq"], int)

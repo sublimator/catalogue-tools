@@ -148,7 +148,7 @@ public:
     int quorum_count = 0;
 
     /// When true, on_packet() keeps collecting after quorum is reached.
-    /// Used by ValidationBuffer for continuous collection.
+    /// Used by ValidationQuorumTracker for continuous collection.
     bool continuous = false;
 
 private:

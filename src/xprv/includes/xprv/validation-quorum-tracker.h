@@ -1,6 +1,6 @@
 #pragma once
 
-// ValidationBuffer — strand-protected continuous validation collection.
+// ValidationQuorumTracker — strand-protected continuous validation collection.
 //
 // Collects STValidation messages from the peer network, maintains a ring
 // buffer of recent quorum entries, and services proof requests.
@@ -56,7 +56,8 @@ struct QuorumCollectResult
     QuorumCollectStopReason stop_reason = QuorumCollectStopReason::timeout;
 };
 
-class ValidationBuffer : public std::enable_shared_from_this<ValidationBuffer>
+class ValidationQuorumTracker
+    : public std::enable_shared_from_this<ValidationQuorumTracker>
 {
 public:
     static constexpr int kQuorumPercent = 90;
@@ -67,16 +68,16 @@ public:
         return (validator_count * kQuorumPercent + 99) / 100;
     }
 
-    ~ValidationBuffer();
+    ~ValidationQuorumTracker();
 
-    static std::shared_ptr<ValidationBuffer>
+    static std::shared_ptr<ValidationQuorumTracker>
     create(
         boost::asio::io_context& io,
         catl::xdata::Protocol const& protocol,
         uint32_t network_id = 0)
     {
-        return std::shared_ptr<ValidationBuffer>(
-            new ValidationBuffer(io, protocol, network_id));
+        return std::shared_ptr<ValidationQuorumTracker>(
+            new ValidationQuorumTracker(io, protocol, network_id));
     }
 
     /// Feed from unsolicited handler. Safe to call from any thread/strand.
@@ -97,7 +98,7 @@ public:
 
     /// Stop admission, join background manifest verification, and cross the
     /// validation owner strand after every previously queued owner operation.
-    /// Completion is the exact ValidationBuffer drain receipt.
+    /// Completion is the exact ValidationQuorumTracker drain receipt.
     boost::asio::awaitable<void>
     co_stop();
 
@@ -276,7 +277,7 @@ public:
 #endif
 
 private:
-    ValidationBuffer(
+    ValidationQuorumTracker(
         boost::asio::io_context& io,
         catl::xdata::Protocol const& protocol,
         uint32_t network_id);
@@ -366,9 +367,9 @@ private:
     bool manifest_in_flight_ = false;
     bool manifest_pending_admitted_ = false;
     //@@authority state=prv.S0080 status=provisional scope=field
-    // bind=xprv::ValidationBuffer::stopped_@5073593fa3a7358c
-    // owner=unresolved owner_hypothesis=validation_buffer
-    // observed_home=ValidationBuffer::stopped_
+    // bind=xprv::ValidationQuorumTracker::stopped_@3114749f1ea2a030
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // observed_home=ValidationQuorumTracker::stopped_
     // label=sticky_validation_admission_seal
     bool stopped_ = false;
     std::shared_ptr<std::vector<uint8_t>> pending_manifest_;

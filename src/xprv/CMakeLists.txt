@@ -97,7 +97,7 @@ add_executable(
   src/proof-resolver.cpp
   src/proof-steps.cpp
   src/manifest-utils.cpp
-  src/validation-buffer.cpp
+  src/validation-quorum-tracker.cpp
   src/validation-collector.cpp
   src/vl-cache.cpp
   ${XPRV_BUILD_ID_CPP})

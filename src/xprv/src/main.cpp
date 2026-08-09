@@ -147,7 +147,7 @@ configure_logging(LoggingOptions const& opts, std::string& error)
     });
 
     set_exact("xprv", LogLevel::INFO);
-    set_exact("val-buffer", LogLevel::INFO);
+    set_exact("quorum-tracker", LogLevel::INFO);
     set_exact("verify", LogLevel::INFO);
     set_exact("anchor-verify", LogLevel::INFO);
 

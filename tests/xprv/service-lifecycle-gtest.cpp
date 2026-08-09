@@ -112,11 +112,11 @@ public:
     }
 
     static void
-    set_validation_buffer(
+    set_validation_quorum_tracker(
         ProofEngine& engine,
-        std::shared_ptr<ValidationBuffer> validation_buffer)
+        std::shared_ptr<ValidationQuorumTracker> validation_quorum_tracker)
     {
-        engine.val_buffer_ = std::move(validation_buffer);
+        engine.quorum_tracker_ = std::move(validation_quorum_tracker);
     }
 
     static void
@@ -1546,7 +1546,7 @@ TEST(HttpServerLifecycle, OneShotStartSurvivesSecondStartRefusal)
     EXPECT_THROW(server->start(), std::logic_error);
 }
 
-TEST(HttpServerLifecycle, EngineDrainAwaitsValidationBufferOwnerReceipt)
+TEST(HttpServerLifecycle, EngineDrainAwaitsValidationQuorumTrackerOwnerReceipt)
 {
     namespace asio = boost::asio;
     using namespace std::chrono_literals;
@@ -1560,10 +1560,10 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsValidationBufferOwnerReceipt)
         auto engine =
             xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
         auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-        auto validation_buffer =
-            xprv::ValidationBuffer::create(io, protocol, 0);
-        xprv::ProofEngineTestAccess::set_validation_buffer(
-            *engine, validation_buffer);
+        auto validation_quorum_tracker =
+            xprv::ValidationQuorumTracker::create(io, protocol, 0);
+        xprv::ProofEngineTestAccess::set_validation_quorum_tracker(
+            *engine, validation_quorum_tracker);
         auto server = xprv::HttpServer::create(
             io,
             engine,
@@ -1576,7 +1576,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsValidationBufferOwnerReceipt)
         std::promise<void> owner_entered;
         std::promise<void> release_owner;
         auto release_owner_future = release_owner.get_future().share();
-        asio::post(validation_buffer->owner_strand_for_test(), [&]() {
+        asio::post(validation_quorum_tracker->owner_strand_for_test(), [&]() {
             owner_entered.set_value();
             release_owner_future.wait();
         });
@@ -1615,7 +1615,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsValidationBufferOwnerReceipt)
     }
 }
 
-TEST(HttpServerLifecycle, EngineDrainFenceAwaitsValidationBufferPreSeal)
+TEST(HttpServerLifecycle, EngineDrainFenceAwaitsValidationQuorumTrackerPreSeal)
 {
     namespace asio = boost::asio;
     using namespace std::chrono_literals;
@@ -1629,10 +1629,10 @@ TEST(HttpServerLifecycle, EngineDrainFenceAwaitsValidationBufferPreSeal)
         auto engine =
             xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
         auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-        auto validation_buffer =
-            xprv::ValidationBuffer::create(io, protocol, 0);
-        xprv::ProofEngineTestAccess::set_validation_buffer(
-            *engine, validation_buffer);
+        auto validation_quorum_tracker =
+            xprv::ValidationQuorumTracker::create(io, protocol, 0);
+        xprv::ProofEngineTestAccess::set_validation_quorum_tracker(
+            *engine, validation_quorum_tracker);
         auto server = xprv::HttpServer::create(
             io,
             engine,
@@ -1647,12 +1647,12 @@ TEST(HttpServerLifecycle, EngineDrainFenceAwaitsValidationBufferPreSeal)
         std::promise<void> release_publication;
         auto release = release_publication.get_future().share();
         std::atomic<unsigned> effects{0};
-        validation_buffer->set_inside_heartbeat_publication_hook_for_test(
+        validation_quorum_tracker->set_inside_heartbeat_publication_hook_for_test(
             [&]() {
                 publication_entered.set_value();
                 release.wait();
             });
-        validation_buffer->set_heartbeat_effect_hook_for_test(
+        validation_quorum_tracker->set_heartbeat_effect_hook_for_test(
             [&]() { effects.fetch_add(1, std::memory_order_relaxed); });
 
         std::promise<void> drain_fence;
@@ -1660,7 +1660,7 @@ TEST(HttpServerLifecycle, EngineDrainFenceAwaitsValidationBufferPreSeal)
         xprv::ProofEngineTestAccess::set_before_engine_draining_log(
             *engine, [&]() { drain_fence.set_value(); });
 
-        validation_buffer->post_heartbeat_tick_for_test();
+        validation_quorum_tracker->post_heartbeat_tick_for_test();
         auto drained = asio::co_spawn(
             io,
             [server, engine]() -> asio::awaitable<void> {

@@ -216,7 +216,7 @@ VlCache::do_fetch()
                         self->vl_host_,
                         first_load ? " (initial)" : " (refresh)");
 
-                    // Notify subscriber (e.g. ValidationBuffer) on every load
+                    // Notify subscriber (e.g. ValidationQuorumTracker) on every load
                     if (self->on_refresh_)
                     {
                         self->on_refresh_(*self->vl_);

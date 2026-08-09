@@ -1,4 +1,4 @@
-#include "xprv/validation-buffer.h"
+#include "xprv/validation-quorum-tracker.h"
 #include "xprv/network-config.h"
 
 #include <catl/crypto/sha512-half-hasher.h>
@@ -93,9 +93,9 @@ private:
     bool started_ = false;
 };
 
-LogPartition ValidationBuffer::log_("val-buffer", LogLevel::INHERIT);
+LogPartition ValidationQuorumTracker::log_("quorum-tracker", LogLevel::INHERIT);
 
-ValidationBuffer::ValidationBuffer(
+ValidationQuorumTracker::ValidationQuorumTracker(
     asio::io_context& io,
     catl::xdata::Protocol const& protocol,
     uint32_t network_id)
@@ -110,13 +110,13 @@ ValidationBuffer::ValidationBuffer(
     collector_.continuous = true;
 }
 
-ValidationBuffer::~ValidationBuffer()
+ValidationQuorumTracker::~ValidationQuorumTracker()
 {
     stop();
 }
 
 void
-ValidationBuffer::stop()
+ValidationQuorumTracker::stop()
 {
     auto const weak = weak_from_this();
     seal_admission_and_join_worker();
@@ -136,13 +136,13 @@ ValidationBuffer::stop()
 }
 
 //@@authority transition=prv.T0232 status=provisional scope=function
-// bind=xprv::seal_admission_and_join_worker@5947e9ed6e68c587
-// owner=unresolved owner_hypothesis=validation_buffer
+// bind=xprv::seal_admission_and_join_worker@41f264ea27d0a284
+// owner=unresolved owner_hypothesis=validation_quorum_tracker
 // commit=publication_admission_mutex_and_manifest_worker_join
 // touches=prv.S0080
 // label=publish_sticky_validation_admission_seal_without_quiescence_receipt
 void
-ValidationBuffer::seal_admission_and_join_worker()
+ValidationQuorumTracker::seal_admission_and_join_worker()
 {
     {
         std::lock_guard publication_lock(publication_mutex_);
@@ -166,34 +166,34 @@ ValidationBuffer::seal_admission_and_join_worker()
 }
 
 //@@authority state=prv.S0057 status=provisional scope=function
-// bind=xprv::co_stop@916bc1beee7eaa2d
-// owner=unresolved owner_hypothesis=validation_buffer_stop_frame
-// observed_home=ValidationBuffer::co_stop_coroutine_frame
-// label=exact_validation_buffer_owner_drain_join_frame
+// bind=xprv::co_stop@a4a0d11feaa98840
+// owner=unresolved owner_hypothesis=validation_quorum_tracker_stop_frame
+// observed_home=ValidationQuorumTracker::co_stop_coroutine_frame
+// label=exact_validation_quorum_tracker_owner_drain_join_frame
 //@@authority channel=prv.C0005 status=provisional scope=function
-// bind=xprv::co_stop@916bc1beee7eaa2d
-// endpoints=proof_engine,validation_buffer
+// bind=xprv::co_stop@a4a0d11feaa98840
+// endpoints=proof_engine,validation_quorum_tracker
 // channel_semantics=process_local_join
-// label=await_exact_validation_buffer_drain_receipt
+// label=await_exact_validation_quorum_tracker_drain_receipt
 asio::awaitable<void>
-ValidationBuffer::co_stop()
+ValidationQuorumTracker::co_stop()
 {
     auto self = shared_from_this();
     co_await asio::this_coro::reset_cancellation_state(
         asio::disable_cancellation());
 
     //@@authority transition=prv.T0177 status=provisional scope=statement
-    // bind=expression_statement@34375817f968c49b
-    // owner=unresolved owner_hypothesis=validation_buffer_stop_frame
+    // bind=expression_statement@d873656ba918bf55
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker_stop_frame
     // commit=publication_admission_mutex_and_manifest_worker_join
     // touches=prv.S0057
     // label=ensure_sticky_validation_ingress_seal_and_join_manifest_worker
     seal_admission_and_join_worker();  //@@authority-target ids=prv.T0177
 
     //@@authority transition=prv.T0178 status=provisional scope=statement
-    // bind=expression_statement@78b49cb1c9415f99
-    // owner=unresolved owner_hypothesis=validation_buffer_stop_frame
-    // commit=validation_buffer_strand touches=prv.S0057
+    // bind=expression_statement@7628c74624b3ba91
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker_stop_frame
+    // commit=validation_quorum_tracker_strand touches=prv.S0057
     // label=consume_owner_barrier_and_publish_validation_stop_receipt
     co_await asio::co_spawn(
         strand_,
@@ -206,7 +206,9 @@ ValidationBuffer::co_stop()
 }
 
 void
-ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
+ValidationQuorumTracker::on_packet(
+    uint16_t type,
+    std::vector<uint8_t> const& data)
 {
     auto const kManifestType =
         static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
@@ -358,7 +360,7 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 }
 
 void
-ValidationBuffer::schedule_validation_drain()
+ValidationQuorumTracker::schedule_validation_drain()
 {
     auto self = shared_from_this();
     try
@@ -374,7 +376,7 @@ ValidationBuffer::schedule_validation_drain()
 }
 
 void
-ValidationBuffer::drain_validation_queue()
+ValidationQuorumTracker::drain_validation_queue()
 {
     auto const validation_type =
         static_cast<uint16_t>(catl::peer_client::packet_type::validation);
@@ -538,7 +540,7 @@ ValidationBuffer::drain_validation_queue()
 }
 
 void
-ValidationBuffer::clear_validation_queue_locked(bool count_as_dropped)
+ValidationQuorumTracker::clear_validation_queue_locked(bool count_as_dropped)
 {
     if (count_as_dropped)
         validation_packets_dropped_ += pending_validations_.size();
@@ -549,7 +551,7 @@ ValidationBuffer::clear_validation_queue_locked(bool count_as_dropped)
 }
 
 void
-ValidationBuffer::erase_validation_index_locked(
+ValidationQuorumTracker::erase_validation_index_locked(
     Hash256 const& digest,
     uint64_t trust_generation,
     std::shared_ptr<std::vector<uint8_t>> const& packet)
@@ -567,7 +569,7 @@ ValidationBuffer::erase_validation_index_locked(
 }
 
 void
-ValidationBuffer::start_manifest_packet(
+ValidationQuorumTracker::start_manifest_packet(
     std::shared_ptr<std::vector<uint8_t>> owned)
 {
     auto self = shared_from_this();
@@ -648,7 +650,8 @@ ValidationBuffer::start_manifest_packet(
                                                     hook();
 #endif
                                                 PLOGD(
-                                                    ValidationBuffer::log_,
+                                                    ValidationQuorumTracker::
+                                                        log_,
                                                     "[",
                                                     self->net_label_,
                                                     "] manifests: ",
@@ -700,7 +703,7 @@ ValidationBuffer::start_manifest_packet(
 }
 
 void
-ValidationBuffer::finish_manifest_packet()
+ValidationQuorumTracker::finish_manifest_packet()
 {
     if (!strand_.running_in_this_thread())
     {
@@ -732,7 +735,7 @@ ValidationBuffer::finish_manifest_packet()
 }
 
 std::shared_ptr<std::vector<uint8_t>>
-ValidationBuffer::finish_manifest_packet_locked(bool& schedule_drain)
+ValidationQuorumTracker::finish_manifest_packet_locked(bool& schedule_drain)
 {
     std::shared_ptr<std::vector<uint8_t>> next;
     bool publish_trust = false;
@@ -781,7 +784,7 @@ ValidationBuffer::finish_manifest_packet_locked(bool& schedule_drain)
 }
 
 void
-ValidationBuffer::abandon_manifest_packets_locked()
+ValidationQuorumTracker::abandon_manifest_packets_locked()
 {
     if (manifest_in_flight_)
     {
@@ -795,7 +798,7 @@ ValidationBuffer::abandon_manifest_packets_locked()
 }
 
 void
-ValidationBuffer::set_unl(
+ValidationQuorumTracker::set_unl(
     std::vector<catl::vl::Manifest> const& validators,
     uint32_t vl_sequence)
 {
@@ -883,7 +886,7 @@ ValidationBuffer::set_unl(
 }
 
 asio::awaitable<bool>
-ValidationBuffer::co_sync_unl(
+ValidationQuorumTracker::co_sync_unl(
     std::vector<catl::vl::Manifest> const& validators,
     uint32_t vl_sequence)
 {
@@ -910,7 +913,7 @@ ValidationBuffer::co_sync_unl(
 }
 
 bool
-ValidationBuffer::apply_unl_locked(
+ValidationQuorumTracker::apply_unl_locked(
     std::vector<catl::vl::Manifest> const& validators,
     uint32_t vl_sequence,
     bool publish)
@@ -952,7 +955,7 @@ ValidationBuffer::apply_unl_locked(
 }
 
 void
-ValidationBuffer::publish_trust_state_locked()
+ValidationQuorumTracker::publish_trust_state_locked()
 {
     if (unpublished_vl_change_)
     {
@@ -990,7 +993,7 @@ ValidationBuffer::publish_trust_state_locked()
 }
 
 void
-ValidationBuffer::check_for_new_quorum()
+ValidationQuorumTracker::check_for_new_quorum()
 {
     // Already on strand_
 
@@ -1108,7 +1111,7 @@ ValidationBuffer::check_for_new_quorum()
 }
 
 void
-ValidationBuffer::resolve_pending()
+ValidationQuorumTracker::resolve_pending()
 {
     // Called on strand from check_for_new_quorum — every validation.
     auto const now = std::chrono::steady_clock::now();
@@ -1261,7 +1264,7 @@ ValidationBuffer::resolve_pending()
 }
 
 void
-ValidationBuffer::cancel_pending_locked(QuorumCollectStopReason reason)
+ValidationQuorumTracker::cancel_pending_locked(QuorumCollectStopReason reason)
 {
     auto const active_vl_sequence = vl_sequence_.value_or(0);
     auto pending = std::move(pending_);
@@ -1277,7 +1280,7 @@ ValidationBuffer::cancel_pending_locked(QuorumCollectStopReason reason)
 }
 
 void
-ValidationBuffer::prune_old_entries()
+ValidationQuorumTracker::prune_old_entries()
 {
     auto const now = std::chrono::steady_clock::now();
 
@@ -1295,7 +1298,7 @@ ValidationBuffer::prune_old_entries()
 }
 
 asio::awaitable<std::optional<QuorumEntry>>
-ValidationBuffer::co_latest_quorum()
+ValidationQuorumTracker::co_latest_quorum()
 {
     co_await asio::post(strand_, asio::use_awaitable);
     std::lock_guard publication_lock(publication_mutex_);
@@ -1308,7 +1311,7 @@ ValidationBuffer::co_latest_quorum()
 }
 
 asio::awaitable<std::optional<QuorumEntry>>
-ValidationBuffer::co_last_full_quorum(
+ValidationQuorumTracker::co_last_full_quorum(
     std::chrono::seconds max_age,
     std::optional<uint32_t> expected_vl_sequence)
 {
@@ -1333,7 +1336,7 @@ ValidationBuffer::co_last_full_quorum(
 }
 
 asio::awaitable<QuorumCollectResult>
-ValidationBuffer::co_wait_best_quorum(
+ValidationQuorumTracker::co_wait_best_quorum(
     std::chrono::seconds timeout,
     std::optional<uint32_t> expected_vl_sequence)
 {
@@ -1354,7 +1357,7 @@ ValidationBuffer::co_wait_best_quorum(
 }
 
 asio::awaitable<QuorumCollectResult>
-ValidationBuffer::co_wait_best_quorum_on_strand(
+ValidationQuorumTracker::co_wait_best_quorum_on_strand(
     std::chrono::seconds timeout,
     std::optional<uint32_t> expected_vl_sequence)
 {
@@ -1502,7 +1505,7 @@ ValidationBuffer::co_wait_best_quorum_on_strand(
             if (next_pending_id_ == std::numeric_limits<std::uint64_t>::max())
             {
                 throw std::overflow_error(
-                    "ValidationBuffer pending identity exhausted");
+                    "ValidationQuorumTracker pending identity exhausted");
             }
             pending_id = ++next_pending_id_;
             pending_.push_back(PendingQuorum{
@@ -1607,7 +1610,7 @@ ValidationBuffer::co_wait_best_quorum_on_strand(
 }
 
 std::optional<QuorumEntry>
-ValidationBuffer::latest_quorum_locked(
+ValidationQuorumTracker::latest_quorum_locked(
     ValidationCollector::QuorumMode mode) const
 {
     auto validations = collector_.get_quorum(kQuorumPercent, mode);
@@ -1637,7 +1640,7 @@ ValidationBuffer::latest_quorum_locked(
 }
 
 bool
-ValidationBuffer::has_newer_ledger_locked(
+ValidationQuorumTracker::has_newer_ledger_locked(
     Hash256 const& ledger_hash,
     uint32_t ledger_seq,
     ValidationCollector::QuorumMode mode) const
@@ -1654,7 +1657,7 @@ ValidationBuffer::has_newer_ledger_locked(
 }
 
 asio::awaitable<bool>
-ValidationBuffer::co_has_live_only_quorum()
+ValidationQuorumTracker::co_has_live_only_quorum()
 {
     co_await asio::post(strand_, asio::use_awaitable);
     std::lock_guard publication_lock(publication_mutex_);
@@ -1670,8 +1673,8 @@ ValidationBuffer::co_has_live_only_quorum()
             kQuorumPercent, ValidationCollector::QuorumMode::proof);
 }
 
-asio::awaitable<ValidationBuffer::Stats>
-ValidationBuffer::co_stats()
+asio::awaitable<ValidationQuorumTracker::Stats>
+ValidationQuorumTracker::co_stats()
 {
     co_await asio::post(strand_, asio::use_awaitable);
 
@@ -1709,7 +1712,7 @@ ValidationBuffer::co_stats()
 
 #ifdef XPRV_TESTING
 asio::awaitable<bool>
-ValidationBuffer::co_insert_validation_for_test(
+ValidationQuorumTracker::co_insert_validation_for_test(
     ValidationCollector::Entry entry)
 {
     co_await asio::post(strand_, asio::use_awaitable);
@@ -1721,7 +1724,7 @@ ValidationBuffer::co_insert_validation_for_test(
 }
 
 void
-ValidationBuffer::post_heartbeat_tick_for_test()
+ValidationQuorumTracker::post_heartbeat_tick_for_test()
 {
     auto self = shared_from_this();
     asio::post(strand_, [self]() { self->emit_heartbeat_on_strand(); });
@@ -1729,7 +1732,7 @@ ValidationBuffer::post_heartbeat_tick_for_test()
 #endif
 
 void
-ValidationBuffer::emit_heartbeat_on_strand()
+ValidationQuorumTracker::emit_heartbeat_on_strand()
 {
     assert(strand_.running_in_this_thread());
 
@@ -1772,14 +1775,14 @@ ValidationBuffer::emit_heartbeat_on_strand()
 
             //@@authority transition=prv.T0234 status=provisional
             // scope=statement
-            // bind=expression_statement@9fde45aec5da51ae
-            // owner=unresolved owner_hypothesis=validation_buffer
-            // commit=validation_buffer_strand_and_publication_mutex
+            // bind=expression_statement@8ce794dd51eabef6
+            // owner=unresolved owner_hypothesis=validation_quorum_tracker
+            // commit=validation_quorum_tracker_strand_and_publication_mutex
             // label=publish_validation_heartbeat_before_admission_seal
             // touches=prv.S0080
             // control_guard=then:not_stopped
             PLOGI(
-                ValidationBuffer::log_,
+                ValidationQuorumTracker::log_,
                 "[",
                 net_label_,
                 "] no quorum for ",
@@ -1805,7 +1808,7 @@ ValidationBuffer::emit_heartbeat_on_strand()
 }
 
 void
-ValidationBuffer::start_heartbeat()
+ValidationQuorumTracker::start_heartbeat()
 {
     auto weak = weak_from_this();
     std::lock_guard lock(admission_mutex_);
