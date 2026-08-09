@@ -1337,6 +1337,17 @@ public:
             count, std::memory_order_release);
     }
 
+    static void
+    fail_next_generation_drain_launch(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::uint32_t count = 1)
+    {
+        run_on_strand(io, peers, [count](auto& set) {
+            set.fail_generation_drain_launches_for_test_ = count;
+        });
+    }
+
     static std::uint64_t
     peer_use_outcome_count(
         boost::asio::io_context& io,

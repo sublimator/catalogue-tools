@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -44,6 +45,28 @@ enum class PeerUseOutcome : std::uint8_t {
     shutdown,
     abandoned,
     count,
+};
+
+enum class PeerUseReceiptFault : std::uint8_t {
+    physical_drain_failed,
+};
+
+class PeerUseReceiptError final : public std::runtime_error
+{
+public:
+    explicit PeerUseReceiptError(PeerUseReceiptFault fault)
+        : std::runtime_error("peer use physical drain failed"), fault_(fault)
+    {
+    }
+
+    PeerUseReceiptFault
+    fault() const noexcept
+    {
+        return fault_;
+    }
+
+private:
+    PeerUseReceiptFault fault_;
 };
 
 inline constexpr PeerUseOutcome
@@ -175,6 +198,11 @@ enum class PeerUsePhase : std::uint8_t {
     revoked,
 };
 
+enum class PeerUseProposalSource : std::uint8_t {
+    local,
+    physical_terminal,
+};
+
 class PeerUseReceiptState
     : public std::enable_shared_from_this<PeerUseReceiptState>
 {
@@ -194,11 +222,17 @@ public:
             [self]() -> boost::asio::awaitable<PeerUseOutcome> {
                 if (self->outcome_)
                     co_return *self->outcome_;
+                if (self->fault_)
+                    throw PeerUseReceiptError(*self->fault_);
                 boost::system::error_code ec;
                 co_await self->signal_.async_wait(boost::asio::redirect_error(
                     boost::asio::use_awaitable, ec));
                 (void)ec;
-                co_return self->outcome_.value_or(PeerUseOutcome::abandoned);
+                if (self->outcome_)
+                    co_return *self->outcome_;
+                if (self->fault_)
+                    throw PeerUseReceiptError(*self->fault_);
+                co_return PeerUseOutcome::abandoned;
             },
             boost::asio::use_awaitable);
     }
@@ -211,12 +245,35 @@ public:
     void
     complete_on_owner(PeerUseOutcome outcome) noexcept
     {
-        if (outcome_)
+        if (outcome_ || fault_)
             return;
         outcome_ = outcome;
         {
             std::lock_guard lock(projection_mutex_);
             projected_outcome_ = outcome;
+        }
+        try
+        {
+            signal_.cancel();
+        }
+        catch (...)
+        {
+        }
+    }
+
+    //@@authority transition=prv.T0253 status=provisional scope=function bind=catl::peer_client::detail::PeerUseReceiptState::fail_on_owner@3b0790e89fbda6e4
+    // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+    // touches=prv.S0099
+    // label=publish_retained_peer_use_physical_drain_fault
+    void
+    fail_on_owner(PeerUseReceiptFault fault) noexcept
+    {
+        if (outcome_ || fault_)
+            return;
+        fault_ = fault;
+        {
+            std::lock_guard lock(projection_mutex_);
+            projected_fault_ = fault;
         }
         try
         {
@@ -234,6 +291,13 @@ public:
         return projected_outcome_;
     }
 
+    std::optional<PeerUseReceiptFault>
+    projected_fault() const noexcept
+    {
+        std::lock_guard lock(projection_mutex_);
+        return projected_fault_;
+    }
+
 private:
     boost::asio::any_io_executor executor_;
     boost::asio::steady_timer signal_;
@@ -244,18 +308,28 @@ private:
     // NOTE: outcome_ is strand-confined; projected_outcome_ is its
     // mutex-protected foreign-thread observation.
     std::optional<PeerUseOutcome> outcome_;
+    //@@authority state=prv.S0099 status=provisional scope=field bind=catl::peer_client::detail::PeerUseReceiptState::fault_@1dd63f24ccedcc91
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_use_receipt
+    // label=retained_peer_use_physical_drain_fault
+    std::optional<PeerUseReceiptFault> fault_;
     mutable std::mutex projection_mutex_;
     std::optional<PeerUseOutcome> projected_outcome_;
+    std::optional<PeerUseReceiptFault> projected_fault_;
 };
 
 struct PeerUseControl
 {
-    using Finish = std::function<void(PeerUseOutcome)>;
+    using Finish =
+        std::function<void(PeerUseOutcome, PeerUseProposalSource)>;
 
     // Access only while submission_gate is held. The pointer is installed
     // before publication and cleared by revocation under that same gate.
     PeerSessionPtr session;
     PeerGenerationRef generation;
+    //@@authority state=prv.S0100 status=provisional scope=field bind=catl::peer_client::detail::PeerUseControl::request@a2e6cc89992721c8
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_use_control
+    // label=immutable_peer_use_request_operation_binding
+    PeerUseRequest request;
     PeerUseTicket ticket;
     std::weak_ptr<PeerSet> owner;
     Finish finish;
@@ -327,6 +401,26 @@ struct PeerUseControl
         return prior;
     }
 
+    /**
+     * Revoke only when no physical submission has committed.
+     *
+     * A submitted operation is left intact so its owner can first install a
+     * drain servant, then revoke it with every sibling under one generation
+     * transition.
+     */
+    PeerUsePhase
+    revoke_if_reserved() noexcept
+    {
+        std::lock_guard guard(submission_gate);
+        auto const prior = phase.load(std::memory_order_relaxed);
+        if (prior == PeerUsePhase::reserved)
+        {
+            phase.store(PeerUsePhase::revoked, std::memory_order_release);
+            session.reset();
+        }
+        return prior;
+    }
+
     //@@authority transition=prv.T0245 status=provisional scope=function
     // bind=catl::peer_client::detail::PeerUseControl::try_propose@8c2b1e519e4c5b21
     // owner=unresolved owner_hypothesis=peer_use_adapter
@@ -344,13 +438,13 @@ struct PeerUseControl
     }
 
     void
-    notify(PeerUseOutcome outcome) noexcept
+    notify(PeerUseOutcome outcome, PeerUseProposalSource source) noexcept
     {
         if (finish)
         {
             try
             {
-                finish(outcome);
+                finish(outcome, source);
             }
             catch (...)
             {
@@ -361,11 +455,13 @@ struct PeerUseControl
     }
 
     bool
-    propose(PeerUseOutcome outcome) noexcept
+    propose(
+        PeerUseOutcome outcome,
+        PeerUseProposalSource source = PeerUseProposalSource::local) noexcept
     {
         if (!try_propose())
             return false;
-        notify(outcome);
+        notify(outcome, source);
         return true;
     }
 };
@@ -408,6 +504,13 @@ public:
     {
         return state_ ? state_->projected_outcome()
                       : std::optional<PeerUseOutcome>{};
+    }
+
+    std::optional<PeerUseReceiptFault>
+    fault() const noexcept
+    {
+        return state_ ? state_->projected_fault()
+                      : std::optional<PeerUseReceiptFault>{};
     }
 
 private:
@@ -531,7 +634,11 @@ public:
         if (state_)
         {
             if (state_->control)
-                (void)state_->control->propose(outcome);
+                (void)state_->control->propose(
+                    outcome,
+                    physical_terminal_ ?
+                        detail::PeerUseProposalSource::physical_terminal :
+                        detail::PeerUseProposalSource::local);
         }
     }
 
@@ -578,13 +685,23 @@ private:
 
     /** Install one internal transport operation under the revoke gate. */
     template <class Submit>
+    //@@authority transition=prv.T0255 status=provisional scope=function bind=catl::peer_client::PeerUseCompletion::install_operation@3fd49684978c8f91
+    // owner=unresolved owner_hypothesis=peer_use_adapter commit=submission_gate
+    // touches=prv.S0094,prv.S0100
+    // label=validate_acquired_request_before_consuming_operation_authority
     bool
-    install_operation(Submit&& submit) const
+    install_operation(
+        PeerUseKind kind,
+        std::uint32_t ledger_seq,
+        Submit&& submit) const
     {
         auto state = state_;
         auto control = state ? state->control : nullptr;
-        if (!control)
+        //@@mutation-site peer-use-operation-matches-acquired-request
+        if (!control || control->request.kind != kind ||
+            control->request.ledger_seq != ledger_seq)
             return false;
+        //@@mutation-end peer-use-operation-matches-acquired-request
         try
         {
             return control->try_submit(std::forward<Submit>(submit));
@@ -596,7 +713,26 @@ private:
         }
     }
 
+    PeerUseCompletion
+    with_physical_terminal_capability() const noexcept
+    {
+        auto result = *this;
+        result.physical_terminal_ = true;
+        return result;
+    }
+
+    bool
+    physical_delivery_allowed() const noexcept
+    {
+        auto state = state_;
+        auto control = state ? state->control : nullptr;
+        return control &&
+            control->phase.load(std::memory_order_acquire) ==
+            detail::PeerUsePhase::submitted;
+    }
+
     std::shared_ptr<detail::PeerUseState> state_;
+    bool physical_terminal_ = false;
 };
 
 inline PeerUseCompletion

@@ -230,6 +230,50 @@ TEST(PeerUse, OneTokenSubmitsAtMostOnePhysicalOperation)
         PeerSetTestAccess::peer_use_outcome_count(
             f.io, f.peers, PeerUseOutcome::success),
         1u);
+    EXPECT_EQ(f.session->co_disconnect_calls.load(), 0u);
+}
+
+TEST(PeerUse, OperationMustMatchAcquiredKindAndLedger)
+{
+    Fixture f;
+    auto header_use = f.acquire(std::chrono::steady_clock::now() + 5s);
+    ASSERT_TRUE(header_use);
+    auto header_completion = std::move(header_use).into_completion();
+    auto header_receipt = header_completion.receipt();
+
+    EXPECT_FALSE(PeerUseOperations::get_ledger_header(
+        header_completion,
+        101,
+        [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+    EXPECT_EQ(f.session->header_calls.load(), 0u);
+    ASSERT_TRUE(PeerUseOperations::get_ledger_header(
+        header_completion,
+        50,
+        [](PeerUseCompletion done, Error error, LedgerHeaderResult) {
+            done.finish(classify_peer_use_error(error));
+        }));
+    ASSERT_TRUE(f.session->header_callback);
+    auto callback = std::move(f.session->header_callback);
+    callback(Error::Success, {});
+    EXPECT_EQ(run(f.io, header_receipt.wait()), PeerUseOutcome::success);
+
+    auto node_use = run(
+        f.io,
+        f.peers->co_acquire_peer_use(
+            f.ref,
+            {.kind = PeerUseKind::ledger_nodes,
+             .ledger_seq = 50,
+             .absolute_deadline = std::chrono::steady_clock::now() + 5s}));
+    ASSERT_TRUE(node_use);
+    auto node_completion = std::move(node_use).into_completion();
+    auto node_receipt = node_completion.receipt();
+    EXPECT_FALSE(PeerUseOperations::get_ledger_header(
+        node_completion,
+        50,
+        [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+    EXPECT_EQ(f.session->header_calls.load(), 1u);
+    node_completion.finish(PeerUseOutcome::cancelled);
+    EXPECT_EQ(run(f.io, node_receipt.wait()), PeerUseOutcome::cancelled);
 }
 
 TEST(PeerUse, InlineTransportCallbackCanFinishExactlyOnce)
@@ -307,10 +351,12 @@ TEST(PeerUse, DuplicateTransportCallbackHasOneOwnerSideEffect)
     ASSERT_TRUE(use);
     auto completion = std::move(use).into_completion();
     auto receipt = completion.receipt();
+    std::atomic<std::size_t> deliveries{0};
     ASSERT_TRUE(PeerUseOperations::get_ledger_header(
         completion,
         50,
-        [](PeerUseCompletion done, Error error, LedgerHeaderResult) {
+        [&deliveries](PeerUseCompletion done, Error error, LedgerHeaderResult) {
+            deliveries.fetch_add(1, std::memory_order_relaxed);
             done.finish(classify_peer_use_error(error));
         }));
     ASSERT_TRUE(f.session->header_callback);
@@ -320,6 +366,69 @@ TEST(PeerUse, DuplicateTransportCallbackHasOneOwnerSideEffect)
     callback(Error::Disconnected, {});
 
     EXPECT_EQ(run(f.io, receipt.wait()), PeerUseOutcome::success);
+    EXPECT_EQ(deliveries.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(
+        PeerSetTestAccess::peer_use_outcome_count(
+            f.io, f.peers, PeerUseOutcome::transport_failure),
+        0u);
+}
+
+TEST(PeerUse, SubmittedLocalFinishWaitsForPhysicalDisconnectReceipt)
+{
+    Fixture f;
+    f.session->hold_disconnect_receipt();
+    auto use = f.acquire(std::chrono::steady_clock::now() + 5s);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+    auto receipt = completion.receipt();
+    ASSERT_TRUE(PeerUseOperations::get_ledger_header(
+        completion, 50, [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+
+    completion.finish(PeerUseOutcome::cancelled);
+    f.poll_until([&] {
+        return f.session->co_disconnect_waiting.load(std::memory_order_acquire);
+    });
+    EXPECT_FALSE(receipt.outcome());
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
+
+    f.session->release_disconnect_receipt();
+    EXPECT_EQ(run(f.io, receipt.wait()), PeerUseOutcome::cancelled);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
+}
+
+TEST(PeerUse, LocalTimeoutCancelsSiblingWithoutBlamingPeer)
+{
+    Fixture f;
+    f.session->hold_disconnect_receipt();
+    auto first = f.acquire(std::chrono::steady_clock::now() + 5s);
+    auto second = f.acquire(std::chrono::steady_clock::now() + 5s);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    auto first_completion = std::move(first).into_completion();
+    auto second_completion = std::move(second).into_completion();
+    auto first_receipt = first_completion.receipt();
+    auto second_receipt = second_completion.receipt();
+    ASSERT_TRUE(PeerUseOperations::get_ledger_header(
+        first_completion,
+        50,
+        [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+    ASSERT_TRUE(PeerUseOperations::get_ledger_header(
+        second_completion,
+        50,
+        [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+
+    PeerSetTestAccess::expire_peer_use(
+        f.io, f.peers, first_completion.ticket());
+    f.poll_until([&] {
+        return f.session->co_disconnect_waiting.load(std::memory_order_acquire);
+    });
+    EXPECT_FALSE(first_receipt.outcome());
+    EXPECT_FALSE(second_receipt.outcome());
+
+    f.session->release_disconnect_receipt();
+    EXPECT_EQ(run(f.io, first_receipt.wait()), PeerUseOutcome::timeout);
+    EXPECT_EQ(run(f.io, second_receipt.wait()), PeerUseOutcome::cancelled);
+    EXPECT_EQ(f.session->co_disconnect_calls.load(), 1u);
     EXPECT_EQ(
         PeerSetTestAccess::peer_use_outcome_count(
             f.io, f.peers, PeerUseOutcome::transport_failure),
@@ -506,10 +615,12 @@ TEST(PeerUse, SubmittedDeadlineReceiptWaitsForPhysicalDisconnectReceipt)
     auto completion = std::move(use).into_completion();
     auto receipt = completion.receipt();
 
+    std::atomic<std::size_t> deliveries{0};
     ASSERT_TRUE(PeerUseOperations::get_ledger_header(
         completion,
         50,
-        [](PeerUseCompletion done, Error error, LedgerHeaderResult) {
+        [&deliveries](PeerUseCompletion done, Error error, LedgerHeaderResult) {
+            deliveries.fetch_add(1, std::memory_order_relaxed);
             done.finish(classify_peer_use_error(error));
         }));
     f.poll_until([&] {
@@ -527,6 +638,7 @@ TEST(PeerUse, SubmittedDeadlineReceiptWaitsForPhysicalDisconnectReceipt)
     auto callback = std::move(f.session->header_callback);
     callback(Error::Success, {});
     f.io.poll();
+    EXPECT_EQ(deliveries.load(std::memory_order_relaxed), 0u);
     EXPECT_EQ(
         PeerSetTestAccess::peer_use_outcome_count(
             f.io, f.peers, PeerUseOutcome::success),
@@ -637,7 +749,7 @@ TEST(PeerUse, SubmittedShutdownWaitsForPhysicalDisconnectReceipt)
     EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
 }
 
-TEST(PeerUse, FailedBackgroundDrainCannotPublishReleaseReceipt)
+TEST(PeerUse, TransientDrainFailureRetriesWithoutGlobalShutdown)
 {
     Fixture f;
     f.session->co_disconnect_failures_remaining.store(1);
@@ -648,20 +760,16 @@ TEST(PeerUse, FailedBackgroundDrainCannotPublishReleaseReceipt)
     ASSERT_TRUE(PeerUseOperations::get_ledger_header(
         completion, 50, [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
 
-    f.poll_until([&] { return f.session->co_disconnect_calls.load() == 1; });
-    EXPECT_FALSE(receipt.outcome());
-    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
-
-    run(f.io, f.peers->co_stop());
+    EXPECT_EQ(run(f.io, receipt.wait()), PeerUseOutcome::timeout);
     EXPECT_EQ(f.session->co_disconnect_calls.load(), 2u);
-    EXPECT_EQ(receipt.outcome(), PeerUseOutcome::shutdown);
+    EXPECT_FALSE(receipt.fault());
     EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
 }
 
-TEST(PeerUse, RepeatedDrainFailurePropagatesWithoutFalseReceipt)
+TEST(PeerUse, ExhaustedDrainRetriesPublishFaultWithoutFalseReceipt)
 {
     Fixture f;
-    f.session->co_disconnect_failures_remaining.store(2);
+    f.session->co_disconnect_failures_remaining.store(3);
     auto use = f.acquire(std::chrono::steady_clock::now() + 20ms);
     ASSERT_TRUE(use);
     auto completion = std::move(use).into_completion();
@@ -669,10 +777,30 @@ TEST(PeerUse, RepeatedDrainFailurePropagatesWithoutFalseReceipt)
     ASSERT_TRUE(PeerUseOperations::get_ledger_header(
         completion, 50, [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
 
-    f.poll_until([&] { return f.session->co_disconnect_calls.load() == 1; });
-    EXPECT_THROW(run(f.io, f.peers->co_stop()), std::runtime_error);
-    EXPECT_EQ(f.session->co_disconnect_calls.load(), 2u);
+    f.poll_until([&] { return receipt.fault().has_value(); });
+    EXPECT_EQ(f.session->co_disconnect_calls.load(), 3u);
     EXPECT_FALSE(receipt.outcome());
+    EXPECT_EQ(receipt.fault(), PeerUseReceiptFault::physical_drain_failed);
+    EXPECT_THROW((void)run(f.io, receipt.wait()), PeerUseReceiptError);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
+}
+
+TEST(PeerUse, DrainLaunchFailurePublishesFaultAndRetainsUse)
+{
+    Fixture f;
+    PeerSetTestAccess::fail_next_generation_drain_launch(f.io, f.peers);
+    auto use = f.acquire(std::chrono::steady_clock::now() + 5s);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+    auto receipt = completion.receipt();
+    ASSERT_TRUE(PeerUseOperations::get_ledger_header(
+        completion, 50, [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+
+    PeerSetTestAccess::expire_peer_use(f.io, f.peers, completion.ticket());
+    EXPECT_EQ(receipt.fault(), PeerUseReceiptFault::physical_drain_failed);
+    EXPECT_FALSE(receipt.outcome());
+    EXPECT_THROW((void)run(f.io, receipt.wait()), PeerUseReceiptError);
+    EXPECT_EQ(f.session->co_disconnect_calls.load(), 0u);
     EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
 }
 

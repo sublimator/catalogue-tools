@@ -566,7 +566,10 @@ private:
         PeerUseRequest const& request);
 
     void
-    finish_peer_use(PeerUseTicket ticket, PeerUseOutcome outcome) noexcept;
+    finish_peer_use(
+        PeerUseTicket ticket,
+        PeerUseOutcome outcome,
+        detail::PeerUseProposalSource source) noexcept;
 
     void
     finalize_peer_use(PeerUseTicket ticket, PeerUseOutcome outcome) noexcept;
@@ -576,9 +579,16 @@ private:
         PeerUseTicket ticket,
         PeerUseOutcome outcome) noexcept;
 
+    enum class GenerationDrainCause : std::uint8_t {
+        peer_terminal,
+        local_use,
+        shutdown,
+    };
+
     void
     mark_generation_peer_uses_finishing(
         std::uint64_t generation,
+        GenerationDrainCause cause,
         PeerUseOutcome outcome,
         std::optional<PeerUseTicket> trigger = std::nullopt) noexcept;
 
@@ -586,6 +596,9 @@ private:
     finish_generation_peer_uses_after_drain(
         std::uint64_t generation,
         PeerUseOutcome fallback) noexcept;
+
+    void
+    fail_generation_peer_uses_without_drain(std::uint64_t generation) noexcept;
 
     void
     expire_peer_use(PeerUseTicket ticket) noexcept;
@@ -604,6 +617,7 @@ private:
     /// independent deadline servant. Cross-thread because proposals may come
     /// from any PeerSession callback executor.
     std::atomic<std::uint32_t> drop_peer_use_finish_posts_for_test_{0};
+    std::uint32_t fail_generation_drain_launches_for_test_ = 0;
 
     /// Drop the seal COMPLETION post, reproducing the one failure this class
     /// deliberately does not recover from: the capability is sealed and then
@@ -706,7 +720,10 @@ private:
     [[nodiscard]] bool
     start_generation_drain(
         std::string const& key,
-        std::uint64_t generation) noexcept;
+        std::uint64_t generation,
+        GenerationDrainCause cause = GenerationDrainCause::peer_terminal,
+        PeerUseOutcome trigger_outcome = PeerUseOutcome::transport_failure,
+        std::optional<PeerUseTicket> trigger = std::nullopt) noexcept;
 
     /// Remove a peer by PeerSet's own decision (eviction, tests). For
     /// deaths reported by the connection itself, use consume_peer_terminal.
@@ -1115,6 +1132,8 @@ private:
     {
         std::string endpoint;
         PeerSessionPtr session;
+        std::shared_ptr<boost::asio::steady_timer> retry_timer;
+        std::size_t attempts = 0;
         bool receipt_failed = false;
     };
     //@@authority state=prv.S0089 status=provisional scope=field
