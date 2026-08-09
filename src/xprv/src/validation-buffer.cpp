@@ -1770,18 +1770,14 @@ ValidationBuffer::emit_heartbeat_on_strand()
                 total_validations += entries.size();
             }
 
-#ifdef XPRV_TESTING
-            if (heartbeat_effect_hook_for_test_)
-                heartbeat_effect_hook_for_test_();
-#endif
-
             //@@authority transition=prv.T0234 status=provisional
             // scope=statement
             // bind=expression_statement@8ee04a2db56d8d22
             // owner=unresolved owner_hypothesis=validation_buffer
             // commit=validation_buffer_strand_and_publication_mutex
             // label=publish_validation_heartbeat_before_admission_seal
-            // touches=prv.S0080 control_guard=then:not_stopped
+            // touches=prv.S0080
+            // control_guard=then:not_stopped
             PLOGI(
                 ValidationBuffer::log_,
                 "[",
@@ -1795,6 +1791,13 @@ ValidationBuffer::emit_heartbeat_on_strand()
                 " ledgers, ",
                 collector_.unl_size,
                 " UNL keys");  //@@authority-target ids=prv.T0234
+
+#ifdef XPRV_TESTING
+            // Witness completion of the real observable effect, rather than
+            // merely reaching the branch that intends to publish it.
+            if (heartbeat_effect_hook_for_test_)
+                heartbeat_effect_hook_for_test_();
+#endif
         }
     }
 
