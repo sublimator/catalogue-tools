@@ -181,6 +181,7 @@ private:
     std::function<void(catl::vl::VlFetchOperationPtr const&)>
         fetch_terminal_observer_for_test_;
     std::function<void()> initiation_failure_diagnostic_for_test_;
+    std::function<void()> stop_entry_observer_for_test_;
     std::size_t fail_fetch_operation_starts_for_test_ = 0;
 
     static LogPartition log_;

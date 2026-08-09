@@ -119,6 +119,17 @@ public:
     {
         cache->initiation_failure_diagnostic_for_test_ = std::move(hook);
     }
+
+    static void
+    observe_stop_entry_executor(
+        std::shared_ptr<VlCache> const& cache,
+        std::shared_ptr<std::promise<bool>> result)
+    {
+        cache->stop_entry_observer_for_test_ = [strand = cache->strand_,
+                                                result = std::move(result)] {
+            result->set_value(strand.running_in_this_thread());
+        };
+    }
 };
 
 namespace {
@@ -412,6 +423,30 @@ TEST(VlCacheShutdown, PublicStopCancelsProductionFetchAndJoinsItsCallback)
     boost::system::error_code ignored;
     accepted->close(ignored);
     acceptor->close(ignored);
+    io.stop();
+    runners.join();
+}
+
+TEST(VlCacheShutdown, StopCheckAndWaitInstallationRunOnOwnerStrand)
+{
+    boost::asio::io_context io;
+    auto control = boost::asio::make_strand(io);
+    auto cache = VlCache::create(io, "unused.invalid");
+    auto observed = std::make_shared<std::promise<bool>>();
+    auto observed_future = observed->get_future();
+    VlCacheTestAccess::observe_stop_entry_executor(cache, observed);
+
+    auto stopped = boost::asio::co_spawn(
+        control, cache->co_stop(), boost::asio::use_future);
+    catl::test::IoContextRunners runners(io, 4);
+
+    ASSERT_EQ(observed_future.wait_for(5s), std::future_status::ready);
+    EXPECT_TRUE(observed_future.get())
+        << "the stopped-state check and progress-wait installation must be "
+           "serialized with refresh terminal publication";
+    ASSERT_EQ(stopped.wait_for(5s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+
     io.stop();
     runners.join();
 }

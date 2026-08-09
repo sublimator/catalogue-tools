@@ -385,18 +385,35 @@ asio::awaitable<void>
 VlCache::co_stop()
 {
     auto self = shared_from_this();
-    co_await asio::post(strand_, asio::use_awaitable);
-    begin_stop_on_strand();
-    if (phase_ == Phase::stopped)
-        co_return;
+    co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<void> {
+            if (self->stop_entry_observer_for_test_)
+                self->stop_entry_observer_for_test_();
 
-    boost::system::error_code ec;
-    co_await stop_progress_.async_wait(
-        asio::redirect_error(asio::use_awaitable, ec));
+            self->begin_stop_on_strand();
+            if (self->phase_ == Phase::stopped)
+                co_return;
 
-    auto const cancel_state = co_await asio::this_coro::cancellation_state;
-    if (cancel_state.cancelled() != asio::cancellation_type::none)
-        throw boost::system::system_error(asio::error::operation_aborted);
+            // Keep the state check and waiter installation on the owner
+            // strand. A post(strand_, use_awaitable) only fences that
+            // executor; it resumes the caller on the caller's executor. With
+            // multiple runners the refresh terminal could therefore publish
+            // stopped and cancel stop_progress_ between this check and the
+            // async_wait, losing the one-shot wakeup forever.
+            boost::system::error_code ec;
+            co_await self->stop_progress_.async_wait(
+                asio::redirect_error(asio::use_awaitable, ec));
+
+            auto const cancel_state =
+                co_await asio::this_coro::cancellation_state;
+            if (cancel_state.cancelled() != asio::cancellation_type::none)
+            {
+                throw boost::system::system_error(
+                    asio::error::operation_aborted);
+            }
+        },
+        asio::use_awaitable);
 }
 
 //@@authority transition=prv.T0071 status=provisional scope=function
@@ -407,6 +424,7 @@ VlCache::co_stop()
 void
 VlCache::begin_stop_on_strand()
 {
+    assert(strand_.running_in_this_thread());
     if (phase_ == Phase::stopped)
         return;
     phase_ = Phase::stopping;
