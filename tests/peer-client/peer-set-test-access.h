@@ -48,25 +48,41 @@ public:
                 std::max(set.next_connection_generation_, generation);
 
         set.peer_generations_.insert_or_assign(
-            key,
-            catl::peer_client::PeerSet::PeerGeneration{key, generation});
+            key, catl::peer_client::PeerSet::PeerGeneration{key, generation});
         set.install_generation_session(key, generation, peer);
         set.consume_lifecycle_event(
             {.endpoint = key,
              .generation = generation,
              .event_sequence = 1,
              .lifecycle = catl::peer_client::PeerLifecycle::connecting});
+        if (!peer->is_ready())
+            return generation;
         auto const range = peer->advertised_ledger_range();
         set.consume_lifecycle_event(
             {.endpoint = key,
              .generation = generation,
              .event_sequence = 2,
              .lifecycle = catl::peer_client::PeerLifecycle::ready,
-             .status =
-                 {.current_seq = peer->peer_ledger_seq(),
-                  .advertised_range = range,
-                  .headers = peer->peer_headers()}});
+             .status = {
+                 .current_seq = peer->peer_ledger_seq(),
+                 .advertised_range = range,
+                 .headers = peer->peer_headers()}});
         return generation;
+    }
+
+    static void
+    record_admitted_peer_on_strand(
+        catl::peer_client::PeerSet& set,
+        catl::peer_client::PeerSessionPtr const& peer)
+    {
+        if (!peer || !peer->is_ready())
+            return;
+        auto const range = peer->advertised_ledger_range();
+        set.note_connect_success(
+            peer->endpoint(),
+            {.first_seq = range.first_seq,
+             .last_seq = range.last_seq,
+             .current_seq = peer->peer_ledger_seq()});
     }
 
     static void
@@ -507,6 +523,7 @@ public:
                 set.connections_[key] =
                     catl::peer_client::PeerSet::ConnectionEntry{
                         peer, generation};
+                record_admitted_peer_on_strand(set, peer);
             });
         return admitted;
     }
@@ -544,9 +561,12 @@ public:
                     install_ready_generation_on_strand(set, peer);
                 admitted = set.make_room_for_peer(key, peer, leases);
                 if (admitted)
+                {
                     set.connections_[key] =
                         catl::peer_client::PeerSet::ConnectionEntry{
                             peer, generation};
+                    record_admitted_peer_on_strand(set, peer);
+                }
                 else
                     set.peer_generations_.erase(
                         catl::peer_client::EndpointTracker::canonical_endpoint(
@@ -1210,8 +1230,9 @@ public:
             auto const key = peer->endpoint();
             auto const generation =
                 install_ready_generation_on_strand(set, peer);
-            set.connections_[key] = catl::peer_client::PeerSet::ConnectionEntry{
-                peer, generation};
+            set.connections_[key] =
+                catl::peer_client::PeerSet::ConnectionEntry{peer, generation};
+            record_admitted_peer_on_strand(set, peer);
         });
     }
 
@@ -1225,8 +1246,9 @@ public:
             auto const key = peer->endpoint();
             auto const generation =
                 install_ready_generation_on_strand(set, peer);
-            set.connections_[key] = catl::peer_client::PeerSet::ConnectionEntry{
-                peer, generation};
+            set.connections_[key] =
+                catl::peer_client::PeerSet::ConnectionEntry{peer, generation};
+            record_admitted_peer_on_strand(set, peer);
             set.remove_peer(key);
         });
     }
@@ -1248,6 +1270,7 @@ public:
                 set.connections_[key] =
                     catl::peer_client::PeerSet::ConnectionEntry{
                         peer, generation};
+                record_admitted_peer_on_strand(set, peer);
             });
         return generation;
     }
@@ -1286,8 +1309,7 @@ public:
         bool found = false;
         run_on_strand(io, peers, [&found, generation](auto& set) {
             auto const row = std::ranges::find_if(
-                set.peer_generations_,
-                [generation](auto const& item) {
+                set.peer_generations_, [generation](auto const& item) {
                     return item.second.lifecycle.generation() == generation;
                 });
             found = row != set.peer_generations_.end() &&
@@ -1302,9 +1324,17 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         catl::peer_client::PeerUseTicket ticket)
     {
-        run_on_strand(io, peers, [ticket](auto& set) {
-            set.expire_peer_use(ticket);
-        });
+        run_on_strand(
+            io, peers, [ticket](auto& set) { set.expire_peer_use(ticket); });
+    }
+
+    static void
+    drop_next_peer_use_finish_posts(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::uint32_t count = 1)
+    {
+        peers->drop_peer_use_finish_posts_for_test_.store(
+            count, std::memory_order_release);
     }
 
     static std::uint64_t
@@ -1380,10 +1410,9 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         catl::peer_client::PeerLifecycleEvent event)
     {
-        run_on_strand(
-            io, peers, [event = std::move(event)](auto& set) mutable {
-                set.consume_lifecycle_event(std::move(event));
-            });
+        run_on_strand(io, peers, [event = std::move(event)](auto& set) mutable {
+            set.consume_lifecycle_event(std::move(event));
+        });
     }
 
     static std::optional<catl::peer_client::PeerStatusSnapshot>
@@ -1395,9 +1424,7 @@ public:
     {
         std::optional<catl::peer_client::PeerStatusSnapshot> status;
         run_on_strand(
-            io,
-            peers,
-            [&status, key = std::move(key), generation](auto& set) {
+            io, peers, [&status, key = std::move(key), generation](auto& set) {
                 if (auto const* ready = set.ready_status_for(key, generation))
                     status = *ready;
             });

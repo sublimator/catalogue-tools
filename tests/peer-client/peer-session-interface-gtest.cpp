@@ -5974,6 +5974,8 @@ TEST(PeerSessionInterface, LateHeaderFailureCannotCancelNewRound)
 
     PeerSetTestAccess::insert_connected_peer(io, peers, old_round);
     PeerSetTestAccess::insert_connected_peer(io, peers, new_round);
+    auto const new_generation =
+        PeerSetTestAccess::live_generation(io, peers, new_round->endpoint());
     std::promise<bool> owner_promise;
     std::promise<bool> joiner_promise;
     auto owner_future = owner_promise.get_future();
@@ -6013,6 +6015,16 @@ TEST(PeerSessionInterface, LateHeaderFailureCannotCancelNewRound)
 
     ASSERT_EQ(old_sent_future.wait_for(2s), std::future_status::ready);
     new_round->set_ready(true);
+    PeerSetTestAccess::consume_lifecycle_event(
+        io,
+        peers,
+        {.endpoint = new_round->endpoint(),
+         .generation = new_generation,
+         .event_sequence = 2,
+         .lifecycle = PeerLifecycle::ready,
+         .status = {
+             .current_seq = new_round->peer_ledger_seq(),
+             .advertised_range = new_round->advertised_ledger_range()}});
     ASSERT_EQ(new_sent_future.wait_for(2s), std::future_status::ready);
 
     Callback<LedgerHeaderResult> stale;
@@ -7449,8 +7461,9 @@ TEST(PeerSessionInterface, PriorGenerationEventsCannotRewriteReplacement)
     auto replacement = std::make_shared<FakePeerSession>(
         io, "generation-guard:1", true, 900, 700, 900);
 
-    auto const old_generation = PeerSetTestAccess::insert_ready_peer_with_generation(
-        io, peers, old_session);
+    auto const old_generation =
+        PeerSetTestAccess::insert_ready_peer_with_generation(
+            io, peers, old_session);
     PeerSetTestAccess::remove_peer_for_test(
         io, peers, old_session->endpoint(), false);
     auto const replacement_generation =
@@ -7466,9 +7479,9 @@ TEST(PeerSessionInterface, PriorGenerationEventsCannotRewriteReplacement)
          .generation = old_generation,
          .event_sequence = 99,
          .lifecycle = PeerLifecycle::ready,
-         .status =
-             {.current_seq = 1,
-              .advertised_range = {.first_seq = 1, .last_seq = 1}}});
+         .status = {
+             .current_seq = 1,
+             .advertised_range = {.first_seq = 1, .last_seq = 1}}});
     //@@mutation-end prior-generation-status-rewrites-current-generation
     //@@mutation-site prior-generation-terminal-removes-current-generation
     PeerSetTestAccess::consume_lifecycle_event(
@@ -7486,8 +7499,7 @@ TEST(PeerSessionInterface, PriorGenerationEventsCannotRewriteReplacement)
     EXPECT_EQ(status->current_seq, 900u);
     EXPECT_EQ(status->advertised_range.first_seq, 700u);
     EXPECT_EQ(
-        PeerSetTestAccess::live_generation(
-            io, peers, replacement->endpoint()),
+        PeerSetTestAccess::live_generation(io, peers, replacement->endpoint()),
         replacement_generation);
 }
 
@@ -7503,8 +7515,9 @@ TEST(PeerSessionInterface, TerminalInvalidatesBeforeSelectionWake)
         });
     auto session = std::make_shared<FakePeerSession>(
         io, "terminal-before-wake:1", true, 600, 400, 600);
-    auto const generation = PeerSetTestAccess::insert_ready_peer_with_generation(
-        io, peers, session);
+    auto const generation =
+        PeerSetTestAccess::insert_ready_peer_with_generation(
+            io, peers, session);
 
     PeerSetTestAccess::consume_lifecycle_event(
         io,
@@ -7518,10 +7531,9 @@ TEST(PeerSessionInterface, TerminalInvalidatesBeforeSelectionWake)
     EXPECT_FALSE(PeerSetTestAccess::canonical_ready_status(
         io, peers, session->endpoint(), generation));
     EXPECT_EQ(
-        PeerSetTestAccess::live_generation(io, peers, session->endpoint()),
-        0u);
-    EXPECT_FALSE(PeerSetTestAccess::make_peer_pin_for_session(
-        io, peers, session));
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()), 0u);
+    EXPECT_FALSE(
+        PeerSetTestAccess::make_peer_pin_for_session(io, peers, session));
     //@@mutation-end terminal-wake-precedes-live-evidence-invalidation
 }
 
@@ -9237,7 +9249,11 @@ TEST(
         generation);
 
     replacement->release_disconnect_receipt();
-    scheduler.run_until_idle();
+    // steady_timer cancellation may become reactor-ready one poll after the
+    // post which requested it. Drain explicit scheduler turns; no wall-clock
+    // wait or production deadline participates in this deterministic control.
+    for (std::size_t turn = 0; turn < 4 && !stopped; ++turn)
+        scheduler.run_until_idle();
 
     EXPECT_TRUE(stopped);
     EXPECT_EQ(stop_failure, nullptr);
@@ -9290,7 +9306,8 @@ TEST(
         generation + 1);
 
     session->release_disconnect_receipt(1);
-    scheduler.run_until_idle();
+    for (std::size_t turn = 0; turn < 4 && !stopped; ++turn)
+        scheduler.run_until_idle();
 
     EXPECT_TRUE(stopped);
     EXPECT_EQ(stop_failure, nullptr);

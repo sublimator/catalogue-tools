@@ -569,6 +569,25 @@ private:
     finish_peer_use(PeerUseTicket ticket, PeerUseOutcome outcome) noexcept;
 
     void
+    finalize_peer_use(PeerUseTicket ticket, PeerUseOutcome outcome) noexcept;
+
+    void
+    begin_forced_peer_use_finish(
+        PeerUseTicket ticket,
+        PeerUseOutcome outcome) noexcept;
+
+    void
+    mark_generation_peer_uses_finishing(
+        std::uint64_t generation,
+        PeerUseOutcome outcome,
+        std::optional<PeerUseTicket> trigger = std::nullopt) noexcept;
+
+    void
+    finish_generation_peer_uses_after_drain(
+        std::uint64_t generation,
+        PeerUseOutcome fallback) noexcept;
+
+    void
     expire_peer_use(PeerUseTicket ticket) noexcept;
 
     void
@@ -580,6 +599,11 @@ private:
     /// asio::post. A stopped io_context is not a substitute: Asio may accept
     /// work that never runs, which tests liveness rather than initiation.
     bool fail_seal_projection_for_test_ = false;
+
+    /// Deterministically discard owner-proposal posts without disabling the
+    /// independent deadline servant. Cross-thread because proposals may come
+    /// from any PeerSession callback executor.
+    std::atomic<std::uint32_t> drop_peer_use_finish_posts_for_test_{0};
 
     /// Drop the seal COMPLETION post, reproducing the one failure this class
     /// deliberately does not recover from: the capability is sealed and then
@@ -679,7 +703,7 @@ private:
     PeerStatusSnapshot const*
     ready_status_for(PeerSessionPtr const& session) const noexcept;
 
-    void
+    [[nodiscard]] bool
     start_generation_drain(
         std::string const& key,
         std::uint64_t generation) noexcept;
@@ -1091,6 +1115,7 @@ private:
     {
         std::string endpoint;
         PeerSessionPtr session;
+        bool receipt_failed = false;
     };
     //@@authority state=prv.S0089 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::draining_generations_@03c0b4d86b3916ae
@@ -1102,23 +1127,37 @@ private:
         std::string endpoint;
         std::uint64_t connection_generation = 0;
         PeerUseRequest request;
-        std::weak_ptr<detail::PeerUseState> live_handle;
+        std::shared_ptr<detail::PeerUseControl> control;
         std::shared_ptr<boost::asio::steady_timer> deadline;
+        //@@authority state=prv.S0098 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::ActivePeerUse::forced_outcome@242169be28e3d328
+        // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+        // label=sticky_owner_selected_peer_use_forced_outcome
+        std::optional<PeerUseOutcome> forced_outcome;
+        //@@authority state=prv.S0097 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::ActivePeerUse::finishing@df82a9d54c08c275
+        // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+        // label=peer_use_waiting_for_exact_generation_drain_receipt
+        bool finishing = false;
     };
-    //@@authority state=prv.S0090 status=provisional scope=field bind=catl::peer_client::PeerSet::active_peer_uses_@640d1f613cb1b089
+    //@@authority state=prv.S0090 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::active_peer_uses_@640d1f613cb1b089
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=authoritative_exact_generation_active_peer_uses
     std::map<std::uint64_t, ActivePeerUse> active_peer_uses_;
-    //@@authority state=prv.S0091 status=provisional scope=field bind=catl::peer_client::PeerSet::next_peer_use_id_@ce26f1fbcb41802d
+    //@@authority state=prv.S0091 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::next_peer_use_id_@ce26f1fbcb41802d
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=monotonic_nonreused_peer_use_identity_mint
     std::uint64_t next_peer_use_id_ = 0;
-    //@@authority state=prv.S0092 status=provisional scope=field bind=catl::peer_client::PeerSet::peer_use_outcomes_@9e34f82e34c11789
+    //@@authority state=prv.S0092 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::peer_use_outcomes_@9e34f82e34c11789
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=classified_terminal_peer_use_outcomes
     std::array<std::uint64_t, static_cast<std::size_t>(PeerUseOutcome::count)>
         peer_use_outcomes_{};
-    //@@authority state=prv.S0093 status=provisional scope=field bind=catl::peer_client::PeerSet::peer_set_instance_id_@564c32da7db0f1b9
+    //@@authority state=prv.S0093 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::peer_set_instance_id_@564c32da7db0f1b9
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=process_unique_peer_set_instance_identity
     std::uint64_t peer_set_instance_id_ = 0;
