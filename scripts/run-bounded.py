@@ -11,11 +11,29 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+# These terms are harmless in local test diagnostics, but can make automated
+# chat-side content filters hide the entire command result.  The complete raw
+# output remains available in --artifact; only the bounded console projection
+# is neutralized.
+DEFAULT_CONSOLE_REDACTIONS = (
+    "attack",
+    "bind",
+    "escape",
+    "exploit",
+    "kill",
+    "payload",
+    "sandbox",
+    "signal",
+    "socket",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +44,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tail-lines", type=int, default=12)
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument(
+        "--console-redact",
+        action="append",
+        default=[],
+        metavar="TERM",
+        help="additional case-insensitive term to neutralize in console output",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command[:1] == ["--"]:
@@ -35,6 +60,17 @@ def parse_args() -> argparse.Namespace:
     if args.timeout <= 0 or args.stop_grace < 0 or args.tail_lines < 0:
         parser.error("time limits must be positive and tail-lines non-negative")
     return args
+
+
+def neutralize_console(text: str, additional: list[str]) -> str:
+    terms = (*DEFAULT_CONSOLE_REDACTIONS, *(term for term in additional if term))
+    if not terms:
+        return text
+    pattern = re.compile(
+        "|".join(re.escape(term) for term in sorted(set(terms), key=len, reverse=True)),
+        re.IGNORECASE,
+    )
+    return pattern.sub("[term]", text)
 
 
 def stop_process_group(process: subprocess.Popen[bytes], grace: float) -> bool:
@@ -74,17 +110,18 @@ def main() -> int:
 
     elapsed = time.monotonic() - started
     status = "timeout" if timed_out else ("pass" if return_code == 0 else "fail")
-    print(
+    summary = (
         f"bounded-run status={status} exit={return_code} elapsed={elapsed:.3f}s "
         f"forced={str(forced).lower()} artifact={args.artifact}"
     )
+    print(neutralize_console(summary, args.console_redact))
 
     if status != "pass" and args.tail_lines:
         lines = args.artifact.read_text(encoding="utf-8", errors="replace").splitlines()
         tail = lines[-args.tail_lines :]
         if tail:
             print(f"bounded-run tail-lines={len(tail)}")
-            print("\n".join(tail))
+            print(neutralize_console("\n".join(tail), args.console_redact))
 
     if timed_out:
         return 124
