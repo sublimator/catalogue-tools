@@ -1851,3 +1851,116 @@ TEST(ValidationBuffer, StopAccountsAdmittedManifestsAsAbandoned)
     EXPECT_FALSE(stats.manifest_in_flight);
     EXPECT_FALSE(stats.manifest_pending);
 }
+
+TEST(ValidationBuffer, HeartbeatEffectWinsBeforeAdmissionSeal)
+{
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+
+        std::promise<void> publication_entered;
+        auto entered = publication_entered.get_future();
+        std::promise<void> release_publication;
+        auto release = release_publication.get_future().share();
+        std::atomic<unsigned> effects{0};
+        buffer->set_inside_heartbeat_publication_hook_for_test([&]() {
+            publication_entered.set_value();
+            release.wait();
+        });
+        buffer->set_heartbeat_effect_hook_for_test(
+            [&]() { effects.fetch_add(1, std::memory_order_relaxed); });
+
+        buffer->post_heartbeat_tick_for_test();
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const entered_status = entered.wait_for(5s);
+
+        std::future<void> sealed;
+        if (entered_status == std::future_status::ready)
+        {
+            sealed = std::async(std::launch::async, [buffer]() {
+                buffer->seal_admission_and_join_worker();
+            });
+            EXPECT_EQ(sealed.wait_for(50ms), std::future_status::timeout);
+        }
+
+        release_publication.set_value();
+        auto const sealed_status =
+            sealed.valid() ? sealed.wait_for(5s) : std::future_status::deferred;
+        if (sealed.valid() && sealed_status == std::future_status::ready)
+            EXPECT_NO_THROW(sealed.get());
+
+        work.reset();
+        io.stop();
+        runners.join();
+
+        EXPECT_EQ(entered_status, std::future_status::ready);
+        EXPECT_EQ(sealed_status, std::future_status::ready);
+        EXPECT_EQ(effects.load(std::memory_order_relaxed), 1u);
+    }
+}
+
+TEST(ValidationBuffer, AdmissionSealWinsBeforeHeartbeatEffect)
+{
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+
+        std::promise<void> before_publication;
+        auto entered = before_publication.get_future();
+        std::promise<void> release_publication;
+        auto release = release_publication.get_future().share();
+        std::atomic<unsigned> effects{0};
+        buffer->set_before_heartbeat_publication_hook_for_test([&]() {
+            before_publication.set_value();
+            release.wait();
+        });
+        buffer->set_heartbeat_effect_hook_for_test(
+            [&]() { effects.fetch_add(1, std::memory_order_relaxed); });
+
+        buffer->post_heartbeat_tick_for_test();
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const entered_status = entered.wait_for(5s);
+
+        std::future<void> sealed;
+        if (entered_status == std::future_status::ready)
+        {
+            sealed = std::async(std::launch::async, [buffer]() {
+                buffer->seal_admission_and_join_worker();
+            });
+        }
+        auto const sealed_status =
+            sealed.valid() ? sealed.wait_for(5s) : std::future_status::deferred;
+
+        std::promise<void> owner_crossed;
+        auto crossed = owner_crossed.get_future();
+        asio::post(buffer->owner_strand_for_test(), [&]() {
+            owner_crossed.set_value();
+        });
+        release_publication.set_value();
+        auto const crossed_status = crossed.wait_for(5s);
+
+        if (sealed.valid() && sealed_status == std::future_status::ready)
+            EXPECT_NO_THROW(sealed.get());
+
+        work.reset();
+        io.stop();
+        runners.join();
+
+        EXPECT_EQ(entered_status, std::future_status::ready);
+        EXPECT_EQ(sealed_status, std::future_status::ready);
+        EXPECT_EQ(crossed_status, std::future_status::ready);
+        EXPECT_EQ(effects.load(std::memory_order_relaxed), 0u);
+    }
+}

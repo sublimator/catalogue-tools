@@ -8,9 +8,11 @@
 
 #include <catl/core/logger.h>
 
+#include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/system/system_error.hpp>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -529,12 +531,6 @@ cmd_serve()
         engines[network_id] = make_engine(io, config, network_id);
     }
 
-    // Start all engines
-    for (auto& [net_id, engine] : engines)
-    {
-        engine->start();
-    }
-
     xprv::HttpServerOptions http_opts;
     http_opts.bind_address = config.bind_address;
     http_opts.port = config.port;
@@ -543,7 +539,28 @@ cmd_serve()
     auto server = (engines.size() == 1)
         ? xprv::HttpServer::create(io, engines.begin()->second, http_opts)
         : xprv::HttpServer::create(io, engines, config.network_id, http_opts);
-    server->start();
+    try
+    {
+        // Bind synchronously before any engine starts DNS, peer, or RPC work.
+        // The io_context is not running yet, so the queued accept loop cannot
+        // observe the engines until the start loop below has completed.
+        server->start();
+    }
+    catch (boost::system::system_error const& e)
+    {
+        std::cerr << "xprv serve: cannot bind " << config.bind_address << ':'
+                  << config.port << ": " << e.code().message();
+        if (e.code() == boost::asio::error::address_in_use)
+            std::cerr << " (another process may already own this endpoint)";
+        std::cerr << '\n';
+        return 2;
+    }
+
+    // Only a committed listening socket authorizes outbound engine work.
+    for (auto& [net_id, engine] : engines)
+    {
+        engine->start();
+    }
 
     log_memory("startup");
 

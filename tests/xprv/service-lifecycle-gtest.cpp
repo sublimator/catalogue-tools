@@ -150,6 +150,14 @@ public:
     {
         engine.before_drain_receipt_publish_for_test_ = std::move(hook);
     }
+
+    static void
+    set_before_engine_draining_log(
+        ProofEngine& engine,
+        std::function<void()> hook)
+    {
+        engine.before_engine_draining_log_for_test_ = std::move(hook);
+    }
 };
 
 class HttpServerTestAccess
@@ -1604,6 +1612,82 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsValidationBufferOwnerReceipt)
 
         work.reset();
         runners.join();
+    }
+}
+
+TEST(HttpServerLifecycle, EngineDrainFenceAwaitsValidationBufferPreSeal)
+{
+    namespace asio = boost::asio;
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto engine =
+            xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+        auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+        auto validation_buffer =
+            xprv::ValidationBuffer::create(io, protocol, 0);
+        xprv::ProofEngineTestAccess::set_validation_buffer(
+            *engine, validation_buffer);
+        auto server = xprv::HttpServer::create(
+            io,
+            engine,
+            xprv::HttpServerOptions{
+                .bind_address = "127.0.0.1",
+                .port = 0,
+            });
+        server->start();
+
+        std::promise<void> publication_entered;
+        auto entered = publication_entered.get_future();
+        std::promise<void> release_publication;
+        auto release = release_publication.get_future().share();
+        std::atomic<unsigned> effects{0};
+        validation_buffer->set_inside_heartbeat_publication_hook_for_test(
+            [&]() {
+                publication_entered.set_value();
+                release.wait();
+            });
+        validation_buffer->set_heartbeat_effect_hook_for_test(
+            [&]() { effects.fetch_add(1, std::memory_order_relaxed); });
+
+        std::promise<void> drain_fence;
+        auto fenced = drain_fence.get_future();
+        xprv::ProofEngineTestAccess::set_before_engine_draining_log(
+            *engine, [&]() { drain_fence.set_value(); });
+
+        validation_buffer->post_heartbeat_tick_for_test();
+        auto drained = asio::co_spawn(
+            io,
+            [server, engine]() -> asio::awaitable<void> {
+                auto receipt = co_await server->co_stop();
+                (void)co_await engine->co_stop(receipt);
+            },
+            asio::use_future);
+
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const entered_status = entered.wait_for(5s);
+        auto const fence_while_parked = fenced.wait_for(50ms);
+
+        release_publication.set_value();
+        auto const fence_status = fenced.wait_for(5s);
+        auto const drained_status = drained.wait_for(5s);
+        if (drained_status == std::future_status::ready)
+            EXPECT_NO_THROW(drained.get());
+
+        work.reset();
+        io.stop();
+        runners.join();
+
+        EXPECT_EQ(entered_status, std::future_status::ready);
+        EXPECT_EQ(fence_while_parked, std::future_status::timeout);
+        EXPECT_EQ(fence_status, std::future_status::ready);
+        EXPECT_EQ(drained_status, std::future_status::ready);
+        EXPECT_EQ(effects.load(std::memory_order_relaxed), 1u);
     }
 }
 

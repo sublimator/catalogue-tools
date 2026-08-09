@@ -436,6 +436,9 @@ private:
     // returned but before co_stop() publishes the engine drain receipt.
     // Production leaves this empty.
     std::function<void()> before_drain_receipt_publish_for_test_;
+    // Test-only observation point at the real engine-drain diagnostic, after
+    // the ValidationBuffer pre-fence seal has returned.
+    std::function<void()> before_engine_draining_log_for_test_;
     std::atomic<size_t> cache_hits_{0};
     std::atomic<size_t> cache_misses_{0};
 

@@ -293,8 +293,6 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     co_await asio::this_coro::reset_cancellation_state(
         asio::disable_cancellation());
 
-    PLOGI(log_, "[", net_label_, "] Engine draining...");
-
     struct InstalledDrainPopulation
     {
         std::shared_ptr<VlCache> vl_cache;
@@ -307,7 +305,7 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     // Snapshot the complete installed child population once. The coroutine
     // frame owns these exact capabilities until every admitted receipt has
     // returned; later member reads cannot silently change the census.
-    //@@authority transition=prv.T0165 status=provisional scope=statement bind=declaration@22b7cc6553fb75c3
+    //@@authority transition=prv.T0165 status=provisional scope=statement bind=declaration@c4b499cb4eb1e0d4
     // owner=unresolved owner_hypothesis=proof_engine_drain_frame
     // commit=proof_engine_drain_coroutine touches=prv.S0056
     // population_ref=proof_engine.installed_drain_population
@@ -320,6 +318,27 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         .ledger_fetch_coordinator = ledger_fetch_coordinator_,
         .peer_set = peers_,
     }; //@@authority-target ids=prv.T0165
+
+    // Seal externally admitted ValidationBuffer work before publishing the
+    // engine drain fence. This is intentionally not its drain receipt: T0168
+    // still crosses the owner strand after the producer (VlCache) has stopped.
+    if (population.validation_buffer)
+    {
+        //@@authority transition=prv.T0233 status=provisional scope=statement
+        // bind=seal_admission_and_join_worker@066633e7dde14f4d
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=seal_admission_and_join_worker
+        // touches=prv.S0056
+        // population_ref=proof_engine.installed_drain_population
+        // member_guard=proof_engine.validation_buffer
+        // label=consume_validation_admission_seal_before_engine_drain_fence
+        population.validation_buffer
+            ->seal_admission_and_join_worker(); //@@authority-target ids=prv.T0233
+    }
+
+    if (before_engine_draining_log_for_test_)
+        before_engine_draining_log_for_test_();
+    PLOGI(log_, "[", net_label_, "] Engine draining...");
 
     // The HTTP admission owner has already drained every request frame before
     // entering here, so no new cache operation can be minted by this service.

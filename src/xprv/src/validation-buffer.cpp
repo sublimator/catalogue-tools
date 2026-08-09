@@ -135,6 +135,12 @@ ValidationBuffer::stop()
     }
 }
 
+//@@authority transition=prv.T0232 status=provisional scope=function
+// bind=xprv::seal_admission_and_join_worker@5947e9ed6e68c587
+// owner=unresolved owner_hypothesis=validation_buffer
+// commit=publication_admission_mutex_and_manifest_worker_join
+// touches=prv.S0080
+// label=publish_sticky_validation_admission_seal_without_quiescence_receipt
 void
 ValidationBuffer::seal_admission_and_join_worker()
 {
@@ -180,7 +186,8 @@ ValidationBuffer::co_stop()
     // bind=expression_statement@34375817f968c49b
     // owner=unresolved owner_hypothesis=validation_buffer_stop_frame
     // commit=publication_admission_mutex_and_manifest_worker_join
-    // touches=prv.S0057 label=seal_validation_ingress_and_join_manifest_worker
+    // touches=prv.S0057
+    // label=ensure_sticky_validation_ingress_seal_and_join_manifest_worker
     seal_admission_and_join_worker();  //@@authority-target ids=prv.T0177
 
     //@@authority transition=prv.T0178 status=provisional scope=statement
@@ -1712,7 +1719,87 @@ ValidationBuffer::co_insert_validation_for_test(
         check_for_new_quorum();
     co_return inserted;
 }
+
+void
+ValidationBuffer::post_heartbeat_tick_for_test()
+{
+    auto self = shared_from_this();
+    asio::post(strand_, [self]() { self->emit_heartbeat_on_strand(); });
+}
 #endif
+
+void
+ValidationBuffer::emit_heartbeat_on_strand()
+{
+    assert(strand_.running_in_this_thread());
+
+#ifdef XPRV_TESTING
+    if (before_heartbeat_publication_hook_for_test_)
+        before_heartbeat_publication_hook_for_test_();
+#endif
+
+    {
+        // Serialize the final stopped check and the observable effect with
+        // seal_admission_and_join_worker(). If this callback wins, the seal
+        // cannot return until the effect has finished. If the seal wins, the
+        // sticky stopped_ check suppresses the effect.
+        std::lock_guard publication_lock(publication_mutex_);
+        {
+            std::lock_guard admission_lock(admission_mutex_);
+            if (stopped_)
+                return;
+        }
+
+#ifdef XPRV_TESTING
+        if (inside_heartbeat_publication_hook_for_test_)
+            inside_heartbeat_publication_hook_for_test_();
+#endif
+
+        auto now = std::chrono::steady_clock::now();
+        auto since_quorum = std::chrono::duration_cast<std::chrono::seconds>(
+                                now - last_quorum_at_)
+                                .count();
+
+        if (recent_quorums_.empty() ||
+            since_quorum >= kHeartbeatInterval.count())
+        {
+            auto total_validations = 0u;
+            auto ledger_count = collector_.by_ledger.size();
+            for (auto const& [hash, entries] : collector_.by_ledger)
+            {
+                total_validations += entries.size();
+            }
+
+#ifdef XPRV_TESTING
+            if (heartbeat_effect_hook_for_test_)
+                heartbeat_effect_hook_for_test_();
+#endif
+
+            //@@authority transition=prv.T0234 status=provisional
+            // scope=statement
+            // bind=expression_statement@8ee04a2db56d8d22
+            // owner=unresolved owner_hypothesis=validation_buffer
+            // commit=validation_buffer_strand_and_publication_mutex
+            // label=publish_validation_heartbeat_before_admission_seal
+            // touches=prv.S0080 control_guard=then:not_stopped
+            PLOGI(
+                ValidationBuffer::log_,
+                "[",
+                net_label_,
+                "] no quorum for ",
+                since_quorum,
+                "s — ",
+                total_validations,
+                " validations across ",
+                ledger_count,
+                " ledgers, ",
+                collector_.unl_size,
+                " UNL keys");  //@@authority-target ids=prv.T0234
+        }
+    }
+
+    start_heartbeat();
+}
 
 void
 ValidationBuffer::start_heartbeat()
@@ -1734,48 +1821,8 @@ ValidationBuffer::start_heartbeat()
                 return;
         }
 
-        asio::post(self->strand_, [weak]() {
-            auto self = weak.lock();
-            if (!self)
-                return;
-            {
-                std::lock_guard lock(self->admission_mutex_);
-                if (self->stopped_)
-                    return;
-            }
-            auto now = std::chrono::steady_clock::now();
-            auto since_quorum =
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    now - self->last_quorum_at_)
-                    .count();
-
-            if (self->recent_quorums_.empty() ||
-                since_quorum >= kHeartbeatInterval.count())
-            {
-                auto total_validations = 0u;
-                auto ledger_count = self->collector_.by_ledger.size();
-                for (auto const& [hash, entries] : self->collector_.by_ledger)
-                {
-                    total_validations += entries.size();
-                }
-
-                PLOGI(
-                    ValidationBuffer::log_,
-                    "[",
-                    self->net_label_,
-                    "] no quorum for ",
-                    since_quorum,
-                    "s — ",
-                    total_validations,
-                    " validations across ",
-                    ledger_count,
-                    " ledgers, ",
-                    self->collector_.unl_size,
-                    " UNL keys");
-            }
-
-            self->start_heartbeat();
-        });
+        asio::post(
+            self->strand_, [self]() { self->emit_heartbeat_on_strand(); });
     });
 }
 

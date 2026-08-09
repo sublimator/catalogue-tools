@@ -89,6 +89,12 @@ public:
     void
     stop();
 
+    /// Synchronously seal packet/trust admission, cancel the heartbeat, and
+    /// join the manifest worker. This is an idempotent admission fence, not a
+    /// drain receipt: queued owner-strand work is retired only by co_stop().
+    void
+    seal_admission_and_join_worker();
+
     /// Stop admission, join background manifest verification, and cross the
     /// validation owner strand after every previously queued owner operation.
     /// Completion is the exact ValidationBuffer drain receipt.
@@ -214,6 +220,27 @@ public:
         quorum_deadline_arm_hook_for_test_ = std::move(hook);
     }
 
+    void
+    set_before_heartbeat_publication_hook_for_test(std::function<void()> hook)
+    {
+        before_heartbeat_publication_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    set_inside_heartbeat_publication_hook_for_test(std::function<void()> hook)
+    {
+        inside_heartbeat_publication_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    set_heartbeat_effect_hook_for_test(std::function<void()> hook)
+    {
+        heartbeat_effect_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    post_heartbeat_tick_for_test();
+
     boost::asio::strand<boost::asio::io_context::executor_type>&
     owner_strand_for_test() noexcept
     {
@@ -304,9 +331,6 @@ private:
     void
     cancel_pending_locked(QuorumCollectStopReason reason);
 
-    void
-    seal_admission_and_join_worker();
-
     std::optional<QuorumEntry>
     latest_quorum_locked(ValidationCollector::QuorumMode mode) const;
 
@@ -341,6 +365,11 @@ private:
     // manifest burst admits one running packet and one successor.
     bool manifest_in_flight_ = false;
     bool manifest_pending_admitted_ = false;
+    //@@authority state=prv.S0080 status=provisional scope=field
+    // bind=xprv::ValidationBuffer::stopped_@5073593fa3a7358c
+    // owner=unresolved owner_hypothesis=validation_buffer
+    // observed_home=ValidationBuffer::stopped_
+    // label=sticky_validation_admission_seal
     bool stopped_ = false;
     std::shared_ptr<std::vector<uint8_t>> pending_manifest_;
 
@@ -421,9 +450,18 @@ private:
     void
     start_heartbeat();
 
+    void
+    emit_heartbeat_on_strand();
+
     boost::asio::steady_timer heartbeat_timer_;
     std::chrono::steady_clock::time_point last_quorum_at_;
     bool heartbeat_started_ = false;
+
+#ifdef XPRV_TESTING
+    std::function<void()> before_heartbeat_publication_hook_for_test_;
+    std::function<void()> inside_heartbeat_publication_hook_for_test_;
+    std::function<void()> heartbeat_effect_hook_for_test_;
+#endif
 
     static constexpr size_t kMaxQuorumEntries = 30;
     static constexpr size_t kMaxCollectorLedgers = 64;
