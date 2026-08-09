@@ -28,6 +28,18 @@ namespace {
 
 LogPartition log_("peer-crawl", LogLevel::INHERIT);
 
+#define CRAWL_TRACE(...)              \
+    do                                \
+    {                                 \
+        try                           \
+        {                             \
+            PLOGD(log_, __VA_ARGS__); \
+        }                             \
+        catch (...)                   \
+        {                             \
+        }                             \
+    } while (false)
+
 std::string
 trim_copy(std::string_view input)
 {
@@ -375,6 +387,13 @@ detail::co_fetch_peer_crawl_with_stop(
     std::stop_token stop,
     CrawlFetchHooks hooks)
 {
+    CRAWL_TRACE(
+        "Crawl fetch admitted host=",
+        host,
+        ":",
+        port,
+        " stage=http stop_requested=",
+        stop.stop_requested() ? "yes" : "no");
     // Try HTTP first — XRPL/Xahau peer crawl endpoints serve plain HTTP
     // on the peer port. HTTPS wastes time on TLS handshake timeout.
     std::string http_summary;
@@ -387,6 +406,15 @@ detail::co_fetch_peer_crawl_with_stop(
     {
         http_failure = std::current_exception();
         http_summary = strip_diagnostic(http_error.what());
+        CRAWL_TRACE(
+            "Crawl fetch host=",
+            host,
+            ":",
+            port,
+            " stage=http terminal=failure stop_requested=",
+            stop.stop_requested() ? "yes" : "no",
+            ": ",
+            http_summary);
     }
 
     // The Asio cancellation edge can be consumed or translated by the nested
@@ -397,6 +425,12 @@ detail::co_fetch_peer_crawl_with_stop(
     //@@mutation-site crawl-stop-intent-prevents-https-fallback
     if (stop.stop_requested())
     {
+        CRAWL_TRACE(
+            "Crawl fetch host=",
+            host,
+            ":",
+            port,
+            " stage=http stop_observed=yes https_fallback=no");
         std::rethrow_exception(http_failure);
     }
     //@@mutation-end crawl-stop-intent-prevents-https-fallback
@@ -404,13 +438,12 @@ detail::co_fetch_peer_crawl_with_stop(
     if (hooks.before_https_fallback)
         hooks.before_https_fallback();
 
-    PLOGD(
-        log_,
-        "HTTP crawl failed for ",
+    CRAWL_TRACE(
+        "Crawl fetch host=",
         host,
         ":",
         port,
-        ": ",
+        " stage=https fallback=yes stop_observed=no http_error=",
         http_summary,
         " — falling back to HTTPS");
 
@@ -432,5 +465,7 @@ co_fetch_peer_crawl(std::string host, uint16_t port)
     co_return co_await detail::co_fetch_peer_crawl_with_stop(
         std::move(host), port, {}, {});
 }
+
+#undef CRAWL_TRACE
 
 }  // namespace catl::peer_client

@@ -60,6 +60,18 @@ namespace catl::peer_client {
 
 static LogPartition log_("peer-set", LogLevel::INHERIT);
 
+#define PEER_SET_TRACE(...)           \
+    do                                \
+    {                                 \
+        try                           \
+        {                             \
+            PLOGD(log_, __VA_ARGS__); \
+        }                             \
+        catch (...)                   \
+        {                             \
+        }                             \
+    } while (false)
+
 enum class WaitOutcome {
     signaled,
     timed_out,
@@ -409,6 +421,7 @@ PeerSet::co_stop()
     // label=publish_retained_crawl_stop_fact_before_ingress_seal
     //@@mutation-site crawl-stop-fact-precedes-seal
     crawl_stop_source_.request_stop(); //@@authority-target ids=prv.T0190
+    PEER_SET_TRACE("[", net_label_, "] Shutdown stop requested");
 
     // This is the immediate cross-thread admission boundary. Once committed,
     // no projection failure is allowed to reopen it.
@@ -426,6 +439,15 @@ PeerSet::co_stop()
                 self->strand_, asio::steady_timer::time_point::max());
             self->shutdown_waiters_.push_back(progress);
             self->begin_stop_on_strand();
+            PEER_SET_TRACE(
+                "[",
+                self->net_label_,
+                "] Shutdown drain wait entered: crawl_in_flight=",
+                self->crawl_in_flight_.size(),
+                " crawl_queued=",
+                self->crawl_queued_.size(),
+                " pending_crawls=",
+                self->pending_crawls_.size());
 
             // A live generation pin is a predecessor's promise that its exact
             // admitted session remains usable. Closing first would invalidate
@@ -506,6 +528,15 @@ PeerSet::co_stop()
             }
 
             self->lifecycle_ = Lifecycle::stopped;
+            PEER_SET_TRACE(
+                "[",
+                self->net_label_,
+                "] Shutdown drain census empty: crawl_in_flight=",
+                self->crawl_in_flight_.size(),
+                " crawl_queued=",
+                self->crawl_queued_.size(),
+                " pending_crawls=",
+                self->pending_crawls_.size());
             self->notify_shutdown_progress();
             if (self->before_stop_receipt_return_for_test_)
                 self->before_stop_receipt_return_for_test_();
@@ -537,6 +568,15 @@ PeerSet::begin_stop_on_strand()
         return;
 
     lifecycle_ = Lifecycle::stopping;
+    PEER_SET_TRACE(
+        "[",
+        net_label_,
+        "] Shutdown stop census: crawl_in_flight=",
+        crawl_in_flight_.size(),
+        " crawl_queued=",
+        crawl_queued_.size(),
+        " pending_crawls=",
+        pending_crawls_.size());
     tracker_->set_discovered_observer({});
     tracker_->set_status_observer({});
 
@@ -601,6 +641,13 @@ PeerSet::begin_stop_on_strand()
             // clang-format on
             //@@mutation-site crawl-stop-emits-owned-cancellation
             servant.cancellation->emit(cancellation_type);
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] Crawl stop cancellation emitted key=",
+                _,
+                " crawl_in_flight=",
+                crawl_in_flight_.size());
             //@@mutation-end crawl-stop-emits-owned-cancellation
         }
         catch (...)
@@ -890,6 +937,8 @@ PeerSet::complete_crawl_servant(
 {
     ASSERT_ON_STRAND();
 
+    auto const census_before = crawl_in_flight_.size();
+
     // As above, optional retention and diagnostics cannot sit between census
     // consumption and the shared stop wake.
     //@@authority transition=prv.T0092 status=provisional scope=statement
@@ -897,6 +946,26 @@ PeerSet::complete_crawl_servant(
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
     crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
+    try
+    {
+        PLOGD(
+            log_,
+            "[",
+            net_label_,
+            "] Crawl servant retired key=",
+            key,
+            " outcome=",
+            failure ? "failure" : "success",
+            " crawl_census=",
+            census_before,
+            "->",
+            crawl_in_flight_.size(),
+            " stop_requested=",
+            crawl_stop_source_.stop_requested() ? "yes" : "no");
+    }
+    catch (...)
+    {
+    }
     notify_shutdown_progress();
 
     try
@@ -2437,6 +2506,15 @@ PeerSet::pump_crawls()
                         before_https_fallback =
                             std::move(before_https_fallback)]() mutable
             -> boost::asio::awaitable<CrawlServantOutcome> {
+            PEER_SET_TRACE(
+                "[",
+                self->net_label_,
+                "] Crawl servant running key=",
+                host,
+                ":",
+                port,
+                " stop_requested=",
+                stop_token.stop_requested() ? "yes" : "no");
             CrawlServantOutcome outcome;
             auto response = co_await detail::co_fetch_peer_crawl_with_stop(
                 host,
@@ -2504,6 +2582,17 @@ PeerSet::pump_crawls()
             if (!inserted)
                 continue;
             census_committed = true;
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] Crawl servant admitted key=",
+                key,
+                " crawl_census=",
+                crawl_in_flight_.size(),
+                " queued=",
+                crawl_queued_.size(),
+                " pending=",
+                pending_crawls_.size());
             if (fail_crawl_servant_launches_for_test_ != 0)
             {
                 --fail_crawl_servant_launches_for_test_;
@@ -5860,5 +5949,7 @@ PeerSet::prune_discovery_state()
     // try_undiscovered() which doesn't run during idle operation.
     prune_endpoint_stats();
 }
+
+#undef PEER_SET_TRACE
 
 }  // namespace catl::peer_client

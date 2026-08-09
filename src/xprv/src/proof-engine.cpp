@@ -18,6 +18,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <utility>
 
 namespace xprv {
 
@@ -25,6 +26,19 @@ namespace asio = boost::asio;
 using namespace catl::peer_client;
 
 static LogPartition log_("engine", LogLevel::INFO);
+
+template <class... Args>
+void
+engine_trace_noexcept(Args&&... args) noexcept
+{
+    try
+    {
+        PLOGD(log_, std::forward<Args>(args)...);
+    }
+    catch (...)
+    {
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Lifecycle
@@ -344,6 +358,8 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     // entering here, so no new cache operation can be minted by this service.
     if (population.vl_cache)
     {
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=vl-cache before");
         //@@authority transition=prv.T0167 status=provisional scope=statement
         //bind=co_stop@24232176950b9c9a
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -355,9 +371,15 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_vl_cache_stop_receipt
         co_await population.vl_cache
             ->co_stop(); //@@authority-target ids=prv.T0167
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=vl-cache after");
     }
     if (population.validation_quorum_tracker)
     {
+        engine_trace_noexcept(
+            "[",
+            net_label_,
+            "] ProofEngine shutdown stage=quorum-tracker before");
         //@@authority transition=prv.T0168 status=provisional scope=statement
         //bind=co_stop@243fe7baa255156c
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -369,10 +391,16 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_validation_quorum_tracker_stop_receipt
         co_await population.validation_quorum_tracker
             ->co_stop(); //@@authority-target ids=prv.T0168
+        engine_trace_noexcept(
+            "[",
+            net_label_,
+            "] ProofEngine shutdown stage=quorum-tracker after");
     }
 
     if (population.node_cache)
     {
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=node-cache-nodes before");
         //@@authority transition=prv.T0169 status=provisional scope=statement
         //bind=co_stop_nodes@b426ab0c6792fffb
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -384,6 +412,10 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_node_cache_node_stop_receipt
         co_await population.node_cache
             ->co_stop_nodes(); //@@authority-target ids=prv.T0169
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=node-cache-nodes after");
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=node-cache-headers before");
         //@@authority transition=prv.T0170 status=provisional scope=statement
         //bind=co_clear_headers@5dbb9a321013b130
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -395,10 +427,14 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_node_cache_header_clear_receipt
         co_await population.node_cache
             ->co_clear_headers(); //@@authority-target ids=prv.T0170
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=node-cache-headers after");
     }
 
     if (population.ledger_fetch_coordinator)
     {
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=coordinator-fence before");
         //@@authority transition=prv.T0171 status=provisional scope=statement
         //bind=co_fence@7bf2af3a2b8cdd61
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -410,9 +446,13 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_ledger_fetch_coordinator_fence_receipt
         co_await population.ledger_fetch_coordinator
             ->co_fence(); //@@authority-target ids=prv.T0171
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=coordinator-fence after");
 
         // A PeerSet seal handler can enqueue its pin release behind the first
         // barrier. The second pass consumes those causally generated releases.
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=coordinator-barrier-1 before");
         //@@authority transition=prv.T0172 status=provisional scope=statement
         //bind=co_generation_pin_release_barrier@6311aeeb80df5da0
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -426,6 +466,10 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_peer_set_first_generation_pin_barrier_receipt
         co_await population.peer_set
             ->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0172
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=coordinator-barrier-1 after");
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=coordinator-barrier-2 before");
         //@@authority transition=prv.T0173 status=provisional scope=statement
         //bind=co_generation_pin_release_barrier@7957ee5f82e45f14
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -439,7 +483,11 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_peer_set_causal_generation_pin_barrier_receipt
         co_await population.peer_set
             ->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0173
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=coordinator-barrier-2 after");
 
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=coordinator-reconciliation before");
         //@@authority transition=prv.T0174 status=provisional scope=statement
         //bind=co_reconcile_shutdown_projection_residue@38fff40d7eef0489
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -453,6 +501,11 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_ledger_fetch_coordinator_projection_reconciliation_receipt
         auto const lost = co_await population.ledger_fetch_coordinator
                               ->co_reconcile_shutdown_projection_residue(); //@@authority-target ids=prv.T0174
+        engine_trace_noexcept(
+            "[",
+            net_label_,
+            "] ProofEngine shutdown stage=coordinator-reconciliation after lost=",
+            lost);
         if (lost != 0)
         {
             PLOGW(
@@ -467,6 +520,8 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
 
     if (population.peer_set)
     {
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=peer-set before");
         //@@authority transition=prv.T0175 status=provisional scope=statement
         //bind=co_stop@7495267fc239b21f
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
@@ -478,6 +533,8 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // label=consume_peer_set_aggregate_stop_receipt
         co_await population.peer_set
             ->co_stop(); //@@authority-target ids=prv.T0175
+        engine_trace_noexcept(
+            "[", net_label_, "] ProofEngine shutdown stage=peer-set after");
     }
 
     PLOGI(log_, "[", net_label_, "] Engine drained");
