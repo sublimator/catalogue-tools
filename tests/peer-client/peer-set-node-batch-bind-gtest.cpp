@@ -304,12 +304,13 @@ TEST(PeerSetNodeBatchBind, InactivePinRowRefuses)
     EXPECT_FALSE(r.sealed) << "a pruned pin row cannot authorise a seal";
 }
 
-/// 5. A session that is no longer ready refuses.
+/// 5. A generation whose canonical lifecycle is no longer ready refuses.
 TEST(PeerSetNodeBatchBind, NotReadySessionRefuses)
 {
     BindFixture f;
     auto pin = f.pin();
-    f.session->ready = false;
+    PeerSetTestAccess::begin_generation_close_for_test(
+        f.io, f.peers, f.session->endpoint(), f.generation);
 
     auto r = seal(f, std::move(pin), BindFixture::intent());
     EXPECT_TRUE(r.completed);

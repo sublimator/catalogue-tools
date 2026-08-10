@@ -301,6 +301,70 @@ public:
             cancel);          // ledger_seq / cancel
     }
 
+    static std::shared_ptr<SharedHistoryFetch>
+    create_participant_in_flight(
+        NodeCache& cache,
+        Hash256 const& hash,
+        std::chrono::milliseconds timeout)
+    {
+        std::lock_guard lock(cache.mutex_);
+        auto [it, inserted] = cache.store_.try_emplace(hash);
+        EXPECT_TRUE(inserted || !it->second.present);
+
+        auto round = std::make_shared<NodeCache::NodeFetchRound>();
+        round->phase = NodeCache::NodeFetchRound::Phase::response;
+        round->response_possible = true;
+        round->submissions_closed = true;
+        round->servants_done_signal = SerializedTimerSignal::create(
+            cache.io_, asio::steady_timer::time_point::max());
+        round->operation_id = ++cache.next_node_operation_id_;
+        round->participant_authority = SharedHistoryFetch::create(
+            HistoryFetchId{round->operation_id}, round->operation_id);
+        EXPECT_TRUE(round->participant_authority);
+        cache.active_node_operations_.emplace(round->operation_id, round);
+
+        it->second.present = false;
+        it->second.signal = SerializedTimerSignal::create(cache.io_, timeout);
+        it->second.round = round;
+        it->second.round_opened_at = std::chrono::steady_clock::now();
+        it->second.last_fetch_at = it->second.round_opened_at;
+        return round->participant_authority;
+    }
+
+    static asio::awaitable<std::shared_ptr<std::vector<uint8_t> const>>
+    wait_for_hash_scoped(
+        std::shared_ptr<NodeCache> cache,
+        Hash256 hash,
+        uint32_t ledger_seq,
+        std::shared_ptr<PeerSet> peers,
+        std::shared_ptr<catl::core::RequestScope> scope,
+        std::shared_ptr<std::atomic<bool>> cancel)
+    {
+        co_return co_await cache->ensure_present(
+            hash,
+            make_hash(0xBB),
+            2,
+            SHAMapNodeID::root(),
+            hash,
+            1,
+            nullptr,
+            {},
+            std::move(peers),
+            ledger_seq,
+            std::move(cancel),
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            std::move(scope));
+    }
+
+    static void
+    set_after_node_waiter_attached(NodeCache& cache, std::function<void()> hook)
+    {
+        cache.after_node_waiter_attached_for_test_ = std::move(hook);
+    }
+
     /// Get the signal for an entry (for testing expiry behavior).
     static std::shared_ptr<SerializedTimerSignal>
     get_signal(NodeCache& cache, Hash256 const& hash)
@@ -406,6 +470,28 @@ public:
     {
         std::lock_guard lock(cache.mutex_);
         return cache.header_cache_.count(ledger_seq) > 0;
+    }
+
+    static std::optional<SharedHistoryFetchSnapshot>
+    header_participant_snapshot(NodeCache& cache, uint32_t ledger_seq)
+    {
+        std::shared_ptr<SharedHistoryFetch> authority;
+        {
+            std::lock_guard lock(cache.mutex_);
+            auto const it = cache.header_cache_.find(ledger_seq);
+            if (it == cache.header_cache_.end() || !it->second.fetch)
+                return std::nullopt;
+            authority = it->second.fetch->participant_authority;
+        }
+        if (!authority)
+            return std::nullopt;
+        return authority->snapshot();
+    }
+
+    static size_t
+    active_header_fetches(NodeCache& cache)
+    {
+        return cache.active_header_fetches_.size();
     }
 
     static size_t
@@ -925,6 +1011,349 @@ TEST(NodeCacheIntegration, CancelledEnsurePresentDoesNotPoisonSharedEntry)
     EXPECT_EQ(second_result->size(), 88u);
 }
 
+TEST(NodeCacheIntegration, CoalescedNodeWaitersKeepDistinctDemandOwners)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        {
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::seconds(5),
+        });
+    auto first_peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto second_peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 21337,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto const hash = make_hash(0xD1);
+    constexpr uint32_t ledger_seq = 654324u;
+    auto authority = NodeCacheTestAccess::create_participant_in_flight(
+        *cache, hash, std::chrono::seconds(5));
+    ASSERT_TRUE(authority);
+
+    auto const deadline =
+        catl::core::RequestScope::Clock::now() + std::chrono::seconds(5);
+    auto first_scope = catl::core::RequestScope::create(deadline);
+    auto second_scope = catl::core::RequestScope::create(deadline);
+    auto first_cancel = std::make_shared<std::atomic<bool>>(false);
+    auto second_cancel = std::make_shared<std::atomic<bool>>(false);
+    std::atomic<int> completions = 0;
+    bool first_returned_null = false;
+    bool second_returned_null = false;
+    bool admission_timed_out = false;
+    std::optional<SharedHistoryFetchSnapshot> sibling_snapshot;
+
+    asio::co_spawn(
+        io,
+        [&, cache, first_peers, first_scope, first_cancel]()
+            -> asio::awaitable<void> {
+            auto result = co_await NodeCacheTestAccess::wait_for_hash_scoped(
+                cache,
+                hash,
+                ledger_seq,
+                first_peers,
+                first_scope,
+                first_cancel);
+            first_returned_null = !result;
+            sibling_snapshot = authority->snapshot();
+            second_scope->cancel();
+            second_cancel->store(true, std::memory_order_release);
+            completions.fetch_add(1, std::memory_order_relaxed);
+        },
+        asio::detached);
+    asio::co_spawn(
+        io,
+        [&, cache, second_peers, second_scope, second_cancel]()
+            -> asio::awaitable<void> {
+            auto result = co_await NodeCacheTestAccess::wait_for_hash_scoped(
+                cache,
+                hash,
+                ledger_seq,
+                second_peers,
+                second_scope,
+                second_cancel);
+            second_returned_null = !result;
+            completions.fetch_add(1, std::memory_order_relaxed);
+            cache->clear_nodes();
+        },
+        asio::detached);
+    asio::co_spawn(
+        io,
+        [&, authority, first_scope, first_cancel, second_scope, second_cancel]()
+            -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            for (int attempt = 0; attempt < 200; ++attempt)
+            {
+                if (authority->snapshot().active_interests == 2)
+                {
+                    first_scope->cancel();
+                    first_cancel->store(true, std::memory_order_release);
+                    co_return;
+                }
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            admission_timed_out = true;
+            first_scope->cancel();
+            second_scope->cancel();
+            first_cancel->store(true, std::memory_order_release);
+            second_cancel->store(true, std::memory_order_release);
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_FALSE(admission_timed_out);
+    EXPECT_EQ(completions.load(std::memory_order_relaxed), 2);
+    EXPECT_TRUE(first_returned_null);
+    EXPECT_TRUE(second_returned_null);
+    ASSERT_TRUE(sibling_snapshot);
+    EXPECT_EQ(sibling_snapshot->interests, 2u);
+    EXPECT_EQ(sibling_snapshot->active_interests, 1u);
+    EXPECT_FALSE(sibling_snapshot->terminal);
+    auto const final_snapshot = authority->snapshot();
+    EXPECT_EQ(final_snapshot.interests, 2u);
+    EXPECT_EQ(final_snapshot.active_interests, 0u);
+    EXPECT_EQ(
+        final_snapshot.terminal, SharedHistoryFetchTerminal::no_interests);
+}
+
+TEST(NodeCacheIntegration, NodeResultPublishesToEveryCoalescedParticipant)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        {
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::seconds(5),
+        });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto const hash = make_hash(0xD2);
+    constexpr uint32_t ledger_seq = 654325u;
+    auto authority = NodeCacheTestAccess::create_participant_in_flight(
+        *cache, hash, std::chrono::seconds(5));
+    ASSERT_TRUE(authority);
+
+    auto const deadline =
+        catl::core::RequestScope::Clock::now() + std::chrono::seconds(5);
+    auto first_scope = catl::core::RequestScope::create(deadline);
+    auto second_scope = catl::core::RequestScope::create(deadline);
+    std::array<std::shared_ptr<std::vector<uint8_t> const>, 2> results;
+    std::atomic<int> completions = 0;
+    bool admission_timed_out = false;
+
+    for (std::size_t index = 0; index < results.size(); ++index)
+    {
+        auto scope = index == 0 ? first_scope : second_scope;
+        asio::co_spawn(
+            io,
+            [&, cache, peers, scope, index]() -> asio::awaitable<void> {
+                results[index] =
+                    co_await NodeCacheTestAccess::wait_for_hash_scoped(
+                        cache,
+                        hash,
+                        ledger_seq,
+                        peers,
+                        scope,
+                        std::make_shared<std::atomic<bool>>(false));
+                if (completions.fetch_add(1, std::memory_order_relaxed) == 1)
+                {
+                    first_scope->cancel();
+                    second_scope->cancel();
+                }
+            },
+            asio::detached);
+    }
+    asio::co_spawn(
+        io,
+        [&, cache, authority]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            for (int attempt = 0; attempt < 200; ++attempt)
+            {
+                if (authority->snapshot().active_interests == 2)
+                {
+                    cache->insert_and_notify(hash, std::vector<uint8_t>(88, 7));
+                    co_return;
+                }
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            admission_timed_out = true;
+            cache->clear_nodes();
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_FALSE(admission_timed_out);
+    EXPECT_EQ(completions.load(std::memory_order_relaxed), 2);
+    for (auto const& result : results)
+    {
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->size(), 88u);
+    }
+    auto const snapshot = authority->snapshot();
+    EXPECT_EQ(snapshot.interests, 2u);
+    EXPECT_EQ(snapshot.active_interests, 0u);
+    EXPECT_EQ(snapshot.terminal, SharedHistoryFetchTerminal::completed);
+    EXPECT_EQ(snapshot.publication_revision, 1u);
+}
+
+TEST(
+    NodeCacheIntegration,
+    NodeResultBeforeParticipantRegistrationReplaysWithoutFalseRefusal)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        {
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::seconds(5),
+        });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto const hash = make_hash(0xD4);
+    constexpr uint32_t ledger_seq = 654327u;
+    auto authority = NodeCacheTestAccess::create_participant_in_flight(
+        *cache, hash, std::chrono::seconds(5));
+    ASSERT_TRUE(authority);
+
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + std::chrono::seconds(5));
+    NodeCacheTestAccess::set_after_node_waiter_attached(
+        *cache, [cache, hash]() {
+            cache->insert_and_notify(hash, std::vector<uint8_t>(88, 9));
+        });
+
+    std::shared_ptr<std::vector<uint8_t> const> result;
+    std::exception_ptr failure;
+    asio::co_spawn(
+        io,
+        [&, cache, peers, scope]() -> asio::awaitable<void> {
+            try
+            {
+                result = co_await NodeCacheTestAccess::wait_for_hash_scoped(
+                    cache,
+                    hash,
+                    ledger_seq,
+                    peers,
+                    scope,
+                    std::make_shared<std::atomic<bool>>(false));
+            }
+            catch (...)
+            {
+                failure = std::current_exception();
+            }
+            scope->cancel();
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_FALSE(failure);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->size(), 88u);
+    auto const snapshot = authority->snapshot();
+    EXPECT_EQ(snapshot.interests, 0u);
+    EXPECT_EQ(snapshot.terminal, SharedHistoryFetchTerminal::completed);
+    EXPECT_EQ(snapshot.publication_revision, 1u);
+}
+
+TEST(NodeCacheIntegration, NodeClearPublishesExactEpochReplacement)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        {
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::seconds(5),
+        });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto const hash = make_hash(0xD3);
+    constexpr uint32_t ledger_seq = 654326u;
+    auto authority = NodeCacheTestAccess::create_participant_in_flight(
+        *cache, hash, std::chrono::seconds(5));
+    ASSERT_TRUE(authority);
+
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + std::chrono::seconds(5));
+    bool returned_null = false;
+    bool admission_timed_out = false;
+    asio::co_spawn(
+        io,
+        [&, cache, peers, scope]() -> asio::awaitable<void> {
+            auto result = co_await NodeCacheTestAccess::wait_for_hash_scoped(
+                cache,
+                hash,
+                ledger_seq,
+                peers,
+                scope,
+                std::make_shared<std::atomic<bool>>(false));
+            returned_null = !result;
+            scope->cancel();
+        },
+        asio::detached);
+    asio::co_spawn(
+        io,
+        [&, cache, authority]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            for (int attempt = 0; attempt < 200; ++attempt)
+            {
+                if (authority->snapshot().active_interests == 1)
+                {
+                    cache->clear_nodes();
+                    co_return;
+                }
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            admission_timed_out = true;
+            cache->clear_nodes();
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_FALSE(admission_timed_out);
+    EXPECT_TRUE(returned_null);
+    auto const snapshot = authority->snapshot();
+    EXPECT_EQ(snapshot.interests, 1u);
+    EXPECT_EQ(snapshot.active_interests, 0u);
+    EXPECT_EQ(snapshot.terminal, SharedHistoryFetchTerminal::replaced);
+    EXPECT_EQ(snapshot.publication_revision, 1u);
+}
+
 TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
 {
     asio::io_context io;
@@ -941,6 +1370,7 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
     bool done = false;
     bool cancel_branch_won = false;
     bool fetch_survived_caller = false;
+    std::optional<SharedHistoryFetchSnapshot> participant_snapshot;
     constexpr uint32_t ledger_seq = 654321u;
     auto scope = catl::core::RequestScope::create(
         catl::core::RequestScope::Clock::now() + std::chrono::seconds(5));
@@ -995,6 +1425,8 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
             return;
         fetch_survived_caller =
             NodeCacheTestAccess::has_header(*cache, ledger_seq);
+        participant_snapshot = NodeCacheTestAccess::header_participant_snapshot(
+            *cache, ledger_seq);
         asio::co_spawn(io, cache->co_clear_headers(), asio::detached);
     });
 
@@ -1003,6 +1435,12 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
     EXPECT_TRUE(done);
     EXPECT_TRUE(cancel_branch_won);
     EXPECT_TRUE(fetch_survived_caller);
+    ASSERT_TRUE(participant_snapshot);
+    EXPECT_EQ(participant_snapshot->interests, 1u);
+    EXPECT_EQ(participant_snapshot->active_interests, 0u);
+    EXPECT_EQ(
+        participant_snapshot->terminal,
+        SharedHistoryFetchTerminal::no_interests);
     EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
 
     io.restart();
@@ -1018,4 +1456,201 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
     EXPECT_EQ(demand_snapshot->acquisitions, 1u);
     EXPECT_EQ(demand_snapshot->active_acquisitions, 0u);
     EXPECT_EQ(demand_snapshot->terminal, LedgerDemandTerminal::cancelled);
+}
+
+TEST(NodeCacheIntegration, CoalescedHeaderWaitersKeepDistinctDemandOwners)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        {
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::seconds(5),
+        });
+    auto first_peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto second_peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 21337,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    constexpr uint32_t ledger_seq = 654322u;
+    auto const deadline =
+        catl::core::RequestScope::Clock::now() + std::chrono::seconds(5);
+    auto first_scope = catl::core::RequestScope::create(deadline);
+    auto second_scope = catl::core::RequestScope::create(deadline);
+    LedgerDemandRef first_parent;
+    LedgerDemandRef second_parent;
+    bool first_done = false;
+    bool second_done = false;
+    bool first_timer_won = false;
+    bool second_timer_won = false;
+
+    auto launch = [&](std::shared_ptr<PeerSet> peers,
+                      std::shared_ptr<catl::core::RequestScope> scope,
+                      LedgerDemandRef& parent,
+                      bool& timer_won,
+                      bool& done,
+                      std::chrono::milliseconds delay) {
+        auto* parent_out = &parent;
+        auto* timer_won_out = &timer_won;
+        auto* done_out = &done;
+        asio::co_spawn(
+            io,
+            [cache,
+             peers = std::move(peers),
+             scope = std::move(scope),
+             parent_out,
+             timer_won_out,
+             done_out,
+             delay]() -> asio::awaitable<void> {
+                *parent_out = co_await peers->co_get_or_create_ledger_demand(
+                    scope,
+                    LedgerDemandOptions{
+                        .ledger_seq = ledger_seq,
+                        .remaining_new_dials =
+                            std::numeric_limits<std::size_t>::max(),
+                        .remaining_promotions =
+                            std::numeric_limits<std::size_t>::max(),
+                        .remaining_blind_uses =
+                            std::numeric_limits<std::size_t>::max()});
+                auto ex = co_await asio::this_coro::executor;
+                auto result =
+                    co_await asio::experimental::make_parallel_group(
+                        asio::co_spawn(
+                            ex,
+                            cache->get_header(
+                                ledger_seq, peers, PeerSessionPtr{}, scope),
+                            asio::deferred),
+                        asio::co_spawn(
+                            ex,
+                            [delay]() -> asio::awaitable<void> {
+                                auto ex = co_await asio::this_coro::executor;
+                                asio::steady_timer timer(ex, delay);
+                                boost::system::error_code ec;
+                                co_await timer.async_wait(asio::redirect_error(
+                                    asio::use_awaitable, ec));
+                            },
+                            asio::deferred))
+                        .async_wait(
+                            asio::experimental::wait_for_one(),
+                            asio::use_awaitable);
+                *timer_won_out = (std::get<0>(result)[0] == 1);
+                scope->cancel();
+                *done_out = true;
+            },
+            asio::detached);
+    };
+
+    launch(
+        first_peers,
+        first_scope,
+        first_parent,
+        first_timer_won,
+        first_done,
+        std::chrono::milliseconds(10));
+    launch(
+        second_peers,
+        second_scope,
+        second_parent,
+        second_timer_won,
+        second_done,
+        std::chrono::milliseconds(15));
+
+    std::optional<SharedHistoryFetchSnapshot> participant_snapshot;
+    asio::steady_timer inspect_timer(io, std::chrono::milliseconds(30));
+    inspect_timer.async_wait([&](boost::system::error_code const& ec) {
+        if (ec)
+            return;
+        participant_snapshot = NodeCacheTestAccess::header_participant_snapshot(
+            *cache, ledger_seq);
+        asio::co_spawn(io, cache->co_clear_headers(), asio::detached);
+    });
+    io.run();
+
+    EXPECT_TRUE(first_done);
+    EXPECT_TRUE(second_done);
+    EXPECT_TRUE(first_timer_won);
+    EXPECT_TRUE(second_timer_won);
+    ASSERT_TRUE(participant_snapshot);
+    EXPECT_EQ(participant_snapshot->interests, 2u);
+    EXPECT_EQ(participant_snapshot->active_interests, 0u);
+    EXPECT_EQ(
+        participant_snapshot->terminal,
+        SharedHistoryFetchTerminal::no_interests);
+
+    io.restart();
+    std::optional<LedgerDemandSnapshot> first_snapshot;
+    std::optional<LedgerDemandSnapshot> second_snapshot;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            first_snapshot =
+                co_await first_peers->co_ledger_demand_snapshot(first_parent);
+            second_snapshot =
+                co_await second_peers->co_ledger_demand_snapshot(second_parent);
+        },
+        asio::detached);
+    io.run();
+
+    ASSERT_TRUE(first_snapshot);
+    ASSERT_TRUE(second_snapshot);
+    EXPECT_EQ(first_snapshot->acquisitions, 1u);
+    EXPECT_EQ(second_snapshot->acquisitions, 1u);
+    EXPECT_EQ(first_snapshot->active_acquisitions, 0u);
+    EXPECT_EQ(second_snapshot->active_acquisitions, 0u);
+    EXPECT_EQ(first_snapshot->terminal, LedgerDemandTerminal::cancelled);
+    EXPECT_EQ(second_snapshot->terminal, LedgerDemandTerminal::cancelled);
+}
+
+TEST(NodeCacheIntegration, ParticipantAdmissionRefusalRetiresUnlaunchedFetch)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        {
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::seconds(5),
+        });
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_active_ledger_demands = 0,
+        });
+    constexpr uint32_t ledger_seq = 654323u;
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + std::chrono::seconds(5));
+    bool done = false;
+    bool refused = false;
+
+    asio::co_spawn(
+        io,
+        [&, cache, peers, scope]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(
+                    ledger_seq, peers, PeerSessionPtr{}, scope);
+            }
+            catch (PeerClientException const&)
+            {
+                refused = true;
+            }
+            done = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(refused);
+    EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
+    EXPECT_EQ(NodeCacheTestAccess::active_header_fetches(*cache), 0u);
 }

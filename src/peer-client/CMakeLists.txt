@@ -19,6 +19,7 @@ add_library(
   src/connection.cpp
   src/crypto-utils.cpp
   src/endpoint-tracker.cpp
+  src/history-fetch.cpp
   src/ledger-fetch-coordinator.cpp
   src/node-identity.cpp
   src/node-transport.cpp

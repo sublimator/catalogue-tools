@@ -14,6 +14,7 @@
 //       root_hash, target_key, ledger_hash, liTX_NODE, peers);
 //   // walk.found(), walk.leaf(), walk.placeholders()
 
+#include "history-fetch.h"
 #include "peer-client-coro.h"
 #include "peer-set.h"
 #include "wire-node-view.h"
@@ -394,7 +395,8 @@ public:
         int tree_type,
         std::shared_ptr<PeerSet> peers,
         PeerGenerationPin peer,
-        std::shared_ptr<std::atomic<bool>> cancel = nullptr);
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr,
+        std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     /// Unmanaged compatibility overload for callers whose session does not
     /// come from PeerSet (principally direct/test sessions). PeerSet-selected
@@ -408,7 +410,8 @@ public:
         int tree_type,
         std::shared_ptr<PeerSet> peers,
         PeerSessionPtr peer = nullptr,
-        std::shared_ptr<std::atomic<bool>> cancel = nullptr);
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr,
+        std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     /// Insert a node into the cache by hash. Returns true if newly inserted.
     bool
@@ -650,6 +653,10 @@ private:
             deadline_servants;
         std::shared_ptr<SerializedTimerSignal> servants_done_signal;
         std::uint64_t operation_id = 0;
+        // Exact non-dialling participant authority for this content-addressed
+        // cache-key operation. Its epoch is the non-reused operation ID, so a
+        // replacement round cannot accept a predecessor interest or grant.
+        std::shared_ptr<SharedHistoryFetch> participant_authority;
         // NodeCache fans out to one primary plus at most two additional peers.
         // A fixed table makes the callback/return handshake bounded by shape.
         std::array<DispatchSlot, 3> dispatches;
@@ -811,6 +818,9 @@ private:
         std::shared_ptr<SerializedTimerSignal> driver_done_signal;
         std::shared_ptr<SerializedTimerSignal> deadline_done_signal;
         std::shared_ptr<PeerSet> peers;
+        // Cut 3C authority is attached to the exact physical fetch identity,
+        // but cannot itself emit a selector, dial, use, or promotion command.
+        std::shared_ptr<SharedHistoryFetch> participant_authority;
         // Receipt routing is distinct from selection authority. This contains
         // the actual owner of the initial managed pin plus any PeerSet that
         // can mint later fan-out pins.
@@ -877,7 +887,8 @@ private:
         std::unordered_set<std::string>* attempted_peers = nullptr,
         std::unordered_set<std::string> const* excluded_peers = nullptr,
         bool* initiated_fetch = nullptr,
-        std::unordered_set<std::string>* written_peers = nullptr);
+        std::unordered_set<std::string>* written_peers = nullptr,
+        std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     /// Send a TMGetLedger request for a node (+ speculative deeper nodes).
     /// Non-coroutine: just builds and sends the request, no waiting.
@@ -1059,6 +1070,11 @@ private:
     terminalize_node_operation_locked(
         std::shared_ptr<NodeFetchRound> const& round) noexcept;
 
+    static void
+    publish_node_participant_terminal(
+        std::shared_ptr<SharedHistoryFetch> const& authority,
+        SharedHistoryFetchTerminal terminal) noexcept;
+
     void
     on_node_deadline_servant_done(
         std::shared_ptr<NodeFetchRound> const& round,
@@ -1090,7 +1106,8 @@ private:
         PeerSession* peer,
         PeerGenerationPin peer_pin,
         PeerSessionPtr unmanaged_owner,
-        std::shared_ptr<std::atomic<bool>> cancel);
+        std::shared_ptr<std::atomic<bool>> cancel,
+        std::shared_ptr<catl::core::RequestScope> request_scope);
 
     asio::awaitable<LedgerHeaderResult>
     get_header_impl(

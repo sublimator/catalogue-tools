@@ -113,6 +113,7 @@ describe_peer_history_coverage(PeerHistoryCoverage const& coverage);
 class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
     friend class ::PeerSetTestAccess;
+    friend class SharedHistoryFetch;
 
 public:
     static std::shared_ptr<PeerSet>

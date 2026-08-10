@@ -15,6 +15,7 @@
 namespace catl::peer_client {
 
 class PeerSet;
+class SharedHistoryFetch;
 
 template <class Tag>
 struct HistoryId
@@ -135,6 +136,7 @@ public:
 
 private:
     friend class PeerSet;
+    friend class SharedHistoryFetch;
 
     LedgerDemandRef(
         std::uint64_t peer_set_instance,
@@ -194,6 +196,7 @@ public:
 
 private:
     friend class PeerSet;
+    friend class SharedHistoryFetch;
 
     HistoryAcquisitionRef(
         std::uint64_t peer_set_instance,

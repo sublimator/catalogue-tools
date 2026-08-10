@@ -363,6 +363,20 @@ NodeCache::terminalize_node_operation_locked(
     return maybe_complete_node_operation_locked(round);
 }
 
+//@@authority transition=prv.T0284 status=provisional scope=function
+// bind=catl::peer_client::publish_node_participant_terminal@63be733800654739
+// owner=unresolved owner_hypothesis=node_cache commit=exact_fetch_epoch
+// touches=prv.S0112,prv.S0113
+// label=publish_exact_shared_node_result_or_terminal_once
+void
+NodeCache::publish_node_participant_terminal(
+    std::shared_ptr<SharedHistoryFetch> const& authority,
+    SharedHistoryFetchTerminal terminal) noexcept
+{
+    if (authority)
+        (void)authority->publish_terminal(terminal);
+}
+
 //@@authority transition=prv.T0096 status=provisional scope=function
 // bind=catl::peer_client::on_node_deadline_servant_done@47542784ced75d0a
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
@@ -700,7 +714,8 @@ NodeCache::walk_to(
     int tree_type,
     std::shared_ptr<PeerSet> peers,
     PeerGenerationPin peer,
-    std::shared_ptr<std::atomic<bool>> cancel)
+    std::shared_ptr<std::atomic<bool>> cancel,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     if (peer)
     {
@@ -725,7 +740,8 @@ NodeCache::walk_to(
         session,
         std::move(peer),
         nullptr,
-        std::move(cancel));
+        std::move(cancel),
+        std::move(request_scope));
 }
 
 asio::awaitable<WalkResult>
@@ -737,7 +753,8 @@ NodeCache::walk_to(
     int tree_type,
     std::shared_ptr<PeerSet> peers,
     PeerSessionPtr peer,
-    std::shared_ptr<std::atomic<bool>> cancel)
+    std::shared_ptr<std::atomic<bool>> cancel,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     auto* session = peer.get();
     co_return co_await walk_to_impl(
@@ -750,11 +767,12 @@ NodeCache::walk_to(
         session,
         {},
         std::move(peer),
-        std::move(cancel));
+        std::move(cancel),
+        std::move(request_scope));
 }
 
 //@@authority transition=prv.T0009 status=provisional scope=function
-// bind=catl::peer_client::walk_to_impl@21a821917bd52914
+// bind=catl::peer_client::walk_to_impl@e45f6b1e26c5eab3
 // owner=unresolved owner_hypothesis=node_cache commit=unresolved
 // touches=prv.S0001 label=legacy_walk_owns_retry_and_peer_rotation
 asio::awaitable<WalkResult>
@@ -768,7 +786,8 @@ NodeCache::walk_to_impl(
     PeerSession* peer,
     PeerGenerationPin peer_pin,
     PeerSessionPtr unmanaged_owner,
-    std::shared_ptr<std::atomic<bool>> cancel)
+    std::shared_ptr<std::atomic<bool>> cancel,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     // The unmanaged owner is intentionally retained by this frame. Managed
     // production sessions are retained by peer_pin instead.
@@ -821,7 +840,7 @@ NodeCache::walk_to_impl(
                 ledger_seq,
                 " — acquiring one");
             //@@authority transition=prv.T0010 status=provisional
-            // bind=wait_for_covering_peer@457892fbcb90b171
+            // bind=wait_for_covering_peer@21221b569958e14b
             // scope=statement
             // owner=unresolved owner_hypothesis=peer_set commit=strand
             // calls=wait_for_covering_peer
@@ -853,7 +872,7 @@ NodeCache::walk_to_impl(
             publish_node_progress(
                 cursor, ProgressKind::no_covering_peer, ledger_seq, 0, 0, 0);
             //@@authority transition=prv.T0037 status=provisional
-            // bind=co_return_statement@beeb3f0a2ca170b1
+            // bind=co_return_statement@27b094d0331b092a
             // scope=statement
             // owner=unresolved owner_hypothesis=ledger_data_control
             // commit=walk_coroutine
@@ -912,7 +931,8 @@ NodeCache::walk_to_impl(
             &attempted_peers,
             &failed_peers,
             &initiated_fetch,
-            &written_peers);
+            &written_peers,
+            request_scope);
 
         // Halve speculation after each fetch round
         if (spec_depth > 1)
@@ -939,7 +959,7 @@ NodeCache::walk_to_impl(
                 {
                     if (peers)
                         //@@authority transition=prv.T0029 status=provisional
-                        // bind=note_ledger_failure@ad3bac49c609254b
+                        // bind=note_ledger_failure@9589dae82f2c2401
                         // scope=statement
                         // owner=unresolved owner_hypothesis=peer_set
                         // commit=strand calls=note_ledger_failure
@@ -960,7 +980,7 @@ NodeCache::walk_to_impl(
                 peer = nullptr;
 
                 //@@authority transition=prv.T0030 status=provisional
-                // bind=co_select_covering_peers_for@14785979cb4c63c6
+                // bind=co_select_covering_peers_for@228f121ca41837bc
                 // scope=statement
                 // owner=unresolved owner_hypothesis=peer_set commit=strand
                 // calls=co_select_covering_peers_for
@@ -984,7 +1004,7 @@ NodeCache::walk_to_impl(
                         static_cast<uint8_t>(total_retries),
                         static_cast<uint8_t>(max_retries));
                     //@@authority transition=prv.T0031 status=provisional
-                    // bind=wait_for_covering_peer@c6e61740f71a3a7c
+                    // bind=wait_for_covering_peer@943e5e91cad045d8
                     // scope=statement
                     // owner=unresolved owner_hypothesis=peer_set commit=strand
                     // calls=wait_for_covering_peer
@@ -1125,7 +1145,7 @@ NodeCache::walk_to_impl(
                 failed_peers.begin(), failed_peers.end());
             std::ranges::sort(attempted_peer_endpoints);
             //@@authority transition=prv.T0038 status=provisional
-            // bind=co_return_statement@a9c5e42bcfcb12ad
+            // bind=co_return_statement@278dcc1af598debb
             // scope=statement
             // owner=unresolved owner_hypothesis=ledger_data_control
             // commit=walk_coroutine
@@ -1186,7 +1206,7 @@ NodeCache::walk_to_impl(
             PLOGD(
                 log_, "  depth=", depth, " DEAD END at nibble ", target_nibble);
             //@@authority transition=prv.T0192 status=provisional
-            // bind=co_return_statement@64ee588b40de4aab
+            // bind=co_return_statement@1d1f56bcb8d56b6c
             // scope=statement owner=unresolved owner_hypothesis=node_cache
             // commit=walk_coroutine touches=prv.S0063
             // label=publish_authoritative_empty_branch_terminal
@@ -1215,7 +1235,7 @@ NodeCache::walk_to_impl(
 
     PLOGW(log_, "  walk_to: reached max depth 64 without finding leaf");
     //@@authority transition=prv.T0193 status=provisional
-    // bind=co_return_statement@e8d97695d42fc27d
+    // bind=co_return_statement@f33d727ac96deecf
     // scope=statement owner=unresolved owner_hypothesis=node_cache
     // commit=walk_coroutine touches=prv.S0063
     // label=publish_invalid_depth_terminal
@@ -1248,12 +1268,14 @@ NodeCache::ensure_present(
     std::unordered_set<std::string>* attempted_peers,
     std::unordered_set<std::string> const* excluded_peers,
     bool* initiated_fetch,
-    std::unordered_set<std::string>* written_peers)
+    std::unordered_set<std::string>* written_peers,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     if (initiated_fetch)
         *initiated_fetch = false;
     if (cancel && cancel->load(std::memory_order_relaxed))
         co_return nullptr;
+    auto participant_owner = peers;
 
     enum class Action { hit, return_null, wait, send_and_wait };
     Action action;
@@ -1264,11 +1286,12 @@ NodeCache::ensure_present(
     std::shared_ptr<SerializedTimerSignal> superseded_signal;
     std::shared_ptr<SerializedTimerSignal> superseded_admission_deadline;
     std::shared_ptr<SerializedTimerSignal> superseded_operation_done;
+    std::shared_ptr<SharedHistoryFetch> superseded_participant_authority;
     std::shared_ptr<NodeFetchRound> send_round;
     bool const managed_transport = node_fetch_coordinator_.has_value();
 
     //@@authority transition=prv.T0120 status=provisional scope=statement
-    // bind=declaration@fb8665a738bbf33e
+    // bind=declaration@7744d5cfa746fb52
     // owner=unresolved owner_hypothesis=node_cache commit=mutex
     // touches=prv.S0002,prv.S0003,prv.S0005,prv.S0018,prv.S0040
     // mutation_class=running_guarded
@@ -1297,8 +1320,22 @@ NodeCache::ensure_present(
                 Error::ResourceExhausted, "node operation identity exhausted");
         }
         round->operation_id = ++next_node_operation_id_;
+        //@@authority transition=prv.T0282 status=provisional scope=statement
+        // bind=expression_statement@95b06a0057be5cfa
+        // owner=unresolved owner_hypothesis=node_cache commit=mutex
+        // touches=prv.S0107
+        // label=install_exact_shared_node_fetch_incarnation
+        round->participant_authority = SharedHistoryFetch::create(
+            HistoryFetchId{round->operation_id},
+            round->operation_id);  //@@authority-target ids=prv.T0282
+        if (!round->participant_authority)
+        {
+            throw PeerClientException(
+                Error::ResourceExhausted,
+                "shared node participant authority exhausted");
+        }
         //@@authority transition=prv.T0093 status=provisional scope=statement
-        // bind=expression_statement@26604e9d04292d89
+        // bind=expression_statement@cdb0ff4fb7c48369
         // owner=unresolved owner_hypothesis=node_cache commit=mutex
         // touches=prv.S0040 label=mint_exact_node_operation_into_registry
         active_node_operations_.emplace(
@@ -1309,6 +1346,8 @@ NodeCache::ensure_present(
         {
             superseded_signal = entry.signal;
             superseded_admission_deadline = entry.round->admission_deadline;
+            superseded_participant_authority =
+                entry.round->participant_authority;
             superseded_operation_done =
                 terminalize_node_operation_locked(entry.round);
         }
@@ -1354,7 +1393,7 @@ NodeCache::ensure_present(
         {
             //@@authority transition=prv.T0011 status=provisional
             // scope=statement
-            // bind=declaration@c92e96dd35b173c2
+            // bind=declaration@8c268fbccc52139c
             // owner=unresolved owner_hypothesis=node_cache
             // commit=mutex touches=prv.S0001
             // mutation_class=running_guarded
@@ -1412,7 +1451,7 @@ NodeCache::ensure_present(
                     // so refresh the wait handle and re-send with the current
                     // peer.
                     //@@authority transition=prv.T0121 status=provisional
-                    // bind=expression_statement@9510acebc6d14c72
+                    // bind=expression_statement@1b586563a8b792f7
                     // scope=statement owner=unresolved
                     // owner_hypothesis=node_cache commit=mutex
                     // touches=prv.S0003 mutation_class=running_guarded
@@ -1483,7 +1522,7 @@ NodeCache::ensure_present(
                 // MISS — new entry, create signal and fetch
                 misses_++;
                 //@@authority transition=prv.T0012 status=provisional
-                // bind=declaration@19ae7a56972085f7
+                // bind=declaration@c2ec24438c5f8ee7
                 // scope=statement
                 // owner=unresolved owner_hypothesis=node_cache
                 // commit=mutex touches=prv.S0002
@@ -1491,7 +1530,7 @@ NodeCache::ensure_present(
                 auto [round, signal] = open_round(
                     it->second, true);  //@@authority-target ids=prv.T0012
                 //@@authority transition=prv.T0013 status=provisional
-                // bind=expression_statement@618c0b43a69e9a74
+                // bind=expression_statement@09a9e755a7a796c7
                 // scope=statement
                 // owner=unresolved owner_hypothesis=node_cache
                 // commit=mutex touches=prv.S0005
@@ -1521,6 +1560,12 @@ NodeCache::ensure_present(
     if (superseded_admission_deadline != superseded_signal)
         complete_timer_noexcept(superseded_admission_deadline);
     complete_timer_noexcept(superseded_operation_done);
+    if (superseded_participant_authority)
+    {
+        publish_node_participant_terminal(
+            superseded_participant_authority,
+            SharedHistoryFetchTerminal::replaced);
+    }
 
     auto abandon_exact_send_round = [&]() {
         retire_node_fetch_round(expected_hash, send_signal);
@@ -1573,7 +1618,7 @@ NodeCache::ensure_present(
             // pins retained would advertise a phantom in-flight request and
             // make every rider wait for a response that cannot exist.
             //@@authority transition=prv.T0046 status=provisional
-            // bind=retire_node_fetch_round@b0fa6c1352fe3159
+            // bind=retire_node_fetch_round@59bbfd25e1e6ff05
             // scope=statement
             // owner=unresolved owner_hypothesis=node_cache
             // commit=mutex calls=retire_node_fetch_round
@@ -1607,7 +1652,7 @@ NodeCache::ensure_present(
                 it->second.round != send_round)
             {
                 //@@authority transition=prv.T0122 status=provisional
-                // bind=co_return_statement@1d381e4a19a6760b
+                // bind=co_return_statement@5304b1b7a533541d
                 // scope=statement owner=unresolved
                 // owner_hypothesis=object_store commit=mutex
                 // touches=prv.S0001 mutation_class=running_guarded
@@ -1622,7 +1667,7 @@ NodeCache::ensure_present(
             {
                 remember_node_pin_owner_barrier_locked(peer_pin);
                 //@@authority transition=prv.T0001 status=provisional
-                // bind=share@1e314a0ca0896457
+                // bind=share@1df927a31ebc2d54
                 // scope=statement owner=unresolved
                 // owner_hypothesis=node_cache commit=mutex
                 // touches=prv.S0003 calls=share
@@ -1644,7 +1689,7 @@ NodeCache::ensure_present(
         try
         {
             //@@authority transition=prv.T0002 status=provisional
-            // bind=send_fetch@97e6d2664ee0d5d0
+            // bind=send_fetch@b7415023e4bda74c
             // scope=statement owner=unresolved
             // owner_hypothesis=node_cache commit=unresolved
             // calls=send_fetch
@@ -1700,7 +1745,7 @@ NodeCache::ensure_present(
                     : std::unordered_set<std::string>{};
                 exclude_set.insert(peer->endpoint());
                 //@@authority transition=prv.T0033 status=provisional
-                // bind=co_select_covering_peers_for@9067bfc556ec9ac1
+                // bind=co_select_covering_peers_for@8cd8ef3870c920aa
                 // scope=statement
                 // owner=unresolved owner_hypothesis=peer_set commit=strand
                 // calls=co_select_covering_peers_for
@@ -1789,7 +1834,7 @@ NodeCache::ensure_present(
         {
             touch_lru(expected_hash);
             //@@authority transition=prv.T0123 status=provisional
-            // bind=co_return_statement@955cdf8fed59d2d5
+            // bind=co_return_statement@871113843ceee62a
             // scope=statement owner=unresolved
             // owner_hypothesis=object_store commit=mutex
             // touches=prv.S0001 mutation_class=running_guarded
@@ -1797,7 +1842,7 @@ NodeCache::ensure_present(
             co_return it->second.wire_data;  //@@authority-target ids=prv.T0123
         }
         //@@authority transition=prv.T0014 status=provisional scope=statement
-        // bind=attach_waiter_locked@92d86de861198d83
+        // bind=attach_waiter_locked@ba57252b7e839cc4
         // owner=unresolved owner_hypothesis=node_cache
         // commit=mutex touches=prv.S0004 calls=attach_waiter_locked
         // label=attach_request_rider_to_shared_round_progress
@@ -1814,93 +1859,222 @@ NodeCache::ensure_present(
         co_return nullptr;
     }
 
-    for (;;)
+    HistoryAcquisitionRef acquisition;
+    HistoryInterestRef interest;
+    auto participant_authority =
+        wait.round ? wait.round->participant_authority : nullptr;
+    std::exception_ptr participant_admission_failure;
+    bool registering_participant = false;
+    if (request_scope && participant_owner)
     {
-        auto const waited_signal = wait.done_signal;
-        if (!waited_signal)
-            co_return nullptr;
-        auto [wake_kind, ec] = co_await wait_for_signal_or_progress_or_cancel(
-            waited_signal, wait.progress_signal, cancel);
-
-        std::vector<ProgressEvent> progress_events;
+        try
         {
-            std::lock_guard lock(mutex_);
-            auto it = store_.find(expected_hash);
-            if (it == store_.end())
-                co_return nullptr;
-
-            if (it->second.present)
+            if (!participant_authority)
             {
-                if (ec == asio::error::operation_aborted)
-                    waiter_wakeups_++;
-                touch_lru(expected_hash);
-                //@@authority transition=prv.T0124 status=provisional
-                // bind=co_return_statement@955cdf8fed59d2d5
-                // scope=statement owner=unresolved
-                // owner_hypothesis=object_store commit=mutex
-                // touches=prv.S0001 mutation_class=running_guarded
-                // label=project_immutable_wire_to_woken_rider
-                co_return it->second
-                    .wire_data;  //@@authority-target ids=prv.T0124
+                throw PeerClientException(
+                    Error::Cancelled,
+                    "shared node participant authority is unavailable");
+            }
+            auto demand =
+                co_await participant_owner->co_get_or_create_ledger_demand(
+                    request_scope,
+                    LedgerDemandOptions{
+                        .ledger_seq = ledger_seq,
+                        .remaining_new_dials =
+                            std::numeric_limits<std::size_t>::max(),
+                        .remaining_promotions =
+                            std::numeric_limits<std::size_t>::max(),
+                        .remaining_blind_uses =
+                            std::numeric_limits<std::size_t>::max()});
+            acquisition =
+                co_await participant_owner->co_open_history_acquisition(
+                    demand,
+                    HistoryAcquisitionOptions{
+                        .fetch = HistoryFetchId{wait.round->operation_id},
+                        .fetch_epoch = wait.round->operation_id,
+                        .request_kind = tree_type == 1
+                            ? HistoryRequestKind::transaction_node
+                            : HistoryRequestKind::state_node,
+                        .tree_type = tree_type,
+                        .item = expected_hash,
+                        .excluded_endpoints = excluded_peers
+                            ? *excluded_peers
+                            : std::unordered_set<std::string>{}});
+            registering_participant = true;
+            //@@authority transition=prv.T0283 status=provisional
+            // bind=expression_statement@bb949950e4d3203b
+            // scope=statement owner=unresolved owner_hypothesis=node_cache
+            // commit=node_cache_waiter
+            // touches=prv.S0104,prv.S0105,prv.S0108,prv.S0113
+            // label=bind_coalesced_node_waiter_to_its_exact_demand_owner
+            interest = participant_authority->register_interest(
+                participant_owner,
+                request_scope,
+                demand,
+                acquisition);  //@@authority-target ids=prv.T0283
+            registering_participant = false;
+        }
+        catch (PeerClientException const& error)
+        {
+            auto const request_terminal = request_scope->snapshot().terminal;
+            auto const fetch_terminal = participant_authority
+                ? participant_authority->snapshot().terminal
+                : std::nullopt;
+            if (!registering_participant || error.error != Error::Cancelled ||
+                request_terminal || !fetch_terminal)
+            {
+                participant_admission_failure = std::current_exception();
+            }
+        }
+        catch (...)
+        {
+            participant_admission_failure = std::current_exception();
+        }
+    }
+    if (participant_admission_failure)
+    {
+        if (action == Action::send_and_wait && send_round == wait.round)
+            retire_node_fetch_round(expected_hash, wait.done_signal);
+        if (acquisition)
+        {
+            co_await participant_owner->co_finish_history_acquisition(
+                acquisition, HistoryAcquisitionTerminal::fetch_terminal);
+        }
+        std::rethrow_exception(participant_admission_failure);
+    }
+
+    std::shared_ptr<std::vector<uint8_t> const> participant_result;
+    auto participant_terminal = HistoryAcquisitionTerminal::fetch_terminal;
+    std::exception_ptr participant_failure;
+    try
+    {
+        for (;;)
+        {
+            auto const waited_signal = wait.done_signal;
+            if (!waited_signal)
+                break;
+            auto [wake_kind, ec] =
+                co_await wait_for_signal_or_progress_or_cancel(
+                    waited_signal, wait.progress_signal, cancel);
+
+            std::vector<ProgressEvent> progress_events;
+            bool leave_wait = false;
+            {
+                std::lock_guard lock(mutex_);
+                auto it = store_.find(expected_hash);
+                if (it == store_.end())
+                {
+                    leave_wait = true;
+                }
+                else if (it->second.present)
+                {
+                    if (ec == asio::error::operation_aborted)
+                        waiter_wakeups_++;
+                    touch_lru(expected_hash);
+                    //@@authority transition=prv.T0124 status=provisional
+                    // bind=expression_statement@2acb0fe59c311681
+                    // scope=statement owner=unresolved
+                    // owner_hypothesis=object_store commit=mutex
+                    // touches=prv.S0001 mutation_class=running_guarded
+                    // label=project_immutable_wire_to_woken_rider
+                    participant_result =
+                        it->second
+                            .wire_data;  //@@authority-target ids=prv.T0124
+                    participant_terminal =
+                        HistoryAcquisitionTerminal::completed;
+                    leave_wait = true;
+                }
+                else if (node_lifecycle_ != NodeLifecycle::running)
+                {
+                    participant_terminal = HistoryAcquisitionTerminal::shutdown;
+                    leave_wait = true;
+                }
+                else
+                {
+                    progress_events =
+                        it->second.progress.journal.replay(wait.cursor);
+                    refresh_waiter_locked(it->second, wait);
+                }
+            }
+            if (leave_wait)
+                break;
+
+            for (auto const& event : progress_events)
+                catl::core::emit_status(format_progress(event));
+
+            if (wake_kind == 2)
+            {
+                PLOGD(
+                    log_,
+                    "  ensure: CANCELLED hash=",
+                    expected_hash.hex().substr(0, 16));
+                participant_terminal = HistoryAcquisitionTerminal::cancelled;
+                break;
             }
 
-            if (node_lifecycle_ != NodeLifecycle::running)
-                co_return nullptr;
-            progress_events = it->second.progress.journal.replay(wait.cursor);
-            refresh_waiter_locked(it->second, wait);
-        }
+            if (wake_kind == 1)
+            {
+                if (!wait.done_signal)
+                    break;
+                continue;
+            }
 
-        for (auto const& event : progress_events)
-            catl::core::emit_status(format_progress(event));
+            if (wait.done_signal && wait.done_signal != waited_signal)
+            {
+                // Managed publication committed a phase transition. The exact
+                // round is unchanged; only its admission signal was replaced
+                // by a fresh response-deadline signal.
+                continue;
+            }
 
-        if (wake_kind == 2)
-        {
-            PLOGD(
-                log_,
-                "  ensure: CANCELLED hash=",
-                expected_hash.hex().substr(0, 16));
-            co_return nullptr;
+            // Timed out and data still isn't present.
+            // The entry stays alive so a late peer response can still
+            // populate the cache for future callers.
+            //@@authority transition=prv.T0015 status=provisional
+            // scope=statement
+            // bind=handle_node_waiter_timeout@1fcc8cc1702fb44d
+            // owner=unresolved owner_hypothesis=node_cache
+            // commit=mutex calls=handle_node_waiter_timeout
+            // touches=prv.S0002 label=timeout_retires_exact_shared_round
+            if (handle_node_waiter_timeout(
+                    expected_hash, wait.round, waited_signal, wait))
+            {
+                continue;
+            }  //@@authority-target ids=prv.T0015
+            project_round_evidence(wait.round);
+            if (ec != asio::error::operation_aborted)
+            {
+                PLOGD(
+                    log_,
+                    "  ensure: TIMEOUT hash=",
+                    expected_hash.hex().substr(0, 16));
+                fetch_errors_++;
+            }
+            if (request_scope &&
+                request_scope->snapshot().terminal ==
+                    catl::core::RequestScopeTerminal::deadline_elapsed)
+            {
+                participant_terminal =
+                    HistoryAcquisitionTerminal::deadline_elapsed;
+            }
+            break;
         }
-
-        if (wake_kind == 1)
-        {
-            if (!wait.done_signal)
-                co_return nullptr;
-            continue;
-        }
-
-        if (wait.done_signal && wait.done_signal != waited_signal)
-        {
-            // Managed publication committed a phase transition. The exact
-            // round is unchanged; only its admission signal was replaced by a
-            // fresh response-deadline signal.
-            continue;
-        }
-
-        // Timed out and data still isn't present.
-        // The entry stays alive so a late peer response can still
-        // populate the cache for future callers.
-        //@@authority transition=prv.T0015 status=provisional scope=statement
-        // bind=handle_node_waiter_timeout@c8fb2eab1d0e7c03
-        // owner=unresolved owner_hypothesis=node_cache
-        // commit=mutex calls=handle_node_waiter_timeout
-        // touches=prv.S0002 label=timeout_retires_exact_shared_round
-        if (handle_node_waiter_timeout(
-                expected_hash, wait.round, waited_signal, wait))
-        {
-            continue;
-        }  //@@authority-target ids=prv.T0015
-        project_round_evidence(wait.round);
-        if (ec != asio::error::operation_aborted)
-        {
-            PLOGD(
-                log_,
-                "  ensure: TIMEOUT hash=",
-                expected_hash.hex().substr(0, 16));
-            fetch_errors_++;
-        }
-        co_return nullptr;
     }
+    catch (...)
+    {
+        participant_failure = std::current_exception();
+    }
+
+    if (interest && participant_authority)
+        (void)participant_authority->detach(interest);
+    if (acquisition)
+    {
+        co_await participant_owner->co_finish_history_acquisition(
+            acquisition, participant_terminal);
+    }
+    if (participant_failure)
+        std::rethrow_exception(participant_failure);
+    co_return participant_result;
 }
 
 //@@authority transition=prv.T0034 status=provisional scope=function
@@ -1954,6 +2128,7 @@ NodeCache::handle_node_waiter_timeout(
 {
     bool retired = false;
     std::shared_ptr<SerializedTimerSignal> operation_done;
+    std::shared_ptr<SharedHistoryFetch> participant_authority;
     try
     {
         std::lock_guard lock(mutex_);
@@ -1983,6 +2158,7 @@ NodeCache::handle_node_waiter_timeout(
 
         it->second.signal.reset();
         it->second.peer_pins.clear();
+        participant_authority = round->participant_authority;
         operation_done = terminalize_node_operation_locked(round);
         retired = true;
     }
@@ -1995,6 +2171,12 @@ NodeCache::handle_node_waiter_timeout(
     {
         complete_timer_noexcept(waited_signal);
         complete_timer_noexcept(operation_done);
+        if (participant_authority)
+        {
+            publish_node_participant_terminal(
+                participant_authority,
+                SharedHistoryFetchTerminal::no_viable_participant);
+        }
         if (node_round_retired_hook_for_test_)
         {
             try
@@ -2964,6 +3146,7 @@ NodeCache::retire_node_fetch_round(
     std::shared_ptr<SerializedTimerSignal> phase_signal;
     std::shared_ptr<SerializedTimerSignal> admission_deadline;
     std::shared_ptr<SerializedTimerSignal> operation_done;
+    std::shared_ptr<SharedHistoryFetch> participant_authority;
     try
     {
         std::lock_guard lock(mutex_);
@@ -2976,6 +3159,7 @@ NodeCache::retire_node_fetch_round(
             phase_signal = it->second.signal;
             if (it->second.round)
             {
+                participant_authority = it->second.round->participant_authority;
                 admission_deadline =
                     std::move(it->second.round->admission_deadline);
             }
@@ -3000,6 +3184,12 @@ NodeCache::retire_node_fetch_round(
     if (admission_deadline != phase_signal)
         complete_timer_noexcept(admission_deadline);
     complete_timer_noexcept(operation_done);
+    if (participant_authority)
+    {
+        publish_node_participant_terminal(
+            participant_authority,
+            SharedHistoryFetchTerminal::no_viable_participant);
+    }
     if (node_round_retired_hook_for_test_)
     {
         try
@@ -3172,6 +3362,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
     std::shared_ptr<SerializedTimerSignal> admission_deadline;
     std::shared_ptr<SerializedTimerSignal> progress_signal;
     std::shared_ptr<SerializedTimerSignal> operation_done;
+    std::shared_ptr<SharedHistoryFetch> participant_authority;
     bool committed = false;
     {
         std::lock_guard lock(mutex_);
@@ -3206,6 +3397,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
             progress_signal = it->second.progress.signal;
             if (it->second.round)
             {
+                participant_authority = it->second.round->participant_authority;
                 admission_deadline = it->second.round->admission_deadline;
                 operation_done =
                     terminalize_node_operation_locked(it->second.round);
@@ -3238,6 +3430,11 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
         complete_timer_noexcept(admission_deadline);
     complete_timer_noexcept(progress_signal);
     complete_timer_noexcept(operation_done);
+    if (participant_authority)
+    {
+        publish_node_participant_terminal(
+            participant_authority, SharedHistoryFetchTerminal::completed);
+    }
     if (committed)
     {
         try
@@ -3282,6 +3479,7 @@ NodeCache::insert_and_notify_observed(
     std::shared_ptr<SerializedTimerSignal> admission_deadline;
     std::shared_ptr<SerializedTimerSignal> progress_signal;
     std::shared_ptr<SerializedTimerSignal> operation_done;
+    std::shared_ptr<SharedHistoryFetch> participant_authority;
 
     {
         std::lock_guard lock(mutex_);
@@ -3309,6 +3507,7 @@ NodeCache::insert_and_notify_observed(
         progress_signal = it->second.progress.signal;
         if (it->second.round)
         {
+            participant_authority = it->second.round->participant_authority;
             admission_deadline = it->second.round->admission_deadline;
             operation_done =
                 terminalize_node_operation_locked(it->second.round);
@@ -3343,6 +3542,11 @@ NodeCache::insert_and_notify_observed(
         complete_timer_noexcept(admission_deadline);
     complete_timer_noexcept(progress_signal);
     complete_timer_noexcept(operation_done);
+    if (participant_authority)
+    {
+        publish_node_participant_terminal(
+            participant_authority, SharedHistoryFetchTerminal::completed);
+    }
     try
     {
         PLOGD(
@@ -3539,10 +3743,10 @@ NodeCache::get_header_impl(
             asio::use_awaitable);
     }
 
-    // The participant record lands later in this cut. Retaining the immutable
-    // scope through this waiter already prevents child code from inventing a
-    // fresh identity or relative deadline while crossing the cache strand.
-    //@@authority transition=prv.T0261 status=provisional scope=statement bind=expression_statement@5a99cce8f2b2c09d
+    // The immutable scope crosses the cache strand unchanged and is bound to
+    // this waiter's exact demand/acquisition participant below.
+    //@@authority transition=prv.T0261 status=provisional scope=statement
+    // bind=expression_statement@5a99cce8f2b2c09d
     // owner=unresolved owner_hypothesis=node_cache commit=header_state_strand
     // touches=prv.S0102,prv.S0103
     // label=carry_request_scope_into_shared_header_fetch_boundary
@@ -3561,6 +3765,7 @@ NodeCache::get_header_impl(
     std::shared_ptr<HeaderFetchState> fetch;
     LedgerHeaderResult hit_result;
     bool start_fetch = false;
+    auto participant_owner = peers;
     {
         std::lock_guard lock(mutex_);
         auto const existing = header_cache_.find(ledger_seq);
@@ -3612,6 +3817,20 @@ NodeCache::get_header_impl(
             fetch->unmanaged_owner = std::move(unmanaged_owner);
             fetch->operation_id = next_header_fetch_id_ + 1;
             fetch->epoch = header_epoch_;
+            // clang-format off
+            //@@authority transition=prv.T0278 status=provisional scope=statement bind=expression_statement@81ea0c1c30495a42
+            // owner=unresolved owner_hypothesis=node_cache
+            // commit=header_state_strand touches=prv.S0107
+            // label=install_exact_shared_header_fetch_incarnation
+            fetch->participant_authority = SharedHistoryFetch::create(
+                HistoryFetchId{fetch->operation_id}, fetch->epoch); //@@authority-target ids=prv.T0278
+            // clang-format on
+            if (!fetch->participant_authority)
+            {
+                throw PeerClientException(
+                    Error::ResourceExhausted,
+                    "shared header participant authority exhausted");
+            }
             //@@authority transition=node_cache.install_header_fetch
             // bind=catl::peer_client::get_header_impl@073601d9515bd8a4
             // owner=node_cache commit=header-state-strand
@@ -3624,8 +3843,6 @@ NodeCache::get_header_impl(
             refresh_header_entries_projection_locked();
         }
     }
-
-    auto participant_owner = fetch ? fetch->peers : nullptr;
 
     // A caller that joins someone else's shared operation contributes no
     // transport authority. Release its unused preferred generation before
@@ -3641,6 +3858,9 @@ NodeCache::get_header_impl(
         co_return hit_result;
 
     HistoryAcquisitionRef acquisition;
+    HistoryInterestRef interest;
+    std::exception_ptr participant_failure;
+    bool registering_participant = false;
     if (request_scope && participant_owner)
     {
         try
@@ -3663,13 +3883,52 @@ NodeCache::get_header_impl(
                         .fetch = HistoryFetchId{fetch->operation_id},
                         .fetch_epoch = fetch->epoch,
                         .request_kind = HistoryRequestKind::ledger_header});
+            registering_participant = true;
+            // clang-format off
+            //@@authority transition=prv.T0279 status=provisional scope=statement bind=expression_statement@bc6822a0d3cc1634
+            // owner=unresolved owner_hypothesis=node_cache
+            // commit=header_state_strand
+            // touches=prv.S0104,prv.S0105,prv.S0108,prv.S0113
+            // label=bind_coalesced_header_waiter_to_its_exact_demand_owner
+            interest = fetch->participant_authority->register_interest(
+                participant_owner, request_scope, demand, acquisition); //@@authority-target ids=prv.T0279
+            // clang-format on
+            registering_participant = false;
+        }
+        catch (PeerClientException const& error)
+        {
+            auto const request_terminal = request_scope->snapshot().terminal;
+            auto const fetch_terminal = fetch->participant_authority
+                ? fetch->participant_authority->snapshot().terminal
+                : std::nullopt;
+            if (!registering_participant || error.error != Error::Cancelled ||
+                request_terminal || !fetch_terminal)
+            {
+                participant_failure = std::current_exception();
+            }
         }
         catch (...)
         {
-            if (start_fetch)
-                finish_header_fetch(ledger_seq, fetch);
-            throw;
+            participant_failure = std::current_exception();
         }
+    }
+    if (participant_failure)
+    {
+        if (start_fetch)
+        {
+            finish_header_fetch(ledger_seq, fetch);
+            // Neither servant has been launched yet. These are truthful
+            // absent-frame acknowledgements, not synthetic completions of
+            // work that might still own locals or transport capabilities.
+            on_header_servant_done(fetch, true);
+            on_header_servant_done(fetch, false);
+        }
+        if (acquisition)
+        {
+            co_await participant_owner->co_finish_history_acquisition(
+                acquisition, HistoryAcquisitionTerminal::fetch_terminal);
+        }
+        std::rethrow_exception(participant_failure);
     }
 
     if (start_fetch)
@@ -3770,10 +4029,12 @@ NodeCache::get_header_impl(
                 }
             }
         }
+        (void)fetch->participant_authority->detach(interest);
         co_await participant_owner->co_finish_history_acquisition(
             acquisition, terminal);
         std::rethrow_exception(failure);
     }
+    (void)fetch->participant_authority->detach(interest);
     co_await participant_owner->co_finish_history_acquisition(
         acquisition, HistoryAcquisitionTerminal::completed);
     co_return std::move(*result);
@@ -3932,6 +4193,18 @@ NodeCache::finish_header_fetch(
         }
     }
 
+    if (fetch->participant_authority)
+    {
+        // clang-format off
+        //@@authority transition=prv.T0280 status=provisional scope=statement bind=expression_statement@0e903c908e04847c
+        // owner=unresolved owner_hypothesis=node_cache
+        // commit=header_state_strand touches=prv.S0112,prv.S0113
+        // label=publish_exact_shared_header_result_or_terminal_once
+        (void)fetch->participant_authority->publish_terminal(
+            result ? SharedHistoryFetchTerminal::completed
+                   : SharedHistoryFetchTerminal::no_viable_participant); //@@authority-target ids=prv.T0280
+        // clang-format on
+    }
     complete_header_round(active_round);
     complete_timer_noexcept(deadline_signal);
     complete_timer_noexcept(progress_signal);
@@ -4370,6 +4643,7 @@ NodeCache::clear_nodes()
     // mutation_class=stop_driver
     // label=compatibility_invalidate_rows_without_terminal_admission_seal
     std::vector<std::shared_ptr<SerializedTimerSignal>> signals;
+    std::vector<std::shared_ptr<SharedHistoryFetch>> participant_authorities;
     {
         std::lock_guard lock(mutex_);
         if (node_lifecycle_ != NodeLifecycle::running)
@@ -4383,6 +4657,11 @@ NodeCache::clear_nodes()
                 signals.push_back(entry.progress.signal);
             if (entry.round)
             {
+                if (entry.round->participant_authority)
+                {
+                    participant_authorities.push_back(
+                        entry.round->participant_authority);
+                }
                 if (entry.round->admission_deadline)
                     signals.push_back(entry.round->admission_deadline);
                 if (auto done = terminalize_node_operation_locked(entry.round))
@@ -4399,6 +4678,11 @@ NodeCache::clear_nodes()
 
     for (auto const& signal : signals)
         complete_timer_noexcept(signal);
+    for (auto const& authority : participant_authorities)
+    {
+        publish_node_participant_terminal(
+            authority, SharedHistoryFetchTerminal::replaced);
+    }
 }
 
 asio::awaitable<void>
@@ -4558,7 +4842,7 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
     std::vector<std::shared_ptr<PeerSet>> owner_barriers;
 
     //@@authority transition=prv.T0126 status=provisional scope=statement
-    // bind=compound_statement@a2c77c554e23db0e
+    // bind=compound_statement@8c932dbd2a0b1ff5
     // owner=unresolved owner_hypothesis=node_cache commit=mutex
     // touches=prv.S0001,prv.S0003,prv.S0043 mutation_class=stop_driver
     // label=extract_and_destroy_owner_local_node_state
@@ -4613,6 +4897,16 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
         owner_barriers = std::move(
             node_pin_owner_barriers_);  //@@authority-target ids=prv.T0104
     }  //@@authority-target ids=prv.T0126
+
+    for (auto const& round : operations)
+    {
+        if (round->participant_authority)
+        {
+            publish_node_participant_terminal(
+                round->participant_authority,
+                SharedHistoryFetchTerminal::shutdown);
+        }
+    }
 
     //@@authority transition=prv.T0110 status=provisional scope=statement
     // bind=for_range_loop@670cfc246324f2ee
@@ -4835,6 +5129,17 @@ NodeCache::drive_header_clear(std::shared_ptr<HeaderClearState> clear)
     // moved pins while awaiting the frame acknowledgements.
     for (auto& drain : drains)
     {
+        if (drain.fetch->participant_authority)
+        {
+            // clang-format off
+            //@@authority transition=prv.T0281 status=provisional scope=statement bind=expression_statement@9389496d860aba7e
+            // owner=unresolved owner_hypothesis=node_cache
+            // commit=header_state_strand touches=prv.S0112,prv.S0113
+            // label=revoke_old_shared_fetch_before_epoch_replacement
+            (void)drain.fetch->participant_authority->publish_terminal(
+                SharedHistoryFetchTerminal::replaced); //@@authority-target ids=prv.T0281
+            // clang-format on
+        }
         complete_header_round(drain.round);
         complete_timer_noexcept(drain.fetch->completion_signal);
         complete_timer_noexcept(drain.fetch->deadline_signal);

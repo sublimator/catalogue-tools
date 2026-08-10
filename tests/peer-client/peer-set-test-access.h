@@ -1543,6 +1543,18 @@ public:
     }
 
     static void
+    begin_generation_close_for_test(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key,
+        std::uint64_t generation)
+    {
+        run_on_strand(io, peers, [key = std::move(key), generation](auto& set) {
+            set.begin_generation_close(key, generation);
+        });
+    }
+
+    static void
     remove_peer_for_test(
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
