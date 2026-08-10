@@ -179,6 +179,12 @@ public:
         server.test_before_regular_watcher_receipt_ =
             std::move(before_watcher_receipt);
     }
+
+    static boost::asio::awaitable<bool>
+    wait_for_transport_failure(boost::asio::ip::tcp::socket& socket)
+    {
+        co_return co_await HttpServer::co_wait_for_transport_failure(socket);
+    }
 };
 
 }  // namespace xprv
@@ -1401,6 +1407,41 @@ TEST(HttpChildCompletion, ParentCancellationCannotCounterfeitJoinReceipt)
 
     EXPECT_TRUE(joined);
     EXPECT_FALSE(failure);
+}
+
+TEST(HttpTransportWatcher, ReadHalfCloseDoesNotCancelResponseWork)
+{
+    namespace asio = boost::asio;
+    using tcp = asio::ip::tcp;
+
+    asio::io_context io;
+    tcp::acceptor acceptor(
+        io, tcp::endpoint{asio::ip::make_address("127.0.0.1"), 0});
+    tcp::socket client(io);
+    client.connect(acceptor.local_endpoint());
+    tcp::socket server = acceptor.accept();
+
+    auto observed = asio::co_spawn(
+        io,
+        xprv::HttpServerTestAccess::wait_for_transport_failure(server),
+        asio::use_future);
+
+    boost::system::error_code shutdown_ec;
+    client.shutdown(tcp::socket::shutdown_send, shutdown_ec);
+    ASSERT_FALSE(shutdown_ec);
+    ASSERT_TRUE(pump_until(io, [&] {
+        return observed.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready;
+    }));
+    EXPECT_FALSE(observed.get())
+        << "request-side EOF does not prove response abandonment";
+
+    std::array<char, 2> const response{'o', 'k'};
+    EXPECT_EQ(server.send(asio::buffer(response)), response.size());
+    std::array<char, 2> received{};
+    EXPECT_EQ(client.receive(asio::buffer(received)), received.size());
+    EXPECT_EQ(received, response)
+        << "a read-half-closed client still consumes the response";
 }
 
 TEST(

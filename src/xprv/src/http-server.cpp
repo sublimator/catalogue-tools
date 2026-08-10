@@ -33,6 +33,7 @@
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
 
+#include <array>
 #include <map>
 #include <random>
 #include <string>
@@ -168,6 +169,44 @@ generate_request_id()
     for (auto& c : id)
         c = hex[dist(gen)];
     return id;
+}
+
+//@@authority state=prv.S0124 status=provisional scope=function
+// bind=xprv::co_wait_for_transport_failure@952ade70e9fa25ca
+// owner=unresolved owner_hypothesis=http_transport_observation
+// observed_home=co_wait_for_transport_failure_coroutine_result
+// label=response_transport_failure_observation_excluding_data_and_read_half_close
+//@@authority transition=prv.T0305 status=provisional scope=function
+// bind=xprv::co_wait_for_transport_failure@952ade70e9fa25ca
+// owner=unresolved owner_hypothesis=http_transport_observer
+// commit=connection_executor touches=prv.S0124
+// label=classify_read_readiness_without_promoting_half_close_to_abandonment
+asio::awaitable<bool>
+HttpServer::co_wait_for_transport_failure(tcp::socket& socket)
+{
+    boost::system::error_code wait_ec;
+    co_await socket.async_wait(
+        tcp::socket::wait_read,
+        asio::redirect_error(asio::use_awaitable, wait_ec));
+    if (wait_ec == asio::error::operation_aborted ||
+        wait_ec == asio::error::eof)
+        co_return false;
+    if (wait_ec)
+        co_return true;
+
+    std::array<char, 1> probe{};
+    boost::system::error_code probe_ec;
+    (void)co_await socket.async_receive(
+        asio::buffer(probe),
+        tcp::socket::message_peek,
+        asio::redirect_error(asio::use_awaitable, probe_ec));
+
+    // Data belongs to a later HTTP request and must remain unread. EOF closes
+    // only the peer's write half; both still permit this response to finish.
+    if (!probe_ec || probe_ec == asio::error::eof ||
+        probe_ec == asio::error::operation_aborted)
+        co_return false;
+    co_return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1226,10 +1265,7 @@ HttpServer::handle_session(
             co_await http::async_write(
                 stream,
                 error_response(
-                    503,
-                    "request authority unavailable",
-                    version,
-                    keep_alive),
+                    503, "request authority unavailable", version, keep_alive),
                 asio::redirect_error(asio::use_awaitable, ec));
             if (ec || !keep_alive)
                 break;
@@ -1330,7 +1366,8 @@ HttpServer::handle_session(
                     if (status.latest_quorum_seq)
                         body["latest_quorum_seq"] = *status.latest_quorum_seq;
                     body["validation_quorum_tracker"] =
-                        validation_quorum_tracker_json(status.validation_quorum_tracker);
+                        validation_quorum_tracker_json(
+                            status.validation_quorum_tracker);
 
                     boost::json::object cache;
                     cache["entries"] = cs.entries;
@@ -1372,7 +1409,8 @@ HttpServer::handle_session(
                             net_body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
                         net_body["validation_quorum_tracker"] =
-                            validation_quorum_tracker_json(status.validation_quorum_tracker);
+                            validation_quorum_tracker_json(
+                                status.validation_quorum_tracker);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;
@@ -1431,7 +1469,8 @@ HttpServer::handle_session(
                             body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
                         body["validation_quorum_tracker"] =
-                            validation_quorum_tracker_json(status.validation_quorum_tracker);
+                            validation_quorum_tracker_json(
+                                status.validation_quorum_tracker);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;
@@ -1766,8 +1805,8 @@ HttpServer::handle_session(
                             std::rethrow_exception(child_spawn_failure);
 
                         // SSE dedicates the connection to this response. Any
-                        // read readiness is therefore a close or unusable
-                        // protocol input and cancels the proof.
+                        // read readiness is only a hint. A proxy may half-close
+                        // its request side while still consuming this stream.
                         try
                         {
                             asio::co_spawn(
@@ -1775,14 +1814,11 @@ HttpServer::handle_session(
                                 [&stream,
                                  request_proof_cancel,
                                  stop_watcher]() -> asio::awaitable<void> {
-                                    boost::system::error_code wec;
-                                    co_await beast::get_lowest_layer(stream)
-                                        .socket()
-                                        .async_wait(
-                                            asio::ip::tcp::socket::wait_read,
-                                            asio::redirect_error(
-                                                asio::use_awaitable, wec));
-                                    if (!stop_watcher->load())
+                                    auto const failed = co_await HttpServer::
+                                        co_wait_for_transport_failure(
+                                            beast::get_lowest_layer(stream)
+                                                .socket());
+                                    if (failed && !stop_watcher->load())
                                         request_proof_cancel();
                                 },
                                 detail::HttpChildCompletion{
@@ -2101,8 +2137,8 @@ HttpServer::handle_session(
                     {
                         // ── Regular JSON/binary path ──
 
-                        // Cancel timer: set to max, cancelled by socket
-                        // watcher when the client disconnects.
+                        // Cancel timer: set to max, cancelled only when the
+                        // socket watcher observes a transport failure.
                         auto cancel = std::make_shared<asio::steady_timer>(
                             stream.get_executor(),
                             asio::steady_timer::time_point::max());
@@ -2110,7 +2146,9 @@ HttpServer::handle_session(
                             detail::HttpChildCompletionChannel>(
                             stream.get_executor(), 1);
 
-                        // Socket watcher: monitors client disconnect.
+                        // Socket watcher: only an actual transport error can
+                        // prove the response consumer is gone. Read EOF alone
+                        // may be a proxy's normal request-side half-close.
                         // Safe: stream lives in handle_session which is
                         // blocked on the parallel_group below.
                         auto watcher_done =
@@ -2120,12 +2158,12 @@ HttpServer::handle_session(
                         auto ex = co_await asio::this_coro::executor;
                         // clang-format off
                         //@@authority transition=prv.T0129
-                        // bind=expression_statement@9aeccbcb6edc60e3
+                        // bind=expression_statement@a95e51eede414092
                         // status=provisional scope=statement owner=unresolved
                         // owner_hypothesis=http_session
                         // commit=connection_executor touches=prv.S0044
                         // mutation_class=running_guarded
-                        // label=launch_regular_http_disconnect_borrower
+                        // label=launch_regular_http_transport_failure_borrower
                         co_spawn(
                             stream.get_executor(),
                             [&stream,
@@ -2136,14 +2174,11 @@ HttpServer::handle_session(
                              watcher_receipt_hook =
                                  std::move(watcher_receipt_hook)]()
                                 -> asio::awaitable<void> {
-                                boost::system::error_code wec;
-                                co_await beast::get_lowest_layer(stream)
-                                    .socket()
-                                    .async_wait(
-                                        asio::ip::tcp::socket::wait_read,
-                                        asio::redirect_error(
-                                            asio::use_awaitable, wec));
-                                if (!watcher_done->load())
+                                auto const failed = co_await
+                                    HttpServer::co_wait_for_transport_failure(
+                                        beast::get_lowest_layer(stream)
+                                            .socket());
+                                if (failed && !watcher_done->load())
                                 {
                                     request_scope->cancel();
                                     cancel_token->store(true);
@@ -2161,10 +2196,11 @@ HttpServer::handle_session(
                                 watcher_join}); //@@authority-target ids=prv.T0129
                         // clang-format on
 
-                        // Race prove against disconnect using parallel_group
-                        // with wait_for_one(). Unlike ||/wait_for_one_success,
-                        // this cancels the other branch when EITHER completes
-                        // — including when prove throws an exception.
+                        // Race prove against transport failure using
+                        // parallel_group with wait_for_one(). Unlike
+                        // ||/wait_for_one_success, this cancels the other
+                        // branch when EITHER completes — including when prove
+                        // throws an exception.
                         std::exception_ptr race_failure;
                         std::exception_ptr prove_failure;
                         std::exception_ptr cancel_failure;
@@ -2228,15 +2264,16 @@ HttpServer::handle_session(
                         boost::system::error_code watcher_cancel_ec;
                         beast::get_lowest_layer(stream).socket().cancel(
                             watcher_cancel_ec);
-                        //@@authority transition=prv.T0130 bind=join_http_child@a266c62b3fdc921a
+                        //@@authority transition=prv.T0130
+                        // bind=join_http_child@a266c62b3fdc921a
                         // status=provisional scope=statement owner=unresolved
                         // owner_hypothesis=http_session
                         // commit=uncancellable_join touches=prv.S0044
                         // mutation_class=terminal_receipt
                         // calls=join_http_child
-                        // label=join_regular_http_disconnect_borrow_before_exit
+                        // label=join_regular_http_transport_watcher_before_exit
                         co_await detail::join_http_child(
-                            watcher_join); //@@authority-target ids=prv.T0130
+                            watcher_join);  //@@authority-target ids=prv.T0130
 
                         if (race_failure)
                             std::rethrow_exception(race_failure);

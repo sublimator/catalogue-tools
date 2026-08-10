@@ -110,6 +110,13 @@ private:
         std::shared_ptr<SessionControl> session,
         std::shared_ptr<catl::core::RequestContext> req_ctx);
 
+    /// Read readiness alone is not evidence that the response consumer is
+    /// gone: a proxy may half-close its request-writing side while continuing
+    /// to receive the response. Peek without consuming and report only an
+    /// actual transport failure.
+    static boost::asio::awaitable<bool>
+    co_wait_for_transport_failure(boost::asio::ip::tcp::socket& socket);
+
     void
     begin_stop_on_control();
 
