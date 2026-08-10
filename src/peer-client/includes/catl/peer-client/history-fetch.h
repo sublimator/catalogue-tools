@@ -451,6 +451,20 @@ public:
     grant_state(HistoryAuthorityGrantRef const& grant) const noexcept;
 
 private:
+    friend class PeerSet;
+
+    using OwnerSpendCommit =
+        void (*)(void*, catl::core::RequestCommitId) noexcept;
+
+    std::optional<HistoryGrantSpendReceipt>
+    try_spend_with_owner_commit(
+        HistoryAuthorityGrantRef const& grant,
+        HistoryAuthorityAction action,
+        HistoryAuthorityTarget const& target,
+        Clock::time_point now,
+        void* owner_context,
+        OwnerSpendCommit owner_commit) noexcept;
+
     enum class ParticipantState : std::uint8_t { active, revoked };
 
     struct GrantRecord

@@ -5846,10 +5846,6 @@ PeerSet::refresh_global_history_tokens(
 }
 
 HistorySearchSnapshot
-//@@authority transition=prv.T0288 status=provisional scope=function bind=catl::peer_client::history_search_snapshot_on_strand@ab70e3cc47b71bbc
-// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0008,prv.S0073,prv.S0081,prv.S0088,prv.S0104,prv.S0105,prv.S0114,prv.S0115
-// label=project_distinct_evidence_lanes_tokens_and_physical_census
 PeerSet::history_search_snapshot_on_strand(
     HistoryAcquisitionRef const& acquisition,
     std::optional<HistoryInterestRef> const& interest)
@@ -5898,11 +5894,7 @@ PeerSet::history_search_snapshot_on_strand(
             Error::BadRequest, "history search interest is foreign");
     }
 
-    auto const now = std::chrono::steady_clock::now();
-    refresh_global_history_tokens(now);
-
-    HistorySearchSnapshot snapshot;
-    snapshot.control = HistoryControlRevision{
+    auto control = HistoryControlRevision{
         .peer_set_instance = peer_set_instance_id_,
         .pool_revision = history_pool_revision_,
         .demand = demand.id,
@@ -5912,15 +5904,36 @@ PeerSet::history_search_snapshot_on_strand(
         .interest = interest ? interest->interest() : HistoryInterestId{},
         .participant_revision = interest ? interest->participant_revision() : 0,
         .request_scope = demand.request_scope_id};
+    return project_history_search_snapshot(
+        acquisition_it->second, demand, std::move(control));
+}
+
+HistorySearchSnapshot
+//@@authority transition=prv.T0288 status=provisional scope=function bind=catl::peer_client::project_history_search_snapshot@fce59ab3514cad01
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0008,prv.S0073,prv.S0081,prv.S0088,prv.S0104,prv.S0105,prv.S0114,prv.S0115
+// label=project_distinct_evidence_lanes_tokens_and_physical_census
+PeerSet::project_history_search_snapshot(
+    HistoryAcquisitionRecord const& acquisition,
+    LedgerDemandRecord& demand,
+    HistoryControlRevision control)
+{
+    ASSERT_ON_STRAND();
+    auto const now = std::chrono::steady_clock::now();
+    refresh_global_history_tokens(now);
+    control.pool_revision = history_pool_revision_;
+
+    HistorySearchSnapshot snapshot;
+    snapshot.control = std::move(control);
     snapshot.absolute_deadline = demand.absolute_deadline;
     snapshot.fallback_at = demand.options.fallback_at;
-    snapshot.cancelled = demand.terminal.has_value() ||
-        acquisition_it->second.terminal.has_value();
+    snapshot.cancelled =
+        demand.terminal.has_value() || acquisition.terminal.has_value();
     snapshot.initial_parent_dial_budget = demand.dial_tokens.size();
     snapshot.crawl_only_creations = demand.crawl_only_creations;
     snapshot.source_attempts = demand.source_attempts;
     snapshot.physical = physical_census_on_strand();
-    snapshot.excluded_endpoints = acquisition_it->second.excluded_endpoints;
+    snapshot.excluded_endpoints = acquisition.excluded_endpoints;
 
     auto first_live = [](auto const& tokens) -> auto const* {
         auto const found =
@@ -6034,8 +6047,8 @@ PeerSet::history_search_snapshot_on_strand(
                 observation.intervals.end(),
                 [&acquisition](CrawlLedgerRange const& interval) {
                     return interval.first_seq <=
-                        acquisition.context_.ledger_seq &&
-                        acquisition.context_.ledger_seq <= interval.last_seq;
+                        acquisition.context.ledger_seq &&
+                        acquisition.context.ledger_seq <= interval.last_seq;
                 });
             if (!covers)
                 continue;
@@ -6056,7 +6069,7 @@ PeerSet::history_search_snapshot_on_strand(
         {
             candidate.value.advertises_ledger =
                 status->advertised_range.contains(
-                    acquisition.context_.ledger_seq);
+                    acquisition.context.ledger_seq);
         }
     }
 
@@ -6149,15 +6162,212 @@ PeerSet::co_history_search_snapshot(
     co_return history_search_snapshot_on_strand(acquisition, interest);
 }
 
-//@@authority transition=prv.T0243 status=provisional scope=function
-// bind=catl::peer_client::make_peer_use@85a104e0fee81e6f
-// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0088,prv.S0090,prv.S0091,prv.S0093,prv.S0094,prv.S0095,prv.S0096,prv.S0100
-// label=install_exact_generation_peer_use_before_caller_resumes
+HistorySearchExecution
+//@@authority transition=prv.T0289 status=provisional scope=function bind=catl::peer_client::execute_history_grant_on_strand@53fcbb8f477966f8
+// owner=unresolved owner_hypothesis=peer_set commit=participant_then_request_mutex
+// touches=prv.S0088,prv.S0090,prv.S0091,prv.S0094,prv.S0103,prv.S0104,prv.S0105,prv.S0110,prv.S0111,prv.S0115
+// label=replan_and_atomically_spend_ready_history_use
+PeerSet::execute_history_grant_on_strand(
+    std::shared_ptr<SharedHistoryFetch> const& fetch,
+    HistoryAuthorityGrantRef const& grant,
+    PeerUseKind kind)
+{
+    ASSERT_ON_STRAND();
+    HistorySearchExecution result;
+    if (!fetch || !grant || history_pool_revision_ == 0 ||
+        grant.participant_owner_instance() != peer_set_instance_id_)
+    {
+        return result;
+    }
+
+    auto acquisition = history_acquisitions_.find(grant.acquisition());
+    if (acquisition == history_acquisitions_.end() ||
+        acquisition->second.demand != grant.demand() ||
+        acquisition->second.context.fetch != grant.fetch() ||
+        acquisition->second.context.fetch_epoch != grant.fetch_epoch())
+    {
+        return result;
+    }
+    auto demand = ledger_demands_.find(grant.demand());
+    if (demand == ledger_demands_.end() ||
+        demand->second.request_scope_id != grant.request_scope() ||
+        demand->second.absolute_deadline != grant.deadline() ||
+        demand->second.options.ledger_seq !=
+            acquisition->second.context.ledger_seq)
+    {
+        return result;
+    }
+
+    auto snapshot = project_history_search_snapshot(
+        acquisition->second,
+        demand->second,
+        HistoryControlRevision{
+            .peer_set_instance = peer_set_instance_id_,
+            .pool_revision = history_pool_revision_,
+            .demand = demand->second.id,
+            .acquisition = acquisition->second.id,
+            .fetch = acquisition->second.context.fetch,
+            .fetch_epoch = acquisition->second.context.fetch_epoch,
+            .interest = grant.interest(),
+            .participant_revision = grant.participant_revision(),
+            .request_scope = demand->second.request_scope_id});
+    auto plan = plan_history_acquisition(
+        snapshot, grant, std::chrono::steady_clock::now());
+    result.plan = plan;
+
+    auto const* known = std::get_if<HistorySubmitKnownUsePlan>(&plan);
+    auto const* blind = std::get_if<HistorySubmitBlindUsePlan>(&plan);
+    if (!known && !blind)
+        return result;
+    auto const& target = known ? known->target : blind->target;
+    auto connection = connections_.find(target.endpoint);
+    if (connection == connections_.end() || !connection->second.session ||
+        connection->second.generation != target.generation)
+    {
+        return result;
+    }
+    auto generation = make_generation_ref(connection->second.session);
+    if (!generation || generation.generation() != target.generation)
+        return result;
+    auto prepared = prepare_peer_use(
+        generation,
+        PeerUseRequest{
+            .kind = kind,
+            .ledger_seq = demand->second.options.ledger_seq,
+            .absolute_deadline = demand->second.absolute_deadline},
+        known != nullptr);
+    if (!prepared)
+        return result;
+
+    auto find_token = [this](
+                          auto& tokens,
+                          HistoryBudgetGrantRef const& ref)
+        -> LedgerDemandRecord::BudgetToken* {
+        if (!ref || ref.owner_instance != peer_set_instance_id_)
+            return nullptr;
+        auto token = std::find_if(
+            tokens.begin(), tokens.end(), [&ref](auto const& current) {
+                return current.id == ref.token &&
+                    current.revision == ref.revision && !current.spent;
+            });
+        return token == tokens.end() ? nullptr : &*token;
+    };
+    LedgerDemandRecord::BudgetToken* parent_blind = nullptr;
+    LedgerDemandRecord::BudgetToken* global_blind = nullptr;
+    if (blind)
+    {
+        //@@mutation-site blind-history-use-requires-parent-and-global-debit
+        parent_blind =
+            find_token(demand->second.blind_tokens, blind->parent_blind_grant);
+        global_blind = find_token(
+            global_history_blind_tokens_, blind->global_blind_grant);
+        if (!parent_blind || !global_blind)
+            return result;
+        //@@mutation-end blind-history-use-requires-parent-and-global-debit
+    }
+
+    struct OwnerCommitContext
+    {
+        PeerSet* owner = nullptr;
+        PreparedPeerUse* prepared = nullptr;
+        LedgerDemandRecord::BudgetToken* parent_blind = nullptr;
+        LedgerDemandRecord::BudgetToken* global_blind = nullptr;
+        std::chrono::steady_clock::time_point refill_at{};
+        PeerUse peer_use;
+    } context{
+        .owner = this,
+        .prepared = prepared.get(),
+        .parent_blind = parent_blind,
+        .global_blind = global_blind,
+        .refill_at = std::chrono::steady_clock::now() +
+            options_.global_history_token_refill};
+    auto const owner_commit = [](void* opaque,
+                                 catl::core::RequestCommitId) noexcept {
+        auto& commit = *static_cast<OwnerCommitContext*>(opaque);
+        if (commit.parent_blind)
+            commit.parent_blind->spent = true;
+        if (commit.global_blind)
+        {
+            commit.global_blind->spent = true;
+            commit.global_blind->refill_at = commit.refill_at;
+        }
+        commit.peer_use =
+            commit.owner->commit_prepared_peer_use(*commit.prepared);
+        assert(commit.peer_use);
+        commit.owner->advance_history_pool_revision();
+    };
+    auto spend = fetch->try_spend_with_owner_commit(
+        grant,
+        known ? HistoryAuthorityAction::submit_known_use :
+                HistoryAuthorityAction::submit_blind_use,
+        target,
+        std::chrono::steady_clock::now(),
+        &context,
+        owner_commit);
+    if (!spend)
+        return result;
+    result.spend = *spend;
+    result.peer_use = std::move(context.peer_use);
+    return result;
+}
+
+boost::asio::awaitable<HistorySearchExecution>
+PeerSet::co_execute_history_grant(
+    std::shared_ptr<SharedHistoryFetch> fetch,
+    HistoryAuthorityGrantRef grant,
+    PeerUseKind kind)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto owner_executor = catl::core::ContextExecutor(
+            strand_, catl::core::retain_current_request());
+        co_return co_await asio::co_spawn(
+            std::move(owner_executor),
+            [self,
+             fetch = std::move(fetch),
+             grant,
+             kind]() -> asio::awaitable<HistorySearchExecution> {
+                co_return self->execute_history_grant_on_strand(
+                    fetch, grant, kind);
+            },
+            asio::use_awaitable);
+    }
+    co_return execute_history_grant_on_strand(fetch, grant, kind);
+}
+
 PeerUse
 PeerSet::make_peer_use(
     PeerGenerationRef const& generation,
     PeerUseRequest const& request)
+{
+    auto prepared = prepare_peer_use(generation, request, true);
+    return prepared ? commit_prepared_peer_use(*prepared) : PeerUse{};
+}
+
+PeerSet::PreparedPeerUse::~PreparedPeerUse() noexcept
+{
+    if (committed)
+        return;
+    if (control)
+        control->finish = {};
+    if (deadline)
+    {
+        try
+        {
+            deadline->cancel();
+        }
+        catch (...)
+        {
+        }
+    }
+}
+
+std::unique_ptr<PeerSet::PreparedPeerUse>
+PeerSet::prepare_peer_use(
+    PeerGenerationRef const& generation,
+    PeerUseRequest const& request,
+    bool require_coverage) noexcept
 {
     ASSERT_ON_STRAND();
     auto const now = std::chrono::steady_clock::now();
@@ -6181,7 +6391,7 @@ PeerSet::make_peer_use(
             generation.generation_ ||
         !generation_row->second.lifecycle.ready() ||
         //@@mutation-site peer-use-request-must-match-current-range
-        (request.ledger_seq != 0 &&
+        (require_coverage && request.ledger_seq != 0 &&
          !generation_row->second.lifecycle.status()->advertised_range.contains(
              request.ledger_seq)) ||
         //@@mutation-end peer-use-request-must-match-current-range
@@ -6193,85 +6403,115 @@ PeerSet::make_peer_use(
         return {};
     }
 
-    auto const use_id = next_peer_use_id_ + 1;
-    PeerUseTicket const ticket{
-        peer_set_instance_id_, use_id, generation.generation_};
-    auto weak = weak_from_this();
-    auto control = std::make_shared<detail::PeerUseControl>();
-    auto state = std::make_shared<detail::PeerUseState>();
-    auto receipt = std::make_shared<detail::PeerUseReceiptState>(strand_);
-    control->session = connection->second.session;
-    control->generation = generation;
-    control->request = request;
-    control->ticket = ticket;
-    control->owner = weak;
-    control->receipt = receipt;
-    control->finish = [weak, ticket](
-                          PeerUseOutcome outcome,
-                          detail::PeerUseProposalSource source) {
-        if (auto self = weak.lock())
-        {
-            auto remaining = self->drop_peer_use_finish_posts_for_test_.load(
-                std::memory_order_acquire);
-            while (remaining != 0 &&
-                   !self->drop_peer_use_finish_posts_for_test_
-                        .compare_exchange_weak(
-                            remaining,
-                            remaining - 1,
-                            std::memory_order_acq_rel,
-                            std::memory_order_acquire))
-            {
-            }
-            if (remaining != 0)
-                return;
-            asio::post(
-                self->strand_, [self, ticket, outcome, source]() noexcept {
-                    self->finish_peer_use(ticket, outcome, source);
-                });
-        }
-    };
-    state->control = control;
-
-    auto deadline = std::make_shared<asio::steady_timer>(
-        strand_, request.absolute_deadline);
-    deadline->async_wait(
-        [weak, ticket](boost::system::error_code const& ec) noexcept {
-            if (ec == asio::error::operation_aborted)
-                return;
-            if (auto self = weak.lock())
-                self->expire_peer_use(ticket);
-        });
-
-    auto [active, inserted] = active_peer_uses_.emplace(
-        use_id,
-        ActivePeerUse{
-            .endpoint = generation.endpoint_,
-            .connection_generation = generation.generation_,
-            .request = request,
-            .control = std::move(control),
-            .deadline = std::move(deadline),
-        });
-    if (!inserted)
-        return {};
-
     try
     {
-        auto const [_, generation_inserted] =
-            generation_row->second.active_use_ids.insert(use_id);
-        if (!generation_inserted)
-        {
-            active_peer_uses_.erase(active);
-            return {};
-        }
+        auto prepared = std::make_unique<PreparedPeerUse>();
+        prepared->use_id = next_peer_use_id_ + 1;
+        prepared->endpoint = generation.endpoint_;
+        prepared->generation = generation.generation_;
+        PeerUseTicket const ticket{
+            peer_set_instance_id_, prepared->use_id, generation.generation_};
+        auto weak = weak_from_this();
+        prepared->control = std::make_shared<detail::PeerUseControl>();
+        prepared->state = std::make_shared<detail::PeerUseState>();
+        auto receipt =
+            std::make_shared<detail::PeerUseReceiptState>(strand_);
+        prepared->control->session = connection->second.session;
+        prepared->control->generation = generation;
+        prepared->control->request = request;
+        prepared->control->ticket = ticket;
+        prepared->control->owner = weak;
+        prepared->control->receipt = receipt;
+        prepared->control->finish =
+            [weak, ticket](PeerUseOutcome outcome,
+                           detail::PeerUseProposalSource source) {
+                if (auto self = weak.lock())
+                {
+                    auto remaining =
+                        self->drop_peer_use_finish_posts_for_test_.load(
+                            std::memory_order_acquire);
+                    while (
+                        remaining != 0 &&
+                        !self->drop_peer_use_finish_posts_for_test_
+                             .compare_exchange_weak(
+                                 remaining,
+                                 remaining - 1,
+                                 std::memory_order_acq_rel,
+                                 std::memory_order_acquire))
+                    {
+                    }
+                    if (remaining != 0)
+                        return;
+                    asio::post(
+                        self->strand_,
+                        [self, ticket, outcome, source]() noexcept {
+                            self->finish_peer_use(
+                                ticket, outcome, source);
+                        });
+                }
+            };
+        prepared->state->control = prepared->control;
+        prepared->deadline = std::make_shared<asio::steady_timer>(
+            strand_, request.absolute_deadline);
+        prepared->deadline->async_wait(
+            [weak, ticket](boost::system::error_code const& ec) noexcept {
+                if (ec == asio::error::operation_aborted)
+                    return;
+                if (auto self = weak.lock())
+                    self->expire_peer_use(ticket);
+            });
+
+        std::map<std::uint64_t, ActivePeerUse> active;
+        active.emplace(
+            prepared->use_id,
+            ActivePeerUse{
+                .endpoint = generation.endpoint_,
+                .connection_generation = generation.generation_,
+                .request = request,
+                .control = prepared->control,
+                .deadline = prepared->deadline});
+        prepared->active_node = active.extract(prepared->use_id);
+        std::set<std::uint64_t> membership;
+        membership.insert(prepared->use_id);
+        prepared->generation_use_node =
+            membership.extract(prepared->use_id);
+        return prepared;
     }
     catch (...)
     {
-        active_peer_uses_.erase(active);
+        return {};
+    }
+}
+
+PeerUse
+//@@authority transition=prv.T0243 status=provisional scope=function bind=catl::peer_client::commit_prepared_peer_use@a6f1e4f58014d31c
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0088,prv.S0090,prv.S0091,prv.S0093,prv.S0094,prv.S0095,prv.S0096,prv.S0100
+// label=install_exact_generation_peer_use_before_caller_resumes
+PeerSet::commit_prepared_peer_use(PreparedPeerUse& prepared) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto generation = peer_generations_.find(prepared.endpoint);
+    if (prepared.committed || prepared.use_id == 0 ||
+        prepared.use_id != next_peer_use_id_ + 1 ||
+        active_peer_uses_.contains(prepared.use_id) ||
+        generation == peer_generations_.end() ||
+        generation->second.lifecycle.generation() != prepared.generation ||
+        generation->second.active_use_ids.contains(prepared.use_id) ||
+        prepared.active_node.empty() || prepared.generation_use_node.empty() ||
+        !prepared.state)
+    {
         return {};
     }
 
-    next_peer_use_id_ = use_id;
-    return PeerUse{std::move(state)};
+    auto active = active_peer_uses_.insert(std::move(prepared.active_node));
+    auto member = generation->second.active_use_ids.insert(
+        std::move(prepared.generation_use_node));
+    assert(active.inserted);
+    assert(member.inserted);
+    next_peer_use_id_ = prepared.use_id;
+    prepared.committed = true;
+    return PeerUse{std::move(prepared.state)};
 }
 
 boost::asio::awaitable<PeerUse>

@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "peer-set-test-access.h"
+#include "node-batch-test-session.h"
 
 #include <chrono>
 #include <future>
@@ -707,6 +708,163 @@ TEST(PeerSetHistorySearch, SaturatedCrawlProjectionRetainsEveryStrongerLane)
                     candidate.source != HistorySourceLane::crawl_only;
             }),
         snapshot.candidates.end());
+}
+
+TEST(PeerSetHistoryExecution, KnownUseSpendsAndInstallsInOneOwnerCommit)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto session =
+        std::make_shared<NodeBatchTestSession>("ready.example.com:51235");
+    session->attach_strand(io);
+    auto const generation =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 30s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope, LedgerDemandOptions{.ledger_seq = 50}));
+    auto acquisition = run(
+        io,
+        peers->co_open_history_acquisition(
+            demand,
+            HistoryAcquisitionOptions{
+                .fetch = HistoryFetchId{30}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{30}, 1);
+    auto proposal = plan_history_interest(
+        run(io, peers->co_history_search_snapshot(acquisition)), now);
+    auto interest = fetch->register_interest(
+        peers, scope, demand, acquisition, std::move(proposal));
+    ASSERT_TRUE(interest);
+    auto sponsor = fetch->select_sponsor(now);
+    ASSERT_TRUE(sponsor.sponsor);
+    auto grant = fetch->mint_grant(*sponsor.sponsor, now);
+    ASSERT_TRUE(grant);
+
+    auto execution = run(
+        io,
+        peers->co_execute_history_grant(
+            fetch, grant, PeerUseKind::ledger_header));
+    ASSERT_TRUE(execution.committed());
+    ASSERT_TRUE(execution.peer_use);
+    EXPECT_EQ(execution.peer_use.generation().generation(), generation);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(io, peers), 1u);
+    EXPECT_EQ(fetch->grant_state(grant), HistoryGrantState::spent);
+
+    execution.peer_use.finish(PeerUseOutcome::success);
+    while (PeerSetTestAccess::active_peer_use_count(io, peers) != 0)
+    {
+        io.poll();
+        io.restart();
+    }
+    EXPECT_TRUE(fetch->acknowledge_work(
+        grant, HistoryWorkReceipt::closed));
+}
+
+TEST(PeerSetHistoryExecution, RequestCancellationLeavesGrantAndUseUnspent)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto session =
+        std::make_shared<NodeBatchTestSession>("ready.example.com:51235");
+    session->attach_strand(io);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 30s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope, LedgerDemandOptions{.ledger_seq = 50}));
+    auto acquisition = run(
+        io,
+        peers->co_open_history_acquisition(
+            demand,
+            HistoryAcquisitionOptions{
+                .fetch = HistoryFetchId{31}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{31}, 1);
+    auto interest = fetch->register_interest(
+        peers,
+        scope,
+        demand,
+        acquisition,
+        plan_history_interest(
+            run(io, peers->co_history_search_snapshot(acquisition)), now));
+    ASSERT_TRUE(interest);
+    auto sponsor = fetch->select_sponsor(now);
+    ASSERT_TRUE(sponsor.sponsor);
+    auto grant = fetch->mint_grant(*sponsor.sponsor, now);
+    ASSERT_TRUE(grant);
+    ASSERT_TRUE(scope->cancel(now + 1ms));
+
+    auto execution = run(
+        io,
+        peers->co_execute_history_grant(
+            fetch, grant, PeerUseKind::ledger_header));
+    EXPECT_FALSE(execution.committed());
+    EXPECT_FALSE(execution.peer_use);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(io, peers), 0u);
+    EXPECT_NE(fetch->grant_state(grant), HistoryGrantState::spent);
+}
+
+TEST(PeerSetHistoryExecution, BlindUseDebitsExactParentTokenAtomically)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto session =
+        std::make_shared<NodeBatchTestSession>("ready.example.com:51235");
+    session->attach_strand(io);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 30s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{
+                .ledger_seq = 150,
+                .fallback_at = now - 1ms,
+                .remaining_blind_uses = 1}));
+    auto acquisition = run(
+        io,
+        peers->co_open_history_acquisition(
+            demand,
+            HistoryAcquisitionOptions{
+                .fetch = HistoryFetchId{32}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{32}, 1);
+    auto interest = fetch->register_interest(
+        peers,
+        scope,
+        demand,
+        acquisition,
+        plan_history_interest(
+            run(io, peers->co_history_search_snapshot(acquisition)), now));
+    ASSERT_TRUE(interest);
+    auto sponsor = fetch->select_sponsor(now);
+    ASSERT_TRUE(sponsor.sponsor);
+    auto grant = fetch->mint_grant(*sponsor.sponsor, now);
+    ASSERT_TRUE(grant);
+    EXPECT_EQ(grant.action(), HistoryAuthorityAction::submit_blind_use);
+
+    auto execution = run(
+        io,
+        peers->co_execute_history_grant(
+            fetch, grant, PeerUseKind::ledger_header));
+    ASSERT_TRUE(execution.committed());
+    ASSERT_TRUE(execution.peer_use);
+    auto parent = run(io, peers->co_ledger_demand_snapshot(demand));
+    ASSERT_TRUE(parent);
+    EXPECT_EQ(parent->remaining_blind_uses, 0u);
+    EXPECT_EQ(fetch->grant_state(grant), HistoryGrantState::spent);
+
+    execution.peer_use.finish(PeerUseOutcome::no_ledger);
+    while (PeerSetTestAccess::active_peer_use_count(io, peers) != 0)
+    {
+        io.poll();
+        io.restart();
+    }
+    EXPECT_TRUE(fetch->acknowledge_work(
+        grant, HistoryWorkReceipt::closed));
 }
 
 }  // namespace

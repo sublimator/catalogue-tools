@@ -120,6 +120,20 @@ struct PeerHistoryCoverage
 std::string
 describe_peer_history_coverage(PeerHistoryCoverage const& coverage);
 
+/** Result of one fresh owner-side replan and attempted exact grant spend. */
+struct HistorySearchExecution
+{
+    std::optional<HistorySearchPlan> plan;
+    std::optional<HistoryGrantSpendReceipt> spend;
+    PeerUse peer_use;
+
+    bool
+    committed() const noexcept
+    {
+        return spend.has_value();
+    }
+};
+
 class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
     friend class ::PeerSetTestAccess;
@@ -433,6 +447,16 @@ public:
         HistoryAcquisitionRef acquisition,
         std::optional<HistoryInterestRef> interest = std::nullopt);
 
+    /// Replan from current canonical state and, for a ready generation action,
+    /// atomically spend the participant/request authority while installing its
+    /// exact PeerUse. Creation and attachment plans remain inert until their
+    /// owner rows are implemented by the following Cut-4 slice.
+    boost::asio::awaitable<HistorySearchExecution>
+    co_execute_history_grant(
+        std::shared_ptr<SharedHistoryFetch> fetch,
+        HistoryAuthorityGrantRef grant,
+        PeerUseKind kind);
+
     /// A receipt for every generation-pin release command posted before this
     /// call. This does not assert that unrelated pins are absent; it proves
     /// only that PeerSet has consumed the causally preceding releases.
@@ -454,6 +478,10 @@ public:
     hub_peer_count() const;
 
 private:
+    struct PreparedPeerUse;
+    struct LedgerDemandRecord;
+    struct HistoryAcquisitionRecord;
+
     enum class Lifecycle : std::uint8_t { running, stopping, stopped };
 
     struct TargetedConnectAuthorization;
@@ -617,6 +645,15 @@ private:
         PeerGenerationRef const& generation,
         PeerUseRequest const& request);
 
+    std::unique_ptr<PreparedPeerUse>
+    prepare_peer_use(
+        PeerGenerationRef const& generation,
+        PeerUseRequest const& request,
+        bool require_coverage) noexcept;
+
+    PeerUse
+    commit_prepared_peer_use(PreparedPeerUse& prepared) noexcept;
+
     void
     finish_peer_use(
         PeerUseTicket ticket,
@@ -700,6 +737,18 @@ private:
     history_search_snapshot_on_strand(
         HistoryAcquisitionRef const& acquisition,
         std::optional<HistoryInterestRef> const& interest);
+
+    HistorySearchSnapshot
+    project_history_search_snapshot(
+        HistoryAcquisitionRecord const& acquisition,
+        LedgerDemandRecord& demand,
+        HistoryControlRevision control);
+
+    HistorySearchExecution
+    execute_history_grant_on_strand(
+        std::shared_ptr<SharedHistoryFetch> const& fetch,
+        HistoryAuthorityGrantRef const& grant,
+        PeerUseKind kind);
 
     void
     refresh_global_history_tokens(
@@ -1265,6 +1314,24 @@ private:
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=peer_use_waiting_for_exact_generation_drain_receipt
         bool finishing = false;
+    };
+    struct PreparedPeerUse
+    {
+        std::uint64_t use_id = 0;
+        std::string endpoint;
+        std::uint64_t generation = 0;
+        std::shared_ptr<detail::PeerUseControl> control;
+        std::shared_ptr<detail::PeerUseState> state;
+        std::shared_ptr<boost::asio::steady_timer> deadline;
+        std::map<std::uint64_t, ActivePeerUse>::node_type active_node;
+        std::set<std::uint64_t>::node_type generation_use_node;
+        bool committed = false;
+
+        PreparedPeerUse() = default;
+        PreparedPeerUse(PreparedPeerUse const&) = delete;
+        PreparedPeerUse&
+        operator=(PreparedPeerUse const&) = delete;
+        ~PreparedPeerUse() noexcept;
     };
     //@@authority state=prv.S0090 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::active_peer_uses_@640d1f613cb1b089

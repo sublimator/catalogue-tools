@@ -501,17 +501,29 @@ SharedHistoryFetch::mint_grant(
 }
 
 std::optional<HistoryGrantSpendReceipt>
-//@@authority transition=prv.T0273 status=provisional scope=function
-// bind=catl::peer_client::try_spend@84600d2155ac1ffe
-// owner=unresolved owner_hypothesis=participant_grant_arbiter
-// commit=participant_then_request_mutex
-// touches=prv.S0103,prv.S0106,prv.S0110,prv.S0111
-// label=spend_exact_grant_against_sticky_request_commit
 SharedHistoryFetch::try_spend(
     HistoryAuthorityGrantRef const& grant,
     HistoryAuthorityAction action,
     HistoryAuthorityTarget const& target,
     Clock::time_point now) noexcept
+{
+    return try_spend_with_owner_commit(
+        grant, action, target, now, nullptr, nullptr);
+}
+
+std::optional<HistoryGrantSpendReceipt>
+//@@authority transition=prv.T0273 status=provisional scope=function bind=catl::peer_client::try_spend_with_owner_commit@48a59e6c8ca0d9f3
+// owner=unresolved owner_hypothesis=participant_grant_arbiter
+// commit=participant_then_request_mutex
+// touches=prv.S0103,prv.S0106,prv.S0110,prv.S0111
+// label=spend_exact_grant_and_owner_flip_against_sticky_request_commit
+SharedHistoryFetch::try_spend_with_owner_commit(
+    HistoryAuthorityGrantRef const& grant,
+    HistoryAuthorityAction action,
+    HistoryAuthorityTarget const& target,
+    Clock::time_point now,
+    void* owner_context,
+    OwnerSpendCommit owner_commit) noexcept
 {
     if (!authentic(grant))
         return std::nullopt;
@@ -546,10 +558,18 @@ SharedHistoryFetch::try_spend(
     }
 
     auto const committed = cell->request_scope->try_commit(
-        now, [&canonical, &cell](catl::core::RequestCommitId id) noexcept {
+        now,
+        [&canonical,
+         &cell,
+         owner_context,
+         owner_commit](catl::core::RequestCommitId id) noexcept {
             canonical.state = HistoryGrantState::spent;
             canonical.request_commit = id;
             ++cell->outstanding_work;
+            //@@mutation-site history-owner-flip-shares-request-commit
+            if (owner_commit)
+                owner_commit(owner_context, id);
+            //@@mutation-end history-owner-flip-shares-request-commit
         });
     if (!committed)
         return std::nullopt;
