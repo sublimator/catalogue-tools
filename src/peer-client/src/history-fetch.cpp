@@ -323,17 +323,17 @@ SharedHistoryFetch::register_interest(
 
 std::optional<HistoryInterestRef>
 //@@authority transition=prv.T0270 status=provisional scope=function
-// bind=catl::peer_client::revise_interest@2fb2297fc2d4cdbe
+// bind=catl::peer_client::revise_interest@4b2a9566205051ca
 // owner=unresolved owner_hypothesis=shared_history_fetch
 // commit=owner_then_participant_mutex touches=prv.S0108,prv.S0109,prv.S0110
 // label=replace_participant_revision_and_revoke_old_unspent_grants
 SharedHistoryFetch::revise_interest(
     HistoryInterestRef const& interest,
-    HistoryParticipantPlan plan)
+    HistoryParticipantPlan plan,
+    Clock::time_point now)
 {
     if (!authentic(interest))
         return std::nullopt;
-    auto const now = Clock::now();
     if (now >= interest.deadline_ || !valid_plan(plan, interest.deadline_, now))
     {
         return std::nullopt;

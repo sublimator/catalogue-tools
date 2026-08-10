@@ -230,6 +230,26 @@ TEST_F(Fixture, ActionAtAbsoluteDeadlineIsNotFutureViability)
     EXPECT_TRUE(fetch->terminalize_if_no_viable_action(now));
 }
 
+TEST_F(Fixture, RevisionUsesThePlannerTimestampAtAnExpiredWakeBoundary)
+{
+    auto passive = participant(now + 10s, {});
+    auto const planning_now = now - 2s;
+    auto const wake = HistoryParticipantPlan{
+        .wait_until = HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::global_token_refill,
+            .at = now - 1s,
+            .token = 1}};
+
+    // The same inert plan is expired against a fresh clock sample but was a
+    // valid future wake in the snapshot from which the planner derived it.
+    EXPECT_FALSE(fetch->revise_interest(passive.interest, wake));
+    auto revised = fetch->revise_interest(passive.interest, wake, planning_now);
+    ASSERT_TRUE(revised);
+    EXPECT_GT(
+        revised->participant_revision(),
+        passive.interest.participant_revision());
+}
+
 TEST_F(Fixture, ExhaustionCancellationAndDetachCannotCancelViableSibling)
 {
     auto first = participant(now + 10s, viable(now, "first"));

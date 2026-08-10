@@ -412,7 +412,8 @@ public:
     std::optional<HistoryInterestRef>
     revise_interest(
         HistoryInterestRef const& interest,
-        HistoryParticipantPlan plan);
+        HistoryParticipantPlan plan,
+        Clock::time_point now = Clock::now());
 
     HistorySponsorDecision
     select_sponsor(Clock::time_point now = Clock::now()) const noexcept;
