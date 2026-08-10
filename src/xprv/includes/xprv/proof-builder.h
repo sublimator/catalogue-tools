@@ -13,6 +13,7 @@
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <catl/core/request-scope.h>
 #include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
 #include <catl/rpc-client/rpc-client-coro.h>
@@ -45,6 +46,10 @@ struct BuildServices
     std::shared_ptr<catl::rpc::RpcClient> rpc;
     uint32_t network_id = 0;
 
+    // Immutable per-HTTP-request identity/deadline. Cut 3 threads this to
+    // NodeCache before it grants any transport authority in Cut 4.
+    std::shared_ptr<catl::core::RequestScope> request_scope;
+
     // Cached tx → ledger_seq (0 = not cached, must do RPC lookup)
     uint32_t tx_ledger_seq_hint = 0;
 
@@ -66,6 +71,7 @@ struct BuildServices
     // Checked at cancellation boundaries (peer waits and node walks)
     // to stop work without disrupting shared NodeCache state.
     //@@authority state=prv.S0012 status=provisional scope=field
+    // bind=xprv::BuildServices::cancel_token@a60067134af3b89b
     // owner=unresolved owner_hypothesis=request_session observed_home=build_services
     // label=borrowed_per_request_cancellation_projection
     std::shared_ptr<std::atomic<bool>> cancel_token;
@@ -77,6 +83,7 @@ struct BuildServices
     using StepCallback =
         std::function<boost::asio::awaitable<void>(ChainStep const&)>;
     //@@authority state=prv.S0013 status=provisional scope=field
+    // bind=xprv::BuildServices::on_step@a7b5bee1021dcc59
     // owner=unresolved owner_hypothesis=request_session observed_home=build_services
     // label=borrowed_per_request_proof_step_delivery_sink
     StepCallback on_step;

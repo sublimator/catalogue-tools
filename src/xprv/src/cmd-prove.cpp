@@ -88,10 +88,13 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
         io,
         [&, engine]() -> boost::asio::awaitable<void> {
             //@@authority transition=prv.T0036 status=provisional scope=statement
+            // bind=prove@aa6f2977f0e541b9
             // owner=unresolved owner_hypothesis=request_session
             // commit=cli_coroutine calls=prove
             // label=submit_cli_proof_without_opaque_operation_id
-            auto prove_result = co_await engine->prove(opts.tx_hash);
+            // clang-format off
+            auto prove_result = co_await engine->prove(opts.tx_hash); //@@authority-target ids=prv.T0036
+            // clang-format on
             auto& chain = prove_result.chain;
 
             if (!xprv::resolve_proof_chain(

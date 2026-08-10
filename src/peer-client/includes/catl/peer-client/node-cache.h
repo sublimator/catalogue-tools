@@ -19,6 +19,7 @@
 #include "wire-node-view.h"
 
 #include <catl/core/logger.h>
+#include <catl/core/request-scope.h>
 #include <catl/core/types.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -465,14 +466,16 @@ public:
     get_header(
         uint32_t ledger_seq,
         std::shared_ptr<PeerSet> peers,
-        PeerGenerationPin peer);
+        PeerGenerationPin peer,
+        std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     /// Unmanaged compatibility overload; see walk_to().
     asio::awaitable<LedgerHeaderResult>
     get_header(
         uint32_t ledger_seq,
         std::shared_ptr<PeerSet> peers,
-        PeerSessionPtr peer = nullptr);
+        PeerSessionPtr peer = nullptr,
+        std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     /// Number of present entries in the cache.
     size_t
@@ -1094,7 +1097,8 @@ private:
         uint32_t ledger_seq,
         std::shared_ptr<PeerSet> peers,
         PeerGenerationPin peer_pin,
-        PeerSessionPtr unmanaged_owner);
+        PeerSessionPtr unmanaged_owner,
+        std::shared_ptr<catl::core::RequestScope> request_scope);
 
     /// Called by the response handler for every TMLedgerData node response.
     /// Reports acceptance and processing failure independently. An earlier

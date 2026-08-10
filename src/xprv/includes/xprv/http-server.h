@@ -47,6 +47,7 @@ struct HttpServerOptions
     size_t max_request_body = 512 * 1024;  // 512KB
     std::chrono::seconds read_timeout{30};
     std::chrono::seconds write_timeout{30};
+    std::chrono::seconds request_work_timeout{60};
     std::string build_id;  // tracked-source identity at serve start
 };
 

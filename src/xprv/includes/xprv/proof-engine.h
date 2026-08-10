@@ -20,6 +20,7 @@
 #include <catl/peer-client/ledger-fetch-coordinator.h>
 #include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
+#include <catl/core/request-scope.h>
 #include <catl/rpc-client/rpc-client.h>
 #include <catl/xdata/protocol.h>
 
@@ -237,7 +238,8 @@ public:
         std::shared_ptr<std::atomic<bool>> cancel_token = nullptr,
         uint32_t ledger_seq_hint = 0,
         uint32_t max_anchor_age_secs = 0,
-        StepCallback on_step = nullptr);
+        StepCallback on_step = nullptr,
+        std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     /// Verify a proof chain. Sync pure function — no shared state.
     VerifyResult
@@ -500,7 +502,8 @@ private:
         uint32_t vl_sequence,
         uint32_t vl_effective,
         uint32_t vl_expiration,
-        std::vector<ValidationCollector::Entry> validations);
+        std::vector<ValidationCollector::Entry> validations,
+        std::shared_ptr<catl::core::RequestScope> request_scope);
 
     /// Reuse the current anchor if recent enough, otherwise wait for
     /// a new quorum and build a fresh one.
@@ -508,7 +511,8 @@ private:
     boost::asio::awaitable<AnchorBundle>
     get_or_reuse_anchor(
         std::shared_ptr<catl::vl::ValidatorList> const& vl,
-        uint32_t max_age_secs);
+        uint32_t max_age_secs,
+        std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     void
     invalidate_anchor_cache();

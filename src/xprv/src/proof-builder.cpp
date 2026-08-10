@@ -198,6 +198,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         std::shared_ptr<catl::peer_client::PeerSet> peers;
         std::shared_ptr<NodeCache> node_cache;
         catl::xdata::Protocol protocol;
+        std::shared_ptr<catl::core::RequestScope> request_scope;
 
         // Anchor state
         Hash256 anchor_hash;
@@ -222,6 +223,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     ctx->peers = svc.peers;
     ctx->node_cache = svc.node_cache;
     ctx->protocol = svc.protocol;
+    ctx->request_scope = svc.request_scope;
     ctx->cancel_token = svc.cancel_token;
 
     // Convenience reference — safe between co_awaits in this frame
@@ -577,7 +579,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             [ctx, tx_ledger_seq](PeerGenerationPin peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
-                    tx_ledger_seq, ctx->peers, std::move(peer));
+                    tx_ledger_seq,
+                    ctx->peers,
+                    std::move(peer),
+                    ctx->request_scope);
             });
         ctx->target_ledger_hash = ctx->target_hdr_result->ledger_hash256();
 
@@ -644,7 +649,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             [ctx, flag_seq](PeerGenerationPin peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
-                    flag_seq, ctx->peers, std::move(peer));
+                    flag_seq,
+                    ctx->peers,
+                    std::move(peer),
+                    ctx->request_scope);
             });
         auto flag_hash = ctx->flag_hdr_result->ledger_hash256();
         auto flag_header = ctx->flag_hdr_result->header();
@@ -692,7 +700,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             [ctx, tx_ledger_seq](PeerGenerationPin peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
-                    tx_ledger_seq, ctx->peers, std::move(peer));
+                    tx_ledger_seq,
+                    ctx->peers,
+                    std::move(peer),
+                    ctx->request_scope);
             });
         ctx->target_ledger_hash = ctx->target_hdr_result->ledger_hash256();
 
@@ -718,7 +729,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             [ctx, tx_ledger_seq](PeerGenerationPin peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
-                    tx_ledger_seq, ctx->peers, std::move(peer));
+                    tx_ledger_seq,
+                    ctx->peers,
+                    std::move(peer),
+                    ctx->request_scope);
             });
     }
     auto const& target_hdr = *ctx->target_hdr_result;

@@ -3469,7 +3469,8 @@ asio::awaitable<LedgerHeaderResult>
 NodeCache::get_header(
     uint32_t ledger_seq,
     std::shared_ptr<PeerSet> peers,
-    PeerGenerationPin peer)
+    PeerGenerationPin peer,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     if (peer)
     {
@@ -3484,17 +3485,26 @@ NodeCache::get_header(
                 "managed peer pin does not belong to the supplied PeerSet");
     }
     co_return co_await get_header_impl(
-        ledger_seq, std::move(peers), std::move(peer), nullptr);
+        ledger_seq,
+        std::move(peers),
+        std::move(peer),
+        nullptr,
+        std::move(request_scope));
 }
 
 asio::awaitable<LedgerHeaderResult>
 NodeCache::get_header(
     uint32_t ledger_seq,
     std::shared_ptr<PeerSet> peers,
-    PeerSessionPtr peer)
+    PeerSessionPtr peer,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     co_return co_await get_header_impl(
-        ledger_seq, std::move(peers), {}, std::move(peer));
+        ledger_seq,
+        std::move(peers),
+        {},
+        std::move(peer),
+        std::move(request_scope));
 }
 
 asio::awaitable<LedgerHeaderResult>
@@ -3502,7 +3512,8 @@ NodeCache::get_header_impl(
     uint32_t ledger_seq,
     std::shared_ptr<PeerSet> peers,
     PeerGenerationPin peer_pin,
-    PeerSessionPtr unmanaged_owner)
+    PeerSessionPtr unmanaged_owner,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     if (!header_state_strand_.running_in_this_thread())
     {
@@ -3515,16 +3526,27 @@ NodeCache::get_header_impl(
              ledger_seq,
              peers = std::move(peers),
              peer_pin = std::move(peer_pin),
-             unmanaged_owner = std::move(unmanaged_owner)]() mutable
+             unmanaged_owner = std::move(unmanaged_owner),
+             request_scope = std::move(request_scope)]() mutable
             -> asio::awaitable<LedgerHeaderResult> {
                 co_return co_await self->get_header_impl(
                     ledger_seq,
                     std::move(peers),
                     std::move(peer_pin),
-                    std::move(unmanaged_owner));
+                    std::move(unmanaged_owner),
+                    std::move(request_scope));
             },
             asio::use_awaitable);
     }
+
+    // The participant record lands later in this cut. Retaining the immutable
+    // scope through this waiter already prevents child code from inventing a
+    // fresh identity or relative deadline while crossing the cache strand.
+    //@@authority transition=prv.T0261 status=provisional scope=statement bind=expression_statement@5a99cce8f2b2c09d
+    // owner=unresolved owner_hypothesis=node_cache commit=header_state_strand
+    // touches=prv.S0102,prv.S0103
+    // label=carry_request_scope_into_shared_header_fetch_boundary
+    (void)request_scope;  //@@authority-target ids=prv.T0261
 
     // Clear is a closed admission boundary, not a best-effort map erase. A
     // caller that races it receives a typed refusal and may retry after the
@@ -3591,7 +3613,7 @@ NodeCache::get_header_impl(
             fetch->operation_id = next_header_fetch_id_ + 1;
             fetch->epoch = header_epoch_;
             //@@authority transition=node_cache.install_header_fetch
-            // bind=catl::peer_client::get_header_impl@0251e110e5833a33
+            // bind=catl::peer_client::get_header_impl@073601d9515bd8a4
             // owner=node_cache commit=header-state-strand
             active_header_fetches_.emplace(fetch->operation_id, fetch);
             next_header_fetch_id_ = fetch->operation_id;

@@ -557,7 +557,7 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
 // ═══════════════════════════════════════════════════════════════════════
 
 //@@authority transition=prv.T0005 status=provisional scope=function
-// bind=xprv::prove@3023246064adff8e
+// bind=xprv::prove@0687ab7802c2dbbe
 // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
 // label=begin_real_proof_operation_without_authority_identity
 asio::awaitable<ProofEngine::ProveResult>
@@ -566,7 +566,8 @@ ProofEngine::prove(
     std::shared_ptr<std::atomic<bool>> cancel_token,
     uint32_t ledger_seq_hint,
     uint32_t max_anchor_age_secs,
-    StepCallback on_step)
+    StepCallback on_step,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     // Enable cancellation so the || operator in the HTTP session can
     // abort this coroutine when the client disconnects.
@@ -625,11 +626,13 @@ ProofEngine::prove(
         .node_cache = node_cache_,
         .rpc = rpc_,
         .network_id = config_.network_id,
+        .request_scope = request_scope,
         .tx_ledger_seq_hint =
             ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0),
-        .get_anchor = [self, vl, anchor_age](uint32_t min_seq)
+        .get_anchor = [self, vl, anchor_age, request_scope](uint32_t min_seq)
             -> boost::asio::awaitable<BuildServices::AnchorData> {
-            auto bundle = co_await self->get_or_reuse_anchor(vl, anchor_age);
+            auto bundle = co_await self->get_or_reuse_anchor(
+                vl, anchor_age, request_scope);
             // If anchor is behind min_seq, force a fresh one once.
             if (min_seq > 0 && bundle.seq < min_seq)
             {
@@ -642,7 +645,8 @@ ProofEngine::prove(
                     " behind min_seq=",
                     min_seq,
                     " — fetching fresh");
-                bundle = co_await self->get_or_reuse_anchor(vl, 0);
+                bundle = co_await self->get_or_reuse_anchor(
+                    vl, 0, request_scope);
             }
             co_return BuildServices::AnchorData{
                 .hdr = bundle.header_result,
@@ -656,7 +660,7 @@ ProofEngine::prove(
     };
 
     //@@authority transition=prv.T0006 status=provisional scope=statement
-    // bind=build_proof@628b5988ba4dbec4
+    // bind=build_proof@0846ac119509f6e8
     // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
     // calls=build_proof
     // label=enter_shared_proof_build_without_operation_identity
@@ -919,7 +923,8 @@ ProofEngine::co_health()
 asio::awaitable<ProofEngine::AnchorBundle>
 ProofEngine::get_or_reuse_anchor(
     std::shared_ptr<catl::vl::ValidatorList> const& vl,
-    uint32_t max_age_secs)
+    uint32_t max_age_secs,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     if (!vl)
         throw std::runtime_error("validator list snapshot is missing");
@@ -1082,7 +1087,8 @@ ProofEngine::get_or_reuse_anchor(
         quorum.vl_sequence,
         vl->effective,
         vl->expiration,
-        quorum.validations);
+        quorum.validations,
+        std::move(request_scope));
 
     if (!validator_list_active_at(
             vl->effective,
@@ -1127,7 +1133,8 @@ ProofEngine::get_anchor_bundle(
     uint32_t vl_sequence,
     uint32_t vl_effective,
     uint32_t vl_expiration,
-    std::vector<ValidationCollector::Entry> validations)
+    std::vector<ValidationCollector::Entry> validations,
+    std::shared_ptr<catl::core::RequestScope> request_scope)
 {
     enum class Action { hit, wait, fetch };
     Action action;
@@ -1214,7 +1221,8 @@ ProofEngine::get_anchor_bundle(
         catl::core::emit_status(
             "anchor header: fetching from peer seq=" +
             std::to_string(anchor_seq));
-        auto hdr = co_await node_cache_->get_header(anchor_seq, peers_);
+        auto hdr = co_await node_cache_->get_header(
+            anchor_seq, peers_, nullptr, std::move(request_scope));
         if (hdr.seq() != anchor_seq || hdr.ledger_hash256() != anchor_hash)
         {
             throw std::runtime_error(

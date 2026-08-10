@@ -15,6 +15,7 @@
 #include <catl/core/context-executor.h>
 #include <catl/core/logger.h>
 #include <catl/core/request-context.h>
+#include <catl/core/request-scope.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/rpc-client/rpc-client.h>
 
@@ -1190,6 +1191,7 @@ HttpServer::handle_session(
         // Fresh request ID per HTTP request (not per connection).
         // Priority: X-Request-Id header > xrid query param > generated.
         req_ctx->request_id = generate_request_id();
+        req_ctx->started_at = std::chrono::steady_clock::now();
         auto hdr = req["X-Request-Id"];
         if (hdr.empty())
         {
@@ -1211,6 +1213,27 @@ HttpServer::handle_session(
             }
             if (!safe.empty())
                 req_ctx->request_id = std::move(safe);
+        }
+
+        // One immutable authority identity and absolute deadline per HTTP
+        // request. It remains observational in Cut 3; Cut 4 binds participant
+        // grants and all peer work to it.
+        auto request_scope = catl::core::RequestScope::create(
+            req_ctx->started_at + opts_.request_work_timeout);
+        if (!request_scope)
+        {
+            stream.expires_after(opts_.write_timeout);
+            co_await http::async_write(
+                stream,
+                error_response(
+                    503,
+                    "request authority unavailable",
+                    version,
+                    keep_alive),
+                asio::redirect_error(asio::use_awaitable, ec));
+            if (ec || !keep_alive)
+                break;
+            continue;
         }
 
         PLOGD(log_, req.method_string(), " ", path);
@@ -1635,7 +1658,9 @@ HttpServer::handle_session(
                         auto writer_failed =
                             std::make_shared<std::atomic<bool>>(false);
                         auto request_proof_cancel = [cancel_token,
-                                                     proof_cancel]() noexcept {
+                                                     proof_cancel,
+                                                     request_scope]() noexcept {
+                            request_scope->cancel();
                             cancel_token->store(true);
                             proof_cancel->try_send(boost::system::error_code{});
                         };
@@ -1887,7 +1912,7 @@ HttpServer::handle_session(
                             try
                             {
                                 //@@authority transition=prv.T0035
-                                // bind=prove@efa7a333b98acf5d
+                                // bind=prove@45d197729a40e4e4
                                 // status=provisional scope=statement
                                 // owner=unresolved
                                 // owner_hypothesis=request_session
@@ -1905,7 +1930,8 @@ HttpServer::handle_session(
                                                 cancel_token,
                                                 ledger_seq_hint,
                                                 max_anchor_age,
-                                                std::move(on_step)),
+                                                std::move(on_step),
+                                                request_scope),
                                             asio::deferred),
                                         asio::co_spawn(
                                             ex,
@@ -2001,6 +2027,7 @@ HttpServer::handle_session(
                         catch (...)
                         {
                             pipeline_failure = std::current_exception();
+                            request_scope->cancel();
                             cancel_token->store(true);
                         }
 
@@ -2093,7 +2120,7 @@ HttpServer::handle_session(
                         auto ex = co_await asio::this_coro::executor;
                         // clang-format off
                         //@@authority transition=prv.T0129
-                        // bind=expression_statement@447ffbbc66ea4973
+                        // bind=expression_statement@9aeccbcb6edc60e3
                         // status=provisional scope=statement owner=unresolved
                         // owner_hypothesis=http_session
                         // commit=connection_executor touches=prv.S0044
@@ -2104,6 +2131,7 @@ HttpServer::handle_session(
                             [&stream,
                              cancel,
                              cancel_token,
+                             request_scope,
                              watcher_done,
                              watcher_receipt_hook =
                                  std::move(watcher_receipt_hook)]()
@@ -2117,6 +2145,7 @@ HttpServer::handle_session(
                                             asio::use_awaitable, wec));
                                 if (!watcher_done->load())
                                 {
+                                    request_scope->cancel();
                                     cancel_token->store(true);
                                     // This pinned Boost exposes only the
                                     // throwing timer cancel overload. Any throw
@@ -2156,7 +2185,9 @@ HttpServer::handle_session(
                                             tx_it->second,
                                             cancel_token,
                                             ledger_seq_hint,
-                                            max_anchor_age),
+                                            max_anchor_age,
+                                            nullptr,
+                                            request_scope),
                                         asio::deferred),
                                     asio::co_spawn(
                                         ex,

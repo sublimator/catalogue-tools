@@ -1,5 +1,6 @@
 # Create the core library
-add_library(catl_core STATIC src/types.cpp src/logger.cpp src/base64.cpp)
+add_library(catl_core STATIC src/types.cpp src/logger.cpp src/base64.cpp
+                             src/request-scope.cpp)
 
 # Set up include directories
 target_include_directories(
