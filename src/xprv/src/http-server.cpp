@@ -192,7 +192,17 @@ HttpServer::co_wait_for_transport_failure(tcp::socket& socket)
         wait_ec == asio::error::eof)
         co_return false;
     if (wait_ec)
+    {
+        PLOGW(
+            log_,
+            "Response transport watcher classified wait-read error: value=",
+            wait_ec.value(),
+            " category=",
+            wait_ec.category().name(),
+            " message=",
+            wait_ec.message());
         co_return true;
+    }
 
     std::array<char, 1> probe{};
     boost::system::error_code probe_ec;
@@ -206,6 +216,14 @@ HttpServer::co_wait_for_transport_failure(tcp::socket& socket)
     if (!probe_ec || probe_ec == asio::error::eof ||
         probe_ec == asio::error::operation_aborted)
         co_return false;
+    PLOGW(
+        log_,
+        "Response transport watcher classified peek error: value=",
+        probe_ec.value(),
+        " category=",
+        probe_ec.category().name(),
+        " message=",
+        probe_ec.message());
     co_return true;
 }
 
@@ -2273,7 +2291,7 @@ HttpServer::handle_session(
                         // calls=join_http_child
                         // label=join_regular_http_transport_watcher_before_exit
                         co_await detail::join_http_child(
-                            watcher_join);  //@@authority-target ids=prv.T0130
+                            watcher_join); //@@authority-target ids=prv.T0130
 
                         if (race_failure)
                             std::rethrow_exception(race_failure);
