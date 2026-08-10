@@ -1390,6 +1390,8 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
                 scope,
                 LedgerDemandOptions{
                     .ledger_seq = ledger_seq,
+                    .fallback_at =
+                        std::chrono::steady_clock::time_point::min(),
                     .remaining_new_dials =
                         std::numeric_limits<std::size_t>::max(),
                     .remaining_promotions =
@@ -1532,6 +1534,8 @@ TEST(NodeCacheIntegration, CoalescedHeaderWaitersKeepDistinctDemandOwners)
                     scope,
                     LedgerDemandOptions{
                         .ledger_seq = ledger_seq,
+                        .fallback_at =
+                            std::chrono::steady_clock::time_point::min(),
                         .remaining_new_dials =
                             std::numeric_limits<std::size_t>::max(),
                         .remaining_promotions =

@@ -1909,6 +1909,8 @@ NodeCache::ensure_present(
                     request_scope,
                     LedgerDemandOptions{
                         .ledger_seq = ledger_seq,
+                        .fallback_at =
+                            std::chrono::steady_clock::time_point::min(),
                         .remaining_new_dials =
                             std::numeric_limits<std::size_t>::max(),
                         .remaining_promotions =
@@ -4241,6 +4243,14 @@ NodeCache::get_header_impl(
                     request_scope,
                     LedgerDemandOptions{
                         .ledger_seq = ledger_seq,
+                        // Peer status can trail the validated tip by a few
+                        // ledgers. Known coverage still wins in the planner;
+                        // this permits its single bounded blind header use
+                        // before declaring the exact anchor unavailable.
+                        // The sentinel matches node acquisitions sharing this
+                        // request-and-ledger parent.
+                        .fallback_at =
+                            std::chrono::steady_clock::time_point::min(),
                         .remaining_new_dials =
                             std::numeric_limits<std::size_t>::max(),
                         .remaining_promotions =

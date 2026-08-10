@@ -6612,6 +6612,68 @@ TEST(PeerSessionInterface, ManagedScopedHeaderUsesExactPeerUseWithoutLegacyPin)
         1u);
 }
 
+TEST(
+    PeerSessionInterface,
+    ManagedScopedHeaderUsesBoundedBlindPeerUseWhenStatusRangeLagsTip)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 500ms,
+        });
+    constexpr uint32_t ledger_seq = 6000;
+    auto session = std::make_shared<FakePeerSession>(
+        io,
+        "lagging-header-range:1",
+        true,
+        ledger_seq,
+        5900,
+        ledger_seq - 6);
+    std::atomic<unsigned> sends = 0;
+    session->set_invoke_header_handler_inline(true);
+    session->set_get_ledger_header_handler(
+        [&sends](uint32_t requested, Callback<LedgerHeaderResult> callback) {
+            EXPECT_EQ(requested, 6000u);
+            sends.fetch_add(1, std::memory_order_relaxed);
+            callback(Error::Success, LedgerHeaderResult{});
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + 2s);
+
+    bool completed = false;
+    asio::co_spawn(
+        io,
+        [&, cache, peers, scope]() -> asio::awaitable<void> {
+            (void)co_await cache->get_header(
+                ledger_seq, peers, PeerSessionPtr{}, scope);
+            completed = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(sends.load(std::memory_order_relaxed), 1u);
+    io.restart();
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(io, peers), 0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::peer_use_outcome_count(
+            io, peers, PeerUseOutcome::success),
+        1u);
+}
+
 TEST(PeerSessionInterface, ManagedScopedWalkUsesExactNodeBatchWithoutLegacyPin)
 {
     using namespace std::chrono_literals;
