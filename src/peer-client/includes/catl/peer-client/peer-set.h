@@ -1427,7 +1427,7 @@ private:
             history_attachments;
         //@@authority state=prv.S0118 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::physical_deadline@f2cf88320d67fe0c
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
-        // label=immutable_physical_generation_completion_deadline
+        // label=immutable_pre_admission_or_transient_generation_deadline
         std::chrono::steady_clock::time_point physical_deadline{};
         //@@authority state=prv.S0121 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::history_watchdog@4b83b94a02576e68
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set

@@ -1571,6 +1571,22 @@ public:
         return generation;
     }
 
+    static void
+    set_generation_physical_deadline(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::chrono::steady_clock::time_point deadline)
+    {
+        run_on_strand(
+            io, peers, [endpoint = std::move(endpoint), deadline](auto& set) {
+                auto generation = set.peer_generations_.find(endpoint);
+                if (generation == set.peer_generations_.end())
+                    throw std::logic_error("test generation missing");
+                generation->second.physical_deadline = deadline;
+            });
+    }
+
     static catl::peer_client::PeerGenerationRef
     generation_ref(
         boost::asio::io_context& io,

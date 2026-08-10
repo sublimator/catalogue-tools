@@ -54,6 +54,15 @@ public:
     std::vector<Entry>
     get_quorum(int percent = 90, QuorumMode mode = QuorumMode::live) const;
 
+    /// Get the newest quorum whose signed ledger sequence does not exceed
+    /// max_ledger_sequence. This lets proof-anchor selection compose
+    /// validation authority with a separately observed transport boundary.
+    std::vector<Entry>
+    get_quorum_at_or_before(
+        uint32_t max_ledger_sequence,
+        int percent = 90,
+        QuorumMode mode = QuorumMode::live) const;
+
     /// Get all distinct validations currently available for a specific ledger
     /// hash under the requested mode.
     std::vector<Entry>
@@ -191,7 +200,10 @@ private:
     };
 
     std::optional<QuorumCandidate>
-    select_quorum_candidate(int percent, QuorumMode mode) const;
+    select_quorum_candidate(
+        int percent,
+        QuorumMode mode,
+        std::optional<uint32_t> max_ledger_sequence = std::nullopt) const;
 
     static constexpr std::size_t kMaxRetainedVotesPerValidator = 4;
 };

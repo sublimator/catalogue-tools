@@ -7075,19 +7075,21 @@ PeerSet::execute_history_grant_on_strand(
     {
         auto connection = connections_.find(target.endpoint);
         auto generation_row = peer_generations_.find(target.endpoint);
+        auto const admitted = generation_row != peer_generations_.end() &&
+            connection != connections_.end() && connection->second.session &&
+            connection->second.session == generation_row->second.session &&
+            connection->second.generation == target.generation;
         if (generation_row == peer_generations_.end() ||
             !generation_row->second.session ||
             generation_row->second.lifecycle.generation() !=
                 target.generation ||
             !generation_row->second.lifecycle.ready() ||
-            generation_row->second.physical_deadline <=
-                std::chrono::steady_clock::now())
+            (!admitted &&
+             generation_row->second.physical_deadline <=
+                 std::chrono::steady_clock::now()))
         {
             return result;
         }
-        auto const admitted = connection != connections_.end() &&
-            connection->second.session == generation_row->second.session &&
-            connection->second.generation == target.generation;
         auto const exact_transient_owner = !admitted &&
             ((generation_row->second.history_origin &&
               generation_row->second.history_origin->retainer_control.acquisition ==

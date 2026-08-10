@@ -53,13 +53,10 @@ valid_wake(
 }
 
 bool
-valid_candidate(
-    HistorySearchCandidate const& candidate,
-    Clock::time_point deadline) noexcept
+valid_candidate(HistorySearchCandidate const& candidate) noexcept
 {
     if (candidate.target.endpoint.empty() || !valid_lane(candidate.source) ||
-        candidate.fair_ticket == 0 ||
-        (candidate.retry_not_before && *candidate.retry_not_before > deadline))
+        candidate.fair_ticket == 0)
     {
         return false;
     }
@@ -91,8 +88,8 @@ valid_snapshot(HistorySearchSnapshot const& snapshot, bool require_control)
     if (!std::all_of(
             snapshot.candidates.begin(),
             snapshot.candidates.end(),
-            [&snapshot](HistorySearchCandidate const& candidate) {
-                return valid_candidate(candidate, snapshot.absolute_deadline);
+            [](HistorySearchCandidate const& candidate) {
+                return valid_candidate(candidate);
             }))
     {
         return false;

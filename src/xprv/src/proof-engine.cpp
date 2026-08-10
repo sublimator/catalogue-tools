@@ -1011,18 +1011,52 @@ ProofEngine::get_or_reuse_anchor(
         co_return *reusable;
     }
 
-    // Use the last full quorum if available — no waiting needed.
-    // Fall back to co_wait_best_quorum only on cold start.
-    auto full = co_await quorum_tracker_->co_last_full_quorum(
-        std::chrono::seconds(max_age_secs > 0 ? max_age_secs : 10),
-        vl->sequence);
+    // Prefer a proof quorum that a ready peer explicitly advertises. Peer
+    // status commonly trails validations by several ledgers; selecting the
+    // newest validation quorum unconditionally turns normal status lag into a
+    // blind header fetch. Walk the merged ranges newest-first and let the
+    // validation owner choose the newest proof quorum below each boundary.
+    std::optional<QuorumEntry> full;
+    auto const coverage = co_await peers_->co_history_coverage();
+    for (auto range = coverage.advertised_ranges.rbegin();
+         range != coverage.advertised_ranges.rend();
+         ++range)
+    {
+        auto covered = co_await quorum_tracker_->co_latest_quorum_at_or_before(
+            range->last_seq, vl->sequence);
+        if (covered && range->contains(covered->ledger_seq))
+        {
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] get_or_reuse_anchor: using transport-covered quorum seq=",
+                covered->ledger_seq,
+                " in [",
+                range->first_seq,
+                ",",
+                range->last_seq,
+                "]");
+            full = std::move(covered);
+            break;
+        }
+    }
+
+    // If no retained proof quorum intersects current peer coverage, preserve
+    // the bounded blind fallback for cold start and genuinely stale status.
+    if (!full)
+    {
+        full = co_await quorum_tracker_->co_last_full_quorum(
+            std::chrono::seconds(max_age_secs > 0 ? max_age_secs : 10),
+            vl->sequence);
+    }
     if (full)
     {
         PLOGI(
             log_,
             "[",
             net_label_,
-            "] get_or_reuse_anchor: using last full quorum seq=",
+            "] get_or_reuse_anchor: using selected quorum seq=",
             full->ledger_seq,
             " (",
             full->validations.size(),

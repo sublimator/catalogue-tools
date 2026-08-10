@@ -347,6 +347,21 @@ ValidationCollector::get_quorum(int percent, QuorumMode mode) const
 }
 
 std::vector<ValidationCollector::Entry>
+ValidationCollector::get_quorum_at_or_before(
+    uint32_t max_ledger_sequence,
+    int percent,
+    QuorumMode mode) const
+{
+    auto candidate =
+        select_quorum_candidate(percent, mode, max_ledger_sequence);
+    if (!candidate)
+        return {};
+
+    return get_ledger_validations(
+        candidate->ledger_hash, candidate->ledger_sequence, mode);
+}
+
+std::vector<ValidationCollector::Entry>
 ValidationCollector::get_ledger_validations(
     Hash256 const& ledger_hash,
     QuorumMode mode) const
@@ -671,7 +686,10 @@ ValidationCollector::threshold_for(int percent) const
 }
 
 std::optional<ValidationCollector::QuorumCandidate>
-ValidationCollector::select_quorum_candidate(int percent, QuorumMode mode) const
+ValidationCollector::select_quorum_candidate(
+    int percent,
+    QuorumMode mode,
+    std::optional<uint32_t> max_ledger_sequence) const
 {
     if (mode == QuorumMode::proof && unl_signing_keys.empty())
     {
@@ -705,6 +723,8 @@ ValidationCollector::select_quorum_candidate(int percent, QuorumMode mode) const
 
         for (auto const& [sequence, voters] : voters_by_sequence)
         {
+            if (max_ledger_sequence && sequence > *max_ledger_sequence)
+                continue;
             auto const matched = static_cast<int>(voters.size());
             if (matched < threshold)
                 continue;

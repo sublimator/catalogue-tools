@@ -123,6 +123,13 @@ public:
     boost::asio::awaitable<std::optional<QuorumEntry>>
     co_latest_quorum();
 
+    /// Newest proof-mode quorum at or below a transport-supplied ledger
+    /// boundary. Returns nullopt across validator-list epoch changes.
+    boost::asio::awaitable<std::optional<QuorumEntry>>
+    co_latest_quorum_at_or_before(
+        uint32_t max_ledger_sequence,
+        std::optional<uint32_t> expected_vl_sequence = std::nullopt);
+
     /// Last quorum that reached full UNL coverage. Updated event-driven
     /// by check_for_new_quorum when "full" is detected. Returns nullopt
     /// if no full quorum exists or it's older than max_age.

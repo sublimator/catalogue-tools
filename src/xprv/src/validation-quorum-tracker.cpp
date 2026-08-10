@@ -1311,6 +1311,48 @@ ValidationQuorumTracker::co_latest_quorum()
 }
 
 asio::awaitable<std::optional<QuorumEntry>>
+ValidationQuorumTracker::co_latest_quorum_at_or_before(
+    uint32_t max_ledger_sequence,
+    std::optional<uint32_t> expected_vl_sequence)
+{
+    co_await asio::post(strand_, asio::use_awaitable);
+    std::lock_guard publication_lock(publication_mutex_);
+    {
+        std::lock_guard admission_lock(admission_mutex_);
+        if (pending_unl_updates_ != 0)
+            co_return std::nullopt;
+    }
+
+    auto const active_vl_sequence = vl_sequence_.value_or(0);
+    if (expected_vl_sequence && active_vl_sequence != *expected_vl_sequence)
+        co_return std::nullopt;
+
+    auto validations = collector_.get_quorum_at_or_before(
+        max_ledger_sequence,
+        kQuorumPercent,
+        ValidationCollector::QuorumMode::proof);
+    if (validations.empty())
+        co_return std::nullopt;
+
+    QuorumEntry entry;
+    entry.ledger_hash = validations.front().ledger_hash;
+    entry.ledger_seq = validations.front().ledger_seq;
+    entry.validations = std::move(validations);
+    entry.when = std::chrono::steady_clock::now();
+    entry.vl_sequence = active_vl_sequence;
+    for (auto const& recent : recent_quorums_)
+    {
+        if (recent.ledger_hash == entry.ledger_hash &&
+            recent.ledger_seq == entry.ledger_seq)
+        {
+            entry.when = recent.when;
+            break;
+        }
+    }
+    co_return entry;
+}
+
+asio::awaitable<std::optional<QuorumEntry>>
 ValidationQuorumTracker::co_last_full_quorum(
     std::chrono::seconds max_age,
     std::optional<uint32_t> expected_vl_sequence)

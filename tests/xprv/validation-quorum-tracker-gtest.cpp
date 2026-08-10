@@ -724,6 +724,96 @@ TEST(ValidationQuorumTracker, LockedQuorumSurvivesVoteRetention)
         }));
 }
 
+TEST(ValidationQuorumTracker, CoveredProofQuorumRespectsTransportBoundary)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationQuorumTracker::create(io, test_protocol(), 0);
+
+    auto make_key = [](uint8_t marker) {
+        std::vector<uint8_t> key(33, 0);
+        key.front() = 0x02;
+        key.back() = marker;
+        return key;
+    };
+    std::vector<catl::vl::Manifest> manifests;
+    for (uint8_t marker = 1; marker <= 10; ++marker)
+    {
+        catl::vl::Manifest manifest;
+        manifest.master_public_key = make_key(marker);
+        manifest.signing_public_key = make_key(marker);
+        manifests.push_back(std::move(manifest));
+    }
+    buffer->set_unl(manifests, 7);
+    io.run();
+    io.restart();
+
+    auto make_hash = [](uint8_t marker) {
+        std::array<uint8_t, 32> bytes{};
+        bytes.back() = marker;
+        return Hash256(bytes);
+    };
+    auto make_entry = [&](Hash256 const& hash,
+                          uint32_t sequence,
+                          catl::vl::Manifest const& manifest) {
+        xprv::ValidationCollector::Entry entry;
+        entry.ledger_hash = hash;
+        entry.ledger_seq = sequence;
+        entry.signing_key_hex = lower_ascii(manifest.signing_key_hex());
+        return entry;
+    };
+
+    bool done = false;
+    bool all_inserted = true;
+    std::optional<xprv::QuorumEntry> below_both;
+    std::optional<xprv::QuorumEntry> covered_older;
+    std::optional<xprv::QuorumEntry> covered_newer;
+    std::optional<xprv::QuorumEntry> wrong_vl;
+    auto const older_hash = make_hash(1);
+    auto const newer_hash = make_hash(2);
+
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            for (std::size_t i = 0; i < 9; ++i)
+            {
+                all_inserted =
+                    (co_await buffer->co_insert_validation_for_test(
+                        make_entry(older_hash, 100, manifests[i]))) &&
+                    all_inserted;
+                all_inserted =
+                    (co_await buffer->co_insert_validation_for_test(
+                        make_entry(newer_hash, 110, manifests[i]))) &&
+                    all_inserted;
+            }
+
+            below_both = co_await buffer->co_latest_quorum_at_or_before(99, 7);
+            covered_older =
+                co_await buffer->co_latest_quorum_at_or_before(105, 7);
+            covered_newer =
+                co_await buffer->co_latest_quorum_at_or_before(110, 7);
+            wrong_vl = co_await buffer->co_latest_quorum_at_or_before(110, 8);
+            done = true;
+            buffer->stop();
+            io.stop();
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(all_inserted);
+    EXPECT_FALSE(below_both.has_value());
+    ASSERT_TRUE(covered_older.has_value());
+    EXPECT_EQ(covered_older->ledger_hash, older_hash);
+    EXPECT_EQ(covered_older->ledger_seq, 100u);
+    EXPECT_EQ(covered_older->validations.size(), 9u);
+    ASSERT_TRUE(covered_newer.has_value());
+    EXPECT_EQ(covered_newer->ledger_hash, newer_hash);
+    EXPECT_EQ(covered_newer->ledger_seq, 110u);
+    EXPECT_EQ(covered_newer->validations.size(), 9u);
+    EXPECT_FALSE(wrong_vl.has_value());
+}
+
 TEST(ValidationQuorumTracker, ManifestWorkerReplaysRotationAcrossListRefresh)
 {
     asio::io_context io;

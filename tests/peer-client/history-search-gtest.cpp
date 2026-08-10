@@ -401,6 +401,27 @@ TEST_F(PlannerFixture, EarliestExactWakeWinsDeterministically)
     EXPECT_EQ(plan.wait_until->endpoint, "retry:1");
 }
 
+TEST_F(PlannerFixture, RetryPastDeadlineDoesNotPoisonUsablePeer)
+{
+    auto deferred = candidate(
+        "retry:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1);
+    deferred.retry_not_before = snapshot.absolute_deadline + 1s;
+    auto known = candidate(
+        "ready:1",
+        HistorySourceLane::direct_verified,
+        HistoryGenerationDisposition::admitted,
+        2);
+    known.advertises_ledger = true;
+    snapshot.candidates = {deferred, known};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).action, HistoryAuthorityAction::submit_known_use);
+    EXPECT_EQ(action(plan).target.endpoint, "ready:1");
+}
+
 TEST_F(PlannerFixture, ExactWakeCannotOutliveExhaustedParentAuthority)
 {
     snapshot.remaining_parent_dials = 0;
@@ -650,6 +671,53 @@ TEST(PeerSetHistorySearch, SnapshotKeepsEvidenceLanesAndHintsDistinct)
     EXPECT_EQ(selected->source, HistorySourceLane::configured);
 }
 
+TEST(PeerSetHistorySearch, LateRetryGateDoesNotHideCoveredAdmittedPeer)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .retry_backoff = 30s});
+    auto session =
+        std::make_shared<NodeBatchTestSession>("ready.example.com:51235");
+    session->attach_strand(io);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 5s);
+    auto demand =
+        run(io,
+            peers->co_get_or_create_ledger_demand(
+                scope, LedgerDemandOptions{.ledger_seq = 50}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{22}, .fetch_epoch = 1}));
+
+    PeerSetTestAccess::set_failed_at(io, peers, "r.ripple.com:51235", now);
+    auto snapshot = run(io, peers->co_history_search_snapshot(acquisition));
+    auto deferred = std::find_if(
+        snapshot.candidates.begin(),
+        snapshot.candidates.end(),
+        [](auto const& candidate) {
+            return candidate.target.endpoint == "r.ripple.com:51235";
+        });
+    ASSERT_NE(deferred, snapshot.candidates.end());
+    ASSERT_TRUE(deferred->retry_not_before);
+    EXPECT_GT(*deferred->retry_not_before, snapshot.absolute_deadline);
+
+    auto const plan = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(plan.next_action);
+    EXPECT_EQ(
+        plan.next_action->action, HistoryAuthorityAction::submit_known_use);
+    EXPECT_EQ(plan.next_action->target.endpoint, "ready.example.com:51235");
+}
+
 TEST(PeerSetHistorySearch, SaturatedCrawlProjectionRetainsEveryStrongerLane)
 {
     boost::asio::io_context io;
@@ -710,7 +778,7 @@ TEST(PeerSetHistorySearch, SaturatedCrawlProjectionRetainsEveryStrongerLane)
         snapshot.candidates.end());
 }
 
-TEST(PeerSetHistoryExecution, KnownUseSpendsAndInstallsInOneOwnerCommit)
+TEST(PeerSetHistoryExecution, AdmittedUseOutlivesConnectDeadlineAndCommits)
 {
     boost::asio::io_context io;
     auto peers = PeerSet::create(io);
@@ -720,6 +788,8 @@ TEST(PeerSetHistoryExecution, KnownUseSpendsAndInstallsInOneOwnerCommit)
     auto const generation =
         PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
     auto const now = std::chrono::steady_clock::now();
+    PeerSetTestAccess::set_generation_physical_deadline(
+        io, peers, session->endpoint(), now - 1s);
     auto scope = catl::core::RequestScope::create(now + 30s);
     auto demand = run(
         io,

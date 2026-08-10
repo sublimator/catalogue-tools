@@ -5099,6 +5099,26 @@ NodeCache::drive_managed_header_fetch(
                 participant->interest = driven.interest;
                 if (!driven.peer_use)
                 {
+                    PLOGD(
+                        log_,
+                        "header history drive produced no use: ledger=",
+                        ledger_seq,
+                        " replans=",
+                        driven.replans,
+                        " grants=",
+                        driven.grants,
+                        " commits=",
+                        driven.commits,
+                        " local_terminal=",
+                        driven.local_terminal
+                            ? static_cast<int>(*driven.local_terminal)
+                            : -1,
+                        " shared_terminal=",
+                        driven.shared_terminal
+                            ? static_cast<int>(*driven.shared_terminal)
+                            : -1,
+                        " has_plan=",
+                        driven.last_plan.has_value());
                     participant->terminal = driven.local_terminal.has_value() ||
                         driven.shared_terminal.has_value();
                     if (participant->terminal)
