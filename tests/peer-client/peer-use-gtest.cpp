@@ -804,4 +804,51 @@ TEST(PeerUse, DrainLaunchFailurePublishesFaultAndRetainsUse)
     EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
 }
 
+TEST(PeerUse, AcceptedDrainServantFailurePublishesFaultAndRetainsUse)
+{
+    Fixture f;
+    PeerSetTestAccess::fail_next_generation_drain_servant_after_start(
+        f.io, f.peers);
+    auto use = f.acquire(std::chrono::steady_clock::now() + 20ms);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+    auto receipt = completion.receipt();
+    ASSERT_TRUE(PeerUseOperations::get_ledger_header(
+        completion, 50, [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+
+    f.poll_until([&] { return receipt.fault().has_value(); });
+    EXPECT_EQ(receipt.fault(), PeerUseReceiptFault::physical_drain_failed);
+    EXPECT_FALSE(receipt.outcome());
+    EXPECT_THROW((void)run(f.io, receipt.wait()), PeerUseReceiptError);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
+
+    run(f.io, f.peers->co_stop());
+    EXPECT_EQ(f.session->co_disconnect_calls.load(), 1u);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
+}
+
+TEST(PeerUse, DrainRetryWaitFailurePublishesFaultAndRetainsUse)
+{
+    Fixture f;
+    f.session->co_disconnect_failures_remaining.store(1);
+    PeerSetTestAccess::fail_next_generation_drain_retry_wait(f.io, f.peers);
+    auto use = f.acquire(std::chrono::steady_clock::now() + 20ms);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+    auto receipt = completion.receipt();
+    ASSERT_TRUE(PeerUseOperations::get_ledger_header(
+        completion, 50, [](PeerUseCompletion, Error, LedgerHeaderResult) {}));
+
+    f.poll_until([&] { return receipt.fault().has_value(); });
+    EXPECT_EQ(f.session->co_disconnect_calls.load(), 1u);
+    EXPECT_EQ(receipt.fault(), PeerUseReceiptFault::physical_drain_failed);
+    EXPECT_FALSE(receipt.outcome());
+    EXPECT_THROW((void)run(f.io, receipt.wait()), PeerUseReceiptError);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
+
+    run(f.io, f.peers->co_stop());
+    EXPECT_EQ(f.session->co_disconnect_calls.load(), 2u);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
+}
+
 }  // namespace

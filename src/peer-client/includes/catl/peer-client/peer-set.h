@@ -601,6 +601,12 @@ private:
     fail_generation_peer_uses_without_drain(std::uint64_t generation) noexcept;
 
     void
+    complete_generation_drain_servant(
+        std::uint64_t generation,
+        PeerSessionPtr const& session,
+        std::exception_ptr failure) noexcept;
+
+    void
     expire_peer_use(PeerUseTicket ticket) noexcept;
 
     void
@@ -618,6 +624,8 @@ private:
     /// from any PeerSession callback executor.
     std::atomic<std::uint32_t> drop_peer_use_finish_posts_for_test_{0};
     std::uint32_t fail_generation_drain_launches_for_test_ = 0;
+    std::uint32_t fail_generation_drain_servants_after_start_for_test_ = 0;
+    std::uint32_t fail_generation_drain_retry_waits_for_test_ = 0;
 
     /// Drop the seal COMPLETION post, reproducing the one failure this class
     /// deliberately does not recover from: the capability is sealed and then

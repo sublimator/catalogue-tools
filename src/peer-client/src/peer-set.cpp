@@ -1132,6 +1132,13 @@ PeerSet::start_generation_drain(
                 // the generation uses, and remove the selectable session
                 // before any physical receipt can arrive.
                 co_await asio::post(self->strand_, asio::use_awaitable);
+                if (self->fail_generation_drain_servants_after_start_for_test_ !=
+                    0)
+                {
+                    --self->fail_generation_drain_servants_after_start_for_test_;
+                    throw std::runtime_error(
+                        "generation drain servant post-accept failpoint");
+                }
                 for (;;)
                 {
                     auto retained =
@@ -1146,13 +1153,16 @@ PeerSet::start_generation_drain(
                     bool drained = false;
                     try
                     {
-                        //@@authority transition=prv.T0254 status=provisional scope=statement bind=expression_statement@11bcc2d1692f1c01
+                        //@@authority transition=prv.T0254 status=provisional scope=statement
+                        // bind=expression_statement@11bcc2d1692f1c01
                         // owner=unresolved owner_hypothesis=peer_set
-                        // commit=peer_set_strand touches=prv.S0089,prv.S0097,prv.S0099
+                        // commit=peer_set_strand
+                        // touches=prv.S0089,prv.S0097,prv.S0099
                         // label=retry_exact_generation_drain_before_fault_publication
                         //@@mutation-site peer-use-release-follows-physical-drain
-                        co_await session
-                            ->co_disconnect(); //@@authority-target ids=prv.T0254
+                        // clang-format off
+                        co_await session->co_disconnect(); //@@authority-target ids=prv.T0254
+                        // clang-format on
                         drained = true;
                     }
                     catch (std::exception const& e)
@@ -1198,12 +1208,21 @@ PeerSet::start_generation_drain(
 
                     retained->second.retry_timer->expires_after(
                         kGenerationDrainRetryDelay);
+                    if (self->fail_generation_drain_retry_waits_for_test_ != 0)
+                    {
+                        --self->fail_generation_drain_retry_waits_for_test_;
+                        throw std::runtime_error(
+                            "generation drain retry-wait failpoint");
+                    }
                     boost::system::error_code ec;
                     co_await retained->second.retry_timer->async_wait(
                         asio::redirect_error(asio::use_awaitable, ec));
                 }
             },
-            asio::detached);
+            [self, generation, session](std::exception_ptr failure) noexcept {
+                self->complete_generation_drain_servant(
+                    generation, session, std::move(failure));
+            });
 
         // The retry servant and its retained session now exist. Only after
         // that fallible setup succeeds may the owner revoke submitted work.
@@ -1222,6 +1241,68 @@ PeerSet::start_generation_drain(
             generation, cause, trigger_outcome, trigger);
         fail_generation_peer_uses_without_drain(generation);
         return false;
+    }
+}
+
+//@@authority transition=prv.T0257 status=provisional scope=function
+// bind=catl::peer_client::complete_generation_drain_servant@01d2312c62bc1e31
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0089,prv.S0090,prv.S0097,prv.S0099
+// label=publish_exact_generation_drain_servant_failure
+void
+PeerSet::complete_generation_drain_servant(
+    std::uint64_t generation,
+    PeerSessionPtr const& session,
+    std::exception_ptr failure) noexcept
+{
+    ASSERT_ON_STRAND();
+    if (!failure)
+        return;
+
+    auto retained = draining_generations_.find(generation);
+    if (retained == draining_generations_.end() ||
+        retained->second.session != session)
+    {
+        return;
+    }
+
+    // The servant was accepted, so this row remains the exact physical owner.
+    // Any exception before a disconnect receipt is a visible retained fault,
+    // never a reason to erase the row or publish a false release.
+    //@@mutation-site generation-drain-servant-failure-is-receipt-fault
+    retained->second.receipt_failed = true;
+    fail_generation_peer_uses_without_drain(generation);
+    notify_shutdown_progress();
+    //@@mutation-end generation-drain-servant-failure-is-receipt-fault
+
+    try
+    {
+        std::rethrow_exception(failure);
+    }
+    catch (std::exception const& e)
+    {
+        try
+        {
+            PLOGE(
+                log_,
+                "generation drain servant failed gen=",
+                generation,
+                ": ",
+                e.what());
+        }
+        catch (...)
+        {
+        }
+    }
+    catch (...)
+    {
+        try
+        {
+            PLOGE(log_, "generation drain servant failed gen=", generation);
+        }
+        catch (...)
+        {
+        }
     }
 }
 
@@ -5160,9 +5241,10 @@ PeerSet::make_peer_use(
             }
             if (remaining != 0)
                 return;
-            asio::post(self->strand_, [self, ticket, outcome, source]() noexcept {
-                self->finish_peer_use(ticket, outcome, source);
-            });
+            asio::post(
+                self->strand_, [self, ticket, outcome, source]() noexcept {
+                    self->finish_peer_use(ticket, outcome, source);
+                });
         }
     };
     state->control = control;
@@ -5366,19 +5448,12 @@ PeerSet::begin_forced_peer_use_finish(
         remove_peer(endpoint, false);
     }
     auto const drain_started = start_generation_drain(
-        endpoint,
-        generation,
-        GenerationDrainCause::local_use,
-        outcome,
-        ticket);
+        endpoint, generation, GenerationDrainCause::local_use, outcome, ticket);
 
     if (!drain_started && !draining_generations_.count(generation))
     {
         mark_generation_peer_uses_finishing(
-            generation,
-            GenerationDrainCause::local_use,
-            outcome,
-            ticket);
+            generation, GenerationDrainCause::local_use, outcome, ticket);
         fail_generation_peer_uses_without_drain(generation);
     }
 }
