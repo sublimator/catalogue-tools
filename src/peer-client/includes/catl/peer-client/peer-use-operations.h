@@ -1,5 +1,6 @@
 #pragma once
 
+#include "node-transport.h"
 #include "peer-use.h"
 
 #include <functional>
@@ -21,6 +22,113 @@ class PeerUseOperations final
 public:
     using LedgerHeaderCallback =
         std::function<void(PeerUseCompletion, Error, LedgerHeaderResult)>;
+
+    /** Replay/ack capability restricted to one exact ledger-node PeerUse. */
+    class NodeBatchChannel
+    {
+    public:
+        NodeBatchChannel() = default;
+
+        explicit
+        operator bool() const noexcept
+        {
+            return static_cast<bool>(completion_);
+        }
+
+        bool
+        submit(
+            NodeBatchCommand const& command,
+            NodeBatchWriteHandler handler) const
+        {
+            if (!completion_ || !handler ||
+                command.ledger_seq() != ledger_seq_ ||
+                command.peer_generation().value() !=
+                    completion_.ticket().generation)
+            {
+                return false;
+            }
+            auto accepted = false;
+            auto const invoked = completion_.install_or_replay_operation(
+                PeerUseKind::ledger_nodes,
+                ledger_seq_,
+                [this, &command, &handler, &accepted](PeerSessionPtr session) {
+                    session->set_node_response_observer(observer_);
+                    accepted = session->submit_node_batch(
+                        command, std::move(handler));
+                });
+            return invoked && accepted;
+        }
+
+        bool
+        acknowledge(NodeBatchReceiptAck ack) const
+        {
+            if (!completion_ || ack.peer_generation().value() !=
+                    completion_.ticket().generation)
+            {
+                return false;
+            }
+            auto accepted = false;
+            auto const invoked = completion_.invoke_submitted_operation(
+                PeerUseKind::ledger_nodes,
+                ledger_seq_,
+                [&ack, &accepted](PeerSessionPtr session) mutable {
+                    accepted = session->acknowledge_node_batch_receipt(
+                        std::move(ack));
+                });
+            return invoked && accepted;
+        }
+
+        PeerUseCompletion const&
+        completion() const noexcept
+        {
+            return completion_;
+        }
+
+        /** Classify the use once this channel has no transport work left. */
+        void
+        finish_operation(PeerUseOutcome outcome) const noexcept
+        {
+            if (!completion_)
+                return;
+            if (completion_.physical_delivery_allowed())
+            {
+                completion_.with_physical_terminal_capability().finish(outcome);
+            }
+            else
+            {
+                completion_.finish(outcome);
+            }
+        }
+
+    private:
+        friend class PeerUseOperations;
+
+        NodeBatchChannel(
+            PeerUseCompletion completion,
+            std::uint32_t ledger_seq,
+            PeerSession::NodeResponseObserver observer) noexcept
+            : completion_(std::move(completion))
+            , ledger_seq_(ledger_seq)
+            , observer_(std::move(observer))
+        {
+        }
+
+        PeerUseCompletion completion_;
+        std::uint32_t ledger_seq_ = 0;
+        PeerSession::NodeResponseObserver observer_;
+    };
+
+    static NodeBatchChannel
+    node_batch_channel(
+        PeerUseCompletion completion,
+        std::uint32_t ledger_seq,
+        PeerSession::NodeResponseObserver observer) noexcept
+    {
+        if (!completion || completion.ticket().generation == 0 || !observer)
+            return {};
+        return NodeBatchChannel{
+            std::move(completion), ledger_seq, std::move(observer)};
+    }
 
     /**
      * Consume the use's sole operation-install authority for a header read.

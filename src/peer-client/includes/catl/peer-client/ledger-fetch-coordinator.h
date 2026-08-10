@@ -2,6 +2,7 @@
 
 #include "node-transport.h"
 #include "peer-generation-pin.h"
+#include "peer-use-operations.h"
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
@@ -180,6 +181,7 @@ public:
         work_budget_exhausted,
         node_count_invalid,
         unpinned_peer,
+        unscoped_peer_use,
         projection_failed,
     };
 
@@ -287,6 +289,17 @@ public:
         NodeTree tree,
         std::vector<SHAMapNodeID> node_ids,
         PeerGenerationPin pin,
+        SubmissionOutcomeHandler on_outcome = {});
+
+    /// Exact ingress: the caller and coordinator retain projections of the
+    /// same request-scoped use until node-round and transport settlement.
+    [[nodiscard]] Ingress
+    submit_node_batch_on_use(
+        Hash256 ledger_hash,
+        std::uint32_t ledger_seq,
+        NodeTree tree,
+        std::vector<SHAMapNodeID> node_ids,
+        PeerUseOperations::NodeBatchChannel channel,
         SubmissionOutcomeHandler on_outcome = {});
 
     /// Seal ingress and terminalize every row. A LOGICAL fence — see the class
@@ -448,9 +461,14 @@ private:
         OutboxRow(
             NodeBatchIntent intent_,
             PeerGenerationPin pin_,
+            PeerUseOperations::NodeBatchChannel channel_,
             SubmissionOutcomeHandler on_outcome_) noexcept
             : intent(std::move(intent_))
             , pin(std::move(pin_))
+            , channel(
+                  channel_ ? std::optional<PeerUseOperations::NodeBatchChannel>{
+                                 std::move(channel_)}
+                           : std::nullopt)
             , on_outcome(std::move(on_outcome_))
         {
         }
@@ -464,6 +482,7 @@ private:
 
         NodeBatchIntent intent;  ///< original, retained for life
         PeerGenerationPin pin;   ///< original; each bind gets a share()
+        std::optional<PeerUseOperations::NodeBatchChannel> channel;
         //@@authority state=prv.S0019 status=provisional scope=field
         // bind=catl::peer_client::LedgerFetchCoordinator::OutboxRow::on_outcome@13ca41889e935acb
         // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
@@ -571,6 +590,7 @@ private:
         NodeTree tree,
         std::vector<SHAMapNodeID> node_ids,
         PeerGenerationPin pin,
+        PeerUseOperations::NodeBatchChannel channel,
         SubmissionOutcomeHandler on_outcome);
 
     void

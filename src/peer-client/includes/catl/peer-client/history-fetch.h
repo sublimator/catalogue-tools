@@ -568,6 +568,11 @@ private:
     void
     release_terminal_authorities() noexcept;
 
+    /** Wake every retained participant owner after shared arbitration moves. */
+    void
+    wake_participant_owners(
+        std::uint64_t excluded_owner_instance = 0) noexcept;
+
     //@@authority state=prv.S0107 status=provisional scope=field
     // bind=catl::peer_client::SharedHistoryFetch::owner_instance_@2dc3c171a1e5f53c
     // owner=unresolved owner_hypothesis=shared_history_fetch

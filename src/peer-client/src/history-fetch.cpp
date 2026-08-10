@@ -175,9 +175,35 @@ SharedHistoryFetch::find_cell(HistoryInterestId interest) const noexcept
 void
 SharedHistoryFetch::release_authority(ReleasedAuthority authority) noexcept
 {
+    if (authority.participant_owner)
+        authority.participant_owner->post_history_fetch_wake();
     authority.subscription.reset();
     authority.scope.reset();
     authority.participant_owner.reset();
+}
+
+void
+SharedHistoryFetch::wake_participant_owners(
+    std::uint64_t excluded_owner_instance) noexcept
+{
+    try
+    {
+        std::lock_guard owner_lock(mutex_);
+        for (auto const& [_, cell] : interests_)
+        {
+            std::lock_guard participant_lock(cell->mutex);
+            if (cell->participant_owner &&
+                cell->participant_owner_instance != excluded_owner_instance)
+            {
+                cell->participant_owner->post_history_fetch_wake();
+            }
+        }
+    }
+    catch (...)
+    {
+        // Wakes are advisory projections of already committed shared state.
+        // Exact deadlines remain the fail-closed fallback if posting fails.
+    }
 }
 
 HistoryInterestRef
@@ -313,42 +339,49 @@ SharedHistoryFetch::revise_interest(
         return std::nullopt;
     }
 
-    std::lock_guard owner_lock(mutex_);
-    if (terminal_ ||
-        next_participant_revision_ ==
-            std::numeric_limits<std::uint64_t>::max() ||
-        next_fair_ticket_ == std::numeric_limits<std::uint64_t>::max())
+    HistoryInterestRef revised;
     {
-        return std::nullopt;
-    }
-    auto const found = interests_.find(interest.interest_);
-    if (found == interests_.end())
-        return std::nullopt;
-    auto const& cell = found->second;
-    std::lock_guard participant_lock(cell->mutex);
-    if (cell->state != ParticipantState::active ||
-        cell->request_terminal.load(std::memory_order_acquire) ||
-        cell->participant_owner_instance !=
-            interest.participant_owner_instance_ ||
-        cell->revision != interest.participant_revision_ ||
-        cell->demand != interest.demand_ ||
-        cell->acquisition != interest.acquisition_ ||
-        cell->request_scope_id != interest.request_scope_)
-    {
-        return std::nullopt;
-    }
+        std::lock_guard owner_lock(mutex_);
+        if (terminal_ ||
+            next_participant_revision_ ==
+                std::numeric_limits<std::uint64_t>::max() ||
+            next_fair_ticket_ == std::numeric_limits<std::uint64_t>::max())
+        {
+            return std::nullopt;
+        }
+        auto const found = interests_.find(interest.interest_);
+        if (found == interests_.end())
+            return std::nullopt;
+        auto const& cell = found->second;
+        std::lock_guard participant_lock(cell->mutex);
+        if (cell->state != ParticipantState::active ||
+            cell->request_terminal.load(std::memory_order_acquire) ||
+            cell->participant_owner_instance !=
+                interest.participant_owner_instance_ ||
+            cell->revision != interest.participant_revision_ ||
+            cell->demand != interest.demand_ ||
+            cell->acquisition != interest.acquisition_ ||
+            cell->request_scope_id != interest.request_scope_)
+        {
+            return std::nullopt;
+        }
 
-    for (auto& [_, grant] : cell->grants)
-    {
-        if (grant.state == HistoryGrantState::active)
-            grant.state = HistoryGrantState::revoked;
+        for (auto& [_, grant] : cell->grants)
+        {
+            if (grant.state == HistoryGrantState::active)
+                grant.state = HistoryGrantState::revoked;
+        }
+        cell->revision = next_participant_revision_;
+        cell->fair_ticket = next_fair_ticket_;
+        cell->plan = std::move(plan);
+        ++next_participant_revision_;
+        ++next_fair_ticket_;
+        revised = make_ref(*cell);
     }
-    cell->revision = next_participant_revision_;
-    cell->fair_ticket = next_fair_ticket_;
-    cell->plan = std::move(plan);
-    ++next_participant_revision_;
-    ++next_fair_ticket_;
-    return make_ref(*cell);
+    // Wake after both shared locks are released. Preserving the global
+    // owner->participant order keeps this reusable if wake delivery evolves.
+    wake_participant_owners(revised.participant_owner_instance());
+    return revised;
 }
 
 HistorySponsorDecision
@@ -645,6 +678,7 @@ SharedHistoryFetch::detach(HistoryInterestRef const& interest) noexcept
         }
     }
     release_authority(std::move(released));
+    wake_participant_owners();
     return result;
 }
 
@@ -765,6 +799,7 @@ SharedHistoryFetch::acknowledge_work(
             --cell->outstanding_work;
         }
         terminalize_if_detached_and_drained();
+        wake_participant_owners();
         return true;
     }
     if (adopter)
@@ -791,6 +826,7 @@ SharedHistoryFetch::acknowledge_work(
         --cell->outstanding_work;
     }
     terminalize_if_detached_and_drained();
+    wake_participant_owners();
     return true;
 }
 

@@ -137,6 +137,25 @@ struct HistorySearchExecution
     }
 };
 
+/** Terminal or exact-use result of one continuously revised participant. */
+struct HistorySearchDriveResult
+{
+    HistoryInterestRef interest;
+    PeerUse peer_use;
+    std::optional<HistoryAcquisitionTerminal> local_terminal;
+    std::optional<SharedHistoryFetchTerminal> shared_terminal;
+    std::optional<HistorySearchPlan> last_plan;
+    std::size_t replans = 0;
+    std::size_t grants = 0;
+    std::size_t commits = 0;
+
+    bool
+    acquired() const noexcept
+    {
+        return static_cast<bool>(peer_use);
+    }
+};
+
 class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
     friend class ::PeerSetTestAccess;
@@ -231,6 +250,14 @@ public:
     seal_node_batch_command(
         NodeBatchIntent intent,
         PeerGenerationPin pin_share,
+        boost::asio::any_io_executor completion_executor,
+        std::function<void(std::optional<NodeBatchCommand>)> on_sealed);
+
+    /// Seal against one already-installed exact ledger-node use.
+    [[nodiscard]] bool
+    seal_node_batch_command_on_use(
+        NodeBatchIntent intent,
+        PeerUseCompletion use,
         boost::asio::any_io_executor completion_executor,
         std::function<void(std::optional<NodeBatchCommand>)> on_sealed);
 
@@ -432,6 +459,11 @@ public:
         LedgerDemandRef demand,
         HistoryAcquisitionOptions options);
 
+    /// Add one exact endpoint to a live child's bounded retry exclusions.
+    boost::asio::awaitable<bool>
+    co_exclude_history_endpoint(
+        HistoryAcquisitionRef acquisition, std::string endpoint);
+
     /// Acknowledged child terminal transition. First terminal wins.
     boost::asio::awaitable<void>
     co_finish_history_acquisition(
@@ -458,6 +490,16 @@ public:
     co_execute_history_grant(
         std::shared_ptr<SharedHistoryFetch> fetch,
         HistoryAuthorityGrantRef grant,
+        PeerUseKind kind);
+
+    /// Continuously revise one exact shared-fetch participant until it owns a
+    /// request-scoped use or reaches a typed local/shared terminal. Every wait
+    /// is tied to a pool revision signal or the aggregate exact wake/deadline.
+    boost::asio::awaitable<HistorySearchDriveResult>
+    co_drive_history_interest(
+        std::shared_ptr<SharedHistoryFetch> fetch,
+        HistoryAcquisitionRef acquisition,
+        HistoryInterestRef interest,
         PeerUseKind kind);
 
     /// A receipt for every generation-pin release command posted before this
@@ -723,6 +765,10 @@ private:
         LedgerDemandRef const& demand,
         HistoryAcquisitionOptions options);
 
+    bool
+    exclude_history_endpoint_on_strand(
+        HistoryAcquisitionRef const& acquisition, std::string endpoint);
+
     void
     finish_history_acquisition_on_strand(
         HistoryAcquisitionRef const& acquisition,
@@ -787,6 +833,13 @@ private:
     execute_history_grant_on_strand(
         std::shared_ptr<SharedHistoryFetch> const& fetch,
         HistoryAuthorityGrantRef const& grant,
+        PeerUseKind kind);
+
+    boost::asio::awaitable<HistorySearchDriveResult>
+    drive_history_interest_on_strand(
+        std::shared_ptr<SharedHistoryFetch> fetch,
+        HistoryAcquisitionRef acquisition,
+        HistoryInterestRef interest,
         PeerUseKind kind);
 
     void
@@ -877,6 +930,11 @@ private:
         NodeBatchIntent intent,
         PeerGenerationPin const& pin);
 
+    std::optional<NodeBatchCommand>
+    seal_node_batch_command_on_use_on_strand(
+        NodeBatchIntent intent,
+        PeerUseCompletion const& use);
+
     //@@authority transition=peer_set.release_generation_pin owner=peer_set
     // bind=catl::peer_client::PeerSet::release_peer_pin@ce1f535e08044301
     // commit=strand
@@ -904,6 +962,10 @@ private:
     reserve_connection_generation(
         std::string const& key,
         std::chrono::steady_clock::time_point physical_deadline);
+
+    [[nodiscard]] bool
+    replaceable_generation_tombstone(PeerGeneration const& generation) const
+        noexcept;
 
     void
     abandon_unstarted_generation(
@@ -1195,7 +1257,13 @@ private:
     attach_wait_signal();
 
     void
-    notify_waiters();
+    notify_waiters() noexcept;
+
+    void
+    wake_waiters_without_revision() noexcept;
+
+    void
+    post_history_fetch_wake() noexcept;
 
     PeerSessionPtr
     choose_any_peer(std::unordered_set<std::string> const& excluded);
@@ -1391,6 +1459,8 @@ private:
         PeerUseRequest request;
         std::shared_ptr<detail::PeerUseControl> control;
         std::shared_ptr<boost::asio::steady_timer> deadline;
+        std::shared_ptr<SharedHistoryFetch> history_fetch;
+        std::optional<HistoryAuthorityGrantRef> history_grant;
         //@@authority state=prv.S0098 status=provisional scope=field
         // bind=catl::peer_client::PeerSet::ActivePeerUse::forced_outcome@242169be28e3d328
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set

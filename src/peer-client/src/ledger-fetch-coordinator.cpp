@@ -59,9 +59,7 @@ LedgerFetchCoordinator::allocate_sender_generation() noexcept
 
 // The ack must be ONE line: the resolver matches reason="..." on the same line
 // as the marker, so a wrapped continuation reads as a missing reason.
-//@@audit-ack unannotated_authority_candidate reason="factory; the only
-// authority it exercises is the sender-generation mint, which carries its own
-// directive at the mint site" ref=2026-07-25-206113a-coordinator-review-reject
+//@@audit-ack unannotated_authority_candidate reason="factory; the only authority it exercises is the sender-generation mint, which carries its own directive at the mint site" ref=2026-07-25-206113a-coordinator-review-reject
 std::shared_ptr<LedgerFetchCoordinator>
 LedgerFetchCoordinator::create(
     asio::io_context& io,
@@ -172,6 +170,7 @@ LedgerFetchCoordinator::submit_node_batch_on_pin(
                     tree,
                     std::move(node_ids),
                     std::move(pin),
+                    {},
                     std::move(on_outcome));
             });
     }
@@ -182,6 +181,76 @@ LedgerFetchCoordinator::submit_node_batch_on_pin(
         release_work();
         return Ingress::projection_failed;
         //@@mutation-end conserved-permit-released-when-projection
+    }
+    return Ingress::reserved;
+}
+
+LedgerFetchCoordinator::Ingress
+LedgerFetchCoordinator::submit_node_batch_on_use(
+    Hash256 ledger_hash,
+    std::uint32_t ledger_seq,
+    NodeTree tree,
+    std::vector<SHAMapNodeID> node_ids,
+    PeerUseOperations::NodeBatchChannel channel,
+    SubmissionOutcomeHandler on_outcome)
+{
+    if (!channel || channel.completion().ticket().generation == 0)
+        return Ingress::unscoped_peer_use;
+    if (node_ids.empty() || node_ids.size() > kMaxNodeBatchRequestNodes)
+    {
+        channel.finish_operation(PeerUseOutcome::cancelled);
+        return Ingress::node_count_invalid;
+    }
+
+    auto current = work_.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if ((current & kIngressSealedBit) != 0)
+        {
+            channel.finish_operation(PeerUseOutcome::cancelled);
+            return Ingress::ingress_sealed;
+        }
+        if ((current & kWorkMask) >= kMaxWork)
+        {
+            channel.finish_operation(PeerUseOutcome::cancelled);
+            return Ingress::work_budget_exhausted;
+        }
+        if (work_.compare_exchange_weak(
+                current,
+                current + 1,
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+        {
+            break;
+        }
+    }
+
+    try
+    {
+        asio::post(
+            strand_,
+            [self = shared_from_this(),
+             ledger_hash = std::move(ledger_hash),
+             ledger_seq,
+             tree,
+             node_ids = std::move(node_ids),
+             channel = std::move(channel),
+             on_outcome = std::move(on_outcome)]() mutable {
+                self->commit_row_on_strand(
+                    std::move(ledger_hash),
+                    ledger_seq,
+                    tree,
+                    std::move(node_ids),
+                    {},
+                    std::move(channel),
+                    std::move(on_outcome));
+            });
+    }
+    catch (...)
+    {
+        release_work();
+        channel.finish_operation(PeerUseOutcome::write_failure);
+        return Ingress::projection_failed;
     }
     return Ingress::reserved;
 }
@@ -210,11 +279,7 @@ LedgerFetchCoordinator::bind_bounds_spent(OutboxRow const& row) noexcept
     //@@mutation-end absolute-deadline-bounds-retry-independently
 }
 
-//@@audit-ack unannotated_authority_candidate reason="internal sub-operation
-// dominated exclusively by the annotated settle_bind and terminalize_row commit
-// transitions; it does mutate owned timer state, so it is not inert, but it has
-// no reachable caller outside those two"
-// ref=2026-07-25-b074165-coordinator-review-final-closure
+//@@audit-ack unannotated_authority_candidate reason="internal sub-operation dominated exclusively by the annotated settle_bind and terminalize_row commit transitions; it does mutate owned timer state, so it is not inert, but it has no reachable caller outside those two" ref=2026-07-25-b074165-coordinator-review-final-closure
 void
 LedgerFetchCoordinator::cancel_quietly(OutboxRow& row) noexcept
 {
@@ -245,7 +310,7 @@ LedgerFetchCoordinator::cancel_quietly(OutboxRow& row) noexcept
 }
 
 //@@authority transition=ledger_fetch_coordinator.commit_sender_row
-// bind=catl::peer_client::commit_row_on_strand@59b9f100d71287e7
+// bind=catl::peer_client::commit_row_on_strand@cd56197306795c2a
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::commit_row_on_strand(
@@ -254,6 +319,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
     NodeTree tree,
     std::vector<SHAMapNodeID> node_ids,
     PeerGenerationPin pin,
+    PeerUseOperations::NodeBatchChannel channel,
     SubmissionOutcomeHandler on_outcome)
 {
     if (ingress_sealed())
@@ -262,6 +328,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
         // what lets the fence complete without waiting on a caller.
         deliver_submission_outcome_noexcept(
             on_outcome, SubmissionOutcome::not_written);
+        channel.finish_operation(PeerUseOutcome::cancelled);
         release_work();
         check_fenced_on_strand();
         return;
@@ -275,6 +342,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
         PLOGE(log_, "attempt id exhausted; refusing without mutation");
         deliver_submission_outcome_noexcept(
             on_outcome, SubmissionOutcome::not_written);
+        channel.finish_operation(PeerUseOutcome::cancelled);
         release_work();
         check_fenced_on_strand();
         return;
@@ -312,7 +380,10 @@ LedgerFetchCoordinator::commit_row_on_strand(
         static_assert(std::is_nothrow_move_constructible_v<OutboxRow>);
         attempt = intent.attempt_id();
         rows_.emplace_back(
-            std::move(intent), std::move(pin), std::move(on_outcome));
+            std::move(intent),
+            std::move(pin),
+            std::move(channel),
+            std::move(on_outcome));
         auto& row = rows_.back();
         row.deadline = std::move(timer);
         row.retry = std::move(retry_timer);
@@ -330,6 +401,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
         PLOGE(log_, "row commit failed; releasing the accepted ingress permit");
         deliver_submission_outcome_noexcept(
             on_outcome, SubmissionOutcome::not_written);
+        channel.finish_operation(PeerUseOutcome::write_failure);
         release_work();
         //@@mutation-end failed-row-commit-releases-permit
         check_fenced_on_strand();
@@ -392,11 +464,7 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
             });
         //@@mutation-end bind-deadline-what-recovers-lost
 
-        projected = peers_->seal_node_batch_command(
-            row->intent,  // copied: the row keeps the original for its life
-            row->pin.share(),  // and keeps the retention it owns
-            strand_,
-            [self = shared_from_this(), attempt, revision](
+        auto on_sealed = [self = shared_from_this(), attempt, revision](
                 std::optional<NodeBatchCommand> sealed) {
                 self->note_projection_observed();
                 ++self->completions_seen_;
@@ -410,7 +478,23 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
                 // race). The fence still has to be re-checked, or a fence
                 // concurrent with a losing completion would never report.
                 self->check_fenced_on_strand();
-            });
+            };
+        if (row->channel)
+        {
+            projected = peers_->seal_node_batch_command_on_use(
+                row->intent,
+                row->channel->completion(),
+                strand_,
+                std::move(on_sealed));
+        }
+        else
+        {
+            projected = peers_->seal_node_batch_command(
+                row->intent,
+                row->pin.share(),
+                strand_,
+                std::move(on_sealed));
+        }
         if (projected)
         {
             // Counted ONLY once PeerSet has accepted it. Counting before the
@@ -554,7 +638,7 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     }
 
     auto* session = row->pin.get();
-    if (session == nullptr)
+    if (!row->channel && session == nullptr)
     {
         // No session to publish on. If nothing ever reached the receiver it
         // holds nothing; if something may have, we can no longer learn or
@@ -618,13 +702,7 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
         // REPLAY, not re-mint: the same sealed command, same attempt identity.
         // A second identity for one payload is exactly what the receiver's
         // identity_conflict refusal exists to catch.
-        //@@authority channel=prv.C0003 status=provisional scope=statement
-        // bind=submit_node_batch@8c216cd03b7675ba
-        // endpoints=ledger_fetch_coordinator,peer_client
-        // channel_semantics=command_receipt calls=submit_node_batch
-        // label=candidate_exact_node_batch_write_command_and_receipt_channel
-        accepted = session->submit_node_batch(
-            *row->sealed,
+        auto receipt_handler =
             [self = shared_from_this(), attempt, revision](
                 NodeBatchWriteReceipt receipt) {
                 // Delivered on the RECEIVER's strand. Hop to ours before
@@ -636,7 +714,16 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
                         self->settle_publication_on_strand(
                             attempt, revision, std::move(receipt), false);
                     });
-            });  //@@authority-target ids=prv.C0003
+            };
+        //@@authority channel=prv.C0003 status=provisional scope=statement bind=submit_node_batch@47decb2e529a6be8
+        // endpoints=ledger_fetch_coordinator,peer_client
+        // channel_semantics=command_receipt calls=submit_node_batch
+        // label=candidate_exact_node_batch_write_command_and_receipt_channel
+        accepted = row->channel
+            ? row->channel->submit(*row->sealed, std::move(receipt_handler))
+            : session->submit_node_batch(
+                  *row->sealed,
+                  std::move(receipt_handler)); //@@authority-target ids=prv.C0003
     }
     catch (...)
     {
@@ -778,7 +865,7 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
     }
 
     auto* session = row->pin.get();
-    if (session == nullptr)
+    if (!row->channel && session == nullptr)
     {
         // The receiver row outlives our retention and we can no longer reach
         // it. Retained, not counted-and-erased: the row IS the authority, and a
@@ -802,8 +889,10 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
         }
         else
         {
-            queued = session->acknowledge_node_batch_receipt(
-                NodeBatchReceiptAck{*row->receipt});
+            auto ack = NodeBatchReceiptAck{*row->receipt};
+            queued = row->channel
+                ? row->channel->acknowledge(std::move(ack))
+                : session->acknowledge_node_batch_receipt(std::move(ack));
         }
     }
     catch (...)
@@ -845,10 +934,7 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
     //@@mutation-end acknowledgement-retry-yields-instead-recursing
 }
 
-//@@audit-ack unannotated_authority_candidate reason="cancels the retry schedule
-// this row owns, so it is NOT inert, but it is reached only from the annotated
-// terminalize_row and retain_unsettled_row commits and is dominated by them"
-// ref=2026-07-26-0832-annotations-are-in-scope-for-current-slice
+//@@audit-ack unannotated_authority_candidate reason="cancels the retry schedule this row owns, so it is NOT inert, but it is reached only from the annotated terminalize_row and retain_unsettled_row commits and is dominated by them" ref=2026-07-26-0832-annotations-are-in-scope-for-current-slice
 void
 LedgerFetchCoordinator::cancel_retry_quietly(OutboxRow& row) noexcept
 {
@@ -995,10 +1081,7 @@ LedgerFetchCoordinator::mark_unsettled_on_strand(
     check_fenced_on_strand();
 }
 
-//@@audit-ack unannotated_authority_candidate reason="recomputes a DERIVED
-// diagnostic projection from owned rows and stores it; it mutates no owned
-// state of its own and is reached only from annotated commit transitions"
-// ref=2026-07-26-0832-annotations-are-in-scope-for-current-slice
+//@@audit-ack unannotated_authority_candidate reason="recomputes a DERIVED diagnostic projection from owned rows and stores it; it mutates no owned state of its own and is reached only from annotated commit transitions" ref=2026-07-26-0832-annotations-are-in-scope-for-current-slice
 void
 LedgerFetchCoordinator::refresh_receipt_obligations_on_strand() noexcept
 {
@@ -1026,7 +1109,7 @@ LedgerFetchCoordinator::repair_unsettled_on_strand(TransportAttemptId attempt)
     {
         return;
     }
-    if (row->pin.get() == nullptr)
+    if (!row->channel && row->pin.get() == nullptr)
     {
         // NOT "the receiver incarnation is gone". PeerGenerationPin::State owns
         // a PeerSessionPtr and neither disconnect nor PeerSet removal nulls it,
@@ -1138,10 +1221,21 @@ LedgerFetchCoordinator::terminalize_on_strand(OutboxRow& row, char const* why)
                                              : SubmissionOutcome::not_written);
         deliver_submission_outcome_on_strand(row, outcome);
     }
+    if (row.channel)
+    {
+        auto const use_outcome = row.receipt &&
+                row.receipt->outcome() == NodeBatchWriteOutcome::written
+            ? PeerUseOutcome::success
+            : (row.may_have_reached_receiver
+                   ? PeerUseOutcome::transport_failure
+                   : PeerUseOutcome::write_failure);
+        row.channel->finish_operation(use_outcome);
+    }
     row.phase = Phase::terminal;
     row.bind_open = false;
     row.publish_open = false;
     row.sealed.reset();
+    row.channel.reset();
     cancel_quietly(row);
     cancel_retry_quietly(
         row);  // both timers, explicitly, or a retry outlives the row

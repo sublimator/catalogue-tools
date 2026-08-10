@@ -1363,6 +1363,7 @@ struct PublishFixture
         // match. See the note above: this equality is the open construction
         // boundary, made explicit here.
         client = PeerClientTestAccess::make(io, State::Ready, client_generation);
+        PeerClientTestAccess::set_endpoint(*client, "127.0.0.1:51235");
         if (with_connection)
         {
             ssl.emplace(asio::ssl::context::tlsv12_client);
@@ -1383,6 +1384,48 @@ struct PublishFixture
             NodeTree::account_state,
             CoordFixture::nodes(),
             PeerSetTestAccess::make_peer_pin_for_session(io, peers, client),
+            std::move(on_outcome));
+    }
+
+    Ingress
+    submit_exact(LedgerFetchCoordinator::SubmissionOutcomeHandler on_outcome = {})
+    {
+        auto const generation_ref =
+            PeerSetTestAccess::generation_ref(io, peers, client);
+        EXPECT_TRUE(generation_ref);
+        auto pending = asio::co_spawn(
+            io,
+            peers->co_acquire_peer_use(
+                generation_ref,
+                PeerUseRequest{
+                    .kind = PeerUseKind::ledger_nodes,
+                    .ledger_seq = 5'500,
+                    .absolute_deadline =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::seconds{5}}),
+            asio::use_future);
+        while (pending.wait_for(std::chrono::milliseconds{0}) !=
+               std::future_status::ready)
+        {
+            io.poll();
+            io.restart();
+        }
+        auto use = pending.get();
+        EXPECT_TRUE(use);
+        auto completion = std::move(use).into_completion();
+        auto channel = PeerUseOperations::node_batch_channel(
+            std::move(completion),
+            5'500,
+            [](std::shared_ptr<protocol::TMLedgerData> const&) {
+                return NodeResponseObservation{};
+            });
+        EXPECT_TRUE(channel);
+        return coord->submit_node_batch_on_use(
+            CoordFixture::ledger_hash(),
+            5'500,
+            NodeTree::account_state,
+            CoordFixture::nodes(),
+            std::move(channel),
             std::move(on_outcome));
     }
 
@@ -1567,6 +1610,33 @@ TEST(LedgerFetchCoordinatorPublish, AdmittedWriteIsAcknowledgedAndRetiresTheRow)
     EXPECT_FALSE(row->sealed.has_value());
     EXPECT_EQ(f.coord->work_outstanding(), 0u);
     EXPECT_FALSE(f.coord->accounting_broken());
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), SubmissionOutcome::written);
+}
+
+TEST(
+    LedgerFetchCoordinatorPublish,
+    ExactUseChannelSurvivesReplayAndReleasesAtAcknowledgedWrite)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    std::vector<SubmissionOutcome> outcomes;
+    ASSERT_EQ(
+        f.submit_exact([&outcomes](SubmissionOutcome outcome) {
+            outcomes.push_back(outcome);
+        }),
+        Ingress::reserved);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 1u);
+
+    f.settle();
+
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(f.io, f.peers), 0u);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::peer_use_outcome_count(
+            f.io, f.peers, PeerUseOutcome::success),
+        1u);
     ASSERT_EQ(outcomes.size(), 1u);
     EXPECT_EQ(outcomes.front(), SubmissionOutcome::written);
 }

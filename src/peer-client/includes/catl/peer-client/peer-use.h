@@ -386,6 +386,38 @@ struct PeerUseControl
         return true;
     }
 
+    /** Install the first call, then permit bounded replay on the same use. */
+    template <class Submit>
+    bool
+    try_submit_replayable(Submit&& submit)
+    {
+        std::lock_guard guard(submission_gate);
+        auto const current_phase = phase.load(std::memory_order_relaxed);
+        if (current_phase == PeerUsePhase::revoked || !session)
+            return false;
+        if (current_phase == PeerUsePhase::reserved)
+        {
+            phase.store(PeerUsePhase::submitted, std::memory_order_release);
+        }
+        std::invoke(std::forward<Submit>(submit), session);
+        return true;
+    }
+
+    /** Invoke a secondary protocol action only after initial submission. */
+    template <class Submit>
+    bool
+    with_submitted_session(Submit&& submit)
+    {
+        std::lock_guard guard(submission_gate);
+        if (phase.load(std::memory_order_relaxed) != PeerUsePhase::submitted ||
+            !session)
+        {
+            return false;
+        }
+        std::invoke(std::forward<Submit>(submit), session);
+        return true;
+    }
+
     //@@authority transition=prv.T0252 status=provisional scope=function
     // bind=catl::peer_client::detail::PeerUseControl::revoke@307aa6c39d134aa3
     // owner=unresolved owner_hypothesis=peer_use_adapter
@@ -711,6 +743,49 @@ private:
             finish(PeerUseOutcome::write_failure);
             throw;
         }
+    }
+
+    template <class Submit>
+    bool
+    install_or_replay_operation(
+        PeerUseKind kind,
+        std::uint32_t ledger_seq,
+        Submit&& submit) const
+    {
+        auto state = state_;
+        auto control = state ? state->control : nullptr;
+        if (!control || control->request.kind != kind ||
+            control->request.ledger_seq != ledger_seq)
+        {
+            return false;
+        }
+        try
+        {
+            return control->try_submit_replayable(
+                std::forward<Submit>(submit));
+        }
+        catch (...)
+        {
+            finish(PeerUseOutcome::write_failure);
+            throw;
+        }
+    }
+
+    template <class Submit>
+    bool
+    invoke_submitted_operation(
+        PeerUseKind kind,
+        std::uint32_t ledger_seq,
+        Submit&& submit) const
+    {
+        auto state = state_;
+        auto control = state ? state->control : nullptr;
+        if (!control || control->request.kind != kind ||
+            control->request.ledger_seq != ledger_seq)
+        {
+            return false;
+        }
+        return control->with_submitted_session(std::forward<Submit>(submit));
     }
 
     PeerUseCompletion

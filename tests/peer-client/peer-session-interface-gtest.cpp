@@ -6561,6 +6561,145 @@ TEST(PeerSessionInterface, HeaderLeaderCancellationDoesNotAbandonFollower)
     EXPECT_TRUE(follower_succeeded);
 }
 
+TEST(PeerSessionInterface, ManagedScopedHeaderUsesExactPeerUseWithoutLegacyPin)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 500ms,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "exact-header-use:1", true, 6000, 5900, 6100);
+    session->set_invoke_header_handler_inline(true);
+    session->set_get_ledger_header_handler(
+        [](uint32_t, Callback<LedgerHeaderResult> callback) {
+            callback(Error::Success, LedgerHeaderResult{});
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + 2s);
+
+    bool completed = false;
+    asio::co_spawn(
+        io,
+        [&, cache, peers, scope]() -> asio::awaitable<void> {
+            (void)co_await cache->get_header(
+                6000, peers, PeerSessionPtr{}, scope);
+            completed = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(completed);
+    io.restart();
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(io, peers), 0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::peer_use_outcome_count(
+            io, peers, PeerUseOutcome::success),
+        1u);
+}
+
+TEST(PeerSessionInterface, ManagedScopedWalkUsesExactNodeBatchWithoutLegacyPin)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto coordinator = LedgerFetchCoordinator::create(io, peers);
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 100ms,
+            .max_walk_peer_retries = 0,
+        },
+        coordinator);
+
+    asio::ssl::context ssl(asio::ssl::context::tlsv12_client);
+    auto client = PeerClientTestAccess::make(io, State::Ready, 1);
+    PeerClientTestAccess::set_endpoint(*client, "127.0.0.1:51235");
+    PeerClientTestAccess::seed_open_connection(*client, ssl);
+    PeerClientTestAccess::seed_successful_packet_writes(*client);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, client);
+
+    auto const root_hash = hash_with_byte(0x91);
+    auto const target_key = hash_with_byte(0x92);
+    auto const ledger_hash = hash_with_byte(0x93);
+    auto const wire = make_leaf_wire(target_key);
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + 2s);
+
+    auto result = asio::co_spawn(
+        io,
+        cache->walk_to(
+            root_hash,
+            target_key,
+            ledger_hash,
+            5'500,
+            1,
+            peers,
+            PeerSessionPtr{},
+            nullptr,
+            scope),
+        asio::use_future);
+
+    auto const submit_deadline = std::chrono::steady_clock::now() + 1s;
+    while (coordinator->work_outstanding() == 0 &&
+           std::chrono::steady_clock::now() < submit_deadline)
+    {
+        io.poll_one();
+        io.restart();
+    }
+    ASSERT_GT(coordinator->work_outstanding(), 0u)
+        << "the production walk never crossed exact node-batch ingress";
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+
+    cache->insert_and_notify(root_hash, wire);
+    while (result.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+    auto walked = result.get();
+    scope->cancel();
+    for (int i = 0; i < 256 &&
+         (coordinator->work_outstanding() != 0 ||
+          PeerSetTestAccess::active_peer_use_count(io, peers) != 0);
+         ++i)
+    {
+        io.poll();
+        io.restart();
+    }
+
+    EXPECT_TRUE(std::holds_alternative<WalkFound>(walked.terminal()));
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(io, peers), 0u);
+    EXPECT_EQ(coordinator->work_outstanding(), 0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::peer_use_outcome_count(
+            io, peers, PeerUseOutcome::success),
+        1u);
+}
+
 TEST(PeerSessionInterface, ManagedHeaderSuccessReleasesGenerationPin)
 {
     using namespace std::chrono_literals;

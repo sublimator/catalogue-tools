@@ -845,6 +845,32 @@ public:
         return generation;
     }
 
+    static std::uint64_t
+    install_terminal_generation_tombstone(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::uint64_t generation = 0;
+        run_on_strand(
+            io,
+            peers,
+            [&generation, endpoint = std::move(endpoint)](auto& set) mutable {
+                generation = set.reserve_connection_generation(
+                    endpoint,
+                    std::chrono::steady_clock::now() +
+                        std::chrono::seconds{30});
+                if (generation == 0)
+                    throw std::logic_error("terminal generation refused");
+                set.consume_lifecycle_event(
+                    {.endpoint = std::move(endpoint),
+                     .generation = generation,
+                     .event_sequence = 1,
+                     .lifecycle = catl::peer_client::PeerLifecycle::failed});
+            });
+        return generation;
+    }
+
     static catl::peer_client::HistoryPhysicalCensus
     history_physical_census(
         boost::asio::io_context& io,

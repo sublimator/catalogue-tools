@@ -761,6 +761,7 @@ private:
     {
         std::shared_ptr<SerializedTimerSignal> signal;
         std::vector<PeerGenerationPin> peer_pins;
+        std::vector<PeerUseCompletion> peer_uses;
         std::mutex peer_pins_mutex;
         std::atomic<int> outstanding{0};
         std::atomic<bool> dispatch_complete{false};
@@ -791,16 +792,51 @@ private:
             return true;
         }
 
+        std::optional<PeerUseCompletion>
+        try_begin_use(PeerUse use)
+        {
+            auto completion = std::move(use).into_completion();
+            std::lock_guard lock(peer_pins_mutex);
+            if (closed)
+            {
+                completion.finish(PeerUseOutcome::cancelled);
+                return std::nullopt;
+            }
+            try
+            {
+                peer_uses.push_back(completion);
+            }
+            catch (...)
+            {
+                completion.finish(PeerUseOutcome::cancelled);
+                throw;
+            }
+            outstanding.fetch_add(1, std::memory_order_relaxed);
+            return completion;
+        }
+
         void
         close_and_release_peer_pins() noexcept
         {
             std::vector<PeerGenerationPin> released;
+            std::vector<PeerUseCompletion> completed;
             {
                 std::lock_guard lock(peer_pins_mutex);
                 closed = true;
                 released.swap(peer_pins);
+                completed.swap(peer_uses);
             }
+            for (auto const& completion : completed)
+                completion.finish(PeerUseOutcome::cancelled);
         }
+    };
+
+    struct HeaderParticipant
+    {
+        std::shared_ptr<PeerSet> owner;
+        HistoryAcquisitionRef acquisition;
+        HistoryInterestRef interest;
+        bool terminal = false;
     };
 
     struct HeaderFetchState
@@ -821,6 +857,8 @@ private:
         // Cut 3C authority is attached to the exact physical fetch identity,
         // but cannot itself emit a selector, dial, use, or promotion command.
         std::shared_ptr<SharedHistoryFetch> participant_authority;
+        std::vector<std::shared_ptr<HeaderParticipant>> participants;
+        std::size_t next_participant = 0;
         // Receipt routing is distinct from selection authority. This contains
         // the actual owner of the initial managed pin plus any PeerSet that
         // can mint later fan-out pins.
@@ -842,6 +880,7 @@ private:
         bool driver_frame_done = false;
         bool deadline_frame_done = false;
         bool retirement_started = false;
+        bool managed_mode = false;
         Phase phase = Phase::running;
     };
 
@@ -917,6 +956,18 @@ private:
         uint32_t ledger_seq,
         PeerSession& peer,
         PeerGenerationPin peer_pin,
+        std::shared_ptr<NodeFetchRound> round);
+
+    NodeFetchSubmission
+    send_fetch_on_use(
+        Hash256 expected_hash,
+        Hash256 ledger_hash,
+        int tree_type,
+        SHAMapNodeID position,
+        Hash256 const& target_key,
+        int speculative_depth,
+        uint32_t ledger_seq,
+        PeerUse use,
         std::shared_ptr<NodeFetchRound> round);
 
     std::optional<std::size_t>
@@ -1001,8 +1052,20 @@ private:
         std::shared_ptr<HeaderFetchState> fetch,
         std::shared_ptr<HeaderRound> round);
 
+    void
+    send_header_use(
+        uint32_t ledger_seq,
+        PeerUse use,
+        std::shared_ptr<HeaderFetchState> fetch,
+        std::shared_ptr<HeaderRound> round);
+
     asio::awaitable<void>
     drive_header_fetch(
+        uint32_t ledger_seq,
+        std::shared_ptr<HeaderFetchState> fetch);
+
+    asio::awaitable<void>
+    drive_managed_header_fetch(
         uint32_t ledger_seq,
         std::shared_ptr<HeaderFetchState> fetch);
 
@@ -1026,7 +1089,8 @@ private:
     finish_header_fetch(
         uint32_t ledger_seq,
         std::shared_ptr<HeaderFetchState> const& fetch,
-        std::optional<LedgerHeaderResult> result = std::nullopt) noexcept;
+        std::optional<LedgerHeaderResult> result = std::nullopt,
+        PeerUseCompletion winning_use = {}) noexcept;
 
     /// Compute the content hash of an inner wire node.
     /// Expands compressed format to canonical 16×32 layout, then

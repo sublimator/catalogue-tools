@@ -7,6 +7,9 @@
 
 #include <catl/peer-client/node-cache.h>
 
+#include "node-batch-test-session.h"
+#include "peer-set-test-access.h"
+
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
@@ -1366,12 +1369,16 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
         .max_in_flight_connects = 0,
         .max_in_flight_crawls = 0,
     });
+    auto session =
+        std::make_shared<NodeBatchTestSession>("127.0.0.1:51235");
+    session->attach_strand(io);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
 
     bool done = false;
     bool cancel_branch_won = false;
     bool fetch_survived_caller = false;
     std::optional<SharedHistoryFetchSnapshot> participant_snapshot;
-    constexpr uint32_t ledger_seq = 654321u;
+    constexpr uint32_t ledger_seq = 50u;
     auto scope = catl::core::RequestScope::create(
         catl::core::RequestScope::Clock::now() + std::chrono::seconds(5));
     LedgerDemandRef parent;
@@ -1438,9 +1445,9 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
     ASSERT_TRUE(participant_snapshot);
     EXPECT_EQ(participant_snapshot->interests, 1u);
     EXPECT_EQ(participant_snapshot->active_interests, 0u);
-    EXPECT_EQ(
-        participant_snapshot->terminal,
-        SharedHistoryFetchTerminal::no_interests);
+    EXPECT_FALSE(participant_snapshot->terminal)
+        << "the cancelled rider owns no interest, while the already-submitted "
+           "exact use still owns the shared physical fetch";
     EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
 
     io.restart();
@@ -1481,7 +1488,17 @@ TEST(NodeCacheIntegration, CoalescedHeaderWaitersKeepDistinctDemandOwners)
             .max_in_flight_connects = 0,
             .max_in_flight_crawls = 0,
         });
-    constexpr uint32_t ledger_seq = 654322u;
+    auto first_session =
+        std::make_shared<NodeBatchTestSession>("127.0.0.1:51236");
+    auto second_session =
+        std::make_shared<NodeBatchTestSession>("127.0.0.1:51237");
+    first_session->attach_strand(io);
+    second_session->attach_strand(io);
+    PeerSetTestAccess::insert_ready_peer_with_generation(
+        io, first_peers, first_session);
+    PeerSetTestAccess::insert_ready_peer_with_generation(
+        io, second_peers, second_session);
+    constexpr uint32_t ledger_seq = 51u;
     auto const deadline =
         catl::core::RequestScope::Clock::now() + std::chrono::seconds(5);
     auto first_scope = catl::core::RequestScope::create(deadline);
@@ -1582,9 +1599,8 @@ TEST(NodeCacheIntegration, CoalescedHeaderWaitersKeepDistinctDemandOwners)
     ASSERT_TRUE(participant_snapshot);
     EXPECT_EQ(participant_snapshot->interests, 2u);
     EXPECT_EQ(participant_snapshot->active_interests, 0u);
-    EXPECT_EQ(
-        participant_snapshot->terminal,
-        SharedHistoryFetchTerminal::no_interests);
+    EXPECT_FALSE(participant_snapshot->terminal)
+        << "detached riders do not erase already-submitted exact uses";
 
     io.restart();
     std::optional<LedgerDemandSnapshot> first_snapshot;

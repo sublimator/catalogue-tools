@@ -75,6 +75,7 @@ class RunConfig:
     peer: str | None
     peer_cache_path: Path | None
     startup_timeout: float
+    settle_seconds: float
     request_timeout: float
     shutdown_timeout: float
     threads: int
@@ -539,6 +540,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threads", type=int, default=1, help="Server I/O thread count")
     parser.add_argument("--no-cache", action="store_true", help="Disable proof cache")
     parser.add_argument("--startup-timeout", type=float, default=20.0, help="Seconds to wait for server startup")
+    parser.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds to let peer discovery settle after health becomes ready",
+    )
     parser.add_argument("--request-timeout", type=float, default=120.0, help="Seconds to allow per request")
     parser.add_argument("--shutdown-timeout", type=float, default=10.0, help="Seconds to wait after SIGINT")
     parser.add_argument("--keep-server", action="store_true", help="Leave server running after the case")
@@ -607,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
         peer=args.peer,
         peer_cache_path=peer_cache_path,
         startup_timeout=args.startup_timeout,
+        settle_seconds=max(0.0, args.settle_seconds),
         request_timeout=args.request_timeout,
         shutdown_timeout=args.shutdown_timeout,
         threads=args.threads,
@@ -632,6 +640,12 @@ def main(argv: list[str] | None = None) -> int:
     server = RunningServer(config)
     try:
         server.start()
+        if config.settle_seconds:
+            print(
+                f"SETTLE: waiting {config.settle_seconds:g}s for peers",
+                flush=True,
+            )
+            time.sleep(config.settle_seconds)
         started = time.time()
         CASES[args.case](server)
         duration = time.time() - started

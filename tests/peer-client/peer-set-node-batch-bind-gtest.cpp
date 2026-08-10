@@ -17,8 +17,12 @@
 #include <gtest/gtest.h>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/use_future.hpp>
 
+#include <chrono>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -62,6 +66,30 @@ struct BindFixture
     pin()
     {
         return PeerSetTestAccess::make_peer_pin_for_session(io, peers, session);
+    }
+
+    PeerUse
+    use(PeerUseKind kind, std::uint32_t ledger_seq = 1)
+    {
+        auto pending = asio::co_spawn(
+            io,
+            peers->co_acquire_peer_use(
+                PeerSetTestAccess::generation_ref(io, peers, session),
+                PeerUseRequest{
+                    .kind = kind,
+                    .ledger_seq = ledger_seq,
+                    .absolute_deadline =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::seconds{5}}),
+            asio::use_future);
+        while (pending.wait_for(std::chrono::milliseconds{0}) !=
+               std::future_status::ready)
+        {
+            io.poll();
+            io.restart();
+        }
+        io.restart();
+        return pending.get();
     }
 
     /// One intent, minted through the only route a test has: the declared
@@ -149,6 +177,32 @@ seal(BindFixture& f, PeerGenerationPin pin, NodeBatchIntent intent)
     out.projected = f.peers->seal_node_batch_command(
         std::move(intent),
         std::move(pin),
+        f.io.get_executor(),
+        [&f, &out](std::optional<NodeBatchCommand> command) {
+            out.completed = true;
+            out.on_peer_set_strand =
+                PeerSetTestAccess::running_on_owner_strand(f.peers);
+            if (command)
+            {
+                out.sealed = true;
+                out.peer_generation = command->peer_generation().value();
+                out.command = std::move(command);
+            }
+        });
+    f.settle();
+    return out;
+}
+
+SealResult
+seal_on_use(
+    BindFixture& f,
+    PeerUseCompletion completion,
+    NodeBatchIntent intent)
+{
+    SealResult out;
+    out.projected = f.peers->seal_node_batch_command_on_use(
+        std::move(intent),
+        std::move(completion),
         f.io.get_executor(),
         [&f, &out](std::optional<NodeBatchCommand> command) {
             out.completed = true;
@@ -425,6 +479,79 @@ TEST(PeerSetNodeBatchBind, EmptyPinRefuses)
     auto r = seal(f, PeerGenerationPin{}, BindFixture::intent());
     EXPECT_TRUE(r.completed);
     EXPECT_FALSE(r.sealed);
+}
+
+/// 11. The exact-use path seals only a live ledger-node use whose immutable
+///     request identity agrees with the intent.
+TEST(PeerSetNodeBatchBind, ExactLedgerNodeUseSealsMatchingIntent)
+{
+    BindFixture f;
+    auto use = f.use(PeerUseKind::ledger_nodes);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+
+    auto r = seal_on_use(f, completion, BindFixture::intent());
+    EXPECT_TRUE(r.projected);
+    EXPECT_TRUE(r.completed);
+    ASSERT_TRUE(r.sealed);
+    EXPECT_EQ(r.peer_generation, f.generation);
+
+    completion.finish(PeerUseOutcome::success);
+    f.settle();
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
+}
+
+/// 12. A live use for the wrong ledger cannot be repurposed by changing the
+///     coordinator intent after admission.
+TEST(PeerSetNodeBatchBind, ExactUseRefusesMismatchedLedger)
+{
+    BindFixture f;
+    auto use = f.use(PeerUseKind::ledger_nodes, 2);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+
+    auto r = seal_on_use(f, completion, BindFixture::intent());
+    EXPECT_TRUE(r.completed);
+    EXPECT_FALSE(r.sealed);
+
+    completion.finish(PeerUseOutcome::cancelled);
+    f.settle();
+}
+
+/// 13. A header-use ticket naming the same endpoint and generation still has
+///     no authority to submit ledger-node transport.
+TEST(PeerSetNodeBatchBind, ExactUseRefusesWrongRequestKind)
+{
+    BindFixture f;
+    auto use = f.use(PeerUseKind::ledger_header);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+
+    auto r = seal_on_use(f, completion, BindFixture::intent());
+    EXPECT_TRUE(r.completed);
+    EXPECT_FALSE(r.sealed);
+
+    completion.finish(PeerUseOutcome::cancelled);
+    f.settle();
+}
+
+/// 14. A copied completion remains an inert historical name after its exact
+///     active-use row is retired; it must not resurrect or retarget authority.
+TEST(PeerSetNodeBatchBind, FinishedExactUseRefusesWithoutResurrection)
+{
+    BindFixture f;
+    auto use = f.use(PeerUseKind::ledger_nodes);
+    ASSERT_TRUE(use);
+    auto completion = std::move(use).into_completion();
+    auto stale = completion;
+    completion.finish(PeerUseOutcome::cancelled);
+    f.settle();
+    ASSERT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
+
+    auto r = seal_on_use(f, std::move(stale), BindFixture::intent());
+    EXPECT_TRUE(r.completed);
+    EXPECT_FALSE(r.sealed);
+    EXPECT_EQ(PeerSetTestAccess::active_peer_use_count(f.io, f.peers), 0u);
 }
 
 /// Deliberately NOT tested here, and left as the coordinator's obligation:
