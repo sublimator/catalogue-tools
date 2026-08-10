@@ -286,6 +286,30 @@ TEST(HistoryDemand, PrunedTerminalParentIdentityIsNeverReused)
     EXPECT_FALSE(run(f.io, f.peers->co_ledger_demand_snapshot(first)));
 }
 
+TEST(HistoryDemand, LastRequestOwnerClosesParentAndChildrenAsCompleted)
+{
+    Fixture f;
+    auto parent = run(
+        f.io, f.peers->co_get_or_create_ledger_demand(f.scope, f.options()));
+    (void)run(
+        f.io,
+        f.peers->co_open_history_acquisition(parent, f.acquisition(1, 1)));
+
+    f.scope.reset();
+    auto terminal = run(f.io, f.peers->co_ledger_demand_snapshot(parent));
+    ASSERT_TRUE(terminal);
+    EXPECT_EQ(terminal->terminal, LedgerDemandTerminal::completed);
+    EXPECT_EQ(terminal->active_acquisitions, 0u);
+
+    auto successor_scope =
+        catl::core::RequestScope::create(f.now + std::chrono::seconds(5));
+    auto successor = run(
+        f.io,
+        f.peers->co_get_or_create_ledger_demand(successor_scope, f.options()));
+    EXPECT_GT(successor.id().value, parent.id().value);
+    EXPECT_FALSE(run(f.io, f.peers->co_ledger_demand_snapshot(parent)));
+}
+
 TEST(HistoryDemand, AbsoluteDeadlineClosesParentWithoutAnotherCaller)
 {
     boost::asio::io_context io;

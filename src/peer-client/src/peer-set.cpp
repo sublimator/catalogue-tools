@@ -5573,11 +5573,18 @@ PeerSet::on_request_scope_terminal(
     if (row == ledger_demands_.end() ||
         row->second.request_scope_id != request_scope)
         return;
-    terminalize_ledger_demand(
-        demand,
-        terminal == catl::core::RequestScopeTerminal::deadline_elapsed
-            ? LedgerDemandTerminal::deadline_elapsed
-            : LedgerDemandTerminal::cancelled);
+    terminalize_ledger_demand(demand, [&] {
+        switch (terminal)
+        {
+            case catl::core::RequestScopeTerminal::completed:
+                return LedgerDemandTerminal::completed;
+            case catl::core::RequestScopeTerminal::cancelled:
+                return LedgerDemandTerminal::cancelled;
+            case catl::core::RequestScopeTerminal::deadline_elapsed:
+                return LedgerDemandTerminal::deadline_elapsed;
+        }
+        return LedgerDemandTerminal::cancelled;
+    }());
 }
 
 void

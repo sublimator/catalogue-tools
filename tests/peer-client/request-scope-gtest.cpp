@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -180,6 +181,47 @@ TEST(RequestScope, ThrowingTerminalObserverCannotEscapeCancellation)
     EXPECT_NO_THROW(EXPECT_TRUE(scope->cancel(now + 1s)));
     EXPECT_EQ(
         scope->snapshot(now + 1s).terminal, RequestScopeTerminal::cancelled);
+}
+
+TEST(RequestScope, LastOwnerDestructionPublishesCompletedExactlyOnce)
+{
+    auto const now = RequestScope::Clock::now();
+    std::optional<RequestScopeTerminal> observed;
+    std::atomic<unsigned> calls{0};
+    RequestScope::Subscription subscription;
+    {
+        auto scope = RequestScope::create(now + 30s);
+        ASSERT_TRUE(scope);
+        subscription = scope->subscribe(
+            [&observed, &calls](RequestScopeTerminal terminal) {
+                observed = terminal;
+                calls.fetch_add(1, std::memory_order_relaxed);
+            });
+    }
+
+    EXPECT_EQ(observed, RequestScopeTerminal::completed);
+    EXPECT_EQ(calls.load(std::memory_order_relaxed), 1u);
+}
+
+TEST(RequestScope, LastOwnerCannotReplaceEarlierCancellation)
+{
+    auto const now = RequestScope::Clock::now();
+    std::optional<RequestScopeTerminal> observed;
+    std::atomic<unsigned> calls{0};
+    RequestScope::Subscription subscription;
+    {
+        auto scope = RequestScope::create(now + 30s);
+        ASSERT_TRUE(scope);
+        subscription = scope->subscribe(
+            [&observed, &calls](RequestScopeTerminal terminal) {
+                observed = terminal;
+                calls.fetch_add(1, std::memory_order_relaxed);
+            });
+        ASSERT_TRUE(scope->cancel(now + 1s));
+    }
+
+    EXPECT_EQ(observed, RequestScopeTerminal::cancelled);
+    EXPECT_EQ(calls.load(std::memory_order_relaxed), 1u);
 }
 
 }  // namespace

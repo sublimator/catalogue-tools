@@ -3756,10 +3756,18 @@ NodeCache::get_header_impl(
         {
             if (auto const state = request_scope->snapshot(); state.terminal)
             {
-                terminal = *state.terminal ==
-                        catl::core::RequestScopeTerminal::deadline_elapsed
-                    ? HistoryAcquisitionTerminal::deadline_elapsed
-                    : HistoryAcquisitionTerminal::cancelled;
+                switch (*state.terminal)
+                {
+                    case catl::core::RequestScopeTerminal::completed:
+                        terminal = HistoryAcquisitionTerminal::completed;
+                        break;
+                    case catl::core::RequestScopeTerminal::cancelled:
+                        terminal = HistoryAcquisitionTerminal::cancelled;
+                        break;
+                    case catl::core::RequestScopeTerminal::deadline_elapsed:
+                        terminal = HistoryAcquisitionTerminal::deadline_elapsed;
+                        break;
+                }
             }
         }
         co_await participant_owner->co_finish_history_acquisition(

@@ -35,6 +35,11 @@ RequestScope::Subscription::~Subscription()
     reset();
 }
 
+RequestScope::~RequestScope()
+{
+    close_from_last_owner();
+}
+
 void
 RequestScope::Subscription::reset() noexcept
 {
@@ -98,6 +103,30 @@ RequestScope::notify_observers(
         {
         }
     }
+}
+
+//@@authority transition=prv.T0267 status=provisional scope=function
+// bind=catl::core::close_from_last_owner@977d0747a906f696
+// owner=unresolved owner_hypothesis=request_scope commit=request_scope_mutex
+// touches=prv.S0103 label=close_request_authority_on_last_owner_destruction
+void
+RequestScope::close_from_last_owner() noexcept
+{
+    ObserverList observers;
+    RequestScopeTerminal selected = RequestScopeTerminal::completed;
+    {
+        std::lock_guard lock(mutex_);
+        if (latch_deadline_locked(Clock::now(), observers))
+        {
+            selected = RequestScopeTerminal::deadline_elapsed;
+        }
+        else if (!terminal_)
+        {
+            terminal_ = RequestScopeTerminal::completed;
+            observers.swap(observers_);
+        }
+    }
+    notify_observers(observers, selected);
 }
 
 //@@authority transition=prv.T0259 status=provisional scope=function

@@ -46,6 +46,7 @@ struct RequestCommitId
 enum class RequestScopeTerminal : std::uint8_t {
     cancelled,
     deadline_elapsed,
+    completed,
 };
 
 struct RequestScopeSnapshot
@@ -137,6 +138,11 @@ public:
     RequestScope(RequestScope const&) = delete;
     RequestScope&
     operator=(RequestScope const&) = delete;
+
+    /// Last-owner fallback. Explicit cancellation/deadline always remains
+    /// sticky; otherwise destruction closes every subscribed child as
+    /// completed so an abandoned owner cannot retain authority until deadline.
+    ~RequestScope();
 
     static std::shared_ptr<RequestScope>
     create(Clock::time_point absolute_deadline);
@@ -230,6 +236,9 @@ private:
     bool
     latch_deadline_locked(Clock::time_point now, ObserverList& observers)
         const noexcept;
+
+    void
+    close_from_last_owner() noexcept;
 
     static void
     notify_observers(
