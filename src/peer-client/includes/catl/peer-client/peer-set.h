@@ -10,6 +10,7 @@
 // coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
 
 #include "endpoint-tracker.h"
+#include "history-demand.h"
 #include "node-transport.h"
 #include "peer-crawl-client.h"
 #include "peer-endpoint-cache.h"
@@ -79,6 +80,13 @@ struct PeerSetOptions
     /// Maximum new endpoints one ledger-specific wait may probe. Existing
     /// connected peers are handled separately by the node/header fan-out.
     std::size_t max_targeted_connect_attempts = 3;
+
+    /// Non-dialling Cut-3 parent limits. Child acquisitions borrow these
+    /// counters; they never receive private copies.
+    std::size_t max_active_ledger_demands = 512;
+    std::size_t max_acquisitions_per_demand = 64;
+    std::size_t max_history_promotions_per_demand = 1;
+    std::size_t max_history_blind_uses_per_demand = 1;
 
     /// Retain bounded /crawl claims for diagnostics. This side table has no
     /// path into discovery, ranking, dial admission, or persistent storage.
@@ -381,6 +389,31 @@ public:
     boost::asio::awaitable<PeerUse>
     co_acquire_peer_use(PeerGenerationRef generation, PeerUseRequest request);
 
+    /// Atomically get or create the sole parent for (request scope, ledger).
+    /// The returned value is inert; Cut 3 records cannot create network work.
+    boost::asio::awaitable<LedgerDemandRef>
+    co_get_or_create_ledger_demand(
+        std::shared_ptr<catl::core::RequestScope> request_scope,
+        LedgerDemandOptions options);
+
+    /// Mint one child identity under an existing live parent. The child owns
+    /// exclusions and request context only; every finite counter remains on
+    /// the parent row.
+    boost::asio::awaitable<HistoryAcquisitionRef>
+    co_open_history_acquisition(
+        LedgerDemandRef demand,
+        HistoryAcquisitionOptions options);
+
+    /// Acknowledged child terminal transition. First terminal wins.
+    boost::asio::awaitable<void>
+    co_finish_history_acquisition(
+        HistoryAcquisitionRef acquisition,
+        HistoryAcquisitionTerminal terminal);
+
+    /// Owner-strand diagnostic snapshot; no scheduling capability escapes.
+    boost::asio::awaitable<std::optional<LedgerDemandSnapshot>>
+    co_ledger_demand_snapshot(LedgerDemandRef demand);
+
     /// A receipt for every generation-pin release command posted before this
     /// call. This does not assert that unrelated pins are absent; it proves
     /// only that PeerSet has consumed the causally preceding releases.
@@ -611,6 +644,38 @@ private:
 
     void
     cancel_all_peer_uses_for_shutdown() noexcept;
+
+    LedgerDemandRef
+    get_or_create_ledger_demand_on_strand(
+        std::shared_ptr<catl::core::RequestScope> const& request_scope,
+        LedgerDemandOptions options);
+
+    HistoryAcquisitionRef
+    open_history_acquisition_on_strand(
+        LedgerDemandRef const& demand,
+        HistoryAcquisitionOptions options);
+
+    void
+    finish_history_acquisition_on_strand(
+        HistoryAcquisitionRef const& acquisition,
+        HistoryAcquisitionTerminal terminal) noexcept;
+
+    void
+    terminalize_ledger_demand(
+        LedgerDemandId demand,
+        LedgerDemandTerminal terminal) noexcept;
+
+    void
+    on_request_scope_terminal(
+        LedgerDemandId demand,
+        catl::core::RequestScopeId request_scope,
+        catl::core::RequestScopeTerminal terminal) noexcept;
+
+    void
+    on_ledger_demand_deadline(LedgerDemandId demand) noexcept;
+
+    void
+    prune_ledger_demand_tombstones() noexcept;
 
     /// Default-inert initiation failpoint, settable only through the declared
     /// test seam. Proving that a failed projection returns false requires a
@@ -1183,6 +1248,43 @@ private:
     // label=classified_terminal_peer_use_outcomes
     std::array<std::uint64_t, static_cast<std::size_t>(PeerUseOutcome::count)>
         peer_use_outcomes_{};
+
+    struct LedgerDemandRecord
+    {
+        LedgerDemandId id;
+        catl::core::RequestScopeId request_scope_id;
+        std::weak_ptr<catl::core::RequestScope> request_scope;
+        LedgerDemandOptions options;
+        std::chrono::steady_clock::time_point absolute_deadline{};
+        std::optional<LedgerDemandTerminal> terminal;
+        std::set<AcquisitionId> acquisitions;
+        catl::core::RequestScope::Subscription terminal_subscription;
+        std::shared_ptr<boost::asio::steady_timer> deadline_timer;
+    };
+
+    struct HistoryAcquisitionRecord
+    {
+        AcquisitionId id;
+        LedgerDemandId demand;
+        HistorySelectionContext context;
+        std::unordered_set<std::string> excluded_endpoints;
+        std::optional<HistoryAcquisitionTerminal> terminal;
+    };
+
+    //@@authority state=prv.S0104 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::ledger_demands_@7971f2c3286d07e3
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=one_parent_history_demand_per_request_scope_and_ledger
+    std::map<LedgerDemandId, LedgerDemandRecord> ledger_demands_;
+    std::map<std::pair<std::uint64_t, std::uint32_t>, LedgerDemandId>
+        ledger_demand_keys_;
+    //@@authority state=prv.S0105 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::history_acquisitions_@4d5dccf4147931e6
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=budgetless_history_acquisition_children
+    std::map<AcquisitionId, HistoryAcquisitionRecord> history_acquisitions_;
+    std::uint64_t next_ledger_demand_id_ = 1;
+    std::uint64_t next_history_acquisition_id_ = 1;
     //@@authority state=prv.S0093 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::peer_set_instance_id_@564c32da7db0f1b9
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set

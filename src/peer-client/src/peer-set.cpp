@@ -745,6 +745,12 @@ PeerSet::begin_stop_on_strand()
     wanted_ledgers_.clear();
     prioritized_ledgers_.clear();
 
+    for (auto const& [id, _] : ledger_demands_)
+        terminalize_ledger_demand(id, LedgerDemandTerminal::shutdown);
+    history_acquisitions_.clear();
+    ledger_demand_keys_.clear();
+    ledger_demands_.clear();
+
     pending_connects_.clear();
     queued_.clear();
     pending_crawls_.clear();
@@ -5164,6 +5170,490 @@ PeerSet::make_generation_ref(PeerSessionPtr const& expected_session) const
         connection->second.generation,
         peer_generations_.at(key).lifecycle.last_event_sequence(),
         *status};
+}
+
+//@@authority transition=prv.T0262 status=provisional scope=function
+// bind=catl::peer_client::get_or_create_ledger_demand_on_strand@ed661f14cbeb9d85
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0102,prv.S0103,prv.S0104
+// label=atomic_get_or_create_request_ledger_parent
+LedgerDemandRef
+PeerSet::get_or_create_ledger_demand_on_strand(
+    std::shared_ptr<catl::core::RequestScope> const& request_scope,
+    LedgerDemandOptions options)
+{
+    ASSERT_ON_STRAND();
+    prune_ledger_demand_tombstones();
+
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        lifecycle_ != Lifecycle::running || peer_set_instance_id_ == 0)
+    {
+        throw PeerClientException(
+            Error::Cancelled, "history demand owner is stopping");
+    }
+    if (!request_scope || !request_scope->id() || options.ledger_seq == 0)
+        throw PeerClientException(
+            Error::BadRequest, "invalid history demand identity");
+
+    auto const now = std::chrono::steady_clock::now();
+    auto const request = request_scope->snapshot(now);
+    if (request.terminal)
+    {
+        throw PeerClientException(
+            *request.terminal ==
+                    catl::core::RequestScopeTerminal::deadline_elapsed
+                ? Error::Timeout
+                : Error::Cancelled,
+            "history demand request is terminal");
+    }
+
+    if (options.fallback_at == std::chrono::steady_clock::time_point{})
+        options.fallback_at =
+            request.absolute_deadline - std::chrono::steady_clock::duration{1};
+    if (options.fallback_at >= request.absolute_deadline)
+        throw PeerClientException(
+            Error::BadRequest,
+            "history demand fallback must precede its deadline");
+
+    options.remaining_new_dials = std::min(
+        options.remaining_new_dials, options_.max_targeted_connect_attempts);
+    options.remaining_promotions = std::min(
+        options.remaining_promotions,
+        options_.max_history_promotions_per_demand);
+    options.remaining_blind_uses = std::min(
+        options.remaining_blind_uses,
+        options_.max_history_blind_uses_per_demand);
+
+    auto const key = std::pair{request.id.value, options.ledger_seq};
+    if (auto const existing_key = ledger_demand_keys_.find(key);
+        existing_key != ledger_demand_keys_.end())
+    {
+        auto const existing = ledger_demands_.find(existing_key->second);
+        if (existing == ledger_demands_.end())
+            throw PeerClientException(
+                Error::Cancelled, "history demand index is unavailable");
+        auto const& row = existing->second;
+        if (row.options != options ||
+            row.absolute_deadline != request.absolute_deadline)
+        {
+            throw PeerClientException(
+                Error::DuplicateRequest,
+                "history demand options disagree with the existing parent");
+        }
+        return LedgerDemandRef{
+            peer_set_instance_id_,
+            row.id,
+            row.request_scope_id,
+            row.options.ledger_seq,
+            row.absolute_deadline};
+    }
+
+    if (ledger_demands_.size() >= options_.max_active_ledger_demands ||
+        next_ledger_demand_id_ == std::numeric_limits<std::uint64_t>::max())
+    {
+        throw PeerClientException(
+            Error::ResourceExhausted, "history demand capacity exhausted");
+    }
+
+    LedgerDemandId const id{next_ledger_demand_id_};
+    auto timer = std::make_shared<asio::steady_timer>(
+        strand_, request.absolute_deadline);
+    auto weak = weak_from_this();
+    auto subscription = request_scope->subscribe(
+        [weak, id, scope = request.id](
+            catl::core::RequestScopeTerminal terminal) noexcept {
+            if (auto self = weak.lock())
+            {
+                try
+                {
+                    asio::post(
+                        self->strand_, [self, id, scope, terminal]() noexcept {
+                            self->on_request_scope_terminal(
+                                id, scope, terminal);
+                        });
+                }
+                catch (...)
+                {
+                }
+            }
+        });
+
+    timer->async_wait([weak, id](boost::system::error_code const& ec) noexcept {
+        if (!ec)
+        {
+            if (auto self = weak.lock())
+                self->on_ledger_demand_deadline(id);
+        }
+    });
+
+    std::map<LedgerDemandId, LedgerDemandRecord> prepared_rows;
+    prepared_rows.emplace(
+        id,
+        LedgerDemandRecord{
+            .id = id,
+            .request_scope_id = request.id,
+            .request_scope = request_scope,
+            .options = options,
+            .absolute_deadline = request.absolute_deadline,
+            .terminal_subscription = std::move(subscription),
+            .deadline_timer = std::move(timer)});
+    auto row_node = prepared_rows.extract(id);
+
+    std::map<std::pair<std::uint64_t, std::uint32_t>, LedgerDemandId>
+        prepared_keys;
+    prepared_keys.emplace(key, id);
+    auto key_node = prepared_keys.extract(key);
+
+    // Prepared nodes make the two-home commit allocation-free. The ID advances
+    // only after both canonical homes exist.
+    ledger_demands_.insert(std::move(row_node));
+    ledger_demand_keys_.insert(std::move(key_node));
+    ++next_ledger_demand_id_;
+
+    return LedgerDemandRef{
+        peer_set_instance_id_,
+        id,
+        request.id,
+        options.ledger_seq,
+        request.absolute_deadline};
+}
+
+boost::asio::awaitable<LedgerDemandRef>
+PeerSet::co_get_or_create_ledger_demand(
+    std::shared_ptr<catl::core::RequestScope> request_scope,
+    LedgerDemandOptions options)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto owner_executor = catl::core::ContextExecutor(
+            strand_, catl::core::retain_current_request());
+        co_return co_await asio::co_spawn(
+            std::move(owner_executor),
+            [self,
+             request_scope = std::move(request_scope),
+             options]() mutable -> asio::awaitable<LedgerDemandRef> {
+                co_return self->get_or_create_ledger_demand_on_strand(
+                    request_scope, options);
+            },
+            asio::use_awaitable);
+    }
+    co_return get_or_create_ledger_demand_on_strand(request_scope, options);
+}
+
+//@@authority transition=prv.T0263 status=provisional scope=function
+// bind=catl::peer_client::open_history_acquisition_on_strand@0d710e1547dc8c6c
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0104,prv.S0105
+// label=mint_budgetless_history_acquisition_child
+HistoryAcquisitionRef
+PeerSet::open_history_acquisition_on_strand(
+    LedgerDemandRef const& demand,
+    HistoryAcquisitionOptions options)
+{
+    ASSERT_ON_STRAND();
+    if (!demand || demand.peer_set_instance_ != peer_set_instance_id_)
+    {
+        throw PeerClientException(
+            Error::BadRequest, "history acquisition has a foreign parent");
+    }
+    auto const row_it = ledger_demands_.find(demand.id_);
+    if (row_it == ledger_demands_.end() ||
+        row_it->second.request_scope_id != demand.scope_id_ ||
+        row_it->second.options.ledger_seq != demand.ledger_seq_)
+    {
+        throw PeerClientException(
+            Error::BadRequest, "history acquisition has a foreign parent");
+    }
+
+    auto& row = row_it->second;
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = row.request_scope.lock();
+    if (row.terminal || now >= row.absolute_deadline || !scope)
+        throw PeerClientException(
+            now >= row.absolute_deadline ? Error::Timeout : Error::Cancelled,
+            "history demand is terminal");
+    if (auto const state = scope->snapshot(now); state.terminal)
+    {
+        terminalize_ledger_demand(
+            row.id,
+            *state.terminal ==
+                    catl::core::RequestScopeTerminal::deadline_elapsed
+                ? LedgerDemandTerminal::deadline_elapsed
+                : LedgerDemandTerminal::cancelled);
+        throw PeerClientException(
+            *state.terminal ==
+                    catl::core::RequestScopeTerminal::deadline_elapsed
+                ? Error::Timeout
+                : Error::Cancelled,
+            "history demand request is terminal");
+    }
+    if (!options.fetch)
+        throw PeerClientException(
+            Error::BadRequest, "history acquisition fetch identity is missing");
+    if (row.acquisitions.size() >= options_.max_acquisitions_per_demand ||
+        next_history_acquisition_id_ ==
+            std::numeric_limits<std::uint64_t>::max())
+    {
+        throw PeerClientException(
+            Error::ResourceExhausted, "history acquisition capacity exhausted");
+    }
+
+    AcquisitionId const id{next_history_acquisition_id_};
+    HistorySelectionContext context{
+        .acquisition = id,
+        .fetch = options.fetch,
+        .fetch_epoch = options.fetch_epoch,
+        .ledger_seq = row.options.ledger_seq,
+        .request_kind = options.request_kind,
+        .tree_type = options.tree_type,
+        .item = std::move(options.item)};
+
+    std::map<AcquisitionId, HistoryAcquisitionRecord> prepared_rows;
+    prepared_rows.emplace(
+        id,
+        HistoryAcquisitionRecord{
+            .id = id,
+            .demand = row.id,
+            .context = context,
+            .excluded_endpoints = std::move(options.excluded_endpoints)});
+    auto acquisition_node = prepared_rows.extract(id);
+    std::set<AcquisitionId> prepared_index;
+    prepared_index.insert(id);
+    auto index_node = prepared_index.extract(id);
+
+    history_acquisitions_.insert(std::move(acquisition_node));
+    row.acquisitions.insert(std::move(index_node));
+    ++next_history_acquisition_id_;
+
+    return HistoryAcquisitionRef{
+        peer_set_instance_id_,
+        row.id,
+        row.request_scope_id,
+        std::move(context),
+        row.absolute_deadline};
+}
+
+boost::asio::awaitable<HistoryAcquisitionRef>
+PeerSet::co_open_history_acquisition(
+    LedgerDemandRef demand,
+    HistoryAcquisitionOptions options)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto owner_executor = catl::core::ContextExecutor(
+            strand_, catl::core::retain_current_request());
+        co_return co_await asio::co_spawn(
+            std::move(owner_executor),
+            [self, demand, options = std::move(options)]() mutable
+            -> asio::awaitable<HistoryAcquisitionRef> {
+                co_return self->open_history_acquisition_on_strand(
+                    demand, std::move(options));
+            },
+            asio::use_awaitable);
+    }
+    co_return open_history_acquisition_on_strand(demand, std::move(options));
+}
+
+void
+//@@authority transition=prv.T0266 status=provisional scope=function
+// bind=catl::peer_client::finish_history_acquisition_on_strand@cfcaa0ac16e9ba4a
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0105
+// label=commit_history_acquisition_terminal_once
+PeerSet::finish_history_acquisition_on_strand(
+    HistoryAcquisitionRef const& acquisition,
+    HistoryAcquisitionTerminal terminal) noexcept
+{
+    ASSERT_ON_STRAND();
+    if (!acquisition || acquisition.peer_set_instance_ != peer_set_instance_id_)
+        return;
+    auto const it =
+        history_acquisitions_.find(acquisition.context_.acquisition);
+    if (it == history_acquisitions_.end() ||
+        it->second.demand != acquisition.demand_ ||
+        it->second.context.fetch != acquisition.context_.fetch ||
+        it->second.context.fetch_epoch != acquisition.context_.fetch_epoch)
+        return;
+    if (!it->second.terminal)
+        it->second.terminal = terminal;
+}
+
+boost::asio::awaitable<void>
+PeerSet::co_finish_history_acquisition(
+    HistoryAcquisitionRef acquisition,
+    HistoryAcquisitionTerminal terminal)
+{
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+    if (!strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto owner_executor = catl::core::ContextExecutor(
+            strand_, catl::core::retain_current_request());
+        co_await asio::co_spawn(
+            std::move(owner_executor),
+            [self, acquisition, terminal]() -> asio::awaitable<void> {
+                self->finish_history_acquisition_on_strand(
+                    acquisition, terminal);
+                co_return;
+            },
+            asio::use_awaitable);
+        co_return;
+    }
+    finish_history_acquisition_on_strand(acquisition, terminal);
+}
+
+void
+//@@authority transition=prv.T0265 status=provisional scope=function
+// bind=catl::peer_client::terminalize_ledger_demand@8d0ae5a02bb6f574
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0103,prv.S0104,prv.S0105
+// label=propagate_parent_terminal_to_budgetless_children
+PeerSet::terminalize_ledger_demand(
+    LedgerDemandId demand,
+    LedgerDemandTerminal terminal) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto const it = ledger_demands_.find(demand);
+    if (it == ledger_demands_.end() || it->second.terminal)
+        return;
+    auto& row = it->second;
+    row.terminal = terminal;
+    row.terminal_subscription.reset();
+    if (row.deadline_timer)
+    {
+        try
+        {
+            row.deadline_timer->cancel();
+        }
+        catch (...)
+        {
+        }
+    }
+
+    HistoryAcquisitionTerminal child_terminal =
+        HistoryAcquisitionTerminal::fetch_terminal;
+    switch (terminal)
+    {
+        case LedgerDemandTerminal::completed:
+            child_terminal = HistoryAcquisitionTerminal::completed;
+            break;
+        case LedgerDemandTerminal::cancelled:
+            child_terminal = HistoryAcquisitionTerminal::cancelled;
+            break;
+        case LedgerDemandTerminal::deadline_elapsed:
+            child_terminal = HistoryAcquisitionTerminal::deadline_elapsed;
+            break;
+        case LedgerDemandTerminal::budget_exhausted:
+            child_terminal = HistoryAcquisitionTerminal::exhausted;
+            break;
+        case LedgerDemandTerminal::shutdown:
+            child_terminal = HistoryAcquisitionTerminal::shutdown;
+            break;
+    }
+    for (auto const id : row.acquisitions)
+    {
+        auto const acquisition = history_acquisitions_.find(id);
+        if (acquisition != history_acquisitions_.end() &&
+            !acquisition->second.terminal)
+            acquisition->second.terminal = child_terminal;
+    }
+}
+
+void
+PeerSet::on_request_scope_terminal(
+    LedgerDemandId demand,
+    catl::core::RequestScopeId request_scope,
+    catl::core::RequestScopeTerminal terminal) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto const row = ledger_demands_.find(demand);
+    if (row == ledger_demands_.end() ||
+        row->second.request_scope_id != request_scope)
+        return;
+    terminalize_ledger_demand(
+        demand,
+        terminal == catl::core::RequestScopeTerminal::deadline_elapsed
+            ? LedgerDemandTerminal::deadline_elapsed
+            : LedgerDemandTerminal::cancelled);
+}
+
+void
+PeerSet::on_ledger_demand_deadline(LedgerDemandId demand) noexcept
+{
+    ASSERT_ON_STRAND();
+    terminalize_ledger_demand(demand, LedgerDemandTerminal::deadline_elapsed);
+}
+
+void
+PeerSet::prune_ledger_demand_tombstones() noexcept
+{
+    ASSERT_ON_STRAND();
+    for (auto it = ledger_demands_.begin(); it != ledger_demands_.end();)
+    {
+        auto const& row = it->second;
+        if (!row.terminal || !row.request_scope.expired())
+        {
+            ++it;
+            continue;
+        }
+        for (auto const acquisition : row.acquisitions)
+            history_acquisitions_.erase(acquisition);
+        ledger_demand_keys_.erase(
+            std::pair{row.request_scope_id.value, row.options.ledger_seq});
+        it = ledger_demands_.erase(it);
+    }
+}
+
+boost::asio::awaitable<std::optional<LedgerDemandSnapshot>>
+PeerSet::co_ledger_demand_snapshot(LedgerDemandRef demand)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto owner_executor = catl::core::ContextExecutor(
+            strand_, catl::core::retain_current_request());
+        co_return co_await asio::co_spawn(
+            std::move(owner_executor),
+            [self,
+             demand]() -> asio::awaitable<std::optional<LedgerDemandSnapshot>> {
+                co_return co_await self->co_ledger_demand_snapshot(demand);
+            },
+            asio::use_awaitable);
+    }
+
+    if (!demand || demand.peer_set_instance_ != peer_set_instance_id_)
+        co_return std::nullopt;
+
+    auto const it = ledger_demands_.find(demand.id_);
+    if (it == ledger_demands_.end() ||
+        it->second.request_scope_id != demand.scope_id_ ||
+        it->second.options.ledger_seq != demand.ledger_seq_)
+        co_return std::nullopt;
+
+    auto const& row = it->second;
+    std::size_t active = 0;
+    for (auto const id : row.acquisitions)
+    {
+        auto const acquisition = history_acquisitions_.find(id);
+        if (acquisition != history_acquisitions_.end() &&
+            !acquisition->second.terminal)
+            ++active;
+    }
+    co_return LedgerDemandSnapshot{
+        .id = row.id,
+        .request_scope_id = row.request_scope_id,
+        .ledger_seq = row.options.ledger_seq,
+        .absolute_deadline = row.absolute_deadline,
+        .fallback_at = row.options.fallback_at,
+        .terminal = row.terminal,
+        .remaining_new_dials = row.options.remaining_new_dials,
+        .remaining_promotions = row.options.remaining_promotions,
+        .remaining_blind_uses = row.options.remaining_blind_uses,
+        .acquisitions = row.acquisitions.size(),
+        .active_acquisitions = active};
 }
 
 //@@authority transition=prv.T0243 status=provisional scope=function

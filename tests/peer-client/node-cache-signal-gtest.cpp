@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -941,16 +942,30 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
     bool cancel_branch_won = false;
     bool fetch_survived_caller = false;
     constexpr uint32_t ledger_seq = 654321u;
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + std::chrono::seconds(5));
+    LedgerDemandRef parent;
 
     asio::co_spawn(
         io,
-        [&, cache, peers]() -> asio::awaitable<void> {
+        [&, cache, peers, scope]() -> asio::awaitable<void> {
+            parent = co_await peers->co_get_or_create_ledger_demand(
+                scope,
+                LedgerDemandOptions{
+                    .ledger_seq = ledger_seq,
+                    .remaining_new_dials =
+                        std::numeric_limits<std::size_t>::max(),
+                    .remaining_promotions =
+                        std::numeric_limits<std::size_t>::max(),
+                    .remaining_blind_uses =
+                        std::numeric_limits<std::size_t>::max()});
             auto ex = co_await asio::this_coro::executor;
             auto result =
                 co_await asio::experimental::make_parallel_group(
                     asio::co_spawn(
                         ex,
-                        cache->get_header(ledger_seq, peers, nullptr),
+                        cache->get_header(
+                            ledger_seq, peers, PeerSessionPtr{}, scope),
                         asio::deferred),
                     asio::co_spawn(
                         ex,
@@ -969,6 +984,7 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
                         asio::use_awaitable);
 
             cancel_branch_won = (std::get<0>(result)[0] == 1);
+            scope->cancel();
             done = true;
         },
         asio::detached);
@@ -988,4 +1004,18 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
     EXPECT_TRUE(cancel_branch_won);
     EXPECT_TRUE(fetch_survived_caller);
     EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
+
+    io.restart();
+    std::optional<LedgerDemandSnapshot> demand_snapshot;
+    asio::co_spawn(
+        io,
+        [&, peers]() -> asio::awaitable<void> {
+            demand_snapshot = co_await peers->co_ledger_demand_snapshot(parent);
+        },
+        asio::detached);
+    io.run();
+    ASSERT_TRUE(demand_snapshot);
+    EXPECT_EQ(demand_snapshot->acquisitions, 1u);
+    EXPECT_EQ(demand_snapshot->active_acquisitions, 0u);
+    EXPECT_EQ(demand_snapshot->terminal, LedgerDemandTerminal::cancelled);
 }

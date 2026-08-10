@@ -3625,6 +3625,8 @@ NodeCache::get_header_impl(
         }
     }
 
+    auto participant_owner = fetch ? fetch->peers : nullptr;
+
     // A caller that joins someone else's shared operation contributes no
     // transport authority. Release its unused preferred generation before
     // suspending so coalescing cannot become an accidental eviction veto.
@@ -3637,6 +3639,38 @@ NodeCache::get_header_impl(
 
     if (!fetch)
         co_return hit_result;
+
+    HistoryAcquisitionRef acquisition;
+    if (request_scope && participant_owner)
+    {
+        try
+        {
+            auto demand =
+                co_await participant_owner->co_get_or_create_ledger_demand(
+                    request_scope,
+                    LedgerDemandOptions{
+                        .ledger_seq = ledger_seq,
+                        .remaining_new_dials =
+                            std::numeric_limits<std::size_t>::max(),
+                        .remaining_promotions =
+                            std::numeric_limits<std::size_t>::max(),
+                        .remaining_blind_uses =
+                            std::numeric_limits<std::size_t>::max()});
+            acquisition =
+                co_await participant_owner->co_open_history_acquisition(
+                    demand,
+                    HistoryAcquisitionOptions{
+                        .fetch = HistoryFetchId{fetch->operation_id},
+                        .fetch_epoch = fetch->epoch,
+                        .request_kind = HistoryRequestKind::ledger_header});
+        }
+        catch (...)
+        {
+            if (start_fetch)
+                finish_header_fetch(ledger_seq, fetch);
+            throw;
+        }
+    }
 
     if (start_fetch)
     {
@@ -3701,7 +3735,40 @@ NodeCache::get_header_impl(
         }
     }
 
-    co_return co_await wait_for_header_fetch(ledger_seq, fetch);
+    if (!acquisition)
+        co_return co_await wait_for_header_fetch(ledger_seq, fetch);
+
+    std::optional<LedgerHeaderResult> result;
+    std::exception_ptr failure;
+    try
+    {
+        result = co_await wait_for_header_fetch(ledger_seq, fetch);
+    }
+    catch (...)
+    {
+        failure = std::current_exception();
+    }
+
+    if (failure)
+    {
+        auto terminal = HistoryAcquisitionTerminal::fetch_terminal;
+        if (request_scope)
+        {
+            if (auto const state = request_scope->snapshot(); state.terminal)
+            {
+                terminal = *state.terminal ==
+                        catl::core::RequestScopeTerminal::deadline_elapsed
+                    ? HistoryAcquisitionTerminal::deadline_elapsed
+                    : HistoryAcquisitionTerminal::cancelled;
+            }
+        }
+        co_await participant_owner->co_finish_history_acquisition(
+            acquisition, terminal);
+        std::rethrow_exception(failure);
+    }
+    co_await participant_owner->co_finish_history_acquisition(
+        acquisition, HistoryAcquisitionTerminal::completed);
+    co_return std::move(*result);
 }
 
 //@@authority transition=node_cache.ack_header_servant owner=node_cache
