@@ -27,6 +27,11 @@ namespace http = beast::http;
 
 namespace {
 
+constexpr std::uint64_t kMaxUpgradeResponseBodyBytes = 64 * 1024;
+constexpr std::uint32_t kMaxUpgradeResponseHeaderBytes = 32 * 1024;
+constexpr std::size_t kMaxRedirectSuccessorsPerResponse = 16;
+constexpr std::size_t kMaxRedirectSuccessorTextBytes = 128;
+
 std::string
 truncate_for_log(std::string const& text, std::size_t limit = 160)
 {
@@ -741,17 +746,28 @@ peer_connection::send_http_request(const connection_handler& handler)
                         // Read the response before releasing the write receipt,
                         // so close cannot observe a false zero between stages.
                         auto buffer = std::make_shared<beast::flat_buffer>();
+                        auto parser = std::make_shared<
+                            http::response_parser<http::string_body>>();
+                        //@@authority transition=prv.T0299 status=provisional scope=statement bind=expression_statement@acd0d7edcb62cacf
+                        // owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+                        // touches=prv.S0123 label=bound_upgrade_response_before_body_allocation
+                        parser->body_limit(kMaxUpgradeResponseBodyBytes); //@@authority-target ids=prv.T0299
+                        parser->header_limit(kMaxUpgradeResponseHeaderBytes);
                         try
                         {
                             self->initiate_transport_operation(
                                 TransportOperationKind::http_read,
-                                [self, buffer, handler](
+                                [self, buffer, parser, handler](
                                     TransportOperationId read_id) {
                                     http::async_read(
                                         *self->socket_,
                                         *buffer,
-                                        self->http_response_,
-                                        [self, buffer, handler, read_id](
+                                        *parser,
+                                        [self,
+                                         buffer,
+                                         parser,
+                                         handler,
+                                         read_id](
                                             boost::system::error_code ec,
                                             std::size_t) {
                                             TransportOperationCompletion
@@ -766,6 +782,8 @@ peer_connection::send_http_request(const connection_handler& handler)
                                             }
                                             if (!ec)
                                             {
+                                                self->http_response_ =
+                                                    parser->release();
                                                 self->handle_http_response(
                                                     handler);
                                             }
@@ -885,6 +903,10 @@ peer_connection::handle_http_request(const connection_handler& handler)
 }
 
 void
+//@@authority transition=prv.T0298 status=provisional scope=function bind=catl::peer_client::handle_http_response@a783de98e235df91
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// touches=prv.S0123
+// label=parse_body_and_value_bounded_redirect_successors
 peer_connection::handle_http_response(const connection_handler& handler)
 {
     if (http_response_.result() != http::status::switching_protocols)
@@ -974,7 +996,20 @@ peer_connection::handle_http_response(const connection_handler& handler)
                     auto const& ips = jv.as_object().at("peer-ips").as_array();
                     for (auto const& ip : ips)
                     {
-                        redirect_ips_.insert(std::string(ip.as_string()));
+                        if (redirect_ips_.size() >=
+                            kMaxRedirectSuccessorsPerResponse)
+                        {
+                            break;
+                        }
+                        if (!ip.is_string())
+                            continue;
+                        auto const value = ip.as_string();
+                        if (value.empty() ||
+                            value.size() > kMaxRedirectSuccessorTextBytes)
+                        {
+                            continue;
+                        }
+                        redirect_ips_.emplace(value.data(), value.size());
                     }
                     PLOGD(
                         log_,

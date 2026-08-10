@@ -449,6 +449,11 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
             options_.max_history_attachments_per_generation,
             1,
             kMaxHistorySearchCandidates);
+    options_.history_connect_timeout = std::clamp(
+        options_.history_connect_timeout,
+        std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            kOrdinaryConnectDeadline));
 
     auto prepare_global_tokens = [this](std::size_t count, auto& destination) {
         destination.reserve(count);
@@ -1094,6 +1099,17 @@ PeerSet::install_generation_session(
         return;
     }
     row->second.session = session;
+    if (row->second.history_origin &&
+        row->second.history_origin->close_requested && session)
+    {
+        try
+        {
+            session->disconnect();
+        }
+        catch (...)
+        {
+        }
+    }
 }
 
 std::uint64_t
@@ -1141,6 +1157,8 @@ PeerSet::abandon_unstarted_generation(
     {
         return;
     }
+    release_generation_history_origin(
+        row->second, HistoryWorkReceipt::closed);
     peer_generations_.erase(row);
     advance_history_pool_revision();
 }
@@ -2854,6 +2872,8 @@ PeerSet::queue_connect(std::string const& endpoint)
     if (queued_.count(key))
     {
         auto& authority = targeted_connects_[key];
+        if (authority.history_demand_authorized)
+            return;
         authority.ordinary_discovery_authorized = true;
         authority.ordinary_deadline = now + kOrdinaryConnectDeadline;
         return;
@@ -2964,6 +2984,16 @@ PeerSet::queue_targeted_connect(
                 "] targeted queue rejected endpoint=",
                 key,
                 " reason=queued_authority_missing");
+            return false;
+        }
+        if (row->second.history_demand_authorized)
+        {
+            PEER_SET_TRACE(
+                "[",
+                net_label_,
+                "] targeted queue rejected endpoint=",
+                key,
+                " reason=demand_origin_requires_exact_adoption");
             return false;
         }
         auto& authorizations = row->second.target_authorizations;
@@ -3080,6 +3110,8 @@ PeerSet::claim_queued_connect_authority(
     claimed.physical_deadline = authority.physical_deadline;
     if (claimed.generation == 0 || claimed.physical_deadline <= now)
         return claimed;
+    if (authority.history_demand_authorized)
+        claimed.absolute_deadline = authority.physical_deadline;
     if (authority.ordinary_discovery_authorized &&
         authority.ordinary_deadline > now)
         claimed.absolute_deadline = authority.ordinary_deadline;
@@ -4229,6 +4261,16 @@ PeerSet::try_connect_on_strand(
             co_return nullptr;
         }
 
+        if (generation_row->second.history_origin)
+        {
+            // Demand-origin generations stay outside ordinary/persistent pool
+            // membership. Their exact origin and independently sponsored uses
+            // are the only authority for retaining the ready-transient slot.
+            retry_gates_.erase(key);
+            advance_history_pool_revision();
+            co_return client;
+        }
+
         if (!make_room_for_peer(key, client, admission_leases))
         {
             PLOGI(
@@ -4349,17 +4391,28 @@ PeerSet::try_connect_on_strand(
                 auto const& ips = client->raw_connection().redirect_ips();
                 redirect_count = ips.size();
                 redirected = redirect_count > 0;
-                for (auto const& ip : ips)
+                auto history_redirects = capture_history_redirect_successors(
+                    key, generation, port, ips);
+                if (history_redirects)
                 {
-                    auto normalized =
-                        EndpointTracker::normalize_discovered_host(ip, port);
-                    if (!normalized)
+                    redirect_count = history_redirects->first;
+                    filtered = history_redirects->second;
+                }
+                else
+                {
+                    for (auto const& ip : ips)
                     {
-                        ++filtered;
-                        continue;
+                        auto normalized =
+                            EndpointTracker::normalize_discovered_host(
+                                ip, port);
+                        if (!normalized || *normalized == key)
+                        {
+                            ++filtered;
+                            continue;
+                        }
+                        tracker_->add_discovered(
+                            *normalized, DiscoverySource::Redirect);
                     }
-                    tracker_->add_discovered(
-                        *normalized, DiscoverySource::Redirect);
                 }
                 if (redirected)
                 {
@@ -4385,8 +4438,11 @@ PeerSet::try_connect_on_strand(
                             " non-public redirect peers from ",
                             key);
                     }
-                    // Immediately try the redirect peers
-                    try_undiscovered();
+                    // Service-owned redirects may feed ordinary discovery.
+                    // Demand-owned successors remain acquisition-scoped and
+                    // require a fresh exact creation grant.
+                    if (!history_redirects)
+                        try_undiscovered();
                 }
             }
 
@@ -5763,6 +5819,129 @@ PeerSet::release_history_acquisition_attachments(
 }
 
 void
+//@@authority transition=prv.T0293 status=provisional scope=function bind=catl::peer_client::release_history_acquisition_origins@26b95fd2195edb5e
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0088,prv.S0110,prv.S0111,prv.S0115,prv.S0119,prv.S0120
+// label=close_exact_demand_origin_or_request_its_physical_drain
+PeerSet::release_history_acquisition_origins(
+    AcquisitionId acquisition) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto owner = history_acquisitions_.find(acquisition);
+    if (owner == history_acquisitions_.end())
+        return;
+
+    std::uint64_t cursor = 0;
+    for (;;)
+    {
+        auto const next = owner->second.retained_generations.upper_bound(cursor);
+        if (next == owner->second.retained_generations.end())
+            break;
+        auto const generation_id = *next;
+        cursor = generation_id;
+        auto generation = std::find_if(
+            peer_generations_.begin(),
+            peer_generations_.end(),
+            [generation_id](auto const& current) {
+                return current.second.lifecycle.generation() == generation_id;
+            });
+        if (generation == peer_generations_.end() ||
+            !generation->second.history_origin ||
+            generation->second.history_origin->retainer_control.acquisition !=
+                acquisition)
+        {
+            owner->second.retained_generations.erase(generation_id);
+            continue;
+        }
+
+        auto& origin = *generation->second.history_origin;
+        auto adopted = false;
+        for (auto attachment = generation->second.history_attachments.begin();
+             attachment != generation->second.history_attachments.end();
+             ++attachment)
+        {
+            auto adopter = history_acquisitions_.find(attachment->first);
+            if (attachment->first == acquisition ||
+                adopter == history_acquisitions_.end() ||
+                adopter->second.terminal || !attachment->second.fetch ||
+                attachment->second.fetch != origin.retainer_fetch ||
+                !adopter->second.attached_generations.contains(generation_id))
+            {
+                continue;
+            }
+            if (!origin.retainer_fetch ||
+                !origin.retainer_fetch->acknowledge_work(
+                    origin.retainer_grant,
+                    HistoryWorkReceipt::adopted,
+                    attachment->second.grant))
+            {
+                continue;
+            }
+
+            auto reverse =
+                adopter->second.attached_generations.extract(generation_id);
+            assert(!reverse.empty());
+            owner->second.retained_generations.erase(generation_id);
+            auto retained =
+                adopter->second.retained_generations.insert(std::move(reverse));
+            assert(retained.inserted);
+            origin.retainer_control = attachment->second.control;
+            origin.retainer_fetch = std::move(attachment->second.fetch);
+            origin.retainer_grant = attachment->second.grant;
+            generation->second.history_attachments.erase(attachment);
+            advance_history_pool_revision();
+            adopted = true;
+            break;
+        }
+        if (adopted)
+            continue;
+
+        auto const endpoint = generation->first;
+        auto queued = targeted_connects_.find(endpoint);
+        if (queued != targeted_connects_.end() &&
+            queued->second.generation == generation_id &&
+            queued->second.history_demand_authorized)
+        {
+            queued_.erase(endpoint);
+            std::erase(pending_connects_, endpoint);
+            targeted_connects_.erase(queued);
+            abandon_unstarted_generation(endpoint, generation_id);
+            continue;
+        }
+
+        generation->second.history_origin->close_requested = true;
+        begin_generation_close(endpoint, generation_id);
+        auto servant = in_flight_.find(endpoint);
+        if (servant != in_flight_.end() &&
+            servant->second.generation == generation_id)
+        {
+            servant->second.stop_cancellation_requested = true;
+            if (servant->second.session)
+            {
+                try
+                {
+                    servant->second.session->disconnect();
+                }
+                catch (...)
+                {
+                }
+            }
+            continue;
+        }
+        if (generation->second.session)
+        {
+            (void)start_generation_drain(endpoint, generation_id);
+            continue;
+        }
+
+        release_generation_history_origin(
+            generation->second, HistoryWorkReceipt::closed);
+        peer_generations_.erase(generation);
+        advance_history_pool_revision();
+    }
+}
+
+void
 //@@authority transition=prv.T0292 status=provisional scope=function bind=catl::peer_client::release_generation_history_attachments@ee2f8e7143b8162e
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0110,prv.S0111,prv.S0115,prv.S0116,prv.S0117
@@ -5791,6 +5970,182 @@ PeerSet::release_generation_history_attachments(
 }
 
 void
+//@@authority transition=prv.T0294 status=provisional scope=function bind=catl::peer_client::release_generation_history_origin@2eac0df594a7a700
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0110,prv.S0111,prv.S0115,prv.S0119,prv.S0120
+// label=acknowledge_exact_history_generation_origin_after_release_receipt
+PeerSet::release_generation_history_origin(
+    PeerGeneration& generation,
+    HistoryWorkReceipt receipt) noexcept
+{
+    ASSERT_ON_STRAND();
+    if (!generation.history_origin)
+        return;
+    if (generation.history_watchdog)
+    {
+        try
+        {
+            generation.history_watchdog->cancel();
+        }
+        catch (...)
+        {
+        }
+        generation.history_watchdog.reset();
+    }
+    auto origin = std::move(*generation.history_origin);
+    generation.history_origin.reset();
+    auto acquisition =
+        history_acquisitions_.find(origin.retainer_control.acquisition);
+    if (acquisition != history_acquisitions_.end())
+    {
+        acquisition->second.retained_generations.erase(
+            generation.lifecycle.generation());
+    }
+    if (origin.retainer_fetch)
+    {
+        (void)origin.retainer_fetch->acknowledge_work(
+            origin.retainer_grant, receipt);
+    }
+    advance_history_pool_revision();
+}
+
+void
+//@@authority transition=prv.T0296 status=provisional scope=function bind=catl::peer_client::on_history_generation_watchdog@23ce312040ed58a7
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0088,prv.S0089,prv.S0115,prv.S0116,prv.S0117,prv.S0118,prv.S0119,prv.S0120,prv.S0121
+// label=expire_exact_demand_generation_without_releasing_before_receipt
+PeerSet::on_history_generation_watchdog(
+    std::string const& endpoint,
+    std::uint64_t generation_id) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto generation = peer_generations_.find(endpoint);
+    if (generation == peer_generations_.end() ||
+        generation->second.lifecycle.generation() != generation_id ||
+        !generation->second.history_origin ||
+        generation->second.physical_deadline >
+            std::chrono::steady_clock::now())
+    {
+        return;
+    }
+
+    release_generation_history_attachments(generation->second);
+    generation->second.history_origin->close_requested = true;
+    auto queued = targeted_connects_.find(endpoint);
+    if (queued != targeted_connects_.end() &&
+        queued->second.generation == generation_id &&
+        queued->second.history_demand_authorized)
+    {
+        queued_.erase(endpoint);
+        std::erase(pending_connects_, endpoint);
+        targeted_connects_.erase(queued);
+        abandon_unstarted_generation(endpoint, generation_id);
+        return;
+    }
+
+    begin_generation_close(endpoint, generation_id);
+    auto servant = in_flight_.find(endpoint);
+    if (servant != in_flight_.end() &&
+        servant->second.generation == generation_id)
+    {
+        servant->second.stop_cancellation_requested = true;
+        if (servant->second.session)
+        {
+            try
+            {
+                servant->second.session->disconnect();
+            }
+            catch (...)
+            {
+            }
+        }
+        return;
+    }
+    if (generation->second.session)
+    {
+        (void)start_generation_drain(endpoint, generation_id);
+        return;
+    }
+    release_generation_history_origin(
+        generation->second, HistoryWorkReceipt::closed);
+    peer_generations_.erase(generation);
+    advance_history_pool_revision();
+}
+
+std::optional<std::pair<std::size_t, std::size_t>>
+//@@authority transition=prv.T0297 status=provisional scope=function bind=catl::peer_client::capture_history_redirect_successors@cea6928fe23b0306
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0115,prv.S0116,prv.S0119,prv.S0120,prv.S0122
+// label=fanout_bounded_redirect_values_to_exact_generation_owners
+PeerSet::capture_history_redirect_successors(
+    std::string const& endpoint,
+    std::uint64_t generation_id,
+    std::uint16_t port,
+    std::set<std::string> const& successors) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto generation = peer_generations_.find(endpoint);
+    if (generation == peer_generations_.end() ||
+        generation->second.lifecycle.generation() != generation_id ||
+        !generation->second.history_origin)
+    {
+        return std::nullopt;
+    }
+
+    try
+    {
+        std::set<std::string> normalized;
+        std::size_t filtered = 0;
+        for (auto const& successor : successors)
+        {
+            auto value =
+                EndpointTracker::normalize_discovered_host(successor, port);
+            if (!value || *value == endpoint ||
+                !normalized.insert(*value).second)
+            {
+                ++filtered;
+                continue;
+            }
+        }
+
+        auto changed = false;
+        auto add_to = [&](AcquisitionId id) {
+            auto acquisition = history_acquisitions_.find(id);
+            if (acquisition == history_acquisitions_.end() ||
+                acquisition->second.terminal)
+            {
+                return;
+            }
+            for (auto const& successor : normalized)
+            {
+                if (acquisition->second.redirect_successors.size() >=
+                    kMaxHistoryRedirectSuccessors)
+                {
+                    break;
+                }
+                changed =
+                    acquisition->second.redirect_successors.insert(successor)
+                        .second || changed;
+            }
+        };
+        add_to(
+            generation->second.history_origin->retainer_control.acquisition);
+        for (auto const& [acquisition, _] :
+             generation->second.history_attachments)
+        {
+            add_to(acquisition);
+        }
+        if (changed)
+            advance_history_pool_revision();
+        return std::pair{normalized.size(), filtered};
+    }
+    catch (...)
+    {
+        return std::pair<std::size_t, std::size_t>{0, successors.size()};
+    }
+}
+
+void
 //@@authority transition=prv.T0266 status=provisional scope=function
 // bind=catl::peer_client::finish_history_acquisition_on_strand@cfcaa0ac16e9ba4a
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
@@ -5813,6 +6168,7 @@ PeerSet::finish_history_acquisition_on_strand(
     if (!it->second.terminal)
     {
         it->second.terminal = terminal;
+        release_history_acquisition_origins(it->second.id);
         release_history_acquisition_attachments(it->second.id);
     }
 }
@@ -5897,6 +6253,7 @@ PeerSet::terminalize_ledger_demand(
             !acquisition->second.terminal)
         {
             acquisition->second.terminal = child_terminal;
+            release_history_acquisition_origins(id);
             release_history_acquisition_attachments(id);
         }
     }
@@ -6125,6 +6482,33 @@ PeerSet::project_history_search_snapshot(
     snapshot.source_attempts = demand.source_attempts;
     snapshot.physical = physical_census_on_strand();
     snapshot.excluded_endpoints = acquisition.excluded_endpoints;
+    if (!snapshot.physical.can_create())
+    {
+        auto earliest = std::chrono::steady_clock::time_point::max();
+        std::string endpoint;
+        std::uint64_t generation_id = 0;
+        for (auto const& [candidate_endpoint, generation] : peer_generations_)
+        {
+            if (!generation.history_origin ||
+                generation.physical_deadline <= now ||
+                generation.physical_deadline > demand.absolute_deadline ||
+                generation.physical_deadline >= earliest)
+            {
+                continue;
+            }
+            earliest = generation.physical_deadline;
+            endpoint = candidate_endpoint;
+            generation_id = generation.lifecycle.generation();
+        }
+        if (generation_id != 0)
+        {
+            snapshot.wakes.push_back(HistoryPlannedWake{
+                .kind = HistoryWakeSourceKind::physical_watchdog,
+                .at = earliest,
+                .endpoint = std::move(endpoint),
+                .generation = generation_id});
+        }
+    }
 
     auto first_live = [](auto const& tokens) -> auto const* {
         auto const found =
@@ -6207,6 +6591,9 @@ PeerSet::project_history_search_snapshot(
     for (auto const& endpoint : configured_endpoints_)
         ensure(endpoint, HistorySourceLane::configured);
 
+    for (auto const& endpoint : acquisition.redirect_successors)
+        ensure(endpoint, HistorySourceLane::independently_discovered);
+
     for (auto const& [endpoint, stats] : endpoint_stats_)
     {
         auto source = HistorySourceLane::crawl_only;
@@ -6265,19 +6652,23 @@ PeerSet::project_history_search_snapshot(
     }
 
     auto project_attachment =
-        [&snapshot, &acquisition, &demand, this](
+        [&snapshot, &acquisition, &demand, &now, this](
             HistorySearchCandidate& candidate,
             std::uint64_t generation_id) {
             auto generation = peer_generations_.find(candidate.target.endpoint);
             if (generation == peer_generations_.end() || generation_id == 0 ||
-                generation->second.lifecycle.generation() != generation_id)
+                generation->second.lifecycle.generation() != generation_id ||
+                generation->second.physical_deadline <= now)
             {
                 candidate.eligible = false;
                 return;
             }
             candidate.eligible = true;
             candidate.attached =
-                acquisition.attached_generations.contains(generation_id);
+                acquisition.attached_generations.contains(generation_id) ||
+                (generation->second.history_origin &&
+                 generation->second.history_origin->retainer_control.acquisition ==
+                     acquisition.id);
             candidate.attachable = !candidate.attached;
             if (candidate.attached &&
                 snapshot.wakes.size() < kMaxHistorySearchWakes)
@@ -6331,6 +6722,13 @@ PeerSet::project_history_search_snapshot(
             generation.lifecycle.generation();
         candidate.value.disposition =
             HistoryGenerationDisposition::ready_transient;
+        candidate.value.blind_eligible = true;
+        if (generation.lifecycle.status())
+        {
+            candidate.value.advertises_ledger =
+                generation.lifecycle.status()->advertised_range.contains(
+                    acquisition.context.ledger_seq);
+        }
         project_attachment(
             candidate.value, generation.lifecycle.generation());
     }
@@ -6365,9 +6763,24 @@ PeerSet::project_history_search_snapshot(
         }
         row.value.fair_ticket = fair_ticket++;
         if (row.value.disposition == HistoryGenerationDisposition::absent)
+        {
             row.value.target.pool = "history-transient";
+            if (next_connection_generation_ ==
+                std::numeric_limits<std::uint64_t>::max())
+            {
+                row.value.eligible = false;
+            }
+            else
+                row.value.target.generation = next_connection_generation_ + 1;
+        }
         else
-            row.value.target.pool = "peer-generation";
+        {
+            auto const generation = peer_generations_.find(endpoint);
+            row.value.target.pool = generation != peer_generations_.end() &&
+                    generation->second.history_origin
+                ? "history-transient"
+                : "peer-generation";
+        }
         auto const lane = static_cast<std::size_t>(row.value.source);
         auto const lane_cap = base_lane_cap + (lane < extra_lanes ? 1 : 0);
         if (lane < lanes.size() && lanes[lane].size() < lane_cap)
@@ -6408,8 +6821,8 @@ PeerSet::co_history_search_snapshot(
 HistorySearchExecution
 //@@authority transition=prv.T0289 status=provisional scope=function bind=catl::peer_client::execute_history_grant_on_strand@53fcbb8f477966f8
 // owner=unresolved owner_hypothesis=peer_set commit=participant_then_request_mutex
-// touches=prv.S0088,prv.S0090,prv.S0091,prv.S0094,prv.S0103,prv.S0104,prv.S0105,prv.S0110,prv.S0111,prv.S0115,prv.S0116,prv.S0117
-// label=replan_and_atomically_spend_ready_use_or_exact_attachment
+// touches=prv.S0088,prv.S0090,prv.S0091,prv.S0094,prv.S0103,prv.S0104,prv.S0105,prv.S0110,prv.S0111,prv.S0115,prv.S0116,prv.S0117,prv.S0118,prv.S0119,prv.S0120
+// label=replan_and_atomically_spend_ready_use_attachment_or_generation
 PeerSet::execute_history_grant_on_strand(
     std::shared_ptr<SharedHistoryFetch> const& fetch,
     HistoryAuthorityGrantRef const& grant,
@@ -6461,21 +6874,48 @@ PeerSet::execute_history_grant_on_strand(
     auto const* known = std::get_if<HistorySubmitKnownUsePlan>(&plan);
     auto const* blind = std::get_if<HistorySubmitBlindUsePlan>(&plan);
     auto const* attach = std::get_if<HistoryAttachPlan>(&plan);
-    if (!known && !blind && !attach)
+    auto const* create = std::get_if<HistoryCreateGenerationPlan>(&plan);
+    if (!known && !blind && !attach && !create)
         return result;
     auto const& target = known ? known->target :
         blind                     ? blind->target :
-                                    attach->target;
+        attach                    ? attach->target :
+                                    create->target;
     std::unique_ptr<PreparedPeerUse> prepared;
     if (known || blind)
     {
         auto connection = connections_.find(target.endpoint);
-        if (connection == connections_.end() || !connection->second.session ||
-            connection->second.generation != target.generation)
+        auto generation_row = peer_generations_.find(target.endpoint);
+        if (generation_row == peer_generations_.end() ||
+            !generation_row->second.session ||
+            generation_row->second.lifecycle.generation() !=
+                target.generation ||
+            !generation_row->second.lifecycle.ready() ||
+            generation_row->second.physical_deadline <=
+                std::chrono::steady_clock::now())
         {
             return result;
         }
-        auto generation = make_generation_ref(connection->second.session);
+        auto const admitted = connection != connections_.end() &&
+            connection->second.session == generation_row->second.session &&
+            connection->second.generation == target.generation;
+        auto const exact_transient_owner = !admitted &&
+            ((generation_row->second.history_origin &&
+              generation_row->second.history_origin->retainer_control.acquisition ==
+                  acquisition->second.id &&
+              !generation_row->second.history_origin->close_requested) ||
+             acquisition->second.attached_generations.contains(
+                 target.generation));
+        if (!admitted && !exact_transient_owner)
+            return result;
+        auto generation = admitted
+            ? make_generation_ref(connection->second.session)
+            : PeerGenerationRef{
+                  peer_set_instance_id_,
+                  target.endpoint,
+                  target.generation,
+                  generation_row->second.lifecycle.last_event_sequence(),
+                  *generation_row->second.lifecycle.status()};
         if (!generation || generation.generation() != target.generation)
             return result;
         prepared = prepare_peer_use(
@@ -6484,7 +6924,8 @@ PeerSet::execute_history_grant_on_strand(
                 .kind = kind,
                 .ledger_seq = demand->second.options.ledger_seq,
                 .absolute_deadline = demand->second.absolute_deadline},
-            known != nullptr);
+            known != nullptr,
+            exact_transient_owner);
         if (!prepared)
             return result;
     }
@@ -6532,6 +6973,113 @@ PeerSet::execute_history_grant_on_strand(
         attachment_generation = &generation->second;
     }
 
+    using GenerationMap = std::map<std::string, PeerGeneration>;
+    using QueuedAuthorityMap =
+        std::map<std::string, QueuedConnectAuthority>;
+    GenerationMap::node_type created_generation_node;
+    QueuedAuthorityMap::node_type created_authority_node;
+    std::set<std::string>::node_type created_queue_node;
+    std::set<std::uint64_t>::node_type created_origin_reverse_node;
+    std::string created_pending_endpoint;
+    std::uint64_t created_generation_id = 0;
+    auto created_physical_deadline =
+        std::chrono::steady_clock::time_point{};
+    if (create)
+    {
+        auto normalized =
+            EndpointTracker::normalize_endpoint_identity(target.endpoint);
+        auto const current_now = std::chrono::steady_clock::now();
+        if (!normalized || *normalized != target.endpoint ||
+            target.generation == 0 || target.use != 0 ||
+            target.pool != "history-transient" ||
+            connections_.contains(target.endpoint) ||
+            in_flight_.contains(target.endpoint) ||
+            queued_.contains(target.endpoint) ||
+            targeted_connects_.contains(target.endpoint) ||
+            !physical_census_on_strand().can_create() ||
+            pending_connects_.size() >= kMaxTrackedEndpoints ||
+            next_connection_generation_ ==
+                std::numeric_limits<std::uint64_t>::max())
+        {
+            return result;
+        }
+        if (target.generation != next_connection_generation_ + 1)
+            return result;
+        if (auto existing = peer_generations_.find(target.endpoint);
+            existing != peer_generations_.end() &&
+            !existing->second.lifecycle.terminal())
+        {
+            return result;
+        }
+        if (auto retry = retry_gates_.find(target.endpoint);
+            retry != retry_gates_.end() &&
+            current_now <
+                retry->second.failed_at + retry_backoff_for(target.endpoint))
+        {
+            return result;
+        }
+        created_physical_deadline = std::min(
+            demand->second.absolute_deadline,
+            current_now + options_.history_connect_timeout);
+        if (created_physical_deadline <= current_now)
+            return result;
+        created_generation_id = target.generation;
+
+        GenerationMap prepared_generations;
+        auto [prepared_generation, generation_inserted] =
+            prepared_generations.emplace(
+                target.endpoint,
+                PeerGeneration{
+                    target.endpoint,
+                    created_generation_id,
+                    created_physical_deadline});
+        assert(generation_inserted);
+        auto watchdog = std::make_shared<asio::steady_timer>(
+            strand_, created_physical_deadline);
+        auto weak = weak_from_this();
+        watchdog->async_wait(
+            [weak,
+             endpoint = target.endpoint,
+             generation = created_generation_id](
+                boost::system::error_code const& ec) noexcept {
+                if (ec == asio::error::operation_aborted)
+                    return;
+                if (auto owner = weak.lock())
+                {
+                    owner->on_history_generation_watchdog(
+                        endpoint, generation);
+                }
+            });
+        prepared_generation->second.history_origin = HistoryGenerationOrigin{
+            .creation_control = create->control,
+            .source = create->source,
+            .retainer_control = create->control,
+            .retainer_fetch = fetch,
+            .retainer_grant = grant};
+        prepared_generation->second.history_watchdog = std::move(watchdog);
+        created_generation_node =
+            prepared_generations.extract(prepared_generation);
+
+        QueuedAuthorityMap prepared_authorities;
+        prepared_authorities.emplace(
+            target.endpoint,
+            QueuedConnectAuthority{
+                .generation = created_generation_id,
+                .physical_deadline = created_physical_deadline,
+                .history_demand_authorized = true});
+        created_authority_node =
+            prepared_authorities.extract(target.endpoint);
+        std::set<std::string> prepared_queue;
+        prepared_queue.insert(target.endpoint);
+        created_queue_node = prepared_queue.extract(target.endpoint);
+        std::set<std::uint64_t> prepared_reverse;
+        prepared_reverse.insert(created_generation_id);
+        created_origin_reverse_node =
+            prepared_reverse.extract(created_generation_id);
+        created_pending_endpoint = target.endpoint;
+        pending_connects_.reserve(pending_connects_.size() + 1);
+    }
+
     auto find_token = [this](
                           auto& tokens,
                           HistoryBudgetGrantRef const& ref)
@@ -6547,6 +7095,8 @@ PeerSet::execute_history_grant_on_strand(
     };
     LedgerDemandRecord::BudgetToken* parent_blind = nullptr;
     LedgerDemandRecord::BudgetToken* global_blind = nullptr;
+    LedgerDemandRecord::BudgetToken* parent_dial = nullptr;
+    LedgerDemandRecord::BudgetToken* global_dial = nullptr;
     if (blind)
     {
         //@@mutation-site blind-history-use-requires-parent-and-global-debit
@@ -6558,6 +7108,17 @@ PeerSet::execute_history_grant_on_strand(
             return result;
         //@@mutation-end blind-history-use-requires-parent-and-global-debit
     }
+    if (create)
+    {
+        //@@mutation-site history-generation-requires-parent-and-global-debit
+        parent_dial =
+            find_token(demand->second.dial_tokens, create->parent_dial_grant);
+        global_dial = find_token(
+            global_history_dial_tokens_, create->global_dial_grant);
+        if (!parent_dial || !global_dial)
+            return result;
+        //@@mutation-end history-generation-requires-parent-and-global-debit
+    }
 
     struct OwnerCommitContext
     {
@@ -6567,8 +7128,19 @@ PeerSet::execute_history_grant_on_strand(
         HistoryAcquisitionRecord* attachment_acquisition = nullptr;
         AttachmentMap::node_type attachment_node;
         std::set<std::uint64_t>::node_type reverse_attachment_node;
+        GenerationMap::node_type created_generation_node;
+        QueuedAuthorityMap::node_type created_authority_node;
+        std::set<std::string>::node_type created_queue_node;
+        std::set<std::uint64_t>::node_type created_origin_reverse_node;
+        HistoryAcquisitionRecord* created_origin_acquisition = nullptr;
+        LedgerDemandRecord* created_origin_demand = nullptr;
+        std::string created_pending_endpoint;
+        std::uint64_t created_generation_id = 0;
+        HistorySourceLane created_source = HistorySourceLane::crawl_only;
         LedgerDemandRecord::BudgetToken* parent_blind = nullptr;
         LedgerDemandRecord::BudgetToken* global_blind = nullptr;
+        LedgerDemandRecord::BudgetToken* parent_dial = nullptr;
+        LedgerDemandRecord::BudgetToken* global_dial = nullptr;
         std::chrono::steady_clock::time_point refill_at{};
         PeerUse peer_use;
     } context{
@@ -6579,8 +7151,22 @@ PeerSet::execute_history_grant_on_strand(
             attach ? &acquisition->second : nullptr,
         .attachment_node = std::move(attachment_node),
         .reverse_attachment_node = std::move(reverse_attachment_node),
+        .created_generation_node = std::move(created_generation_node),
+        .created_authority_node = std::move(created_authority_node),
+        .created_queue_node = std::move(created_queue_node),
+        .created_origin_reverse_node =
+            std::move(created_origin_reverse_node),
+        .created_origin_acquisition =
+            create ? &acquisition->second : nullptr,
+        .created_origin_demand = create ? &demand->second : nullptr,
+        .created_pending_endpoint = std::move(created_pending_endpoint),
+        .created_generation_id = created_generation_id,
+        .created_source =
+            create ? create->source : HistorySourceLane::crawl_only,
         .parent_blind = parent_blind,
         .global_blind = global_blind,
+        .parent_dial = parent_dial,
+        .global_dial = global_dial,
         .refill_at = std::chrono::steady_clock::now() +
             options_.global_history_token_refill};
     auto const owner_commit = [](void* opaque,
@@ -6593,7 +7179,55 @@ PeerSet::execute_history_grant_on_strand(
             commit.global_blind->spent = true;
             commit.global_blind->refill_at = commit.refill_at;
         }
-        if (commit.attachment_generation)
+        if (commit.parent_dial)
+            commit.parent_dial->spent = true;
+        if (commit.global_dial)
+        {
+            commit.global_dial->spent = true;
+            commit.global_dial->refill_at = commit.refill_at;
+        }
+        if (commit.created_generation_id != 0)
+        {
+            //@@mutation-site history-generation-queue-origin-and-debits-share-owner-flip
+            //@@authority transition=prv.T0295 status=provisional scope=statement bind=declaration@b97cb1639915ef03
+            // owner=unresolved owner_hypothesis=peer_set commit=participant_then_request_mutex
+            // touches=prv.S0088,prv.S0103,prv.S0104,prv.S0105,prv.S0110,prv.S0111,prv.S0115,prv.S0118,prv.S0119,prv.S0120
+            // label=atomically_debit_exact_dials_and_install_demand_origin_generation
+            auto generation = commit.owner->peer_generations_.insert(
+                std::move(commit.created_generation_node)); //@@authority-target ids=prv.T0295
+            auto authority = commit.owner->targeted_connects_.insert(
+                std::move(commit.created_authority_node));
+            auto queued = commit.owner->queued_.insert(
+                std::move(commit.created_queue_node));
+            auto reverse =
+                commit.created_origin_acquisition->retained_generations.insert(
+                    std::move(commit.created_origin_reverse_node));
+            assert(generation.inserted);
+            assert(authority.inserted);
+            assert(queued.inserted);
+            assert(reverse.inserted);
+            commit.owner->pending_connects_.push_back(
+                std::move(commit.created_pending_endpoint));
+            commit.owner->next_connection_generation_ =
+                commit.created_generation_id;
+            auto const lane = static_cast<std::size_t>(commit.created_source);
+            if (lane < commit.created_origin_demand->source_attempts.size())
+            {
+                auto& attempts =
+                    commit.created_origin_demand->source_attempts[lane];
+                if (attempts != std::numeric_limits<std::size_t>::max())
+                    ++attempts;
+            }
+            if (commit.created_source == HistorySourceLane::crawl_only)
+            {
+                auto& crawl =
+                    commit.created_origin_demand->crawl_only_creations;
+                if (crawl != std::numeric_limits<std::size_t>::max())
+                    ++crawl;
+            }
+            //@@mutation-end history-generation-queue-origin-and-debits-share-owner-flip
+        }
+        else if (commit.attachment_generation)
         {
             //@@mutation-site history-attachment-has-forward-and-reverse-owner
             auto forward =
@@ -6618,7 +7252,8 @@ PeerSet::execute_history_grant_on_strand(
         grant,
         known  ? HistoryAuthorityAction::submit_known_use :
         blind  ? HistoryAuthorityAction::submit_blind_use :
-                 HistoryAuthorityAction::attach_or_adopt,
+        attach ? HistoryAuthorityAction::attach_or_adopt :
+                 HistoryAuthorityAction::create_generation,
         target,
         std::chrono::steady_clock::now(),
         &context,
@@ -6626,6 +7261,15 @@ PeerSet::execute_history_grant_on_strand(
     if (!spend)
         return result;
     result.spend = *spend;
+    if (create)
+    {
+        result.created_generation = HistoryAuthorityTarget{
+            .endpoint = target.endpoint,
+            .generation = created_generation_id,
+            .pool = "history-transient"};
+        sort_pending_connects();
+        pump_connects();
+    }
     result.peer_use = std::move(context.peer_use);
     return result;
 }
@@ -6686,7 +7330,8 @@ std::unique_ptr<PeerSet::PreparedPeerUse>
 PeerSet::prepare_peer_use(
     PeerGenerationRef const& generation,
     PeerUseRequest const& request,
-    bool require_coverage) noexcept
+    bool require_coverage,
+    bool allow_ready_transient) noexcept
 {
     ASSERT_ON_STRAND();
     auto const now = std::chrono::steady_clock::now();
@@ -6700,12 +7345,20 @@ PeerSet::prepare_peer_use(
         return {};
     }
 
-    auto const connection = connections_.find(generation.endpoint_);
     auto const generation_row = peer_generations_.find(generation.endpoint_);
-    if (connection == connections_.end() || !connection->second.session ||
-        connection->second.generation != generation.generation_ ||
+    auto const connection = connections_.find(generation.endpoint_);
+    auto const admitted = connection != connections_.end() &&
+        connection->second.session &&
+        connection->second.generation == generation.generation_;
+    auto const transient = allow_ready_transient &&
+        generation_row != peer_generations_.end() &&
+        generation_row->second.session && !admitted &&
+        !draining_generations_.contains(generation.generation_);
+    if ((!admitted && !transient) ||
         generation_row == peer_generations_.end() ||
-        generation_row->second.session != connection->second.session ||
+        !generation_row->second.session ||
+        (admitted &&
+         generation_row->second.session != connection->second.session) ||
         generation_row->second.lifecycle.generation() !=
             generation.generation_ ||
         !generation_row->second.lifecycle.ready() ||
@@ -6735,7 +7388,7 @@ PeerSet::prepare_peer_use(
         prepared->state = std::make_shared<detail::PeerUseState>();
         auto receipt =
             std::make_shared<detail::PeerUseReceiptState>(strand_);
-        prepared->control->session = connection->second.session;
+        prepared->control->session = generation_row->second.session;
         prepared->control->generation = generation;
         prepared->control->request = request;
         prepared->control->ticket = ticket;
@@ -7075,6 +7728,17 @@ PeerSet::finish_generation_peer_uses_after_drain(
         auto const outcome = use->second.forced_outcome.value_or(fallback);
         ++use;
         finalize_peer_use(ticket, outcome);
+    }
+    auto origin = std::find_if(
+        peer_generations_.begin(),
+        peer_generations_.end(),
+        [generation](auto const& current) {
+            return current.second.lifecycle.generation() == generation;
+        });
+    if (origin != peer_generations_.end())
+    {
+        release_generation_history_origin(
+            origin->second, HistoryWorkReceipt::closed);
     }
 }
 

@@ -858,6 +858,21 @@ public:
     }
 
     static std::size_t
+    history_available_global_dials(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count](auto& set) {
+            count = static_cast<std::size_t>(std::count_if(
+                set.global_history_dial_tokens_.begin(),
+                set.global_history_dial_tokens_.end(),
+                [](auto const& token) { return !token.spent; }));
+        });
+        return count;
+    }
+
+    static std::size_t
     history_generation_attachment_count(
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
@@ -888,6 +903,84 @@ public:
         return count;
     }
 
+    static std::size_t
+    history_generation_origin_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::size_t count = 0;
+        run_on_strand(
+            io, peers, [&count, endpoint = std::move(endpoint)](auto& set) {
+                auto const row = set.peer_generations_.find(endpoint);
+                count = row != set.peer_generations_.end() &&
+                        row->second.history_origin
+                    ? 1
+                    : 0;
+            });
+        return count;
+    }
+
+    static std::size_t
+    history_acquisition_origin_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::AcquisitionId acquisition)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count, acquisition](auto& set) {
+            auto const row = set.history_acquisitions_.find(acquisition);
+            if (row != set.history_acquisitions_.end())
+                count = row->second.retained_generations.size();
+        });
+        return count;
+    }
+
+    static bool
+    history_generation_is_queued(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::uint64_t generation)
+    {
+        bool queued = false;
+        run_on_strand(
+            io,
+            peers,
+            [&queued, endpoint = std::move(endpoint), generation](auto& set) {
+                auto const authority = set.targeted_connects_.find(endpoint);
+                queued = set.queued_.contains(endpoint) &&
+                    authority != set.targeted_connects_.end() &&
+                    authority->second.generation == generation &&
+                    authority->second.history_demand_authorized;
+            });
+        return queued;
+    }
+
+    static std::optional<std::pair<std::size_t, std::size_t>>
+    capture_history_redirects(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::uint64_t generation,
+        std::uint16_t port,
+        std::set<std::string> successors)
+    {
+        std::optional<std::pair<std::size_t, std::size_t>> result;
+        run_on_strand(
+            io,
+            peers,
+            [&result,
+             endpoint = std::move(endpoint),
+             generation,
+             port,
+             successors = std::move(successors)](auto& set) {
+                result = set.capture_history_redirect_successors(
+                    endpoint, generation, port, successors);
+            });
+        return result;
+    }
+
     static void
     make_reserved_generation_ready(
         boost::asio::io_context& io,
@@ -901,6 +994,14 @@ public:
             if (row == set.peer_generations_.end())
                 throw std::logic_error("reserved generation missing");
             auto const generation = row->second.lifecycle.generation();
+            auto const queued = set.targeted_connects_.find(key);
+            if (queued != set.targeted_connects_.end() &&
+                queued->second.generation == generation)
+            {
+                set.targeted_connects_.erase(queued);
+                set.queued_.erase(key);
+                std::erase(set.pending_connects_, key);
+            }
             set.install_generation_session(key, generation, session);
             set.consume_lifecycle_event(
                 {.endpoint = key,

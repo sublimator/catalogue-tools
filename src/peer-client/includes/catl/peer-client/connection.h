@@ -476,7 +476,7 @@ private:
         // mutation_class=running_guarded
         // label=reserve_exact_transport_operation_before_fallible_initiation
         auto const id =
-            begin_transport_operation(kind);  //@@authority-target ids=prv.T0140
+            begin_transport_operation(kind); //@@authority-target ids=prv.T0140
         try
         {
             std::invoke(std::forward<Initiator>(initiator), id);
@@ -557,6 +557,9 @@ private:
         bool fire_disconnect) noexcept;
 
     // Redirect IPs from 503 response
+    //@@authority state=prv.S0123 status=provisional scope=field bind=catl::peer_client::peer_connection::redirect_ips_@3557f9f9f1a8f1f9
+    // owner=unresolved owner_hypothesis=peer_connection observed_home=peer_connection
+    // label=body_string_and_count_bounded_redirect_successor_values
     std::set<std::string> redirect_ips_;
 
     // Outbound write queue — serializes async_write calls.

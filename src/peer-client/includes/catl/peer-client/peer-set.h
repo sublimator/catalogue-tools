@@ -102,6 +102,7 @@ struct PeerSetOptions
     std::size_t max_global_history_blind_uses = 8;
     std::chrono::milliseconds global_history_token_refill{250};
     std::size_t max_history_attachments_per_generation = 64;
+    std::chrono::milliseconds history_connect_timeout{10'000};
 };
 
 /// Read-only diagnostic projection of the currently connected peer set.
@@ -126,6 +127,7 @@ struct HistorySearchExecution
 {
     std::optional<HistorySearchPlan> plan;
     std::optional<HistoryGrantSpendReceipt> spend;
+    std::optional<HistoryAuthorityTarget> created_generation;
     PeerUse peer_use;
 
     bool
@@ -583,12 +585,14 @@ private:
     };
 
     static constexpr std::size_t kMaxQueuedTargetAuthorizations = 64;
+    static constexpr std::size_t kMaxHistoryRedirectSuccessors = 64;
     static constexpr auto kOrdinaryConnectDeadline = std::chrono::seconds(60);
 
     struct QueuedConnectAuthority
     {
         std::uint64_t generation = 0;
         std::chrono::steady_clock::time_point physical_deadline{};
+        bool history_demand_authorized = false;
         bool ordinary_discovery_authorized = false;
         std::chrono::steady_clock::time_point ordinary_deadline{};
         std::vector<TargetedConnectAuthorizationPtr> target_authorizations;
@@ -656,7 +660,8 @@ private:
     prepare_peer_use(
         PeerGenerationRef const& generation,
         PeerUseRequest const& request,
-        bool require_coverage) noexcept;
+        bool require_coverage,
+        bool allow_ready_transient = false) noexcept;
 
     PeerUse
     commit_prepared_peer_use(PreparedPeerUse& prepared) noexcept;
@@ -727,8 +732,28 @@ private:
     release_history_acquisition_attachments(AcquisitionId acquisition) noexcept;
 
     void
+    release_history_acquisition_origins(AcquisitionId acquisition) noexcept;
+
+    void
     release_generation_history_attachments(
         PeerGeneration& generation) noexcept;
+
+    void
+    release_generation_history_origin(
+        PeerGeneration& generation,
+        HistoryWorkReceipt receipt) noexcept;
+
+    void
+    on_history_generation_watchdog(
+        std::string const& endpoint,
+        std::uint64_t generation) noexcept;
+
+    std::optional<std::pair<std::size_t, std::size_t>>
+    capture_history_redirect_successors(
+        std::string const& endpoint,
+        std::uint64_t generation,
+        std::uint16_t port,
+        std::set<std::string> const& successors) noexcept;
 
     void
     terminalize_ledger_demand(
@@ -1299,6 +1324,15 @@ private:
         HistoryAuthorityGrantRef grant;
         std::chrono::steady_clock::time_point deadline{};
     };
+    struct HistoryGenerationOrigin
+    {
+        HistoryControlRevision creation_control;
+        HistorySourceLane source = HistorySourceLane::crawl_only;
+        HistoryControlRevision retainer_control;
+        std::shared_ptr<SharedHistoryFetch> retainer_fetch;
+        HistoryAuthorityGrantRef retainer_grant;
+        bool close_requested = false;
+    };
     struct PeerGeneration
     {
         PeerGeneration(
@@ -1314,6 +1348,10 @@ private:
         PeerGenerationLifecycle lifecycle;
         PeerSessionPtr session;
         std::set<std::uint64_t> active_use_ids;
+        //@@authority state=prv.S0119 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::history_origin@aaa91bca6043e702
+        // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+        // label=immutable_exact_history_demand_generation_origin
+        std::optional<HistoryGenerationOrigin> history_origin;
         //@@authority state=prv.S0116 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::history_attachments@2a3b072ed8f9d424
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=bounded_generation_to_history_acquisition_attachments
@@ -1323,6 +1361,10 @@ private:
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=immutable_physical_generation_completion_deadline
         std::chrono::steady_clock::time_point physical_deadline{};
+        //@@authority state=prv.S0121 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::history_watchdog@4b83b94a02576e68
+        // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+        // label=exact_demand_generation_physical_watchdog
+        std::shared_ptr<boost::asio::steady_timer> history_watchdog;
     };
     //@@authority state=prv.S0088 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::peer_generations_@221008d6ea60dbb8
@@ -1430,6 +1472,14 @@ private:
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=history_acquisition_to_exact_generation_reverse_attachments
         std::set<std::uint64_t> attached_generations;
+        //@@authority state=prv.S0120 status=provisional scope=field bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::retained_generations@a467ad72c4cf7525
+        // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+        // label=history_acquisition_to_exact_retained_generation_reverse_index
+        std::set<std::uint64_t> retained_generations;
+        //@@authority state=prv.S0122 status=provisional scope=field bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::redirect_successors@c810dfde6dc3fc66
+        // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+        // label=bounded_acquisition_scoped_redirect_successor_values
+        std::set<std::string> redirect_successors;
         std::optional<HistoryAcquisitionTerminal> terminal;
     };
 

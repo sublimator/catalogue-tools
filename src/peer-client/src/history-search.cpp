@@ -362,7 +362,12 @@ plan_history_interest(
 
     if (auto const* candidate = best_candidate(
             snapshot, now, [](HistorySearchCandidate const& current) {
-                return ready(current.disposition) && current.advertises_ledger;
+                return current.advertises_ledger &&
+                    (current.disposition ==
+                         HistoryGenerationDisposition::admitted ||
+                     (current.disposition ==
+                          HistoryGenerationDisposition::ready_transient &&
+                      current.attached));
             }))
     {
         return action(HistoryAuthorityAction::submit_known_use, *candidate);
@@ -393,7 +398,12 @@ plan_history_interest(
     {
         if (auto const* candidate = best_candidate(
                 snapshot, now, [](HistorySearchCandidate const& current) {
-                    return ready(current.disposition) && current.blind_eligible;
+                    return current.blind_eligible &&
+                        (current.disposition ==
+                             HistoryGenerationDisposition::admitted ||
+                         (current.disposition ==
+                              HistoryGenerationDisposition::ready_transient &&
+                          current.attached));
                 }))
         {
             return action(HistoryAuthorityAction::submit_blind_use, *candidate);
