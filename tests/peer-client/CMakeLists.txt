@@ -41,6 +41,10 @@ add_executable(history-fetch-gtest history-fetch-gtest.cpp)
 target_link_libraries(history-fetch-gtest PRIVATE catl::peer-client
                                                   GTest::gtest_main)
 
+add_executable(history-search-gtest history-search-gtest.cpp)
+target_link_libraries(history-search-gtest PRIVATE catl::peer-client
+                                                   GTest::gtest_main)
+
 add_executable(node-cache-signal-gtest node-cache-signal-gtest.cpp)
 target_link_libraries(node-cache-signal-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
@@ -115,6 +119,7 @@ set(CATL_PEER_CLIENT_TEST_TARGETS
     request-scope-gtest
     history-demand-gtest
     history-fetch-gtest
+    history-search-gtest
     node-cache-signal-gtest
     peer-session-interface-gtest
     node-credentials-gtest

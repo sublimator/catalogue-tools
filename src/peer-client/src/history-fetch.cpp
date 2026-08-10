@@ -40,6 +40,7 @@ valid_action(HistoryAuthorityAction action) noexcept
     {
         case HistoryAuthorityAction::attach_or_adopt:
         case HistoryAuthorityAction::create_generation:
+        case HistoryAuthorityAction::submit_known_use:
         case HistoryAuthorityAction::submit_blind_use:
         case HistoryAuthorityAction::promote:
             return true;
@@ -81,12 +82,19 @@ valid_fetch_terminal(SharedHistoryFetchTerminal terminal) noexcept
 bool
 valid_plan(
     HistoryParticipantPlan const& plan,
-    std::chrono::steady_clock::time_point deadline) noexcept
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::steady_clock::time_point now) noexcept
 {
-    return !(plan.next_action && plan.local_terminal) &&
+    auto const alternatives =
+        static_cast<unsigned>(plan.next_action.has_value()) +
+        static_cast<unsigned>(plan.wait_until.has_value()) +
+        static_cast<unsigned>(plan.local_terminal.has_value());
+    return alternatives <= 1 &&
         (!plan.next_action ||
          (valid_action(plan.next_action->action) &&
           plan.next_action->not_before < deadline)) &&
+        (!plan.wait_until ||
+         (now < plan.wait_until->at && plan.wait_until->at <= deadline)) &&
         (!plan.local_terminal ||
          valid_acquisition_terminal(*plan.local_terminal));
 }
@@ -211,7 +219,8 @@ SharedHistoryFetch::register_interest(
                 ? Error::Timeout
                 : Error::Cancelled,
             "shared-fetch request is terminal");
-    if (!valid_plan(plan, request.absolute_deadline))
+    auto const now = Clock::now();
+    if (!valid_plan(plan, request.absolute_deadline, now))
     {
         throw PeerClientException(
             Error::BadRequest,
@@ -298,8 +307,8 @@ SharedHistoryFetch::revise_interest(
 {
     if (!authentic(interest))
         return std::nullopt;
-    if (Clock::now() >= interest.deadline_ ||
-        !valid_plan(plan, interest.deadline_))
+    auto const now = Clock::now();
+    if (now >= interest.deadline_ || !valid_plan(plan, interest.deadline_, now))
     {
         return std::nullopt;
     }
@@ -369,6 +378,13 @@ SharedHistoryFetch::select_sponsor(Clock::time_point now) const noexcept
         ++result.live_participants;
         if (!cell->plan.next_action)
         {
+            if (cell->plan.wait_until && cell->plan.wait_until->at > now &&
+                (!result.aggregate_wake ||
+                 cell->plan.wait_until->at < *result.aggregate_wake))
+            {
+                ++result.viable_participants;
+                result.aggregate_wake = cell->plan.wait_until->at;
+            }
             continue;
         }
         ++result.viable_participants;
@@ -623,6 +639,7 @@ SharedHistoryFetch::receipt_matches_action(
         case HistoryAuthorityAction::create_generation:
             return receipt == HistoryWorkReceipt::closed ||
                 receipt == HistoryWorkReceipt::adopted;
+        case HistoryAuthorityAction::submit_known_use:
         case HistoryAuthorityAction::submit_blind_use:
             return receipt == HistoryWorkReceipt::closed;
         case HistoryAuthorityAction::promote:
@@ -778,8 +795,10 @@ SharedHistoryFetch::terminalize_if_no_viable_action(Clock::time_point now)
             if (cell->state == ParticipantState::active &&
                 !cell->request_terminal.load(std::memory_order_acquire) &&
                 cell->request_scope && now < cell->deadline &&
-                cell->plan.next_action &&
-                cell->plan.next_action->not_before < cell->deadline)
+                ((cell->plan.next_action &&
+                  cell->plan.next_action->not_before < cell->deadline) ||
+                 (cell->plan.wait_until && cell->plan.wait_until->at > now &&
+                  cell->plan.wait_until->at <= cell->deadline)))
             {
                 return false;
             }

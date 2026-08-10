@@ -1,0 +1,551 @@
+#include <catl/peer-client/history-search.h>
+#include <catl/peer-client/peer-client-coro.h>
+#include <catl/peer-client/peer-set.h>
+
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
+
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <future>
+#include <string>
+#include <type_traits>
+
+using namespace catl::peer_client;
+using namespace std::chrono_literals;
+
+namespace {
+
+template <class T>
+T
+run(boost::asio::io_context& io, boost::asio::awaitable<T> operation)
+{
+    auto result = boost::asio::co_spawn(
+        io, std::move(operation), boost::asio::use_future);
+    while (result.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+    io.restart();
+    return result.get();
+}
+
+HistoryBudgetGrantRef
+budget(std::uint64_t id)
+{
+    return HistoryBudgetGrantRef{
+        .owner_instance = 1, .token = id, .revision = 1};
+}
+
+struct PlannerFixture : ::testing::Test
+{
+    PlannerFixture()
+    {
+        snapshot.control = HistoryControlRevision{
+            .peer_set_instance = 1,
+            .pool_revision = 1,
+            .demand = LedgerDemandId{1},
+            .acquisition = AcquisitionId{2},
+            .fetch = HistoryFetchId{3},
+            .fetch_epoch = 4,
+            .interest = HistoryInterestId{5},
+            .participant_revision = 6,
+            .request_scope = catl::core::RequestScopeId{7}};
+        snapshot.absolute_deadline = now + 30s;
+        snapshot.fallback_at = now + 5s;
+        snapshot.initial_parent_dial_budget = 6;
+        snapshot.remaining_parent_dials = 6;
+        snapshot.parent_dial_grant = budget(10);
+        snapshot.global_dial_grant = budget(11);
+        snapshot.parent_blind_grant = budget(12);
+        snapshot.global_blind_grant = budget(13);
+        snapshot.physical = HistoryPhysicalCensus{
+            .max_admitted = 4, .max_transient = 3, .drain_reserve = 2};
+    }
+
+    HistorySearchCandidate
+    candidate(
+        std::string endpoint,
+        HistorySourceLane source,
+        HistoryGenerationDisposition disposition,
+        std::uint64_t ticket) const
+    {
+        auto const generation =
+            disposition == HistoryGenerationDisposition::absent ? 0 : ticket;
+        return HistorySearchCandidate{
+            .target =
+                HistoryAuthorityTarget{
+                    .endpoint = std::move(endpoint),
+                    .generation = generation,
+                    .use = generation == 0 ? 0 : generation + 100},
+            .source = source,
+            .disposition = disposition,
+            .fair_ticket = ticket,
+            .eligible = true};
+    }
+
+    HistoryPlannedAction const&
+    action(HistoryParticipantPlan const& plan) const
+    {
+        EXPECT_TRUE(plan.next_action);
+        EXPECT_FALSE(plan.wait_until);
+        EXPECT_FALSE(plan.local_terminal);
+        return *plan.next_action;
+    }
+
+    std::chrono::steady_clock::time_point now =
+        std::chrono::steady_clock::now();
+    HistorySearchSnapshot snapshot;
+};
+
+TEST_F(PlannerFixture, KnownCoveredUsePrecedesEveryOtherAction)
+{
+    auto create = candidate(
+        "configured:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1);
+    auto attach = candidate(
+        "queued:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::queued_or_connecting,
+        2);
+    attach.attachable = true;
+    auto known = candidate(
+        "ready:1",
+        HistorySourceLane::direct_verified,
+        HistoryGenerationDisposition::admitted,
+        3);
+    known.advertises_ledger = true;
+    snapshot.candidates = {create, attach, known};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).action, HistoryAuthorityAction::submit_known_use);
+    EXPECT_EQ(action(plan).target.endpoint, "ready:1");
+}
+
+TEST_F(PlannerFixture, AttachmentPrecedesBlindUseAndCreation)
+{
+    snapshot.fallback_at = now;
+    auto attach = candidate(
+        "joining:1",
+        HistorySourceLane::independently_discovered,
+        HistoryGenerationDisposition::queued_or_connecting,
+        1);
+    attach.attachable = true;
+    auto blind = candidate(
+        "blind:1",
+        HistorySourceLane::direct_verified,
+        HistoryGenerationDisposition::admitted,
+        2);
+    blind.blind_eligible = true;
+    snapshot.candidates = {
+        blind,
+        candidate(
+            "new:1",
+            HistorySourceLane::configured,
+            HistoryGenerationDisposition::absent,
+            3),
+        attach};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).action, HistoryAuthorityAction::attach_or_adopt);
+    EXPECT_EQ(action(plan).target.endpoint, "joining:1");
+}
+
+TEST_F(PlannerFixture, BlindUseRequiresFallbackAndBothExactBudgetGrants)
+{
+    auto blind = candidate(
+        "blind:1",
+        HistorySourceLane::direct_verified,
+        HistoryGenerationDisposition::admitted,
+        1);
+    blind.blind_eligible = true;
+    snapshot.candidates = {blind};
+
+    EXPECT_TRUE(
+        plan_history_interest(snapshot, now).local_terminal.has_value());
+    snapshot.fallback_at = now;
+    EXPECT_EQ(
+        action(plan_history_interest(snapshot, now)).action,
+        HistoryAuthorityAction::submit_blind_use);
+    snapshot.global_blind_grant.reset();
+    EXPECT_TRUE(
+        plan_history_interest(snapshot, now).local_terminal.has_value());
+}
+
+TEST_F(PlannerFixture, LaneFairnessGivesEveryStrongerLaneAnOpportunity)
+{
+    snapshot.source_attempts = {1, 0, 0, 0, 1};
+    snapshot.crawl_only_creations = 1;
+    snapshot.candidates = {
+        candidate(
+            "crawl:1",
+            HistorySourceLane::crawl_only,
+            HistoryGenerationDisposition::absent,
+            1),
+        candidate(
+            "configured:1",
+            HistorySourceLane::configured,
+            HistoryGenerationDisposition::absent,
+            2),
+        candidate(
+            "persistent:1",
+            HistorySourceLane::persistent_success,
+            HistoryGenerationDisposition::absent,
+            3),
+        candidate(
+            "direct:1",
+            HistorySourceLane::direct_verified,
+            HistoryGenerationDisposition::absent,
+            4),
+        candidate(
+            "independent:1",
+            HistorySourceLane::independently_discovered,
+            HistoryGenerationDisposition::absent,
+            5)};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).target.endpoint, "persistent:1");
+}
+
+TEST_F(PlannerFixture, CrawlOnlyQuotaCannotBorrowUnusedParentBudget)
+{
+    snapshot.crawl_only_creations = 2;  // floor(6 / 3)
+    snapshot.source_attempts = {9, 9, 9, 9, 0};
+    snapshot.candidates = {
+        candidate(
+            "crawl:1",
+            HistorySourceLane::crawl_only,
+            HistoryGenerationDisposition::absent,
+            1),
+        candidate(
+            "independent:1",
+            HistorySourceLane::independently_discovered,
+            HistoryGenerationDisposition::absent,
+            2)};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).target.endpoint, "independent:1");
+
+    snapshot.candidates.resize(1);
+    EXPECT_TRUE(
+        plan_history_interest(snapshot, now).local_terminal.has_value());
+}
+
+TEST_F(PlannerFixture, OneTokenDemandChoosesNonCrawlCandidate)
+{
+    snapshot.initial_parent_dial_budget = 1;
+    snapshot.remaining_parent_dials = 1;
+    snapshot.source_attempts = {20, 0, 0, 0, 0};
+    snapshot.candidates = {
+        candidate(
+            "crawl:1",
+            HistorySourceLane::crawl_only,
+            HistoryGenerationDisposition::absent,
+            1),
+        candidate(
+            "configured:1",
+            HistorySourceLane::configured,
+            HistoryGenerationDisposition::absent,
+            2)};
+
+    EXPECT_EQ(
+        action(plan_history_interest(snapshot, now)).target.endpoint,
+        "configured:1");
+}
+
+TEST_F(PlannerFixture, SaturatedCrawlBatchCannotHideConfiguredCandidate)
+{
+    snapshot.initial_parent_dial_budget = 1;
+    snapshot.remaining_parent_dials = 1;
+    snapshot.candidates.reserve(kMaxHistorySearchCandidates);
+    for (std::size_t i = 1; i < kMaxHistorySearchCandidates; ++i)
+    {
+        snapshot.candidates.push_back(candidate(
+            "crawl:" + std::to_string(i),
+            HistorySourceLane::crawl_only,
+            HistoryGenerationDisposition::absent,
+            i));
+    }
+    snapshot.candidates.push_back(candidate(
+        "configured:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        kMaxHistorySearchCandidates));
+
+    EXPECT_EQ(
+        action(plan_history_interest(snapshot, now)).target.endpoint,
+        "configured:1");
+}
+
+TEST_F(PlannerFixture, CandidateOverflowFailsClosed)
+{
+    snapshot.candidates.assign(
+        kMaxHistorySearchCandidates + 1,
+        candidate(
+            "crawl:1",
+            HistorySourceLane::crawl_only,
+            HistoryGenerationDisposition::absent,
+            1));
+    auto const plan = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(plan.local_terminal);
+    EXPECT_EQ(*plan.local_terminal, HistoryAcquisitionTerminal::exhausted);
+}
+
+TEST_F(PlannerFixture, PhysicalCapRequiresExactBoundedWake)
+{
+    snapshot.physical = HistoryPhysicalCensus{
+        .queued_or_connecting = 1,
+        .ready_transient = 1,
+        .admitted = 2,
+        .draining = 1,
+        .max_admitted = 2,
+        .max_transient = 2,
+        .drain_reserve = 1};
+    snapshot.candidates = {candidate(
+        "new:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1)};
+    EXPECT_TRUE(
+        plan_history_interest(snapshot, now).local_terminal.has_value());
+
+    snapshot.wakes.push_back(HistoryPlannedWake{
+        .kind = HistoryWakeSourceKind::physical_slot_release,
+        .at = now + 2s,
+        .endpoint = "closing:1",
+        .generation = 9});
+    auto const plan = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(plan.wait_until);
+    EXPECT_EQ(
+        plan.wait_until->kind, HistoryWakeSourceKind::physical_slot_release);
+    EXPECT_EQ(plan.wait_until->generation, 9u);
+}
+
+TEST_F(PlannerFixture, UnnamedOrLateCapacityWakeIsNotProgress)
+{
+    snapshot.physical = HistoryPhysicalCensus{
+        .queued_or_connecting = 3,
+        .max_admitted = 4,
+        .max_transient = 3,
+        .drain_reserve = 1};
+    snapshot.candidates = {candidate(
+        "new:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1)};
+    snapshot.wakes = {
+        HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::physical_slot_release,
+            .at = now + 1s},
+        HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::physical_watchdog,
+            .at = snapshot.absolute_deadline + 1s,
+            .endpoint = "late:1",
+            .generation = 7}};
+
+    EXPECT_TRUE(
+        plan_history_interest(snapshot, now).local_terminal.has_value());
+}
+
+TEST_F(PlannerFixture, EarliestExactWakeWinsDeterministically)
+{
+    snapshot.remaining_parent_dials = 1;
+    snapshot.global_dial_grant.reset();
+    snapshot.candidates = {candidate(
+        "retry:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1)};
+    snapshot.candidates.front().retry_not_before = now + 2s;
+    snapshot.wakes = {
+        HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::global_token_refill,
+            .at = now + 3s,
+            .token = 40},
+        HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::candidate_retry_expiry,
+            .at = now + 2s,
+            .endpoint = "retry:1"}};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(plan.wait_until);
+    EXPECT_EQ(plan.wait_until->at, now + 2s);
+    EXPECT_EQ(plan.wait_until->endpoint, "retry:1");
+}
+
+TEST_F(PlannerFixture, ExactWakeCannotOutliveExhaustedParentAuthority)
+{
+    snapshot.remaining_parent_dials = 0;
+    snapshot.parent_dial_grant.reset();
+    snapshot.global_dial_grant.reset();
+    snapshot.candidates = {candidate(
+        "new:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1)};
+    snapshot.wakes = {
+        HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::global_token_refill,
+            .at = now + 1s,
+            .token = 41},
+        HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::physical_slot_release,
+            .at = now + 1s,
+            .endpoint = "closing:1",
+            .generation = 8}};
+
+    EXPECT_TRUE(
+        plan_history_interest(snapshot, now).local_terminal.has_value());
+}
+
+TEST_F(PlannerFixture, DrainingMayExceedReserveWithoutBreakingCensus)
+{
+    HistoryPhysicalCensus census{
+        .queued_or_connecting = 1,
+        .admitted = 1,
+        .draining = 3,
+        .max_admitted = 2,
+        .max_transient = 2,
+        .drain_reserve = 1};
+    EXPECT_TRUE(census.valid());
+    EXPECT_FALSE(census.can_create());
+    EXPECT_EQ(census.total(), census.max_physical());
+}
+
+TEST_F(PlannerFixture, DeadlineHasNoCompletionGrace)
+{
+    snapshot.candidates = {candidate(
+        "configured:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1)};
+    auto const plan =
+        plan_history_interest(snapshot, snapshot.absolute_deadline);
+    ASSERT_TRUE(plan.local_terminal);
+    EXPECT_EQ(
+        *plan.local_terminal, HistoryAcquisitionTerminal::deadline_elapsed);
+}
+
+struct GrantFixture : PlannerFixture
+{
+    GrantFixture()
+        : peers(PeerSet::create(io))
+        , scope(catl::core::RequestScope::create(snapshot.absolute_deadline))
+        , fetch(SharedHistoryFetch::create(HistoryFetchId{3}, 4))
+    {
+        auto known = candidate(
+            "ready:1",
+            HistorySourceLane::direct_verified,
+            HistoryGenerationDisposition::admitted,
+            9);
+        known.advertises_ledger = true;
+        snapshot.candidates = {known};
+        demand =
+            run(io,
+                peers->co_get_or_create_ledger_demand(
+                    scope,
+                    LedgerDemandOptions{
+                        .ledger_seq = 50,
+                        .fallback_at = snapshot.fallback_at,
+                        .remaining_new_dials = 3,
+                        .remaining_blind_uses = 1}));
+        acquisition =
+            run(io,
+                peers->co_open_history_acquisition(
+                    demand,
+                    HistoryAcquisitionOptions{
+                        .fetch = HistoryFetchId{3},
+                        .fetch_epoch = 4,
+                        .request_kind = HistoryRequestKind::ledger_header}));
+        interest = fetch->register_interest(
+            peers,
+            scope,
+            demand,
+            acquisition,
+            plan_history_interest(snapshot, now));
+        snapshot.control.peer_set_instance =
+            interest.participant_owner_instance();
+        snapshot.control.demand = demand.id();
+        snapshot.control.acquisition = acquisition.context().acquisition;
+        snapshot.control.fetch = interest.fetch();
+        snapshot.control.fetch_epoch = interest.fetch_epoch();
+        snapshot.control.interest = interest.interest();
+        snapshot.control.participant_revision = interest.participant_revision();
+        snapshot.control.request_scope = interest.request_scope();
+        grant = fetch->mint_grant(interest, now);
+    }
+
+    boost::asio::io_context io;
+    std::shared_ptr<PeerSet> peers;
+    std::shared_ptr<catl::core::RequestScope> scope;
+    std::shared_ptr<SharedHistoryFetch> fetch;
+    LedgerDemandRef demand;
+    HistoryAcquisitionRef acquisition;
+    HistoryInterestRef interest;
+    HistoryAuthorityGrantRef grant;
+};
+
+TEST_F(GrantFixture, ExactGrantBindsToInertKnownUsePlan)
+{
+    ASSERT_TRUE(grant);
+    auto plan = plan_history_acquisition(snapshot, grant, now);
+    auto const* known = std::get_if<HistorySubmitKnownUsePlan>(&plan);
+    ASSERT_NE(known, nullptr);
+    EXPECT_EQ(known->participant_grant.grant(), grant.grant());
+    EXPECT_EQ(known->target.endpoint, "ready:1");
+    EXPECT_EQ(known->control, snapshot.control);
+    static_assert(!std::is_pointer_v<decltype(known->target)>);
+}
+
+TEST_F(GrantFixture, ChangedTargetRefusesWithoutRetargetingGrant)
+{
+    snapshot.candidates.front().target.endpoint = "replacement:1";
+    auto plan = plan_history_acquisition(snapshot, grant, now);
+    auto const* terminal = std::get_if<HistoryTerminalPlan>(&plan);
+    ASSERT_NE(terminal, nullptr);
+    EXPECT_EQ(terminal->reason, HistorySearchTerminalReason::control_changed);
+}
+
+TEST(SharedHistoryFetchWait, ExactWaitPreventsFalseNoViableTerminal)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 20s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{8}, .fetch_epoch = 2}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{8}, 2);
+    auto interest = fetch->register_interest(
+        peers,
+        scope,
+        demand,
+        acquisition,
+        HistoryParticipantPlan{
+            .wait_until = HistoryPlannedWake{
+                .kind = HistoryWakeSourceKind::global_token_refill,
+                .at = now + 5s,
+                .token = 11}});
+    ASSERT_TRUE(interest);
+    auto const sponsor = fetch->select_sponsor(now);
+    EXPECT_FALSE(sponsor.sponsor);
+    ASSERT_TRUE(sponsor.aggregate_wake);
+    EXPECT_EQ(*sponsor.aggregate_wake, now + 5s);
+    EXPECT_FALSE(fetch->terminalize_if_no_viable_action(now));
+    EXPECT_FALSE(fetch->snapshot().terminal);
+}
+
+}  // namespace

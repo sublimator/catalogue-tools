@@ -21,8 +21,17 @@ class PeerSet;
 enum class HistoryAuthorityAction : std::uint8_t {
     attach_or_adopt,
     create_generation,
+    submit_known_use,
     submit_blind_use,
     promote,
+};
+
+enum class HistoryWakeSourceKind : std::uint8_t {
+    attached_generation_deadline,
+    candidate_retry_expiry,
+    global_token_refill,
+    physical_slot_release,
+    physical_watchdog,
 };
 
 /** Exact, generation-aware target of one authority-consuming action. */
@@ -47,9 +56,23 @@ struct HistoryPlannedAction
     operator==(HistoryPlannedAction const&) const = default;
 };
 
+/** Exact bounded event which can make an otherwise inert interest viable. */
+struct HistoryPlannedWake
+{
+    HistoryWakeSourceKind kind = HistoryWakeSourceKind::candidate_retry_expiry;
+    std::chrono::steady_clock::time_point at{};
+    std::string endpoint;
+    std::uint64_t generation = 0;
+    std::uint64_t token = 0;
+
+    bool
+    operator==(HistoryPlannedWake const&) const = default;
+};
+
 struct HistoryParticipantPlan
 {
     std::optional<HistoryPlannedAction> next_action;
+    std::optional<HistoryPlannedWake> wait_until;
     std::optional<HistoryAcquisitionTerminal> local_terminal;
 };
 
