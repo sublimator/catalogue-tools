@@ -5546,6 +5546,18 @@ TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
     auto session = std::make_shared<FakePeerSession>(
         io, "node-clear-first:1", true, 5500, 5400, 5600);
 
+    std::promise<void> first_fetch_written;
+    auto first_fetch_written_future = first_fetch_written.get_future();
+    std::atomic<bool> first_fetch_reported{false};
+    session->set_send_get_nodes_handler(
+        [&](Hash256 const&,
+            int,
+            std::vector<SHAMapNodeID> const&,
+            std::function<void(boost::system::error_code)>) {
+            if (!first_fetch_reported.exchange(true))
+                first_fetch_written.set_value();
+        });
+
     std::promise<void> old_servant_started;
     auto old_servant_started_future = old_servant_started.get_future();
     std::promise<void> release_old_servant;
@@ -5583,6 +5595,8 @@ TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
     };
     ASSERT_EQ(
         old_servant_started_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(
+        first_fetch_written_future.wait_for(2s), std::future_status::ready);
 
     cache->clear_nodes();
     EXPECT_EQ(
@@ -9203,6 +9217,19 @@ TEST(
         << "the production servant funnel retires the exact row once";
 }
 
+static void
+drain_stop_completion(asio::io_context& io, bool const& stopped)
+{
+    auto const deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!stopped)
+    {
+        io.restart();
+        if (io.run_one_until(deadline) == 0)
+            break;
+    }
+}
+
 TEST(
     PeerSetShutdownDeterministic,
     ReturnedReceiptCannotEraseDifferentSessionAtSameGeneration)
@@ -9249,11 +9276,10 @@ TEST(
         generation);
 
     replacement->release_disconnect_receipt();
-    // steady_timer cancellation may become reactor-ready one poll after the
-    // post which requested it. Drain explicit scheduler turns; no wall-clock
-    // wait or production deadline participates in this deterministic control.
-    for (std::size_t turn = 0; turn < 4 && !stopped; ++turn)
-        scheduler.run_until_idle();
+    // Real steady_timer cancellation is outside DeterministicScheduler's
+    // virtual-time model. Wait only for executor publication of that physical
+    // receipt; no production timeout or shutdown deadline participates.
+    drain_stop_completion(io, stopped);
 
     EXPECT_TRUE(stopped);
     EXPECT_EQ(stop_failure, nullptr);
@@ -9306,8 +9332,7 @@ TEST(
         generation + 1);
 
     session->release_disconnect_receipt(1);
-    for (std::size_t turn = 0; turn < 4 && !stopped; ++turn)
-        scheduler.run_until_idle();
+    drain_stop_completion(io, stopped);
 
     EXPECT_TRUE(stopped);
     EXPECT_EQ(stop_failure, nullptr);
