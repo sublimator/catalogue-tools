@@ -951,6 +951,68 @@ public:
         return status;
     }
 
+    static void
+    install_history_source(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        bool persistent_success,
+        bool seen_endpoints,
+        bool seen_redirect,
+        bool seen_crawl,
+        std::optional<catl::peer_client::PeerStatus> persistent_hint = {})
+    {
+        run_on_strand(
+            io,
+            peers,
+            [endpoint = std::move(endpoint),
+             persistent_success,
+             seen_endpoints,
+             seen_redirect,
+             seen_crawl,
+             persistent_hint](auto& set) {
+                auto& stats = set.endpoint_stats_[endpoint];
+                stats.last_success_at = persistent_success ? 1 : 0;
+                stats.seen_endpoints = seen_endpoints;
+                stats.seen_redirect = seen_redirect;
+                stats.seen_crawl = seen_crawl;
+                if (persistent_hint)
+                {
+                    stats.status = *persistent_hint;
+                    stats.range_is_persistent_hint = true;
+                    stats.range_is_current_live = false;
+                }
+                set.notify_waiters();
+            });
+    }
+
+    static void
+    install_crawl_history_candidates(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::size_t count,
+        std::uint32_t first_ledger,
+        std::uint32_t last_ledger)
+    {
+        run_on_strand(io, peers, [count, first_ledger, last_ledger](auto& set) {
+            catl::peer_client::PeerSet::CrawlObservationBatch batch;
+            batch.observed_at = std::chrono::steady_clock::now();
+            batch.crawl_epoch = ++set.next_crawl_observation_epoch_;
+            batch.observations.reserve(count);
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                batch.observations.push_back(
+                    catl::peer_client::PeerSet::CrawlObservation{
+                        .subject_endpoint =
+                            "crawl-" + std::to_string(i) + ".example.com:51235",
+                        .intervals = {{first_ledger, last_ledger}}});
+            }
+            set.crawl_observation_batches_.insert_or_assign(
+                "reporter.example.com:51235", std::move(batch));
+            set.notify_waiters();
+        });
+    }
+
     static bool
     capture_crawl_observations(
         boost::asio::io_context& io,

@@ -257,7 +257,9 @@ using HistorySearchPlan = std::variant<
  * Build the authority-free plan advertised to SharedHistoryFetch.
  *
  * This stage selects one exact action/target or one exact bounded wake.  It
- * never sees a live session and cannot spend a parent/global token.
+ * does not require a participant revision because SharedHistoryFetch mints
+ * that revision only when the proposal is installed. It never sees a live
+ * session and cannot spend a parent/global token.
  */
 HistoryParticipantPlan
 plan_history_interest(

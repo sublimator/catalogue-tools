@@ -77,9 +77,9 @@ valid_candidate(
 }
 
 bool
-valid_snapshot(HistorySearchSnapshot const& snapshot)
+valid_snapshot(HistorySearchSnapshot const& snapshot, bool require_control)
 {
-    if (!snapshot.control ||
+    if ((require_control && !snapshot.control) ||
         snapshot.absolute_deadline == Clock::time_point{} ||
         snapshot.candidates.size() > kMaxHistorySearchCandidates ||
         snapshot.wakes.size() > kMaxHistorySearchWakes ||
@@ -286,7 +286,7 @@ terminal_interest(HistoryAcquisitionTerminal terminal)
 HistorySearchTerminalReason
 terminal_reason(HistorySearchSnapshot const& snapshot, Clock::time_point now)
 {
-    if (!valid_snapshot(snapshot))
+    if (!valid_snapshot(snapshot, true))
         return HistorySearchTerminalReason::invalid_snapshot;
     if (snapshot.cancelled)
         return HistorySearchTerminalReason::cancelled;
@@ -337,7 +337,7 @@ HistoryPhysicalCensus::valid() const noexcept
 }
 
 //@@authority transition=prv.T0286 status=provisional scope=function
-//bind=catl::peer_client::plan_history_interest@6fc42641a3b5935a
+// bind=catl::peer_client::plan_history_interest@6fc42641a3b5935a
 // owner=unresolved owner_hypothesis=peer_set commit=pure
 // touches=prv.S0109,prv.S0114
 // label=derive_one_inert_exact_history_action_or_bounded_wake
@@ -346,7 +346,7 @@ plan_history_interest(
     HistorySearchSnapshot const& snapshot,
     Clock::time_point now)
 {
-    if (!valid_snapshot(snapshot))
+    if (!valid_snapshot(snapshot, false))
         return terminal_interest(HistoryAcquisitionTerminal::exhausted);
     if (snapshot.cancelled)
         return terminal_interest(HistoryAcquisitionTerminal::cancelled);
@@ -429,7 +429,7 @@ plan_history_interest(
 }
 
 //@@authority transition=prv.T0287 status=provisional scope=function
-//bind=catl::peer_client::plan_history_acquisition@dfcabb67a4fb16c6
+// bind=catl::peer_client::plan_history_acquisition@dfcabb67a4fb16c6
 // owner=unresolved owner_hypothesis=peer_set commit=pure
 // touches=prv.S0110,prv.S0114
 // label=bind_exact_participant_grant_to_inert_owner_commit_plan
@@ -439,6 +439,11 @@ plan_history_acquisition(
     HistoryAuthorityGrantRef const& participant_grant,
     Clock::time_point now)
 {
+    if (!valid_snapshot(snapshot, true))
+    {
+        return terminal_plan(
+            snapshot, HistorySearchTerminalReason::invalid_snapshot);
+    }
     auto const proposal = plan_history_interest(snapshot, now);
     if (proposal.wait_until)
     {

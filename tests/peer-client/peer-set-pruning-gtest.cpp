@@ -182,7 +182,7 @@ TEST(PeerSetPruning, CrawlObservationsStayOutsideSelectionState)
     EXPECT_TRUE(disabled_snapshot.reported_crawl_observations.empty());
 }
 
-TEST(PeerSetPruning, CanonicalCrawlDiagnosticsDoNotChangeLegacyProjection)
+TEST(PeerSetPruning, CrawlRangesStayOutsideDirectStatusAtCutover)
 {
     asio::io_context io;
     auto const options = PeerSetOptions{
@@ -214,6 +214,8 @@ TEST(PeerSetPruning, CanonicalCrawlDiagnosticsDoNotChangeLegacyProjection)
         disabled_snapshot.tracked_endpoints);
     EXPECT_EQ(
         enabled_snapshot.queued_connects, disabled_snapshot.queued_connects);
+    EXPECT_EQ(enabled_snapshot.queued_connects, 0u)
+        << "crawl-only locators cannot create ordinary background work";
     EXPECT_EQ(
         enabled_snapshot.in_flight_connects,
         disabled_snapshot.in_flight_connects);
@@ -224,8 +226,8 @@ TEST(PeerSetPruning, CanonicalCrawlDiagnosticsDoNotChangeLegacyProjection)
         io, disabled, "subject.example.com:51235");
     ASSERT_TRUE(enabled_status.has_value());
     ASSERT_TRUE(disabled_status.has_value());
-    EXPECT_EQ(enabled_status->first_seq, 11u);
-    EXPECT_EQ(enabled_status->last_seq, 20u);
+    EXPECT_EQ(enabled_status->first_seq, 0u);
+    EXPECT_EQ(enabled_status->last_seq, 0u);
     EXPECT_EQ(enabled_status->first_seq, disabled_status->first_seq);
     EXPECT_EQ(enabled_status->last_seq, disabled_status->last_seq);
     EXPECT_TRUE(PeerSetTestAccess::cached_endpoint_seen_crawl(

@@ -11,6 +11,7 @@
 
 #include "endpoint-tracker.h"
 #include "history-demand.h"
+#include "history-search.h"
 #include "node-transport.h"
 #include "peer-crawl-client.h"
 #include "peer-endpoint-cache.h"
@@ -91,6 +92,15 @@ struct PeerSetOptions
     /// Retain bounded /crawl claims for diagnostics. This side table has no
     /// path into discovery, ranking, dial admission, or persistent storage.
     bool capture_crawl_observations = true;
+
+    /// Cut-4 process-local physical and rate bounds. Admitted capacity remains
+    /// the configured hub plus archival limits above; transient and reserve
+    /// are independent parts of the one physical census.
+    std::size_t max_transient_peer_generations = 64;
+    std::size_t physical_drain_reserve = 16;
+    std::size_t max_global_history_dials = 32;
+    std::size_t max_global_history_blind_uses = 8;
+    std::chrono::milliseconds global_history_token_refill{250};
 };
 
 /// Read-only diagnostic projection of the currently connected peer set.
@@ -415,6 +425,14 @@ public:
     boost::asio::awaitable<std::optional<LedgerDemandSnapshot>>
     co_ledger_demand_snapshot(LedgerDemandRef demand);
 
+    /// Build one authority-free Cut-4 pool projection for an exact child.
+    /// Supplying the current interest adds its complete control revision for
+    /// final grant binding; omitting it is sufficient for proposal planning.
+    boost::asio::awaitable<HistorySearchSnapshot>
+    co_history_search_snapshot(
+        HistoryAcquisitionRef acquisition,
+        std::optional<HistoryInterestRef> interest = std::nullopt);
+
     /// A receipt for every generation-pin release command posted before this
     /// call. This does not assert that unrelated pins are absent; it proves
     /// only that PeerSet has consumed the causally preceding releases.
@@ -677,6 +695,21 @@ private:
 
     void
     prune_ledger_demand_tombstones() noexcept;
+
+    HistorySearchSnapshot
+    history_search_snapshot_on_strand(
+        HistoryAcquisitionRef const& acquisition,
+        std::optional<HistoryInterestRef> const& interest);
+
+    void
+    refresh_global_history_tokens(
+        std::chrono::steady_clock::time_point now) noexcept;
+
+    void
+    advance_history_pool_revision() noexcept;
+
+    HistoryPhysicalCensus
+    physical_census_on_strand() const noexcept;
 
     /// Default-inert initiation failpoint, settable only through the declared
     /// test seam. Proving that a failed projection returns false requires a
@@ -1261,6 +1294,18 @@ private:
         std::set<AcquisitionId> acquisitions;
         catl::core::RequestScope::Subscription terminal_subscription;
         std::shared_ptr<boost::asio::steady_timer> deadline_timer;
+        struct BudgetToken
+        {
+            std::uint64_t id = 0;
+            std::uint64_t revision = 1;
+            bool spent = false;
+            std::optional<std::chrono::steady_clock::time_point> refill_at;
+        };
+        std::vector<BudgetToken> dial_tokens;
+        std::vector<BudgetToken> promotion_tokens;
+        std::vector<BudgetToken> blind_tokens;
+        std::array<std::size_t, kHistorySourceLaneCount> source_attempts{};
+        std::size_t crawl_only_creations = 0;
     };
 
     struct HistoryAcquisitionRecord
@@ -1286,6 +1331,13 @@ private:
     std::map<AcquisitionId, HistoryAcquisitionRecord> history_acquisitions_;
     std::uint64_t next_ledger_demand_id_ = 1;
     std::uint64_t next_history_acquisition_id_ = 1;
+    std::uint64_t next_history_budget_token_id_ = 1;
+    std::vector<LedgerDemandRecord::BudgetToken> global_history_dial_tokens_;
+    std::vector<LedgerDemandRecord::BudgetToken> global_history_blind_tokens_;
+    //@@authority state=prv.S0115 status=provisional scope=field bind=catl::peer_client::PeerSet::history_pool_revision_@43682a6dd9503a79
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=monotonic_history_pool_control_revision
+    std::uint64_t history_pool_revision_ = 1;
     //@@authority state=prv.S0093 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::peer_set_instance_id_@564c32da7db0f1b9
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
@@ -1410,6 +1462,7 @@ private:
     std::uint64_t crawl_malformed_interval_tokens_ = 0;
     std::uint64_t crawl_truncated_observations_ = 0;
     std::uint64_t crawl_observation_capture_failures_ = 0;
+    std::set<std::string> configured_endpoints_;
     // Active target ledgers from in-flight wait_for_covering_peer calls.
     // Used by candidate admission and same-pool rotation to prioritize peers
     // that can serve any active target. Counts preserve concurrent waiters.

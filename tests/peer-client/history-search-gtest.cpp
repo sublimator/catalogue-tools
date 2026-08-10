@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include "peer-set-test-access.h"
+
 #include <chrono>
 #include <future>
 #include <string>
@@ -125,6 +127,26 @@ TEST_F(PlannerFixture, KnownCoveredUsePrecedesEveryOtherAction)
     auto const plan = plan_history_interest(snapshot, now);
     EXPECT_EQ(action(plan).action, HistoryAuthorityAction::submit_known_use);
     EXPECT_EQ(action(plan).target.endpoint, "ready:1");
+}
+
+TEST_F(PlannerFixture, ProposalNeedsNoAuthorityButFinalBindingDoes)
+{
+    snapshot.control = {};
+    auto known = candidate(
+        "ready:1",
+        HistorySourceLane::direct_verified,
+        HistoryGenerationDisposition::admitted,
+        1);
+    known.advertises_ledger = true;
+    snapshot.candidates = {known};
+
+    EXPECT_EQ(
+        action(plan_history_interest(snapshot, now)).action,
+        HistoryAuthorityAction::submit_known_use);
+    auto final = plan_history_acquisition(snapshot, {}, now);
+    auto const* terminal = std::get_if<HistoryTerminalPlan>(&final);
+    ASSERT_NE(terminal, nullptr);
+    EXPECT_EQ(terminal->reason, HistorySearchTerminalReason::invalid_snapshot);
 }
 
 TEST_F(PlannerFixture, AttachmentPrecedesBlindUseAndCreation)
@@ -546,6 +568,145 @@ TEST(SharedHistoryFetchWait, ExactWaitPreventsFalseNoViableTerminal)
     EXPECT_EQ(*sponsor.aggregate_wake, now + 5s);
     EXPECT_FALSE(fetch->terminalize_if_no_viable_action(now));
     EXPECT_FALSE(fetch->snapshot().terminal);
+}
+
+TEST(PeerSetHistorySearch, SnapshotKeepsEvidenceLanesAndHintsDistinct)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0});
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 30s);
+    auto demand =
+        run(io,
+            peers->co_get_or_create_ledger_demand(
+                scope,
+                LedgerDemandOptions{
+                    .ledger_seq = 50,
+                    .fallback_at = now + 10s,
+                    .remaining_new_dials = 3,
+                    .remaining_blind_uses = 1}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{20}, .fetch_epoch = 2}));
+
+    PeerSetTestAccess::install_history_source(
+        io,
+        peers,
+        "persistent.example.com:51235",
+        true,
+        false,
+        false,
+        false,
+        PeerStatus{.first_seq = 1, .last_seq = 2});
+    PeerSetTestAccess::install_history_source(
+        io, peers, "independent.example.com:51235", false, true, false, false);
+    PeerSetTestAccess::install_crawl_history_candidates(io, peers, 1, 40, 60);
+
+    auto snapshot = run(io, peers->co_history_search_snapshot(acquisition));
+    EXPECT_FALSE(static_cast<bool>(snapshot.control));
+    ASSERT_TRUE(snapshot.parent_dial_grant);
+    ASSERT_TRUE(snapshot.global_dial_grant);
+    EXPECT_EQ(snapshot.remaining_parent_dials, 3u);
+    EXPECT_TRUE(snapshot.physical.valid());
+
+    auto find = [&snapshot](std::string const& endpoint) {
+        return std::find_if(
+            snapshot.candidates.begin(),
+            snapshot.candidates.end(),
+            [&endpoint](auto const& candidate) {
+                return candidate.target.endpoint == endpoint;
+            });
+    };
+    auto configured = find("r.ripple.com:51235");
+    auto persistent = find("persistent.example.com:51235");
+    auto independent = find("independent.example.com:51235");
+    auto crawl = find("crawl-0.example.com:51235");
+    ASSERT_NE(configured, snapshot.candidates.end());
+    ASSERT_NE(persistent, snapshot.candidates.end());
+    ASSERT_NE(independent, snapshot.candidates.end());
+    ASSERT_NE(crawl, snapshot.candidates.end());
+    EXPECT_EQ(configured->source, HistorySourceLane::configured);
+    EXPECT_EQ(persistent->source, HistorySourceLane::persistent_success);
+    EXPECT_TRUE(persistent->eligible)
+        << "persistent noncoverage is not negative exclusion authority";
+    EXPECT_EQ(independent->source, HistorySourceLane::independently_discovered);
+    EXPECT_EQ(crawl->source, HistorySourceLane::crawl_only);
+    EXPECT_FALSE(crawl->advertises_ledger)
+        << "crawl coverage is a creation hint, never direct-use evidence";
+
+    auto proposal = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(proposal.next_action);
+    auto selected = find(proposal.next_action->target.endpoint);
+    ASSERT_NE(selected, snapshot.candidates.end());
+    EXPECT_EQ(selected->source, HistorySourceLane::configured);
+}
+
+TEST(PeerSetHistorySearch, SaturatedCrawlProjectionRetainsEveryStrongerLane)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0});
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 30s);
+    auto demand =
+        run(io,
+            peers->co_get_or_create_ledger_demand(
+                scope,
+                LedgerDemandOptions{
+                    .ledger_seq = 50,
+                    .fallback_at = now + 10s,
+                    .remaining_new_dials = 1}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{21}, .fetch_epoch = 1}));
+    PeerSetTestAccess::install_history_source(
+        io, peers, "persistent.example.com:51235", true, false, false, false);
+    PeerSetTestAccess::install_history_source(
+        io, peers, "independent.example.com:51235", false, true, false, false);
+    PeerSetTestAccess::install_crawl_history_candidates(
+        io, peers, kMaxHistorySearchCandidates, 1, 100);
+
+    auto snapshot = run(io, peers->co_history_search_snapshot(acquisition));
+    EXPECT_LE(snapshot.candidates.size(), kMaxHistorySearchCandidates);
+    for (auto lane :
+         {HistorySourceLane::configured,
+          HistorySourceLane::persistent_success,
+          HistorySourceLane::independently_discovered,
+          HistorySourceLane::crawl_only})
+    {
+        EXPECT_TRUE(std::any_of(
+            snapshot.candidates.begin(),
+            snapshot.candidates.end(),
+            [lane](auto const& candidate) {
+                return candidate.source == lane;
+            }));
+    }
+    auto proposal = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(proposal.next_action);
+    EXPECT_NE(
+        std::find_if(
+            snapshot.candidates.begin(),
+            snapshot.candidates.end(),
+            [&proposal](auto const& candidate) {
+                return candidate.target == proposal.next_action->target &&
+                    candidate.source != HistorySourceLane::crawl_only;
+            }),
+        snapshot.candidates.end());
 }
 
 }  // namespace
