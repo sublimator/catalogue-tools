@@ -7586,6 +7586,46 @@ PeerSet::drive_history_interest_on_strand(
         auto revised = fetch->revise_interest(result.interest, proposal);
         if (!revised)
         {
+            bool found_interest = false;
+            bool active_interest = false;
+            bool request_terminal = false;
+            std::uint64_t canonical_revision = 0;
+            {
+                std::lock_guard owner_lock(fetch->mutex_);
+                auto const found =
+                    fetch->interests_.find(result.interest.interest());
+                if (found != fetch->interests_.end())
+                {
+                    found_interest = true;
+                    auto const& cell = found->second;
+                    std::lock_guard participant_lock(cell->mutex);
+                    active_interest = cell->state ==
+                        SharedHistoryFetch::ParticipantState::active;
+                    request_terminal = cell->request_terminal.load(
+                        std::memory_order_acquire);
+                    canonical_revision = cell->revision;
+                }
+            }
+            PLOGD(
+                log_,
+                "history interest revision refused: supplied_revision=",
+                result.interest.participant_revision(),
+                " canonical_revision=",
+                canonical_revision,
+                " found=",
+                found_interest,
+                " active=",
+                active_interest,
+                " request_terminal=",
+                request_terminal,
+                " deadline_elapsed=",
+                now >= acquisition.absolute_deadline(),
+                " proposal_action=",
+                proposal.next_action.has_value(),
+                " proposal_wait=",
+                proposal.wait_until.has_value(),
+                " proposal_terminal=",
+                proposal.local_terminal.has_value());
             auto const terminal = fetch->snapshot().terminal;
             if (terminal)
                 finish_shared(*terminal);
