@@ -67,6 +67,22 @@ class BuildIdTests(unittest.TestCase):
         self.assert_dirty(second)
         self.assertNotEqual(first, second)
 
+    def test_configured_id_is_authoritative_without_git_objects(self) -> None:
+        configured = "3733a00-dirty.1234abcd"
+        self.assertEqual(GENERATOR.resolve_id(self.repo, configured), configured)
+        objects = self.repo / ".git" / "objects"
+        for path in sorted(objects.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                path.rmdir()
+        objects.rmdir()
+        self.assertEqual(GENERATOR.resolve_id(self.repo, configured), configured)
+
+    def test_configured_id_rejects_shell_syntax(self) -> None:
+        with self.assertRaises(ValueError):
+            GENERATOR.resolve_id(self.repo, "good;touch-bad")
+
     def test_write_if_different_preserves_timestamp(self) -> None:
         output = self.repo / "generated.cpp"
         self.assertTrue(GENERATOR.write_if_different(output, "first\n"))

@@ -39,7 +39,12 @@ def git(repo: Path, *args: str) -> tuple[int, bytes]:
     return completed.returncode, completed.stdout
 
 
-def resolve_id(repo: Path) -> str:
+def resolve_id(repo: Path, configured_id: str = "") -> str:
+    if configured_id:
+        if not SAFE_ID.fullmatch(configured_id):
+            raise ValueError(f"refusing unsafe configured build id: {configured_id!r}")
+        return configured_id
+
     code, inside = git(repo, "rev-parse", "--is-inside-work-tree")
     if code != 0 or inside.strip() != b"true":
         return "unknown"
@@ -110,20 +115,30 @@ def write_if_different(path: Path, content: str) -> bool:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo", type=Path, default=Path.cwd())
-    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--output", type=Path)
     p.add_argument(
         "--config-id",
         default="",
-        help="ignored; kept for call-site compatibility",
+        help="authoritative identity supplied before Git metadata is removed",
     )
     p.add_argument("--print-id", action="store_true")
     args = p.parse_args()
 
-    build_id = resolve_id(args.repo.resolve())
-    changed = write_if_different(args.output, render_cpp(build_id))
+    if args.output is None and not args.print_id:
+        p.error("--output is required unless --print-id is used")
+
+    try:
+        build_id = resolve_id(args.repo.resolve(), args.config_id)
+    except ValueError as exc:
+        p.error(str(exc))
+
+    changed = False
+    if args.output is not None:
+        changed = write_if_different(args.output, render_cpp(build_id))
     if args.print_id:
         print(build_id)
-        print("updated" if changed else "unchanged", file=sys.stderr)
+        if args.output is not None:
+            print("updated" if changed else "unchanged", file=sys.stderr)
     return 0
 
 

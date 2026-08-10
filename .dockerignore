@@ -1,8 +1,7 @@
 build/
 build-*/
-# Include .git for rev-parse, exclude heavy parts
-.git/objects/**
-.git/lfs/**
+# Source identity is injected as XPRV_BUILD_ID before this context is built.
+.git/
 .ai-docs/
 .claude/
 .mypy_cache/

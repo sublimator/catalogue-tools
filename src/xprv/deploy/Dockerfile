@@ -1,11 +1,13 @@
 # ── ccache seed from previous build ──────────────────────────────
 ARG PREV_IMAGE
+ARG XPRV_BUILD_ID
 FROM ${PREV_IMAGE:-ubuntu:24.04} AS prev
 RUN mkdir -p /ccache
 
 # ── Stage 1: Build ───────────────────────────────────────────────
 # ccache should be in deps base image. Install if missing (slower).
 FROM us-central1-docker.pkg.dev/xprv-server/xprv/xprv-deps:latest AS builder
+ARG XPRV_BUILD_ID
 RUN which ccache || (apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/*)
 
 # Seed ccache from previous build
@@ -25,6 +27,7 @@ RUN cd build && cmake -G Ninja \
     -DCMAKE_C_COMPILER=/usr/bin/gcc-13 \
     -DCMAKE_CXX_COMPILER=/usr/bin/g++-13 \
     -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
+    -DXPRV_BUILD_ID_OVERRIDE="${XPRV_BUILD_ID}" \
     ..
 
 RUN cd build && ninja xprv && ccache --show-stats

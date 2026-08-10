@@ -1,6 +1,8 @@
 substitutions:
   _PREV_IMAGE: "auto"
   _REGISTRY: us-central1-docker.pkg.dev/xprv-server/xprv
+  # Must be resolved by the submitter while the complete Git repository exists.
+  _XPRV_BUILD_ID: "UNSET"
 
 steps:
   # Pull previous builder for ccache seed (ignore failure on first build)
@@ -17,6 +19,10 @@ steps:
       - -c
       - |
         PREV="${_PREV_IMAGE}"
+        if [ "${_XPRV_BUILD_ID}" = "UNSET" ]; then
+          echo "ERROR: pass --substitutions=_XPRV_BUILD_ID=<source-id>" >&2
+          exit 2
+        fi
         if [ "$$PREV" = "auto" ]; then
           if docker images -q ${_REGISTRY}/xprv:builder 2>/dev/null | grep -q .; then
             PREV=${_REGISTRY}/xprv:builder
@@ -34,12 +40,14 @@ steps:
         docker build --progress=plain \
           -f src/xprv/deploy/Dockerfile \
           $$PREV_ARG \
+          --build-arg XPRV_BUILD_ID=${_XPRV_BUILD_ID} \
           --target builder \
           -t ${_REGISTRY}/xprv:builder \
           . && \
         docker build --progress=plain \
           -f src/xprv/deploy/Dockerfile \
           $$PREV_ARG \
+          --build-arg XPRV_BUILD_ID=${_XPRV_BUILD_ID} \
           -t ${_REGISTRY}/xprv:latest \
           .
 

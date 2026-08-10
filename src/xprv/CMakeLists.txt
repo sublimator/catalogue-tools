@@ -44,12 +44,19 @@ set(XPRV_BUILD_ID_CPP
     ${CMAKE_CURRENT_BINARY_DIR}/generated/xprv-build-id.cpp)
 set(XPRV_BUILD_ID_SCRIPT
     ${CMAKE_SOURCE_DIR}/scripts/generate-xprv-build-id.py)
+set(XPRV_BUILD_ID_OVERRIDE
+    ""
+    CACHE STRING "Source identity resolved before Git metadata was removed")
+set(XPRV_BUILD_ID_ARGS --repo ${CMAKE_SOURCE_DIR})
+if(XPRV_BUILD_ID_OVERRIDE)
+  list(APPEND XPRV_BUILD_ID_ARGS --config-id ${XPRV_BUILD_ID_OVERRIDE})
+endif()
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 if(NOT EXISTS ${XPRV_BUILD_ID_CPP})
   execute_process(
-    COMMAND ${Python3_EXECUTABLE} ${XPRV_BUILD_ID_SCRIPT} --repo
-            ${CMAKE_SOURCE_DIR} --output ${XPRV_BUILD_ID_CPP}
+    COMMAND ${Python3_EXECUTABLE} ${XPRV_BUILD_ID_SCRIPT}
+            ${XPRV_BUILD_ID_ARGS} --output ${XPRV_BUILD_ID_CPP}
     RESULT_VARIABLE XPRV_BUILD_ID_SEED_RC)
   if(NOT XPRV_BUILD_ID_SEED_RC EQUAL 0)
     file(
@@ -67,8 +74,8 @@ endif()
 
 add_custom_target(
   xprv_build_id_refresh
-  COMMAND ${Python3_EXECUTABLE} ${XPRV_BUILD_ID_SCRIPT} --repo
-          ${CMAKE_SOURCE_DIR} --output ${XPRV_BUILD_ID_CPP}
+  COMMAND ${Python3_EXECUTABLE} ${XPRV_BUILD_ID_SCRIPT}
+          ${XPRV_BUILD_ID_ARGS} --output ${XPRV_BUILD_ID_CPP}
   BYPRODUCTS ${XPRV_BUILD_ID_CPP}
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   COMMENT "Refreshing xprv build identity"
