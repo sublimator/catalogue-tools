@@ -212,7 +212,7 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
                     snapshot.candidates.end(),
                     [&wake,
                      &snapshot](HistorySearchCandidate const& candidate) {
-                        return candidate.eligible && candidate.attachable &&
+                        return candidate.eligible && candidate.attached &&
                             candidate.target.endpoint == wake.endpoint &&
                             candidate.target.generation == wake.generation &&
                             !snapshot.excluded_endpoints.contains(
@@ -371,6 +371,7 @@ plan_history_interest(
     if (auto const* candidate = best_candidate(
             snapshot, now, [](HistorySearchCandidate const& current) {
                 return current.attachable &&
+                    !current.attached &&
                     (current.disposition ==
                          HistoryGenerationDisposition::queued_or_connecting ||
                      current.disposition ==
@@ -378,6 +379,13 @@ plan_history_interest(
             }))
     {
         return action(HistoryAuthorityAction::attach_or_adopt, *candidate);
+    }
+
+    if (auto wake = earliest_wake(snapshot, now);
+        wake &&
+        wake->kind == HistoryWakeSourceKind::attached_generation_deadline)
+    {
+        return HistoryParticipantPlan{.wait_until = std::move(wake)};
     }
 
     if (now >= snapshot.fallback_at && snapshot.parent_blind_grant &&

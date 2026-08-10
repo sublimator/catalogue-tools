@@ -157,6 +157,7 @@ struct HistorySearchCandidate
     bool eligible = false;
     bool advertises_ledger = false;
     bool attachable = false;
+    bool attached = false;
     bool blind_eligible = false;
     std::optional<std::chrono::steady_clock::time_point> retry_not_before;
 

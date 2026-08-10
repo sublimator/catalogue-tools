@@ -187,11 +187,18 @@ public:
         std::string endpoint)
     {
         run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
+            auto const deadline = std::chrono::steady_clock::now() +
+                set.kOrdinaryConnectDeadline;
+            auto const generation =
+                set.reserve_connection_generation(endpoint, deadline);
+            if (generation == 0)
+                throw std::logic_error("test queue generation refused");
             set.queued_.insert(endpoint);
             auto& authority = set.targeted_connects_[endpoint];
+            authority.generation = generation;
+            authority.physical_deadline = deadline;
             authority.ordinary_discovery_authorized = true;
-            authority.ordinary_deadline =
-                std::chrono::steady_clock::now() + set.kOrdinaryConnectDeadline;
+            authority.ordinary_deadline = deadline;
         });
     }
 
@@ -755,6 +762,8 @@ public:
     {
         using PeerSet = catl::peer_client::PeerSet;
         PeerSet::QueuedConnectAuthority authority;
+        authority.generation = 1;
+        authority.physical_deadline = now + std::chrono::seconds(60);
         authority.ordinary_discovery_authorized = ordinary;
         authority.ordinary_deadline = ordinary_deadline;
         for (std::size_t i = 0; i < target_deadlines.size(); ++i)
@@ -818,6 +827,97 @@ public:
                 accepted = set.queue_targeted_connect(endpoint, authorization);
             });
         return accepted;
+    }
+
+    static std::uint64_t
+    generation_for_endpoint(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::uint64_t generation = 0;
+        run_on_strand(
+            io, peers, [&generation, endpoint = std::move(endpoint)](auto& set) {
+                auto const row = set.peer_generations_.find(endpoint);
+                if (row != set.peer_generations_.end())
+                    generation = row->second.lifecycle.generation();
+            });
+        return generation;
+    }
+
+    static catl::peer_client::HistoryPhysicalCensus
+    history_physical_census(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        catl::peer_client::HistoryPhysicalCensus census;
+        run_on_strand(io, peers, [&census](auto& set) {
+            census = set.physical_census_on_strand();
+        });
+        return census;
+    }
+
+    static std::size_t
+    history_generation_attachment_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::size_t count = 0;
+        run_on_strand(
+            io, peers, [&count, endpoint = std::move(endpoint)](auto& set) {
+                auto const row = set.peer_generations_.find(endpoint);
+                if (row != set.peer_generations_.end())
+                    count = row->second.history_attachments.size();
+            });
+        return count;
+    }
+
+    static std::size_t
+    history_acquisition_attachment_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::AcquisitionId acquisition)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count, acquisition](auto& set) {
+            auto const row = set.history_acquisitions_.find(acquisition);
+            if (row != set.history_acquisitions_.end())
+                count = row->second.attached_generations.size();
+        });
+        return count;
+    }
+
+    static void
+    make_reserved_generation_ready(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSessionPtr const& session)
+    {
+        run_on_strand(io, peers, [&session](auto& set) {
+            auto const key = catl::peer_client::EndpointTracker::canonical_endpoint(
+                session->endpoint());
+            auto const row = set.peer_generations_.find(key);
+            if (row == set.peer_generations_.end())
+                throw std::logic_error("reserved generation missing");
+            auto const generation = row->second.lifecycle.generation();
+            set.install_generation_session(key, generation, session);
+            set.consume_lifecycle_event(
+                {.endpoint = key,
+                 .generation = generation,
+                 .event_sequence = 1,
+                 .lifecycle = catl::peer_client::PeerLifecycle::connecting});
+            auto const range = session->advertised_ledger_range();
+            set.consume_lifecycle_event(
+                {.endpoint = key,
+                 .generation = generation,
+                 .event_sequence = 2,
+                 .lifecycle = catl::peer_client::PeerLifecycle::ready,
+                 .status = {
+                     .current_seq = session->peer_ledger_seq(),
+                     .advertised_range = range,
+                     .headers = session->peer_headers()}});
+        });
     }
 
     static std::shared_ptr<boost::asio::steady_timer>
@@ -1097,12 +1197,19 @@ public:
         std::string endpoint)
     {
         run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
+            auto const deadline = std::chrono::steady_clock::now() +
+                set.kOrdinaryConnectDeadline;
+            auto const generation =
+                set.reserve_connection_generation(endpoint, deadline);
+            if (generation == 0)
+                throw std::logic_error("test queue generation refused");
             set.pending_connects_.push_back(endpoint);
             set.queued_.insert(endpoint);
             auto& authority = set.targeted_connects_[endpoint];
+            authority.generation = generation;
+            authority.physical_deadline = deadline;
             authority.ordinary_discovery_authorized = true;
-            authority.ordinary_deadline =
-                std::chrono::steady_clock::now() + set.kOrdinaryConnectDeadline;
+            authority.ordinary_deadline = deadline;
         });
     }
 
@@ -1734,7 +1841,8 @@ public:
             peers->strand_,
             [peers, host = std::move(host), port]()
                 -> boost::asio::awaitable<catl::peer_client::PeerSessionPtr> {
-                co_return co_await peers->try_connect_on_strand(host, port, {});
+                co_return co_await peers->try_connect_on_strand(
+                    host, port, 0, {});
             },
             [&done](
                 std::exception_ptr ep,
@@ -1828,12 +1936,19 @@ public:
                     [waiter, wake](auto ec) { wake->set_value(ec); });
 
                 set.fail_connect_servant_launches_for_test_ = 1;
+                auto const deadline = std::chrono::steady_clock::now() +
+                    set.kOrdinaryConnectDeadline;
+                auto const generation =
+                    set.reserve_connection_generation(key, deadline);
+                if (generation == 0)
+                    throw std::logic_error("test queue generation refused");
                 set.pending_connects_.push_back(key);
                 set.queued_.insert(key);
                 auto& authority = set.targeted_connects_[key];
+                authority.generation = generation;
+                authority.physical_deadline = deadline;
                 authority.ordinary_discovery_authorized = true;
-                authority.ordinary_deadline = std::chrono::steady_clock::now() +
-                    set.kOrdinaryConnectDeadline;
+                authority.ordinary_deadline = deadline;
                 set.pump_connects();
                 result.exact_row_consumed = set.in_flight_.count(key) == 0;
                 set.fail_connect_servant_launches_for_test_ = 0;

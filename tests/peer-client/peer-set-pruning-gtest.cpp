@@ -1138,9 +1138,24 @@ TEST(PeerSetPruning, TargetCleanupRemovesOnlyTargetOnlyQueueRows)
     ASSERT_TRUE(PeerSetTestAccess::queue_targeted_authorization(
         io, peers, target_only, target_authorization));
     ASSERT_TRUE(PeerSetTestAccess::is_queued_connect(io, peers, target_only));
+    auto const target_generation =
+        PeerSetTestAccess::generation_for_endpoint(io, peers, target_only);
+    EXPECT_NE(target_generation, 0u)
+        << "physical identity must predate queue visibility";
+    EXPECT_EQ(
+        PeerSetTestAccess::history_physical_census(io, peers)
+            .queued_or_connecting,
+        1u);
     PeerSetTestAccess::release_targeted_wanted_ledger(
         io, peers, std::move(target_authorization));
     EXPECT_FALSE(PeerSetTestAccess::is_queued_connect(io, peers, target_only));
+    EXPECT_EQ(
+        PeerSetTestAccess::generation_for_endpoint(io, peers, target_only),
+        0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::history_physical_census(io, peers)
+            .queued_or_connecting,
+        0u);
 
     auto const ordinary = std::string("ordinary-plus-target.example.com:1");
     PeerSetTestAccess::push_pending_connect(io, peers, ordinary);
@@ -1152,6 +1167,8 @@ TEST(PeerSetPruning, TargetCleanupRemovesOnlyTargetOnlyQueueRows)
         io, peers, std::move(joined_authorization));
     EXPECT_TRUE(PeerSetTestAccess::is_queued_connect(io, peers, ordinary));
     EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, ordinary));
+    EXPECT_NE(
+        PeerSetTestAccess::generation_for_endpoint(io, peers, ordinary), 0u);
 }
 
 TEST(PeerSetPruning, AsioCanceledWaitRevokesReplacementProbe)
