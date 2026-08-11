@@ -1926,7 +1926,7 @@ PeerSet::note_discovered(std::string const& endpoint, DiscoverySource source)
         // ordinary discovery, recursively crawl its claims, or create a
         // connection outside an exact demand-backed plan.
         prune_discovery_state();
-        notify_waiters();
+        notify_waiters(HistoryPoolChange::discovery);
         return;
     }
 
@@ -1941,7 +1941,7 @@ PeerSet::note_discovered(std::string const& endpoint, DiscoverySource source)
     pump_crawls();
     pump_connects();
     schedule_connect_retry_wake();
-    notify_waiters();
+    notify_waiters(HistoryPoolChange::discovery);
 }
 
 void
@@ -1973,7 +1973,9 @@ PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
     pump_crawls();
     pump_connects();
     schedule_connect_retry_wake();
-    notify_waiters();
+    // EndpointTracker status is an evidence/ranking projection. The exact
+    // generation lifecycle publishes the corresponding availability change.
+    notify_waiters(HistoryPoolChange::discovery);
 }
 
 void
@@ -2435,10 +2437,10 @@ PeerSet::wake_waiters_without_revision() noexcept
 }
 
 void
-PeerSet::notify_waiters() noexcept
+PeerSet::notify_waiters(HistoryPoolChange change) noexcept
 {
     ASSERT_ON_STRAND();
-    advance_history_pool_revision();
+    advance_history_pool_revision(change);
     wake_waiters_without_revision();
 }
 
@@ -2457,13 +2459,24 @@ PeerSet::post_history_fetch_wake() noexcept
 }
 
 void
-PeerSet::advance_history_pool_revision() noexcept
+//@@authority transition=prv.T0309 status=provisional scope=function bind=catl::peer_client::advance_history_pool_revision@ccd2583138b894bd
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0115,prv.S0128,prv.S0129
+// label=advance_exact_history_control_and_one_typed_scheduling_revision
+PeerSet::advance_history_pool_revision(HistoryPoolChange change) noexcept
 {
     ASSERT_ON_STRAND();
-    if (history_pool_revision_ == std::numeric_limits<std::uint64_t>::max())
-        history_pool_revision_ = 0;
-    else if (history_pool_revision_ != 0)
-        ++history_pool_revision_;
+    auto advance = [](std::uint64_t& revision) noexcept {
+        if (revision == std::numeric_limits<std::uint64_t>::max())
+            revision = 0;
+        else if (revision != 0)
+            ++revision;
+    };
+    advance(history_pool_revision_);
+    if (change == HistoryPoolChange::availability)
+        advance(history_availability_revision_);
+    else
+        advance(history_discovery_revision_);
 }
 
 HistoryPhysicalCensus
@@ -6989,7 +7002,7 @@ PeerSet::history_search_snapshot_on_strand(
 HistorySearchSnapshot
 //@@authority transition=prv.T0288 status=provisional scope=function bind=catl::peer_client::project_history_search_snapshot@fce59ab3514cad01
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0008,prv.S0073,prv.S0081,prv.S0088,prv.S0104,prv.S0105,prv.S0114,prv.S0115,prv.S0116,prv.S0117,prv.S0118
+// touches=prv.S0008,prv.S0073,prv.S0081,prv.S0088,prv.S0104,prv.S0105,prv.S0114,prv.S0115,prv.S0116,prv.S0117,prv.S0118,prv.S0127,prv.S0128,prv.S0129
 // label=project_distinct_evidence_lanes_tokens_and_physical_census
 PeerSet::project_history_search_snapshot(
     HistoryAcquisitionRecord const& acquisition,
@@ -7003,6 +7016,9 @@ PeerSet::project_history_search_snapshot(
 
     HistorySearchSnapshot snapshot;
     snapshot.control = std::move(control);
+    snapshot.observation = HistoryPoolObservation{
+        .availability_revision = history_availability_revision_,
+        .discovery_revision = history_discovery_revision_};
     snapshot.absolute_deadline = demand.absolute_deadline;
     snapshot.fallback_at = demand.options.fallback_at;
     snapshot.cancelled =
@@ -7887,10 +7903,74 @@ PeerSet::co_execute_history_grant(
     co_return execute_history_grant_on_strand(fetch, grant, kind);
 }
 
+PeerSet::HistoryWakeDisposition
+//@@authority transition=prv.T0310 status=provisional scope=function bind=catl::peer_client::classify_history_wake_on_strand@7432ded2c5f86373
+// owner=unresolved owner_hypothesis=peer_set commit=pure
+// touches=prv.S0088,prv.S0104,prv.S0105,prv.S0109,prv.S0114,prv.S0115,prv.S0127,prv.S0128,prv.S0129
+// label=classify_observed_history_change_as_reuse_coalesce_or_replan
+PeerSet::classify_history_wake_on_strand(
+    HistoryAcquisitionRef const& acquisition,
+    HistoryParticipantPlan const& proposal,
+    HistorySearchSnapshot const& snapshot,
+    bool availability_changed,
+    bool discovery_changed) const noexcept
+{
+    ASSERT_ON_STRAND();
+    auto const local =
+        history_acquisitions_.find(acquisition.context().acquisition);
+    auto const parent = ledger_demands_.find(acquisition.demand_id());
+    if (history_pool_revision_ == 0 ||
+        history_availability_revision_ == 0 ||
+        history_discovery_revision_ == 0 ||
+        local == history_acquisitions_.end() ||
+        parent == ledger_demands_.end() || local->second.terminal ||
+        parent->second.terminal ||
+        std::chrono::steady_clock::now() >= acquisition.absolute_deadline())
+    {
+        return HistoryWakeDisposition::replan_now;
+    }
+
+    // The final grant path always projects current exact state before spend.
+    if (proposal.next_action)
+        return HistoryWakeDisposition::reuse;
+
+    if (proposal.wait_until &&
+        proposal.wait_until->kind ==
+            HistoryWakeSourceKind::attached_generation_deadline)
+    {
+        auto const& wake = *proposal.wait_until;
+        auto const generation = peer_generations_.find(wake.endpoint);
+        if (generation == peer_generations_.end() ||
+            generation->second.lifecycle.generation() != wake.generation ||
+            generation->second.lifecycle.ready() ||
+            generation->second.lifecycle.terminal())
+        {
+            return HistoryWakeDisposition::replan_now;
+        }
+        auto const queued = targeted_connects_.find(wake.endpoint);
+        auto const connecting = in_flight_.find(wake.endpoint);
+        auto const still_pending =
+            (queued != targeted_connects_.end() &&
+             queued->second.generation == wake.generation) ||
+            (connecting != in_flight_.end() &&
+             connecting->second.generation == wake.generation);
+        return still_pending ? HistoryWakeDisposition::reuse
+                             : HistoryWakeDisposition::replan_now;
+    }
+
+    auto const discovery_can_create = snapshot.remaining_parent_dials != 0 &&
+        snapshot.parent_dial_grant && snapshot.global_dial_grant &&
+        snapshot.physical.can_create();
+    if (!availability_changed && discovery_changed && !discovery_can_create)
+        return HistoryWakeDisposition::reuse;
+
+    return HistoryWakeDisposition::coalesce;
+}
+
 boost::asio::awaitable<HistorySearchDriveResult>
 //@@authority transition=prv.T0300 status=provisional scope=function bind=catl::peer_client::drive_history_interest_on_strand@9ad65daf4bb809cb
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0105,prv.S0108,prv.S0109,prv.S0110,prv.S0115
+// touches=prv.S0105,prv.S0108,prv.S0109,prv.S0110,prv.S0115,prv.S0127,prv.S0128,prv.S0129
 // label=drive_one_revisioned_history_participant_to_exact_use_or_terminal
 PeerSet::drive_history_interest_on_strand(
     std::shared_ptr<SharedHistoryFetch> fetch,
@@ -8003,6 +8083,42 @@ PeerSet::drive_history_interest_on_strand(
             co_return result;
         }
 
+        auto observed_pool_revision = snapshot.control.pool_revision;
+        auto observed_pool = snapshot.observation;
+        auto local_plan_dirty = false;
+        auto observe_pool_change = [&]() noexcept {
+            if (history_pool_revision_ == observed_pool_revision)
+                return false;
+
+            auto const availability_changed =
+                history_availability_revision_ !=
+                observed_pool.availability_revision;
+            auto const discovery_changed = history_discovery_revision_ !=
+                observed_pool.discovery_revision;
+            observed_pool_revision = history_pool_revision_;
+            observed_pool = HistoryPoolObservation{
+                .availability_revision = history_availability_revision_,
+                .discovery_revision = history_discovery_revision_};
+            auto const disposition = classify_history_wake_on_strand(
+                acquisition,
+                proposal,
+                snapshot,
+                availability_changed,
+                discovery_changed);
+            if (disposition == HistoryWakeDisposition::replan_now)
+                return true;
+
+            ++result.pool_wakes_reused;
+            if (discovery_changed)
+                ++result.discovery_wakes_reused;
+            if (disposition == HistoryWakeDisposition::coalesce)
+            {
+                local_plan_dirty = true;
+                ++result.local_wakes_coalesced;
+            }
+            return false;
+        };
+
         // Keep this authority-free local plan until one of its actual inputs
         // changes. Shared-fetch publications only change sponsor arbitration;
         // the progress timer only changes what observers should see. Neither
@@ -8079,6 +8195,9 @@ PeerSet::drive_history_interest_on_strand(
                        << result.commits
                        << ", reused=shared:" << result.shared_wakes_reused
                        << ",tick:" << result.progress_wakes_reused
+                       << ",pool:" << result.pool_wakes_reused
+                       << ",discovery:" << result.discovery_wakes_reused
+                       << ",coalesced:" << result.local_wakes_coalesced
                        << ", eligible_candidates=" << eligible << '/'
                        << snapshot.candidates.size()
                        << ", physical_slots=" << snapshot.physical.total()
@@ -8119,11 +8238,14 @@ PeerSet::drive_history_interest_on_strand(
                     auto const outcome = co_await wait_for_signal_or_timeout(
                         strand_, std::move(wait_signal), wait_for);
                     ASSERT_ON_STRAND();
-                    if (history_pool_revision_ !=
-                        snapshot.control.pool_revision)
+                    if (history_pool_revision_ != observed_pool_revision)
                     {
-                        next_replan_cause = ReplanCause::local_change;
-                        break;
+                        if (observe_pool_change())
+                        {
+                            next_replan_cause = ReplanCause::local_change;
+                            break;
+                        }
+                        continue;
                     }
                     if (outcome == WaitOutcome::timed_out)
                     {
@@ -8213,7 +8335,14 @@ PeerSet::drive_history_interest_on_strand(
                     break;
                 }
                 if (wake_target == WakeTarget::progress)
+                {
+                    if (local_plan_dirty)
+                    {
+                        next_replan_cause = ReplanCause::local_change;
+                        break;
+                    }
                     ++result.progress_wakes_reused;
+                }
                 else
                     ++result.shared_wakes_reused;
                 continue;
@@ -8224,10 +8353,14 @@ PeerSet::drive_history_interest_on_strand(
             auto const outcome = co_await wait_for_signal_or_timeout(
                 strand_, std::move(wait_signal), wait_for);
             ASSERT_ON_STRAND();
-            if (history_pool_revision_ != snapshot.control.pool_revision)
+            if (history_pool_revision_ != observed_pool_revision)
             {
-                next_replan_cause = ReplanCause::local_change;
-                break;
+                if (observe_pool_change())
+                {
+                    next_replan_cause = ReplanCause::local_change;
+                    break;
+                }
+                continue;
             }
             if (outcome == WaitOutcome::timed_out)
             {
@@ -8238,7 +8371,14 @@ PeerSet::drive_history_interest_on_strand(
                     break;
                 }
                 if (wake_target == WakeTarget::progress)
+                {
+                    if (local_plan_dirty)
+                    {
+                        next_replan_cause = ReplanCause::local_change;
+                        break;
+                    }
                     ++result.progress_wakes_reused;
+                }
                 else
                     ++result.shared_wakes_reused;
                 continue;

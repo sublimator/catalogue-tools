@@ -154,6 +154,9 @@ struct HistorySearchDriveResult
     std::size_t arbitrations = 0;
     std::size_t shared_wakes_reused = 0;
     std::size_t progress_wakes_reused = 0;
+    std::size_t pool_wakes_reused = 0;
+    std::size_t discovery_wakes_reused = 0;
+    std::size_t local_wakes_coalesced = 0;
     std::size_t grants = 0;
     std::size_t commits = 0;
 
@@ -537,6 +540,15 @@ private:
     struct PeerGeneration;
 
     enum class Lifecycle : std::uint8_t { running, stopping, stopped };
+    enum class HistoryPoolChange : std::uint8_t {
+        availability,
+        discovery,
+    };
+    enum class HistoryWakeDisposition : std::uint8_t {
+        reuse,
+        coalesce,
+        replan_now,
+    };
 
     struct TargetedConnectAuthorization;
     using TargetedConnectAuthorizationPtr =
@@ -850,12 +862,21 @@ private:
         HistoryInterestRef interest,
         PeerUseKind kind);
 
+    HistoryWakeDisposition
+    classify_history_wake_on_strand(
+        HistoryAcquisitionRef const& acquisition,
+        HistoryParticipantPlan const& proposal,
+        HistorySearchSnapshot const& snapshot,
+        bool availability_changed,
+        bool discovery_changed) const noexcept;
+
     void
     refresh_global_history_tokens(
         std::chrono::steady_clock::time_point now) noexcept;
 
     void
-    advance_history_pool_revision() noexcept;
+    advance_history_pool_revision(
+        HistoryPoolChange change = HistoryPoolChange::availability) noexcept;
 
     HistoryPhysicalCensus
     physical_census_on_strand() const noexcept;
@@ -1297,7 +1318,8 @@ private:
     attach_wait_signal();
 
     void
-    notify_waiters() noexcept;
+    notify_waiters(
+        HistoryPoolChange change = HistoryPoolChange::availability) noexcept;
 
     void
     wake_waiters_without_revision() noexcept;
@@ -1620,6 +1642,14 @@ private:
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=monotonic_history_pool_control_revision
     std::uint64_t history_pool_revision_ = 1;
+    //@@authority state=prv.S0128 status=provisional scope=field bind=catl::peer_client::PeerSet::history_availability_revision_@f0fa1bd888d92259
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=monotonic_history_availability_scheduling_revision
+    std::uint64_t history_availability_revision_ = 1;
+    //@@authority state=prv.S0129 status=provisional scope=field bind=catl::peer_client::PeerSet::history_discovery_revision_@6e8ea9570c30c7ef
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=monotonic_history_discovery_scheduling_revision
+    std::uint64_t history_discovery_revision_ = 1;
     //@@authority state=prv.S0093 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::peer_set_instance_id_@564c32da7db0f1b9
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set

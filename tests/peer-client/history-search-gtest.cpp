@@ -2134,6 +2134,134 @@ TEST(PeerSetHistoryDriver, RequestCancellationWakesAttachedWaitImmediately)
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
 }
 
+TEST(PeerSetHistoryDriver, AttachedWaitIgnoresUnrelatedPoolChurn)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto const endpoint = std::string("driver-churn.example.com:51235");
+    PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 5s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
+    auto acquisition = run(
+        io,
+        peers->co_open_history_acquisition(
+            demand,
+            HistoryAcquisitionOptions{
+                .fetch = HistoryFetchId{52}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{52}, 1);
+    auto interest = fetch->register_interest(
+        peers, scope, demand, acquisition);
+    auto future = boost::asio::co_spawn(
+        io,
+        peers->co_drive_history_interest(
+            fetch, acquisition, interest, PeerUseKind::ledger_header),
+        boost::asio::use_future);
+
+    io.run_for(20ms);
+    io.restart();
+    ASSERT_EQ(
+        PeerSetTestAccess::history_acquisition_attachment_count(
+            io, peers, acquisition.context().acquisition),
+        1u);
+
+    for (std::size_t i = 0; i < 100; ++i)
+    {
+        PeerSetTestAccess::post_history_pool_wake(peers, i % 2 == 0);
+        io.poll();
+        io.restart();
+    }
+    ASSERT_TRUE(scope->cancel());
+    while (future.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+    auto driven = future.get();
+    ASSERT_TRUE(driven.local_terminal);
+    EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_LE(driven.replans, 3u)
+        << "an exact attached wait depends on its generation, not unrelated "
+           "pool revisions";
+    EXPECT_GE(driven.pool_wakes_reused, 90u);
+    EXPECT_GE(driven.discovery_wakes_reused, 45u);
+    EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
+}
+
+TEST(PeerSetHistoryDriver, RelevantPoolChurnCoalescesAtProgressTick)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .retry_backoff = 2s});
+    auto const now = std::chrono::steady_clock::now();
+    PeerSetTestAccess::defer_configured_history_candidates(io, peers, now);
+    auto scope = catl::core::RequestScope::create(now + 5s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
+    auto acquisition = run(
+        io,
+        peers->co_open_history_acquisition(
+            demand,
+            HistoryAcquisitionOptions{
+                .fetch = HistoryFetchId{53}, .fetch_epoch = 1}));
+    auto initial = plan_history_interest(
+        run(io, peers->co_history_search_snapshot(acquisition)), now);
+    ASSERT_TRUE(initial.wait_until);
+    ASSERT_EQ(
+        initial.wait_until->kind,
+        HistoryWakeSourceKind::candidate_retry_expiry);
+
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{53}, 1);
+    auto interest = fetch->register_interest(
+        peers, scope, demand, acquisition);
+    auto future = boost::asio::co_spawn(
+        io,
+        peers->co_drive_history_interest(
+            fetch, acquisition, interest, PeerUseKind::ledger_header),
+        boost::asio::use_future);
+    io.run_for(20ms);
+    io.restart();
+
+    for (std::size_t i = 0; i < 100; ++i)
+    {
+        PeerSetTestAccess::post_history_pool_wake(peers, false);
+        io.poll();
+        io.restart();
+    }
+    boost::asio::steady_timer cancel(io, 1100ms);
+    cancel.async_wait([scope](boost::system::error_code ec) {
+        if (!ec)
+            scope->cancel();
+    });
+    while (future.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+    auto driven = future.get();
+    ASSERT_TRUE(driven.local_terminal);
+    EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_LE(driven.replans, 3u)
+        << "one hundred relevant revisions must collapse into one bounded "
+           "planner evaluation";
+    EXPECT_GE(driven.pool_wakes_reused, 90u);
+    EXPECT_GE(driven.local_wakes_coalesced, 90u);
+    EXPECT_LE(driven.replans_after_local_change, 2u);
+    EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
+}
+
 TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
 {
     boost::asio::io_context io;

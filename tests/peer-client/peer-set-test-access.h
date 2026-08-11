@@ -1084,6 +1084,36 @@ public:
     }
 
     static void
+    post_history_pool_wake(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        bool discovery)
+    {
+        boost::asio::post(peers->strand_, [peers, discovery]() {
+            peers->notify_waiters(
+                discovery
+                    ? catl::peer_client::PeerSet::HistoryPoolChange::discovery
+                    : catl::peer_client::PeerSet::HistoryPoolChange::
+                          availability);
+        });
+    }
+
+    static void
+    defer_configured_history_candidates(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::chrono::steady_clock::time_point failed_at)
+    {
+        run_on_strand(io, peers, [failed_at](auto& set) {
+            for (auto const& endpoint : set.configured_endpoints_)
+            {
+                auto& gate = set.retry_gates_[endpoint];
+                gate.failed_at = failed_at;
+                gate.failure_count = 1;
+            }
+        });
+    }
+
+    static void
     note_connect_success(
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,

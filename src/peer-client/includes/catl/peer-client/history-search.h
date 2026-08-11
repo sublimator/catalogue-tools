@@ -166,6 +166,16 @@ struct HistorySearchCandidate
     operator==(HistorySearchCandidate const&) const = default;
 };
 
+/** Advisory owner revisions used only to decide when planning must rerun. */
+struct HistoryPoolObservation
+{
+    std::uint64_t availability_revision = 0;
+    std::uint64_t discovery_revision = 0;
+
+    bool
+    operator==(HistoryPoolObservation const&) const = default;
+};
+
 enum class HistorySearchTerminalReason : std::uint8_t {
     cancelled,
     deadline_elapsed,
@@ -182,6 +192,11 @@ struct HistorySearchSnapshot
     // observed_home=history_search_snapshot
     // label=exact_authority_free_history_pool_and_participant_revision
     HistoryControlRevision control;
+    //@@authority state=prv.S0127 status=provisional scope=field bind=catl::peer_client::HistorySearchSnapshot::observation@84be0831f2a86ff0
+    // owner=unresolved owner_hypothesis=peer_set
+    // observed_home=history_search_snapshot
+    // label=advisory_history_planning_revision_observation
+    HistoryPoolObservation observation;
     std::chrono::steady_clock::time_point absolute_deadline{};
     std::chrono::steady_clock::time_point fallback_at{};
     bool cancelled = false;
