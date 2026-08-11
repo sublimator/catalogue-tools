@@ -120,7 +120,7 @@ verify_parallel_branch(
 }
 
 //@@authority transition=prv.T0131 status=provisional scope=function
-// bind=catl::peer_client::wait_for_signal_or_progress@cd5c94aacf428935
+// bind=catl::peer_client::wait_for_signal_or_progress@234fde3853bb4f89
 // owner=unresolved owner_hypothesis=request_rider
 // commit=rider_arbitration_strand touches=prv.S0002,prv.S0004
 // mutation_class=running_guarded
@@ -225,7 +225,7 @@ wait_for_header_round_observation(
 }
 
 //@@authority transition=prv.T0132 status=provisional scope=function
-// bind=catl::peer_client::wait_for_signal_or_progress_or_cancel@10dce7a12fa3d59c
+// bind=catl::peer_client::wait_for_signal_or_progress_or_cancel@dabe2fd306794c69
 // owner=unresolved owner_hypothesis=request_rider
 // commit=rider_arbitration_strand touches=prv.S0002,prv.S0004
 // mutation_class=running_guarded
@@ -298,7 +298,7 @@ wait_for_signal_or_progress_or_cancel(
 }
 
 //@@authority transition=prv.T0134 status=provisional scope=function
-// bind=catl::peer_client::wait_for_signal_or_cancellation@9abff3c5d4a26683
+// bind=catl::peer_client::wait_for_signal_or_cancellation@72b9635eba71b2d1
 // owner=unresolved owner_hypothesis=request_rider
 // commit=rider_arbitration_strand touches=prv.S0042
 // mutation_class=running_guarded
