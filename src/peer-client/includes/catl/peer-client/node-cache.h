@@ -540,6 +540,7 @@ private:
         retry_covered_peer,
         switch_peer,
         acquired_peer,
+        waiting_for_header_peers,
         give_up,
         searching_covering_peer,
         no_covering_peer,
@@ -553,7 +554,10 @@ private:
         uint16_t depth = kNoDepth;
         uint8_t attempt = 0;
         uint8_t max_attempts = 0;
-        std::array<char, 64> peer{};
+        uint8_t peer_count = 0;
+        uint32_t elapsed_ms = 0;
+        uint32_t remaining_ms = 0;
+        std::array<char, 192> peer{};
     };
 
     struct ProgressCursor
@@ -1254,6 +1258,16 @@ private:
         uint8_t attempt,
         uint8_t max_attempts,
         std::string_view peer = {});
+
+    void
+    publish_header_wait_progress(
+        uint32_t ledger_seq,
+        std::shared_ptr<HeaderFetchState> const& fetch,
+        std::shared_ptr<HeaderRound> const& round,
+        uint8_t round_number,
+        uint8_t max_rounds,
+        std::chrono::steady_clock::time_point round_started,
+        std::chrono::milliseconds round_timeout);
 
     asio::io_context& io_;
     asio::strand<asio::io_context::executor_type> header_state_strand_;

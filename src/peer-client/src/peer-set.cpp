@@ -65,6 +65,45 @@ std::atomic<std::uint64_t> next_peer_set_instance_id{0};
 
 constexpr std::size_t kGenerationDrainMaxAttempts = 3;
 constexpr auto kGenerationDrainRetryDelay = std::chrono::milliseconds(10);
+constexpr auto kHistoryDriveProgressInterval = std::chrono::seconds(1);
+
+char const*
+history_action_name(HistoryAuthorityAction action) noexcept
+{
+    switch (action)
+    {
+        case HistoryAuthorityAction::attach_or_adopt:
+            return "attach/adopt";
+        case HistoryAuthorityAction::create_generation:
+            return "dial";
+        case HistoryAuthorityAction::submit_known_use:
+            return "use known peer";
+        case HistoryAuthorityAction::submit_blind_use:
+            return "use blind peer";
+        case HistoryAuthorityAction::promote:
+            return "promote";
+    }
+    return "unknown";
+}
+
+char const*
+history_wake_name(HistoryWakeSourceKind kind) noexcept
+{
+    switch (kind)
+    {
+        case HistoryWakeSourceKind::attached_generation_deadline:
+            return "attached generation";
+        case HistoryWakeSourceKind::candidate_retry_expiry:
+            return "candidate retry";
+        case HistoryWakeSourceKind::global_token_refill:
+            return "global token refill";
+        case HistoryWakeSourceKind::physical_slot_release:
+            return "physical slot";
+        case HistoryWakeSourceKind::physical_watchdog:
+            return "physical watchdog";
+    }
+    return "unknown";
+}
 
 std::uint64_t
 mint_peer_set_instance_id() noexcept
@@ -7839,6 +7878,8 @@ PeerSet::drive_history_interest_on_strand(
         finish_history_acquisition_on_strand(acquisition, local);
         notify_waiters();
     };
+    auto next_progress_at =
+        std::chrono::steady_clock::now() + kHistoryDriveProgressInterval;
 
     for (;;)
     {
@@ -7878,8 +7919,62 @@ PeerSet::drive_history_interest_on_strand(
         }
 
         auto const decision = fetch->select_sponsor(now);
-        if (decision.sponsor &&
-            same_interest(*decision.sponsor, result.interest))
+        auto const selected_here = decision.sponsor &&
+            same_interest(*decision.sponsor, result.interest);
+        if (now >= next_progress_at)
+        {
+            do
+            {
+                next_progress_at += kHistoryDriveProgressInterval;
+            } while (next_progress_at <= now);
+
+            auto const eligible = std::ranges::count_if(
+                snapshot.candidates,
+                [](HistorySearchCandidate const& candidate) {
+                    return candidate.eligible;
+                });
+            auto const remaining_ms = std::max<std::int64_t>(
+                0,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    acquisition.absolute_deadline() - now)
+                    .count());
+            std::ostringstream status;
+            status << "history source selection ledger "
+                   << acquisition.context().ledger_seq << ": ";
+            if (decision.sponsor && !selected_here)
+            {
+                status << "waiting for shared participant";
+            }
+            else if (proposal.next_action)
+            {
+                status << "proposed="
+                       << history_action_name(proposal.next_action->action);
+                if (!proposal.next_action->target.endpoint.empty())
+                    status << ' ' << proposal.next_action->target.endpoint;
+            }
+            else if (proposal.wait_until)
+            {
+                status << "waiting="
+                       << history_wake_name(proposal.wait_until->kind);
+                if (!proposal.wait_until->endpoint.empty())
+                    status << ' ' << proposal.wait_until->endpoint;
+            }
+            else
+            {
+                status << "replanning";
+            }
+            status << "; replans=" << result.replans
+                   << ", grants=" << result.grants
+                   << ", commits=" << result.commits
+                   << ", eligible=" << eligible << '/'
+                   << snapshot.candidates.size()
+                   << ", physical=" << snapshot.physical.total() << '/'
+                   << snapshot.physical.max_physical()
+                   << ", remaining=" << (remaining_ms + 999) / 1000 << 's';
+            catl::core::emit_status(status.str());
+        }
+
+        if (selected_here)
         {
             auto grant = fetch->mint_grant(*decision.sponsor, now);
             if (!grant)
@@ -7925,6 +8020,7 @@ PeerSet::drive_history_interest_on_strand(
             wait_until = std::min(wait_until, *decision.aggregate_wake);
         if (proposal.wait_until)
             wait_until = std::min(wait_until, proposal.wait_until->at);
+        wait_until = std::min(wait_until, next_progress_at);
         auto const current = std::chrono::steady_clock::now();
         if (wait_until <= current)
             continue;

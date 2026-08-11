@@ -1490,7 +1490,10 @@ function finishProve(json, hash) {
 let activeSSE = null;
 let activeProveToken = 0;
 let activeProveTimeout = null;
-const proveInactivityTimeoutMs = 15000;
+// The backend owns a bounded proof deadline and reports long-running header
+// rounds once per second. This is only a last-resort stream watchdog; it must
+// not pre-empt the backend's typed terminal result.
+const proveInactivityTimeoutMs = 75000;
 
 function cancelActiveProof() {
   activeProveToken++;
@@ -1562,8 +1565,8 @@ async function prove(hash, {history = 'push'} = {}) {
         activeProveTimeout = null;
         settled = true;
         statusEl.className = 'status error';
-        statusEl.textContent = 'connection stalled';
-        showModalError('connection stalled', hash);
+        statusEl.textContent = 'proof stream stopped responding';
+        showModalError('proof stream stopped responding', hash);
         resolve();
       }, proveInactivityTimeoutMs);
     };
@@ -1586,10 +1589,26 @@ async function prove(hash, {history = 'push'} = {}) {
             if (sk) sk.parentElement.insertBefore(logBox, sk);
             else content.appendChild(logBox);
           }
-          const line = document.createElement('div');
-          line.style.cssText = 'padding:.05rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+          const liveProgressKind = msg.msg.includes('header seq=') &&
+            msg.msg.includes('unsettled peer request(s)')
+            ? 'header-peer-wait'
+            : msg.msg.startsWith('history source selection ledger ')
+              ? 'history-source-selection'
+              : null;
+          let line = liveProgressKind
+            ? logBox.querySelector(`[data-live-progress="${liveProgressKind}"]`)
+            : null;
+          for (const previousLive of logBox.querySelectorAll('[data-live-progress]')) {
+            if (previousLive !== line)
+              previousLive.removeAttribute('data-live-progress');
+          }
+          if (!line) {
+            line = document.createElement('div');
+            line.style.cssText = 'padding:.05rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+            logBox.appendChild(line);
+          }
+          if (liveProgressKind) line.dataset.liveProgress = liveProgressKind;
           line.textContent = '\u203a ' + msg.msg;
-          logBox.appendChild(line);
           // Cap at 5 lines
           while (logBox.children.length > 5)
             logBox.removeChild(logBox.firstChild);

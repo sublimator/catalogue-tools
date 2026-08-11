@@ -7400,6 +7400,77 @@ TEST(PeerSessionInterface, HeaderStrandPreservesRequestStatusContext)
         }));
 }
 
+TEST(PeerSessionInterface, ManagedHeaderReportsUnsettledRoundProgress)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 2500ms,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "progress-header:1", true, 6000, 5900, 6100);
+    session->set_get_ledger_header_handler(
+        [&io](uint32_t, Callback<LedgerHeaderResult> callback) {
+            auto timer = std::make_shared<asio::steady_timer>(io, 1250ms);
+            timer->async_wait([timer, callback = std::move(callback)](
+                                  boost::system::error_code ec) mutable {
+                if (!ec)
+                    callback(Error::Success, LedgerHeaderResult{});
+            });
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+
+    auto request = std::make_shared<catl::core::RequestContext>(
+        "header-progress", "transaction", std::chrono::steady_clock::now());
+    auto request_executor =
+        catl::core::ContextExecutor(asio::make_strand(io), request);
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + 4s);
+    bool completed = false;
+    asio::co_spawn(
+        request_executor,
+        [&, cache, peers, scope]() -> asio::awaitable<void> {
+            (void)co_await cache->get_header(
+                6000, peers, PeerSessionPtr{}, scope);
+            completed = true;
+            scope->cancel();
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(completed);
+    auto const events = request->drain();
+    auto const progress_events =
+        std::ranges::count_if(events, [](std::string const& event) {
+            return event.find("unsettled peer request(s)") != std::string::npos;
+        });
+    EXPECT_EQ(progress_events, 1u);
+    EXPECT_TRUE(std::ranges::any_of(
+        events,
+        [](std::string const& event) {
+            return event.find(
+                       "header seq=6000 — waiting on 1 unsettled peer "
+                       "request(s), round 1/3, elapsed=1s") !=
+                std::string::npos &&
+                event.find("progress-header:1") != std::string::npos;
+        }))
+        << "the shared header owner must publish its exact unsettled round "
+           "through the request context";
+}
+
 TEST(PeerSessionInterface, ArchivalAdmissionRotatesOnlyArchivalPool)
 {
     asio::io_context io;

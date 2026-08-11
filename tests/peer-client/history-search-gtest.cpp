@@ -2,6 +2,9 @@
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/peer-client/peer-set.h>
 
+#include <catl/core/context-executor.h>
+#include <catl/core/request-context.h>
+
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
@@ -2024,6 +2027,76 @@ TEST(PeerSetHistoryDriver, RequestCancellationWakesAttachedWaitImmediately)
         PeerSetTestAccess::history_acquisition_attachment_count(
             io, peers, acquisition.context().acquisition),
         0u);
+    EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
+}
+
+TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto const endpoint = std::string("driver-progress.example.com:51235");
+    PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 5s);
+    auto demand =
+        run(io,
+            peers->co_get_or_create_ledger_demand(
+                scope, LedgerDemandOptions{.ledger_seq = 50}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{47}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{47}, 1);
+    auto interest = fetch->register_interest(peers, scope, demand, acquisition);
+    auto request = std::make_shared<catl::core::RequestContext>(
+        "history-driver-progress",
+        "transaction",
+        std::chrono::steady_clock::now());
+    auto request_executor =
+        catl::core::ContextExecutor(boost::asio::make_strand(io), request);
+    auto future = boost::asio::co_spawn(
+        request_executor,
+        peers->co_drive_history_interest(
+            fetch, acquisition, interest, PeerUseKind::ledger_header),
+        boost::asio::use_future);
+
+    boost::asio::steady_timer cancel(io, 1250ms);
+    cancel.async_wait([scope](boost::system::error_code ec) {
+        if (!ec)
+            scope->cancel();
+    });
+    while (future.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+    auto driven = future.get();
+    ASSERT_TRUE(driven.local_terminal);
+    EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+
+    auto const events = request->drain();
+    auto const progress_events =
+        std::ranges::count_if(events, [](std::string const& event) {
+            return event.starts_with("history source selection ledger 50:");
+        });
+    EXPECT_EQ(progress_events, 1u);
+    EXPECT_TRUE(std::ranges::any_of(
+        events,
+        [&](std::string const& event) {
+            return event.find(endpoint) != std::string::npos &&
+                event.find("replans=") != std::string::npos &&
+                event.find("grants=") != std::string::npos &&
+                event.find("commits=") != std::string::npos &&
+                event.find("eligible=") != std::string::npos &&
+                event.find("physical=") != std::string::npos &&
+                event.find("remaining=") != std::string::npos;
+        }))
+        << "the history owner must expose its canonical selection state "
+           "through the retained request context; events were: "
+        << testing::PrintToString(events);
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
 }
 

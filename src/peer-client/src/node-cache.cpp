@@ -34,6 +34,24 @@ LogPartition NodeCache::log_("node-cache", LogLevel::INHERIT);
 namespace {
 
 constexpr auto kCancelPollInterval = std::chrono::milliseconds(25);
+constexpr auto kHeaderProgressInterval = std::chrono::seconds(1);
+
+enum class HeaderWaitWake : std::uint8_t {
+    round_terminal,
+    shared_progress,
+    report_interval,
+};
+
+enum class ProgressWaitWake : std::uint8_t {
+    shared_terminal,
+    shared_progress,
+    rider_cancelled,
+};
+
+enum class SignalWaitWake : std::uint8_t {
+    shared_terminal,
+    rider_cancelled,
+};
 
 bool
 advertises_ledger(PeerSession const* peer, uint32_t ledger_seq)
@@ -107,11 +125,16 @@ verify_parallel_branch(
 // commit=rider_arbitration_strand touches=prv.S0002,prv.S0004
 // mutation_class=running_guarded
 // label=arbitrate_terminal_and_progress_signal_without_lost_winner
-asio::awaitable<std::pair<int, boost::system::error_code>>
+asio::awaitable<std::pair<ProgressWaitWake, boost::system::error_code>>
 wait_for_signal_or_progress(
     std::shared_ptr<SerializedTimerSignal> done_signal,
     std::shared_ptr<SerializedTimerSignal> progress_signal)
 {
+    enum Branch : std::size_t {
+        done_branch,
+        progress_branch,
+    };
+
     auto arbitration = asio::make_strand(done_signal->base_executor());
     auto done = asio::bind_executor(
         arbitration,
@@ -135,11 +158,70 @@ wait_for_signal_or_progress(
             .async_wait(
                 asio::experimental::wait_for_one(), asio::use_awaitable);
 
-    verify_parallel_branch(ex0, order[0] != 0);
-    verify_parallel_branch(ex1, order[0] != 1);
-    if (order[0] == 0)
-        co_return std::pair{0, ec0};
-    co_return std::pair{1, ec1};
+    verify_parallel_branch(ex0, order[0] != done_branch);
+    verify_parallel_branch(ex1, order[0] != progress_branch);
+    if (order[0] == done_branch)
+        co_return std::pair{ProgressWaitWake::shared_terminal, ec0};
+    co_return std::pair{ProgressWaitWake::shared_progress, ec1};
+}
+
+asio::awaitable<HeaderWaitWake>
+wait_for_header_round_observation(
+    std::shared_ptr<SerializedTimerSignal> done_signal,
+    std::shared_ptr<SerializedTimerSignal> progress_signal)
+{
+    enum Branch : std::size_t {
+        done_branch,
+        progress_branch,
+        interval_branch,
+    };
+
+    auto arbitration = asio::make_strand(done_signal->base_executor());
+    auto done = asio::bind_executor(
+        arbitration,
+        asio::co_spawn(
+            arbitration,
+            [done_signal]() -> asio::awaitable<boost::system::error_code> {
+                co_return co_await done_signal->wait();
+            },
+            asio::deferred));
+    auto progress = asio::bind_executor(
+        arbitration,
+        asio::co_spawn(
+            arbitration,
+            [progress_signal]() -> asio::awaitable<boost::system::error_code> {
+                co_return co_await progress_signal->wait();
+            },
+            asio::deferred));
+    auto report_interval = asio::bind_executor(
+        arbitration,
+        asio::co_spawn(
+            arbitration,
+            [arbitration]() -> asio::awaitable<boost::system::error_code> {
+                asio::steady_timer timer(arbitration, kHeaderProgressInterval);
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+                co_return ec;
+            },
+            asio::deferred));
+    auto [order, ex0, ec0, ex1, ec1, ex2, ec2] =
+        co_await asio::experimental::make_parallel_group(
+            std::move(done), std::move(progress), std::move(report_interval))
+            .async_wait(
+                asio::experimental::wait_for_one(), asio::use_awaitable);
+    (void)ec0;
+    (void)ec1;
+    (void)ec2;
+
+    verify_parallel_branch(ex0, order[0] != done_branch);
+    verify_parallel_branch(ex1, order[0] != progress_branch);
+    verify_parallel_branch(ex2, order[0] != interval_branch);
+    if (order[0] == done_branch)
+        co_return HeaderWaitWake::round_terminal;
+    if (order[0] == progress_branch)
+        co_return HeaderWaitWake::shared_progress;
+    co_return HeaderWaitWake::report_interval;
 }
 
 //@@authority transition=prv.T0132 status=provisional scope=function
@@ -148,7 +230,7 @@ wait_for_signal_or_progress(
 // commit=rider_arbitration_strand touches=prv.S0002,prv.S0004
 // mutation_class=running_guarded
 // label=arbitrate_terminal_progress_and_rider_cancel
-asio::awaitable<std::pair<int, boost::system::error_code>>
+asio::awaitable<std::pair<ProgressWaitWake, boost::system::error_code>>
 wait_for_signal_or_progress_or_cancel(
     std::shared_ptr<SerializedTimerSignal> done_signal,
     std::shared_ptr<SerializedTimerSignal> progress_signal,
@@ -157,6 +239,12 @@ wait_for_signal_or_progress_or_cancel(
     if (!cancel)
         co_return co_await wait_for_signal_or_progress(
             std::move(done_signal), std::move(progress_signal));
+
+    enum Branch : std::size_t {
+        done_branch,
+        progress_branch,
+        cancel_poll_branch,
+    };
 
     auto arbitration = asio::make_strand(done_signal->base_executor());
     while (!cancel->load(std::memory_order_relaxed))
@@ -196,16 +284,17 @@ wait_for_signal_or_progress_or_cancel(
                 .async_wait(
                     asio::experimental::wait_for_one(), asio::use_awaitable);
 
-        verify_parallel_branch(ex0, order[0] != 0);
-        verify_parallel_branch(ex1, order[0] != 1);
-        verify_parallel_branch(ex2, order[0] != 2);
-        if (order[0] == 0)
-            co_return std::pair{0, ec0};
-        if (order[0] == 1)
-            co_return std::pair{1, ec1};
+        verify_parallel_branch(ex0, order[0] != done_branch);
+        verify_parallel_branch(ex1, order[0] != progress_branch);
+        verify_parallel_branch(ex2, order[0] != cancel_poll_branch);
+        if (order[0] == done_branch)
+            co_return std::pair{ProgressWaitWake::shared_terminal, ec0};
+        if (order[0] == progress_branch)
+            co_return std::pair{ProgressWaitWake::shared_progress, ec1};
     }
 
-    co_return std::pair{2, boost::system::error_code{}};
+    co_return std::pair{
+        ProgressWaitWake::rider_cancelled, boost::system::error_code{}};
 }
 
 //@@authority transition=prv.T0134 status=provisional scope=function
@@ -214,15 +303,21 @@ wait_for_signal_or_progress_or_cancel(
 // commit=rider_arbitration_strand touches=prv.S0042
 // mutation_class=running_guarded
 // label=join_shared_node_stop_or_observe_rider_cancellation
-asio::awaitable<std::pair<int, boost::system::error_code>>
+asio::awaitable<std::pair<SignalWaitWake, boost::system::error_code>>
 wait_for_signal_or_cancellation(std::shared_ptr<SerializedTimerSignal> signal)
 {
+    enum Branch : std::size_t {
+        done_branch,
+        cancel_poll_branch,
+    };
+
     auto arbitration = asio::make_strand(signal->base_executor());
     for (;;)
     {
         auto const cancel_state = co_await asio::this_coro::cancellation_state;
         if (cancel_state.cancelled() != asio::cancellation_type::none)
-            co_return std::pair{1, boost::system::error_code{}};
+            co_return std::pair{
+                SignalWaitWake::rider_cancelled, boost::system::error_code{}};
 
         auto done = asio::bind_executor(
             arbitration,
@@ -250,10 +345,11 @@ wait_for_signal_or_cancellation(std::shared_ptr<SerializedTimerSignal> signal)
                 .async_wait(
                     asio::experimental::wait_for_one(), asio::use_awaitable);
 
-        verify_parallel_branch(ex0, order[0] != 0);
-        verify_parallel_branch(ex1, order[0] != 1);
-        if (order[0] == 0)
-            co_return std::pair{0, ec0};
+        (void)ec1;
+        verify_parallel_branch(ex0, order[0] != done_branch);
+        verify_parallel_branch(ex1, order[0] != cancel_poll_branch);
+        if (order[0] == done_branch)
+            co_return std::pair{SignalWaitWake::shared_terminal, ec0};
     }
 }
 
@@ -493,6 +589,20 @@ NodeCache::format_progress(ProgressEvent const& event)
                 ("header seq=" + std::to_string(event.ledger_seq) +
                  " — acquired peer " + std::string(peer));
 
+        case ProgressKind::waiting_for_header_peers: {
+            auto const elapsed_seconds = event.elapsed_ms / 1000;
+            auto const remaining_seconds = (event.remaining_ms + 999) / 1000;
+            return prefix +
+                ("header seq=" + std::to_string(event.ledger_seq) +
+                 " — waiting on " + std::to_string(event.peer_count) +
+                 " unsettled peer request(s), round " +
+                 std::to_string(event.attempt) + "/" +
+                 std::to_string(event.max_attempts) +
+                 ", elapsed=" + std::to_string(elapsed_seconds) +
+                 "s, remaining=" + std::to_string(remaining_seconds) +
+                 "s: " + std::string(peer));
+        }
+
         case ProgressKind::give_up:
             if (event.depth != kNoDepth)
             {
@@ -692,6 +802,72 @@ NodeCache::publish_header_progress(
                 attempt,
                 max_attempts,
                 peer);
+        }
+    }
+
+    if (wake)
+    {
+        waiter_wakeups_++;
+        wake->complete();
+    }
+}
+
+void
+NodeCache::publish_header_wait_progress(
+    uint32_t ledger_seq,
+    std::shared_ptr<HeaderFetchState> const& fetch,
+    std::shared_ptr<HeaderRound> const& round,
+    uint8_t round_number,
+    uint8_t max_rounds,
+    std::chrono::steady_clock::time_point round_started,
+    std::chrono::milliseconds round_timeout)
+{
+    std::shared_ptr<SerializedTimerSignal> wake;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = header_cache_.find(ledger_seq);
+        if (it != header_cache_.end() && !it->second.present &&
+            it->second.fetch == fetch && fetch->active_round == round &&
+            fetch->phase == HeaderFetchState::Phase::running &&
+            round->outstanding.load(std::memory_order_acquire) > 0)
+        {
+            std::string unsettled_peers;
+            std::uint8_t unsettled_count = 0;
+            for (auto const& endpoint : fetch->round_peers)
+            {
+                if (round->settled_endpoints.contains(endpoint))
+                    continue;
+                if (!unsettled_peers.empty())
+                    unsettled_peers += ", ";
+                unsettled_peers += endpoint;
+                ++unsettled_count;
+            }
+
+            auto const elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - round_started);
+            auto const remaining = std::max(
+                std::chrono::milliseconds::zero(), round_timeout - elapsed);
+            auto& entry = it->second;
+            ProgressEvent event;
+            event.kind = ProgressKind::waiting_for_header_peers;
+            event.ledger_seq = ledger_seq;
+            event.attempt = round_number;
+            event.max_attempts = max_rounds;
+            event.peer_count = unsettled_count;
+            auto const max_millis = std::numeric_limits<std::uint32_t>::max();
+            event.elapsed_ms = static_cast<std::uint32_t>(
+                std::clamp<int64_t>(elapsed.count(), 0, max_millis));
+            event.remaining_ms = static_cast<std::uint32_t>(
+                std::clamp<int64_t>(remaining.count(), 0, max_millis));
+            auto const peer_len =
+                std::min(unsettled_peers.size(), event.peer.size() - 1);
+            std::memcpy(event.peer.data(), unsettled_peers.data(), peer_len);
+            event.peer[peer_len] = '\0';
+
+            wake = entry.progress.signal;
+            entry.progress.journal.publish(event);
+            entry.progress.signal = make_progress_signal();
         }
     }
 
@@ -2117,7 +2293,7 @@ NodeCache::ensure_present(
             for (auto const& event : progress_events)
                 catl::core::emit_status(format_progress(event));
 
-            if (wake_kind == 2)
+            if (wake_kind == ProgressWaitWake::rider_cancelled)
             {
                 PLOGD(
                     log_,
@@ -2127,7 +2303,7 @@ NodeCache::ensure_present(
                 break;
             }
 
-            if (wake_kind == 1)
+            if (wake_kind == ProgressWaitWake::shared_progress)
             {
                 if (!wait.done_signal)
                     break;
@@ -4670,12 +4846,14 @@ NodeCache::wait_for_header_fetch(
             throw boost::system::system_error(asio::error::operation_aborted);
 
         for (auto const& event : progress_events)
+        {
             catl::core::emit_status(format_progress(event));
+        }
 
         // A progress pulse only refreshes the journal cursor. Cancellation of
         // this observer was handled above without touching HeaderFetchState;
         // shared terminality remains exclusively operation-owned.
-        if (wake_kind == 1)
+        if (wake_kind == ProgressWaitWake::shared_progress)
             continue;
     }
 }
@@ -4904,6 +5082,7 @@ NodeCache::drive_header_fetch(
                                    : "header retry: seq=") +
                 std::to_string(ledger_seq) + " asking " + std::to_string(sent) +
                 " peer(s): " + peer_list);
+            auto const round_started = std::chrono::steady_clock::now();
 
             WaitRegistration wait;
             {
@@ -4920,9 +5099,21 @@ NodeCache::drive_header_fetch(
 
             for (;;)
             {
-                auto [wake_kind, ec] = co_await wait_for_signal_or_progress(
+                auto const wake = co_await wait_for_header_round_observation(
                     wait.done_signal, wait.progress_signal);
-                (void)ec;
+
+                if (wake == HeaderWaitWake::report_interval)
+                {
+                    publish_header_wait_progress(
+                        ledger_seq,
+                        fetch,
+                        round,
+                        static_cast<std::uint8_t>(round_number + 1),
+                        kMaxRounds,
+                        round_started,
+                        header_timeout);
+                    continue;
+                }
 
                 std::vector<ProgressEvent> progress_events;
                 {
@@ -4942,9 +5133,12 @@ NodeCache::drive_header_fetch(
                 }
 
                 for (auto const& event : progress_events)
-                    catl::core::emit_status(format_progress(event));
+                {
+                    if (event.kind != ProgressKind::waiting_for_header_peers)
+                        catl::core::emit_status(format_progress(event));
+                }
 
-                if (wake_kind == 1)
+                if (wake == HeaderWaitWake::shared_progress)
                     continue;
                 break;
             }
@@ -5199,6 +5393,7 @@ NodeCache::drive_managed_header_fetch(
                                    : "header retry: seq=") +
                 std::to_string(ledger_seq) + " asking " +
                 std::to_string(sent) + " peer(s): " + peer_list);
+            auto const round_started = std::chrono::steady_clock::now();
 
             WaitRegistration wait;
             {
@@ -5215,9 +5410,20 @@ NodeCache::drive_managed_header_fetch(
 
             for (;;)
             {
-                auto [wake_kind, ec] = co_await wait_for_signal_or_progress(
+                auto const wake = co_await wait_for_header_round_observation(
                     wait.done_signal, wait.progress_signal);
-                (void)ec;
+                if (wake == HeaderWaitWake::report_interval)
+                {
+                    publish_header_wait_progress(
+                        ledger_seq,
+                        fetch,
+                        round,
+                        static_cast<std::uint8_t>(round_number + 1),
+                        kMaxRounds,
+                        round_started,
+                        header_timeout);
+                    continue;
+                }
                 std::vector<ProgressEvent> events;
                 {
                     std::lock_guard lock(mutex_);
@@ -5235,8 +5441,11 @@ NodeCache::drive_managed_header_fetch(
                     wait.done_signal = round->signal;
                 }
                 for (auto const& event : events)
-                    catl::core::emit_status(format_progress(event));
-                if (wake_kind != 1)
+                {
+                    if (event.kind != ProgressKind::waiting_for_header_peers)
+                        catl::core::emit_status(format_progress(event));
+                }
+                if (wake != HeaderWaitWake::shared_progress)
                     break;
             }
 
@@ -5490,7 +5699,7 @@ NodeCache::co_stop_nodes()
             co_await wait_for_signal_or_cancellation(
                 stop->completion_signal); //@@authority-target ids=prv.T0133
         (void)wake_error;
-        if (wake_kind == 1)
+        if (wake_kind == SignalWaitWake::rider_cancelled)
             throw boost::system::system_error(asio::error::operation_aborted);
 
         auto const cancel_state = co_await asio::this_coro::cancellation_state;
