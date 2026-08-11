@@ -783,6 +783,47 @@ TEST_F(Fixture, DuplicateAcquisitionAndCapacityLimitsFailClosed)
     EXPECT_EQ(limited->grant_state(only_grant), HistoryGrantState::active);
 }
 
+TEST_F(Fixture, RetiredGrantTombstonesAreReclaimedUnderCapacityPressure)
+{
+    auto participant_row = participant(now + 10s, viable(now));
+    auto limited = SharedHistoryFetch::create(
+        HistoryFetchId{7},
+        3,
+        SharedHistoryFetch::Limits{
+            .max_interests = 1, .max_grants_per_interest = 2});
+    ASSERT_TRUE(limited);
+    auto interest = limited->register_interest(
+        peers,
+        participant_row.scope,
+        participant_row.demand,
+        participant_row.acquisition,
+        viable(now));
+    ASSERT_TRUE(interest);
+
+    HistoryAuthorityGrantRef first;
+    for (auto attempt = 0; attempt < 5; ++attempt)
+    {
+        auto decision = limited->select_sponsor(now);
+        ASSERT_TRUE(decision.sponsor);
+        auto grant = limited->mint_grant(*decision.sponsor, now);
+        ASSERT_TRUE(grant) << "attempt " << attempt;
+        if (attempt == 0)
+            first = grant;
+        ASSERT_TRUE(limited->try_spend(
+            grant, grant.action(), grant.target(), now + 1ms));
+        ASSERT_TRUE(
+            limited->acknowledge_work(grant, HistoryWorkReceipt::closed));
+        auto revised = limited->revise_interest(interest, viable(now));
+        ASSERT_TRUE(revised);
+        interest = *revised;
+    }
+
+    EXPECT_FALSE(limited->grant_state(first))
+        << "the oldest fully receipted tombstone should be reclaimed before "
+           "the hard registry bound becomes a permanent refusal";
+    EXPECT_EQ(limited->snapshot().spent_unacknowledged, 0u);
+}
+
 TEST_F(Fixture, AdoptionRequiresAnotherSpentExactAttachGrant)
 {
     auto source = participant(now + 10s, viable(now, "shared"));

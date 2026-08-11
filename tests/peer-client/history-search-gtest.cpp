@@ -2103,6 +2103,73 @@ TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
 }
 
+TEST(PeerSetHistoryDriver, FullGrantRegistryWaitsForReceiptWithoutHotLooping)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto session =
+        std::make_shared<NodeBatchTestSession>("driver-capacity.example.com:1");
+    session->attach_strand(io);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 5s);
+    auto demand =
+        run(io,
+            peers->co_get_or_create_ledger_demand(
+                scope, LedgerDemandOptions{.ledger_seq = 50}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{48}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(
+        HistoryFetchId{48},
+        1,
+        SharedHistoryFetch::Limits{
+            .max_interests = 1, .max_grants_per_interest = 1});
+    ASSERT_TRUE(fetch);
+    auto plan = plan_history_interest(
+        run(io, peers->co_history_search_snapshot(acquisition)), now);
+    auto interest =
+        fetch->register_interest(peers, scope, demand, acquisition, plan);
+    auto decision = fetch->select_sponsor(now);
+    ASSERT_TRUE(decision.sponsor);
+    auto occupying_grant = fetch->mint_grant(*decision.sponsor, now);
+    ASSERT_TRUE(occupying_grant);
+    ASSERT_TRUE(fetch->try_spend(
+        occupying_grant,
+        occupying_grant.action(),
+        occupying_grant.target(),
+        now));
+
+    auto future = boost::asio::co_spawn(
+        io,
+        peers->co_drive_history_interest(
+            fetch, acquisition, interest, PeerUseKind::ledger_header),
+        boost::asio::use_future);
+    boost::asio::steady_timer cancel(io, 50ms);
+    cancel.async_wait([scope](boost::system::error_code ec) {
+        if (!ec)
+            scope->cancel();
+    });
+    while (future.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+    auto driven = future.get();
+    ASSERT_TRUE(driven.local_terminal);
+    EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_LT(driven.replans, 10u)
+        << "a bounded grant refusal must suspend for a receipt or terminal, "
+           "not retry immediately";
+    EXPECT_TRUE(
+        fetch->acknowledge_work(occupying_grant, HistoryWorkReceipt::closed));
+    EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
+}
+
 TEST(PeerSetHistoryDriver, RetryExclusionReplansAwayFromExactEndpoint)
 {
     boost::asio::io_context io;

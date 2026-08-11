@@ -7980,7 +7980,27 @@ PeerSet::drive_history_interest_on_strand(
         {
             auto grant = fetch->mint_grant(*decision.sponsor, now);
             if (!grant)
+            {
+                // A selected participant can still be temporarily unable to
+                // mint because its bounded grant registry is full of
+                // unacknowledged physical work. Receipt publication cancels
+                // this armed signal; the progress wake keeps the refusal
+                // observable and the absolute deadline keeps it bounded.
+                auto const wait_until =
+                    std::min(acquisition.absolute_deadline(), next_progress_at);
+                auto const current = std::chrono::steady_clock::now();
+                if (wait_until > current)
+                {
+                    auto const wait_for = std::max(
+                        std::chrono::milliseconds{1},
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            wait_until - current));
+                    (void)co_await wait_for_signal_or_timeout(
+                        strand_, std::move(wait_signal), wait_for);
+                    ASSERT_ON_STRAND();
+                }
                 continue;
+            }
             ++result.grants;
             auto execution = execute_history_grant_on_strand(fetch, grant, kind);
             result.last_plan = execution.plan;

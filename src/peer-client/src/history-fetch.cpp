@@ -495,10 +495,32 @@ SharedHistoryFetch::mint_grant(
         winner->demand != selected.demand_ ||
         winner->acquisition != selected.acquisition_ ||
         winner->request_scope_id != selected.request_scope_ ||
-        winner->grants.size() >= limits_.max_grants_per_interest ||
         !winner->plan.next_action)
     {
         return {};
+    }
+
+    {
+        std::lock_guard participant_lock(winner->mutex);
+        // Grant ids are never reused, so a fully retired record is only a
+        // diagnostic tombstone. Reclaim tombstones lazily under pressure;
+        // active grants and spent work without its exact receipt remain
+        // authority-bearing and continue to consume the hard bound.
+        for (auto grant = winner->grants.begin();
+             winner->grants.size() >= limits_.max_grants_per_interest &&
+             grant != winner->grants.end();)
+        {
+            auto const retired =
+                grant->second.state == HistoryGrantState::revoked ||
+                (grant->second.state == HistoryGrantState::spent &&
+                 grant->second.work_receipt.has_value());
+            if (retired)
+                grant = winner->grants.erase(grant);
+            else
+                ++grant;
+        }
+        if (winner->grants.size() >= limits_.max_grants_per_interest)
+            return {};
     }
 
     HistoryGrantId const id{next_grant_id_};
