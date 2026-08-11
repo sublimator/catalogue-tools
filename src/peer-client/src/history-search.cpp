@@ -492,12 +492,14 @@ plan_history_interest(
 
     if (snapshot.candidate_supply_open)
     {
+        //@@authority-machine-exit id=xprv.history.no_action.wait_supply
         return HistoryParticipantPlan{
             .wait_until = HistoryPlannedWake{
                 .kind = HistoryWakeSourceKind::candidate_supply_change,
                 .at = snapshot.absolute_deadline}};
     }
 
+    //@@authority-machine-exit id=xprv.history.no_action.exhausted
     return terminal_interest(HistoryAcquisitionTerminal::exhausted);
 }
 
