@@ -466,6 +466,25 @@ TEST_F(Fixture, RevisionRevokesOldGrantAndStaleRefCannotTouchSuccessor)
         successor->participant_revision());
 }
 
+TEST_F(Fixture, EquivalentRunnableRevisionIsIdempotent)
+{
+    auto participant_row = participant(now + 10s, viable(now, "same"));
+    auto decision = fetch->select_sponsor(now);
+    ASSERT_TRUE(decision.sponsor);
+    auto grant = fetch->mint_grant(*decision.sponsor, now);
+    ASSERT_TRUE(grant);
+
+    auto equivalent = fetch->revise_interest(
+        participant_row.interest, viable(now + 1ms, "same"), now + 1ms);
+    ASSERT_TRUE(equivalent);
+    EXPECT_EQ(
+        equivalent->participant_revision(),
+        participant_row.interest.participant_revision());
+    EXPECT_EQ(fetch->grant_state(grant), HistoryGrantState::active)
+        << "an equivalent runnable plan must not revoke authority or publish "
+           "a sibling wake";
+}
+
 TEST_F(Fixture, LastInterestDetachPublishesOneTerminalAndRefusesReopen)
 {
     auto only = participant(now + 10s, viable(now));

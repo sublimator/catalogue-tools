@@ -99,6 +99,28 @@ valid_plan(
          valid_acquisition_terminal(*plan.local_terminal));
 }
 
+bool
+equivalent_plan(
+    HistoryParticipantPlan const& current,
+    HistoryParticipantPlan const& proposed,
+    std::chrono::steady_clock::time_point now) noexcept
+{
+    if (current.wait_until != proposed.wait_until ||
+        current.local_terminal != proposed.local_terminal ||
+        current.next_action.has_value() != proposed.next_action.has_value())
+    {
+        return false;
+    }
+    if (!current.next_action)
+        return true;
+
+    auto const& left = *current.next_action;
+    auto const& right = *proposed.next_action;
+    return left.action == right.action && left.target == right.target &&
+        (left.not_before == right.not_before ||
+         (left.not_before <= now && right.not_before <= now));
+}
+
 }  // namespace
 
 std::shared_ptr<SharedHistoryFetch>
@@ -365,6 +387,13 @@ SharedHistoryFetch::revise_interest(
         {
             return std::nullopt;
         }
+
+        // A fresh local snapshot may prove exactly the same runnable action
+        // after an unrelated pool revision. Preserve the published revision,
+        // its fairness position, and any live grants instead of waking every
+        // sibling participant with a semantically empty replacement.
+        if (equivalent_plan(cell->plan, plan, now))
+            return make_ref(*cell);
 
         for (auto& [_, grant] : cell->grants)
         {

@@ -2079,6 +2079,13 @@ TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
     EXPECT_LT(driven.replans, 10u)
         << "a driver must not consume the wake emitted by its own interest "
            "revision and hot-loop while waiting";
+    EXPECT_LE(driven.replans, 3u)
+        << "progress must reuse the current local plan; cancellation may "
+           "publish one final local cleanup revision";
+    EXPECT_EQ(driven.replans_after_commit, 1u);
+    EXPECT_LE(driven.replans_after_local_change, 1u);
+    EXPECT_EQ(driven.replans_after_scheduled_wake, 0u);
+    EXPECT_GE(driven.progress_wakes_reused, 1u);
 
     auto const events = request->drain();
     auto const progress_events =
@@ -2091,10 +2098,13 @@ TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
         [&](std::string const& event) {
             return event.find(endpoint) != std::string::npos &&
                 event.find("replans=") != std::string::npos &&
-                event.find("grants=") != std::string::npos &&
-                event.find("commits=") != std::string::npos &&
-                event.find("eligible=") != std::string::npos &&
-                event.find("physical=") != std::string::npos &&
+                event.find("replans=2 [action=1, local=0, timer=0]") !=
+                std::string::npos &&
+                event.find("grants/commits=") != std::string::npos &&
+                event.find("arbitrations=") != std::string::npos &&
+                event.find("reused=shared:") != std::string::npos &&
+                event.find("eligible_candidates=") != std::string::npos &&
+                event.find("physical_slots=") != std::string::npos &&
                 event.find("remaining=") != std::string::npos;
         }))
         << "the history owner must expose its canonical selection state "
@@ -2165,6 +2175,10 @@ TEST(PeerSetHistoryDriver, FullGrantRegistryWaitsForReceiptWithoutHotLooping)
     EXPECT_LT(driven.replans, 10u)
         << "a bounded grant refusal must suspend for a receipt or terminal, "
            "not retry immediately";
+    EXPECT_LE(driven.replans, 2u)
+        << "capacity refusal must wait; cancellation may cause one local "
+           "cleanup replan";
+    EXPECT_LE(driven.replans_after_local_change, 1u);
     EXPECT_TRUE(
         fetch->acknowledge_work(occupying_grant, HistoryWorkReceipt::closed));
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
@@ -2289,6 +2303,11 @@ TEST(PeerSetHistoryDriver, SharedSponsorRevisionWakesCompetingPeerSet)
     }
     auto driven = future.get();
     ASSERT_TRUE(driven.acquired());
+    EXPECT_EQ(driven.replans, 1u)
+        << "a sibling publication changes sponsor arbitration, not this "
+           "owner's local candidate plan";
+    EXPECT_GE(driven.arbitrations, 2u);
+    EXPECT_GE(driven.shared_wakes_reused, 1u);
     EXPECT_EQ(driven.peer_use.generation().endpoint(), second_session->endpoint());
     auto receipt = driven.peer_use.receipt();
     driven.peer_use.finish(PeerUseOutcome::success);

@@ -147,6 +147,12 @@ struct HistorySearchDriveResult
     std::optional<SharedHistoryFetchTerminal> shared_terminal;
     std::optional<HistorySearchPlan> last_plan;
     std::size_t replans = 0;
+    std::size_t replans_after_commit = 0;
+    std::size_t replans_after_local_change = 0;
+    std::size_t replans_after_scheduled_wake = 0;
+    std::size_t arbitrations = 0;
+    std::size_t shared_wakes_reused = 0;
+    std::size_t progress_wakes_reused = 0;
     std::size_t grants = 0;
     std::size_t commits = 0;
 

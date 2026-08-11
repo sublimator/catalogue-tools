@@ -7881,6 +7881,31 @@ PeerSet::drive_history_interest_on_strand(
     auto next_progress_at =
         std::chrono::steady_clock::now() + kHistoryDriveProgressInterval;
 
+    enum class ReplanCause : std::uint8_t {
+        initial,
+        committed_action,
+        local_change,
+        scheduled_wake,
+    };
+    auto next_replan_cause = ReplanCause::initial;
+    auto note_replan = [&]() noexcept {
+        ++result.replans;
+        switch (next_replan_cause)
+        {
+            case ReplanCause::initial:
+                break;
+            case ReplanCause::committed_action:
+                ++result.replans_after_commit;
+                break;
+            case ReplanCause::local_change:
+                ++result.replans_after_local_change;
+                break;
+            case ReplanCause::scheduled_wake:
+                ++result.replans_after_scheduled_wake;
+                break;
+        }
+    };
+
     for (;;)
     {
         auto const fetch_state = fetch->snapshot();
@@ -7892,7 +7917,7 @@ PeerSet::drive_history_interest_on_strand(
 
         auto const now = std::chrono::steady_clock::now();
         auto snapshot = history_search_snapshot_on_strand(acquisition, {});
-        ++result.replans;
+        note_replan();
         auto proposal = plan_history_interest(snapshot, now);
         auto revised = fetch->revise_interest(result.interest, proposal, now);
         if (!revised)
@@ -7908,151 +7933,254 @@ PeerSet::drive_history_interest_on_strand(
         }
         result.interest = *revised;
 
-        // Publishing our own revision wakes this participant owner. Arm only
-        // after that self-wake, then observe the shared sponsor decision. A
-        // concurrent shared-owner change after the arm cancels this exact
-        // signal; local pool changes cannot interleave while on the strand.
-        auto wait_signal = attach_wait_signal();
-
         if (proposal.local_terminal)
         {
             finish_local(*proposal.local_terminal);
             co_return result;
         }
 
-        auto const decision = fetch->select_sponsor(now);
-        auto const selected_here = decision.sponsor &&
-            same_interest(*decision.sponsor, result.interest);
-        if (now >= next_progress_at)
+        // Keep this authority-free local plan until one of its actual inputs
+        // changes. Shared-fetch publications only change sponsor arbitration;
+        // the progress timer only changes what observers should see. Neither
+        // requires another 4K-bounded local candidate projection.
+        for (;;)
         {
-            do
+            // Publishing our own revision wakes sibling owners, not this one.
+            // Arm before observing the shared owner so a concurrent shared
+            // change cannot be lost between selection and suspension.
+            auto wait_signal = attach_wait_signal();
+            auto const arbitration_now = std::chrono::steady_clock::now();
+            auto const current_fetch = fetch->snapshot();
+            if (current_fetch.terminal)
             {
-                next_progress_at += kHistoryDriveProgressInterval;
-            } while (next_progress_at <= now);
+                finish_shared(*current_fetch.terminal);
+                co_return result;
+            }
 
-            auto const eligible = std::ranges::count_if(
-                snapshot.candidates,
-                [](HistorySearchCandidate const& candidate) {
-                    return candidate.eligible;
-                });
-            auto const remaining_ms = std::max<std::int64_t>(
-                0,
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    acquisition.absolute_deadline() - now)
-                    .count());
-            std::ostringstream status;
-            status << "history source selection ledger "
-                   << acquisition.context().ledger_seq << ": ";
-            if (decision.sponsor && !selected_here)
+            ++result.arbitrations;
+            auto const decision = fetch->select_sponsor(arbitration_now);
+            auto const selected_here = decision.sponsor &&
+                same_interest(*decision.sponsor, result.interest);
+            if (arbitration_now >= next_progress_at)
             {
-                status << "waiting for shared participant";
-            }
-            else if (proposal.next_action)
-            {
-                status << "proposed="
-                       << history_action_name(proposal.next_action->action);
-                if (!proposal.next_action->target.endpoint.empty())
-                    status << ' ' << proposal.next_action->target.endpoint;
-            }
-            else if (proposal.wait_until)
-            {
-                status << "waiting="
-                       << history_wake_name(proposal.wait_until->kind);
-                if (!proposal.wait_until->endpoint.empty())
-                    status << ' ' << proposal.wait_until->endpoint;
-            }
-            else
-            {
-                status << "replanning";
-            }
-            status << "; replans=" << result.replans
-                   << ", grants=" << result.grants
-                   << ", commits=" << result.commits
-                   << ", eligible=" << eligible << '/'
-                   << snapshot.candidates.size()
-                   << ", physical=" << snapshot.physical.total() << '/'
-                   << snapshot.physical.max_physical()
-                   << ", remaining=" << (remaining_ms + 999) / 1000 << 's';
-            catl::core::emit_status(status.str());
-        }
-
-        if (selected_here)
-        {
-            auto grant = fetch->mint_grant(*decision.sponsor, now);
-            if (!grant)
-            {
-                // A selected participant can still be temporarily unable to
-                // mint because its bounded grant registry is full of
-                // unacknowledged physical work. Receipt publication cancels
-                // this armed signal; the progress wake keeps the refusal
-                // observable and the absolute deadline keeps it bounded.
-                auto const wait_until =
-                    std::min(acquisition.absolute_deadline(), next_progress_at);
-                auto const current = std::chrono::steady_clock::now();
-                if (wait_until > current)
+                do
                 {
-                    auto const wait_for = std::max(
-                        std::chrono::milliseconds{1},
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            wait_until - current));
-                    (void)co_await wait_for_signal_or_timeout(
+                    next_progress_at += kHistoryDriveProgressInterval;
+                } while (next_progress_at <= arbitration_now);
+
+                auto const eligible = std::ranges::count_if(
+                    snapshot.candidates,
+                    [](HistorySearchCandidate const& candidate) {
+                        return candidate.eligible;
+                    });
+                auto const remaining_ms = std::max<std::int64_t>(
+                    0,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        acquisition.absolute_deadline() - arbitration_now)
+                        .count());
+                std::ostringstream status;
+                status << "history source selection ledger "
+                       << acquisition.context().ledger_seq << ": ";
+                if (decision.sponsor && !selected_here)
+                {
+                    status << "waiting for shared participant";
+                }
+                else if (proposal.next_action)
+                {
+                    status << "proposed="
+                           << history_action_name(proposal.next_action->action);
+                    if (!proposal.next_action->target.endpoint.empty())
+                    {
+                        status << ' ' << proposal.next_action->target.endpoint;
+                    }
+                }
+                else if (proposal.wait_until)
+                {
+                    status << "waiting="
+                           << history_wake_name(proposal.wait_until->kind);
+                    if (!proposal.wait_until->endpoint.empty())
+                        status << ' ' << proposal.wait_until->endpoint;
+                }
+                else
+                {
+                    status << "replanning";
+                }
+                status << "; replans=" << result.replans
+                       << " [action=" << result.replans_after_commit
+                       << ", local=" << result.replans_after_local_change
+                       << ", timer=" << result.replans_after_scheduled_wake
+                       << "]"
+                       << ", arbitrations=" << result.arbitrations
+                       << ", grants/commits=" << result.grants << '/'
+                       << result.commits
+                       << ", reused=shared:" << result.shared_wakes_reused
+                       << ",tick:" << result.progress_wakes_reused
+                       << ", eligible_candidates=" << eligible << '/'
+                       << snapshot.candidates.size()
+                       << ", physical_slots=" << snapshot.physical.total()
+                       << '/' << snapshot.physical.max_physical()
+                       << ", remaining=" << (remaining_ms + 999) / 1000 << 's';
+                catl::core::emit_status(status.str());
+            }
+
+            if (selected_here)
+            {
+                auto grant =
+                    fetch->mint_grant(*decision.sponsor, arbitration_now);
+                if (!grant)
+                {
+                    // Capacity can change through a shared work receipt
+                    // without changing the local pool. Re-arbitrate the same
+                    // local plan on that exact signal; the display tick and
+                    // request deadline remain bounded fallbacks.
+                    auto const progress_first =
+                        next_progress_at < acquisition.absolute_deadline();
+                    auto const wait_until = progress_first
+                        ? next_progress_at
+                        : acquisition.absolute_deadline();
+                    auto const current = std::chrono::steady_clock::now();
+                    if (wait_until <= current)
+                    {
+                        if (progress_first)
+                        {
+                            ++result.progress_wakes_reused;
+                            continue;
+                        }
+                        next_replan_cause = ReplanCause::scheduled_wake;
+                        break;
+                    }
+                    auto const wait_for =
+                        std::chrono::ceil<std::chrono::milliseconds>(
+                            wait_until - current);
+                    auto const outcome = co_await wait_for_signal_or_timeout(
                         strand_, std::move(wait_signal), wait_for);
                     ASSERT_ON_STRAND();
+                    if (history_pool_revision_ !=
+                        snapshot.control.pool_revision)
+                    {
+                        next_replan_cause = ReplanCause::local_change;
+                        break;
+                    }
+                    if (outcome == WaitOutcome::timed_out)
+                    {
+                        if (progress_first)
+                        {
+                            ++result.progress_wakes_reused;
+                            continue;
+                        }
+                        next_replan_cause = ReplanCause::scheduled_wake;
+                        break;
+                    }
+                    ++result.shared_wakes_reused;
+                    continue;
                 }
-                continue;
+                ++result.grants;
+                auto execution =
+                    execute_history_grant_on_strand(fetch, grant, kind);
+                result.last_plan = execution.plan;
+                if (execution.committed())
+                    ++result.commits;
+                if (execution.peer_use)
+                {
+                    result.peer_use = std::move(execution.peer_use);
+                    co_return result;
+                }
+                if (execution.committed())
+                {
+                    next_replan_cause = ReplanCause::committed_action;
+                    break;
+                }
+
+                auto const fresh = history_search_snapshot_on_strand(
+                    acquisition, result.interest);
+                if (fresh.control.pool_revision ==
+                    snapshot.control.pool_revision)
+                {
+                    finish_local(HistoryAcquisitionTerminal::exhausted);
+                    co_return result;
+                }
+                next_replan_cause = ReplanCause::local_change;
+                break;
             }
-            ++result.grants;
-            auto execution = execute_history_grant_on_strand(fetch, grant, kind);
-            result.last_plan = execution.plan;
-            if (execution.committed())
+
+            if (decision.viable_participants == 0)
             {
-                ++result.commits;
-            }
-            if (execution.peer_use)
-            {
-                result.peer_use = std::move(execution.peer_use);
+                (void)fetch->terminalize_if_no_viable_action(arbitration_now);
+                auto const terminal = fetch->snapshot().terminal;
+                if (terminal)
+                    finish_shared(*terminal);
+                else
+                    finish_local(HistoryAcquisitionTerminal::exhausted);
                 co_return result;
             }
-            if (execution.committed())
-                continue;
 
-            auto const fresh = history_search_snapshot_on_strand(
-                acquisition, result.interest);
-            if (fresh.control.pool_revision == snapshot.control.pool_revision)
+            enum class WakeTarget : std::uint8_t {
+                request_deadline,
+                local_plan,
+                shared_plan,
+                progress,
+            };
+            auto wake_target = WakeTarget::request_deadline;
+            auto wait_until = acquisition.absolute_deadline();
+            if (decision.aggregate_wake &&
+                *decision.aggregate_wake < wait_until)
             {
-                finish_local(HistoryAcquisitionTerminal::exhausted);
-                co_return result;
+                wait_until = *decision.aggregate_wake;
+                wake_target = WakeTarget::shared_plan;
             }
-            continue;
-        }
+            if (proposal.wait_until && proposal.wait_until->at <= wait_until)
+            {
+                wait_until = proposal.wait_until->at;
+                wake_target = WakeTarget::local_plan;
+            }
+            if (next_progress_at < wait_until)
+            {
+                wait_until = next_progress_at;
+                wake_target = WakeTarget::progress;
+            }
 
-        if (decision.viable_participants == 0)
-        {
-            (void)fetch->terminalize_if_no_viable_action(now);
-            auto const terminal = fetch->snapshot().terminal;
-            if (terminal)
-                finish_shared(*terminal);
-            else
-                finish_local(HistoryAcquisitionTerminal::exhausted);
-            co_return result;
-        }
+            auto const current = std::chrono::steady_clock::now();
+            if (wait_until <= current)
+            {
+                if (wake_target == WakeTarget::local_plan ||
+                    wake_target == WakeTarget::request_deadline)
+                {
+                    next_replan_cause = ReplanCause::scheduled_wake;
+                    break;
+                }
+                if (wake_target == WakeTarget::progress)
+                    ++result.progress_wakes_reused;
+                else
+                    ++result.shared_wakes_reused;
+                continue;
+            }
 
-        auto wait_until = acquisition.absolute_deadline();
-        if (decision.aggregate_wake)
-            wait_until = std::min(wait_until, *decision.aggregate_wake);
-        if (proposal.wait_until)
-            wait_until = std::min(wait_until, proposal.wait_until->at);
-        wait_until = std::min(wait_until, next_progress_at);
-        auto const current = std::chrono::steady_clock::now();
-        if (wait_until <= current)
-            continue;
-        auto const wait_for = std::max(
-            std::chrono::milliseconds{1},
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                wait_until - current));
-        (void)co_await wait_for_signal_or_timeout(
-            strand_, std::move(wait_signal), wait_for);
-        ASSERT_ON_STRAND();
+            auto const wait_for = std::chrono::ceil<std::chrono::milliseconds>(
+                wait_until - current);
+            auto const outcome = co_await wait_for_signal_or_timeout(
+                strand_, std::move(wait_signal), wait_for);
+            ASSERT_ON_STRAND();
+            if (history_pool_revision_ != snapshot.control.pool_revision)
+            {
+                next_replan_cause = ReplanCause::local_change;
+                break;
+            }
+            if (outcome == WaitOutcome::timed_out)
+            {
+                if (wake_target == WakeTarget::local_plan ||
+                    wake_target == WakeTarget::request_deadline)
+                {
+                    next_replan_cause = ReplanCause::scheduled_wake;
+                    break;
+                }
+                if (wake_target == WakeTarget::progress)
+                    ++result.progress_wakes_reused;
+                else
+                    ++result.shared_wakes_reused;
+                continue;
+            }
+            ++result.shared_wakes_reused;
+        }
     }
 }
 
