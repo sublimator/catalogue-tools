@@ -69,6 +69,8 @@ struct LedgerDemandOptions
 {
     std::uint32_t ledger_seq = 0;
     std::chrono::steady_clock::time_point fallback_at{};
+    // Legacy field name: this bounds newly sponsored peer generations. A
+    // sponsorship may create a dial or attach to an existing in-flight dial.
     std::size_t remaining_new_dials = 0;
     std::size_t remaining_promotions = 0;
     std::size_t remaining_blind_uses = 0;

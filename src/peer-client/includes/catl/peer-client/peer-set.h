@@ -79,8 +79,9 @@ struct PeerSetOptions
     /// this threshold. Default 1M ledgers (~40 days of history).
     uint32_t archival_range_threshold = 1'000'000;
 
-    /// Maximum new endpoints one ledger-specific wait may probe. Existing
-    /// connected peers are handled separately by the node/header fan-out.
+    /// Maximum new peer generations one ledger-specific demand may sponsor,
+    /// whether it creates the dial or attaches to an existing in-flight dial.
+    /// Existing ready peers remain separately eligible for node/header use.
     std::size_t max_targeted_connect_attempts = 3;
 
     /// Non-dialling Cut-3 parent limits. Child acquisitions borrow these
@@ -1564,11 +1565,17 @@ private:
             bool spent = false;
             std::optional<std::chrono::steady_clock::time_point> refill_at;
         };
-        std::vector<BudgetToken> dial_tokens;
+        // One token sponsors one distinct peer generation, whether this
+        // demand creates it or attaches to an already-started generation.
+        std::vector<BudgetToken> generation_probe_tokens;
+        // Durable for the demand lifetime: an attachment receipt may close
+        // before the same generation becomes usable, but that must not charge
+        // a second probe token for the same physical attempt.
+        std::set<std::uint64_t> sponsored_generations;
         std::vector<BudgetToken> promotion_tokens;
         std::vector<BudgetToken> blind_tokens;
         std::array<std::size_t, kHistorySourceLaneCount> source_attempts{};
-        std::size_t crawl_only_creations = 0;
+        std::size_t crawl_only_probes = 0;
     };
 
     struct HistoryAcquisitionRecord

@@ -17,6 +17,7 @@
 #include <chrono>
 #include <future>
 #include <string>
+#include <thread>
 #include <type_traits>
 
 using namespace catl::peer_client;
@@ -182,6 +183,29 @@ TEST_F(PlannerFixture, AttachmentPrecedesBlindUseAndCreation)
     EXPECT_EQ(action(plan).target.endpoint, "joining:1");
 }
 
+TEST_F(PlannerFixture, FreshAttachmentNeedsProbeButSponsoredGenerationDoesNot)
+{
+    auto attach = candidate(
+        "joining:1",
+        HistorySourceLane::independently_discovered,
+        HistoryGenerationDisposition::queued_or_connecting,
+        1);
+    attach.attachable = true;
+    snapshot.candidates = {attach};
+    snapshot.remaining_parent_dials = 0;
+    snapshot.parent_dial_grant.reset();
+
+    auto exhausted = plan_history_interest(snapshot, now);
+    EXPECT_FALSE(exhausted.next_action);
+    EXPECT_EQ(exhausted.local_terminal, HistoryAcquisitionTerminal::exhausted);
+
+    snapshot.candidates.front().demand_sponsored = true;
+    auto sponsored = plan_history_interest(snapshot, now);
+    EXPECT_EQ(
+        action(sponsored).action, HistoryAuthorityAction::attach_or_adopt);
+    EXPECT_EQ(action(sponsored).target.endpoint, "joining:1");
+}
+
 TEST_F(PlannerFixture, BlindUseRequiresFallbackAndBothExactBudgetGrants)
 {
     auto blind = candidate(
@@ -206,7 +230,7 @@ TEST_F(PlannerFixture, BlindUseRequiresFallbackAndBothExactBudgetGrants)
 TEST_F(PlannerFixture, LaneFairnessGivesEveryStrongerLaneAnOpportunity)
 {
     snapshot.source_attempts = {1, 0, 0, 0, 1};
-    snapshot.crawl_only_creations = 1;
+    snapshot.crawl_only_probes = 1;
     snapshot.candidates = {
         candidate(
             "crawl:1",
@@ -240,7 +264,7 @@ TEST_F(PlannerFixture, LaneFairnessGivesEveryStrongerLaneAnOpportunity)
 
 TEST_F(PlannerFixture, CrawlOnlyQuotaCannotBorrowUnusedParentBudget)
 {
-    snapshot.crawl_only_creations = 2;  // floor(6 / 3)
+    snapshot.crawl_only_probes = 2;  // floor(6 / 3)
     snapshot.source_attempts = {9, 9, 9, 9, 0};
     snapshot.candidates = {
         candidate(
@@ -1771,6 +1795,10 @@ TEST(PeerSetHistoryExecution, AttachmentHasExactReverseOwnerAndInheritedWake)
             io, peers, acquisition.context().acquisition),
         1u);
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 1u);
+    auto parent = run(io, peers->co_ledger_demand_snapshot(demand));
+    ASSERT_TRUE(parent);
+    EXPECT_EQ(parent->remaining_new_dials, 0u)
+        << "a piggyback attachment sponsors one bounded generation probe";
 
     auto attached = run(
         io, peers->co_history_search_snapshot(acquisition, interest));
@@ -1858,6 +1886,80 @@ TEST(PeerSetHistoryExecution, AttachmentHasExactReverseOwnerAndInheritedWake)
             second_acquisition, HistoryAcquisitionTerminal::completed));
 }
 
+TEST(PeerSetHistoryExecution, AttachmentProbeBudgetDoesNotResetForNewGeneration)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0});
+    auto const first = std::string("probe-first.example.com:51235");
+    auto const second = std::string("probe-second.example.com:51235");
+    PeerSetTestAccess::push_pending_connect(io, peers, first);
+    PeerSetTestAccess::push_pending_connect(io, peers, second);
+
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 30s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
+    auto first_acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{51},
+                    .fetch_epoch = 1,
+                    .excluded_endpoints = {second}}));
+    auto first_fetch = SharedHistoryFetch::create(HistoryFetchId{51}, 1);
+    auto first_plan = plan_history_interest(
+        run(io, peers->co_history_search_snapshot(first_acquisition)), now);
+    ASSERT_TRUE(first_plan.next_action);
+    ASSERT_EQ(
+        first_plan.next_action->action,
+        HistoryAuthorityAction::attach_or_adopt);
+    ASSERT_EQ(first_plan.next_action->target.endpoint, first);
+    auto first_interest = first_fetch->register_interest(
+        peers, scope, demand, first_acquisition, std::move(first_plan));
+    auto sponsor = first_fetch->select_sponsor(now);
+    ASSERT_TRUE(sponsor.sponsor);
+    auto grant = first_fetch->mint_grant(*sponsor.sponsor, now);
+    ASSERT_TRUE(grant);
+    auto attached =
+        run(io,
+            peers->co_execute_history_grant(
+                first_fetch, grant, PeerUseKind::ledger_header));
+    ASSERT_TRUE(attached.committed());
+    run(io,
+        peers->co_finish_history_acquisition(
+            first_acquisition, HistoryAcquisitionTerminal::cancelled));
+    (void)first_fetch->detach(first_interest);
+
+    auto second_acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{52},
+                    .fetch_epoch = 1,
+                    .excluded_endpoints = {first}}));
+    auto second_plan = plan_history_interest(
+        run(io, peers->co_history_search_snapshot(second_acquisition)), now);
+    EXPECT_FALSE(second_plan.next_action);
+    EXPECT_EQ(
+        second_plan.local_terminal, HistoryAcquisitionTerminal::exhausted);
+    auto parent = run(io, peers->co_ledger_demand_snapshot(demand));
+    ASSERT_TRUE(parent);
+    EXPECT_EQ(parent->remaining_new_dials, 0u);
+    run(io,
+        peers->co_finish_history_acquisition(
+            second_acquisition, HistoryAcquisitionTerminal::cancelled));
+}
+
 TEST(PeerSetHistoryDriver, EmptyInterestAcquiresAndClosesExactKnownUse)
 {
     boost::asio::io_context io;
@@ -1926,7 +2028,8 @@ TEST(PeerSetHistoryDriver, ExactAttachmentWakeReplansToReadyUse)
     auto demand = run(
         io,
         peers->co_get_or_create_ledger_demand(
-            scope, LedgerDemandOptions{.ledger_seq = 50}));
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
     auto acquisition = run(
         io,
         peers->co_open_history_acquisition(
@@ -1988,7 +2091,8 @@ TEST(PeerSetHistoryDriver, RequestCancellationWakesAttachedWaitImmediately)
     auto demand = run(
         io,
         peers->co_get_or_create_ledger_demand(
-            scope, LedgerDemandOptions{.ledger_seq = 50}));
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
     auto acquisition = run(
         io,
         peers->co_open_history_acquisition(
@@ -2039,10 +2143,11 @@ TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
 
     auto const now = std::chrono::steady_clock::now();
     auto scope = catl::core::RequestScope::create(now + 5s);
-    auto demand =
-        run(io,
-            peers->co_get_or_create_ledger_demand(
-                scope, LedgerDemandOptions{.ledger_seq = 50}));
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
     auto acquisition =
         run(io,
             peers->co_open_history_acquisition(
@@ -2110,6 +2215,60 @@ TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
         << "the history owner must expose its canonical selection state "
            "through the retained request context; events were: "
         << testing::PrintToString(events);
+    EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
+}
+
+TEST(PeerSetHistoryDriver, WaitReentersOwnerStrandAcrossConcurrentRunners)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto const endpoint = std::string("driver-concurrent.example.com:51235");
+    PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+
+    auto const now = std::chrono::steady_clock::now();
+    auto scope = catl::core::RequestScope::create(now + 2s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{50}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{50}, 1);
+    auto interest = fetch->register_interest(peers, scope, demand, acquisition);
+    auto request = std::make_shared<catl::core::RequestContext>(
+        "history-driver-concurrent",
+        "transaction",
+        std::chrono::steady_clock::now());
+    auto caller_executor =
+        catl::core::ContextExecutor(boost::asio::make_strand(io), request);
+    auto future = boost::asio::co_spawn(
+        caller_executor,
+        peers->co_drive_history_interest(
+            fetch, acquisition, interest, PeerUseKind::ledger_header),
+        boost::asio::use_future);
+    boost::asio::steady_timer cancel(io, 50ms);
+    cancel.async_wait([scope](boost::system::error_code ec) {
+        if (!ec)
+            scope->cancel();
+    });
+
+    auto work = boost::asio::make_work_guard(io);
+    std::thread first([&io]() { io.run(); });
+    std::thread second([&io]() { io.run(); });
+    auto driven = future.get();
+    work.reset();
+    io.stop();
+    first.join();
+    second.join();
+
+    ASSERT_TRUE(driven.local_terminal);
+    EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_FALSE(driven.acquired());
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
 }
 

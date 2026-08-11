@@ -145,6 +145,20 @@ enum class WaitOutcome {
     canceled,
 };
 
+static asio::awaitable<void>
+resume_on_owner_strand(
+    asio::strand<asio::io_context::executor_type>& strand,
+    std::shared_ptr<catl::core::RequestContext const> request_context)
+{
+    if (!strand.running_in_this_thread())
+    {
+        auto owner_executor =
+            catl::core::ContextExecutor(strand, std::move(request_context));
+        co_await asio::post(std::move(owner_executor), asio::use_awaitable);
+    }
+    co_return;
+}
+
 std::string
 describe_peer_history_coverage(PeerHistoryCoverage const& coverage)
 {
@@ -182,10 +196,17 @@ wait_for_signal_or_timeout(
     std::chrono::milliseconds timeout,
     std::shared_ptr<std::atomic<bool>> cancel = nullptr)
 {
+    auto request_context = catl::core::retain_current_request();
     if (cancel && cancel->load(std::memory_order_relaxed))
+    {
+        co_await resume_on_owner_strand(strand, request_context);
         co_return WaitOutcome::canceled;
+    }
     if (timeout <= std::chrono::milliseconds::zero())
+    {
+        co_await resume_on_owner_strand(strand, request_context);
         co_return WaitOutcome::timed_out;
+    }
 
     static constexpr auto kCancelPoll = std::chrono::milliseconds(25);
     auto remaining = timeout;
@@ -219,13 +240,20 @@ wait_for_signal_or_timeout(
                     asio::experimental::wait_for_one(), asio::use_awaitable);
 
         if (order[0] == 0)
+        {
+            co_await resume_on_owner_strand(strand, request_context);
             co_return WaitOutcome::signaled;
+        }
 
         remaining -= slice;
         if (cancel && cancel->load(std::memory_order_relaxed))
+        {
+            co_await resume_on_owner_strand(strand, request_context);
             co_return WaitOutcome::canceled;
+        }
     }
 
+    co_await resume_on_owner_strand(strand, request_context);
     co_return WaitOutcome::timed_out;
 }
 
@@ -6002,7 +6030,7 @@ PeerSet::get_or_create_ledger_demand_on_strand(
         }
         return tokens;
     };
-    auto dial_tokens = prepare_tokens(options.remaining_new_dials);
+    auto generation_probe_tokens = prepare_tokens(options.remaining_new_dials);
     auto promotion_tokens = prepare_tokens(options.remaining_promotions);
     auto blind_tokens = prepare_tokens(options.remaining_blind_uses);
     auto timer = std::make_shared<asio::steady_timer>(
@@ -6046,7 +6074,7 @@ PeerSet::get_or_create_ledger_demand_on_strand(
             .absolute_deadline = request.absolute_deadline,
             .terminal_subscription = std::move(subscription),
             .deadline_timer = std::move(timer),
-            .dial_tokens = std::move(dial_tokens),
+            .generation_probe_tokens = std::move(generation_probe_tokens),
             .promotion_tokens = std::move(promotion_tokens),
             .blind_tokens = std::move(blind_tokens)});
     auto row_node = prepared_rows.extract(id);
@@ -6861,7 +6889,7 @@ PeerSet::co_ledger_demand_snapshot(LedgerDemandRef demand)
         .absolute_deadline = row.absolute_deadline,
         .fallback_at = row.options.fallback_at,
         .terminal = row.terminal,
-        .remaining_new_dials = remaining(row.dial_tokens),
+        .remaining_new_dials = remaining(row.generation_probe_tokens),
         .remaining_promotions = remaining(row.promotion_tokens),
         .remaining_blind_uses = remaining(row.blind_tokens),
         .acquisitions = row.acquisitions.size(),
@@ -6979,8 +7007,8 @@ PeerSet::project_history_search_snapshot(
     snapshot.fallback_at = demand.options.fallback_at;
     snapshot.cancelled =
         demand.terminal.has_value() || acquisition.terminal.has_value();
-    snapshot.initial_parent_dial_budget = demand.dial_tokens.size();
-    snapshot.crawl_only_creations = demand.crawl_only_creations;
+    snapshot.initial_parent_dial_budget = demand.generation_probe_tokens.size();
+    snapshot.crawl_only_probes = demand.crawl_only_probes;
     snapshot.source_attempts = demand.source_attempts;
     snapshot.physical = physical_census_on_strand();
     snapshot.excluded_endpoints = acquisition.excluded_endpoints;
@@ -7029,10 +7057,11 @@ PeerSet::project_history_search_snapshot(
             .revision = token->revision};
     };
     snapshot.remaining_parent_dials = static_cast<std::size_t>(std::count_if(
-        demand.dial_tokens.begin(),
-        demand.dial_tokens.end(),
+        demand.generation_probe_tokens.begin(),
+        demand.generation_probe_tokens.end(),
         [](auto const& token) { return !token.spent; }));
-    snapshot.parent_dial_grant = grant(first_live(demand.dial_tokens));
+    snapshot.parent_dial_grant =
+        grant(first_live(demand.generation_probe_tokens));
     snapshot.parent_blind_grant = grant(first_live(demand.blind_tokens));
     snapshot.global_dial_grant = grant(first_live(global_history_dial_tokens_));
     snapshot.global_blind_grant =
@@ -7171,6 +7200,8 @@ PeerSet::project_history_search_snapshot(
                 (generation->second.history_origin &&
                  generation->second.history_origin->retainer_control.acquisition ==
                      acquisition.id);
+            candidate.demand_sponsored =
+                demand.sponsored_generations.contains(generation_id);
             candidate.attachable = !candidate.attached;
             if (candidate.attached &&
                 snapshot.wakes.size() < kMaxHistorySearchWakes)
@@ -7603,7 +7634,7 @@ PeerSet::execute_history_grant_on_strand(
     };
     LedgerDemandRecord::BudgetToken* parent_blind = nullptr;
     LedgerDemandRecord::BudgetToken* global_blind = nullptr;
-    LedgerDemandRecord::BudgetToken* parent_dial = nullptr;
+    LedgerDemandRecord::BudgetToken* parent_probe = nullptr;
     LedgerDemandRecord::BudgetToken* global_dial = nullptr;
     if (blind)
     {
@@ -7616,16 +7647,42 @@ PeerSet::execute_history_grant_on_strand(
             return result;
         //@@mutation-end blind-history-use-requires-parent-and-global-debit
     }
+    if (attach && attach->parent_probe_grant)
+    {
+        // A request may adopt an already-running physical dial, but doing so
+        // still spends one of its bounded generation probes. Otherwise a busy
+        // ordinary peer pool turns one request into an unbounded attachment
+        // conveyor belt.
+        parent_probe = find_token(
+            demand->second.generation_probe_tokens,
+            *attach->parent_probe_grant);
+        if (!parent_probe)
+            return result;
+    }
     if (create)
     {
         //@@mutation-site history-generation-requires-parent-and-global-debit
-        parent_dial =
-            find_token(demand->second.dial_tokens, create->parent_dial_grant);
+        parent_probe = find_token(
+            demand->second.generation_probe_tokens, create->parent_dial_grant);
         global_dial = find_token(
             global_history_dial_tokens_, create->global_dial_grant);
-        if (!parent_dial || !global_dial)
+        if (!parent_probe || !global_dial)
             return result;
         //@@mutation-end history-generation-requires-parent-and-global-debit
+    }
+
+    std::set<std::uint64_t>::node_type sponsored_generation_node;
+    if (parent_probe)
+    {
+        if (target.generation == 0 ||
+            demand->second.sponsored_generations.contains(target.generation))
+        {
+            return result;
+        }
+        std::set<std::uint64_t> prepared_sponsorship;
+        prepared_sponsorship.insert(target.generation);
+        sponsored_generation_node =
+            prepared_sponsorship.extract(target.generation);
     }
 
     struct OwnerCommitContext
@@ -7641,14 +7698,15 @@ PeerSet::execute_history_grant_on_strand(
         std::set<std::string>::node_type created_queue_node;
         std::set<std::uint64_t>::node_type created_origin_reverse_node;
         HistoryAcquisitionRecord* created_origin_acquisition = nullptr;
-        LedgerDemandRecord* created_origin_demand = nullptr;
+        LedgerDemandRecord* probe_demand = nullptr;
+        std::set<std::uint64_t>::node_type sponsored_generation_node;
         std::string created_pending_endpoint;
         std::uint64_t created_generation_id = 0;
         bool replace_terminal_generation = false;
-        HistorySourceLane created_source = HistorySourceLane::crawl_only;
+        HistorySourceLane probe_source = HistorySourceLane::crawl_only;
         LedgerDemandRecord::BudgetToken* parent_blind = nullptr;
         LedgerDemandRecord::BudgetToken* global_blind = nullptr;
-        LedgerDemandRecord::BudgetToken* parent_dial = nullptr;
+        LedgerDemandRecord::BudgetToken* parent_probe = nullptr;
         LedgerDemandRecord::BudgetToken* global_dial = nullptr;
         std::chrono::steady_clock::time_point refill_at{};
         PeerUse peer_use;
@@ -7656,26 +7714,25 @@ PeerSet::execute_history_grant_on_strand(
         .owner = this,
         .prepared = prepared.get(),
         .attachment_generation = attachment_generation,
-        .attachment_acquisition =
-            attach ? &acquisition->second : nullptr,
+        .attachment_acquisition = attach ? &acquisition->second : nullptr,
         .attachment_node = std::move(attachment_node),
         .reverse_attachment_node = std::move(reverse_attachment_node),
         .created_generation_node = std::move(created_generation_node),
         .created_authority_node = std::move(created_authority_node),
         .created_queue_node = std::move(created_queue_node),
-        .created_origin_reverse_node =
-            std::move(created_origin_reverse_node),
-        .created_origin_acquisition =
-            create ? &acquisition->second : nullptr,
-        .created_origin_demand = create ? &demand->second : nullptr,
+        .created_origin_reverse_node = std::move(created_origin_reverse_node),
+        .created_origin_acquisition = create ? &acquisition->second : nullptr,
+        .probe_demand = parent_probe ? &demand->second : nullptr,
+        .sponsored_generation_node = std::move(sponsored_generation_node),
         .created_pending_endpoint = std::move(created_pending_endpoint),
         .created_generation_id = created_generation_id,
         .replace_terminal_generation = replace_terminal_generation,
-        .created_source =
-            create ? create->source : HistorySourceLane::crawl_only,
+        .probe_source = create ? create->source
+            : attach           ? attach->source
+                               : HistorySourceLane::crawl_only,
         .parent_blind = parent_blind,
         .global_blind = global_blind,
-        .parent_dial = parent_dial,
+        .parent_probe = parent_probe,
         .global_dial = global_dial,
         .refill_at = std::chrono::steady_clock::now() +
             options_.global_history_token_refill};
@@ -7689,8 +7746,14 @@ PeerSet::execute_history_grant_on_strand(
             commit.global_blind->spent = true;
             commit.global_blind->refill_at = commit.refill_at;
         }
-        if (commit.parent_dial)
-            commit.parent_dial->spent = true;
+        if (commit.parent_probe)
+            commit.parent_probe->spent = true;
+        if (commit.probe_demand)
+        {
+            auto sponsored = commit.probe_demand->sponsored_generations.insert(
+                std::move(commit.sponsored_generation_node));
+            assert(sponsored.inserted);
+        }
         if (commit.global_dial)
         {
             commit.global_dial->spent = true;
@@ -7730,21 +7793,6 @@ PeerSet::execute_history_grant_on_strand(
                 std::move(commit.created_pending_endpoint));
             commit.owner->next_connection_generation_ =
                 commit.created_generation_id;
-            auto const lane = static_cast<std::size_t>(commit.created_source);
-            if (lane < commit.created_origin_demand->source_attempts.size())
-            {
-                auto& attempts =
-                    commit.created_origin_demand->source_attempts[lane];
-                if (attempts != std::numeric_limits<std::size_t>::max())
-                    ++attempts;
-            }
-            if (commit.created_source == HistorySourceLane::crawl_only)
-            {
-                auto& crawl =
-                    commit.created_origin_demand->crawl_only_creations;
-                if (crawl != std::numeric_limits<std::size_t>::max())
-                    ++crawl;
-            }
             //@@mutation-end history-generation-queue-origin-and-debits-share-owner-flip
         }
         else if (commit.attachment_generation)
@@ -7765,6 +7813,22 @@ PeerSet::execute_history_grant_on_strand(
             commit.peer_use =
                 commit.owner->commit_prepared_peer_use(*commit.prepared);
             assert(commit.peer_use);
+        }
+        if (commit.probe_demand)
+        {
+            auto const lane = static_cast<std::size_t>(commit.probe_source);
+            if (lane < commit.probe_demand->source_attempts.size())
+            {
+                auto& attempts = commit.probe_demand->source_attempts[lane];
+                if (attempts != std::numeric_limits<std::size_t>::max())
+                    ++attempts;
+            }
+            if (commit.probe_source == HistorySourceLane::crawl_only &&
+                commit.probe_demand->crawl_only_probes !=
+                    std::numeric_limits<std::size_t>::max())
+            {
+                ++commit.probe_demand->crawl_only_probes;
+            }
         }
         commit.owner->advance_history_pool_revision();
     };

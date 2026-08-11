@@ -371,9 +371,16 @@ plan_history_interest(
     }
 
     if (auto const* candidate = best_candidate(
-            snapshot, now, [](HistorySearchCandidate const& current) {
-                return current.attachable &&
-                    !current.attached &&
+            snapshot, now, [&snapshot](HistorySearchCandidate const& current) {
+                auto const has_probe_authority = current.demand_sponsored ||
+                    (snapshot.remaining_parent_dials != 0 &&
+                     snapshot.parent_dial_grant.has_value());
+                auto const within_crawl_quota = current.demand_sponsored ||
+                    current.source != HistorySourceLane::crawl_only ||
+                    snapshot.crawl_only_probes <
+                        crawl_quota(snapshot.initial_parent_dial_budget);
+                return has_probe_authority && within_crawl_quota &&
+                    current.attachable && !current.attached &&
                     (current.disposition ==
                          HistoryGenerationDisposition::queued_or_connecting ||
                      current.disposition ==
@@ -415,7 +422,7 @@ plan_history_interest(
             return current.disposition ==
                 HistoryGenerationDisposition::absent &&
                 (current.source != HistorySourceLane::crawl_only ||
-                 snapshot.crawl_only_creations < quota);
+                 snapshot.crawl_only_probes < quota);
         };
         auto const non_crawl_exists = best_candidate(
             snapshot, now, [&](HistorySearchCandidate const& current) {
@@ -499,11 +506,28 @@ plan_history_acquisition(
                 .target = proposal.next_action->target,
                 .parent_blind_grant = *snapshot.parent_blind_grant,
                 .global_blind_grant = *snapshot.global_blind_grant};
-        case HistoryAuthorityAction::attach_or_adopt:
+        case HistoryAuthorityAction::attach_or_adopt: {
+            auto const found = std::find_if(
+                snapshot.candidates.begin(),
+                snapshot.candidates.end(),
+                [&](HistorySearchCandidate const& candidate) {
+                    return candidate.target == proposal.next_action->target;
+                });
+            if (found == snapshot.candidates.end() ||
+                (!found->demand_sponsored && !snapshot.parent_dial_grant))
+            {
+                return terminal_plan(
+                    snapshot, HistorySearchTerminalReason::control_changed);
+            }
             return HistoryAttachPlan{
                 .control = snapshot.control,
                 .participant_grant = participant_grant,
-                .target = proposal.next_action->target};
+                .target = proposal.next_action->target,
+                .source = found->source,
+                .parent_probe_grant = found->demand_sponsored
+                    ? std::nullopt
+                    : snapshot.parent_dial_grant};
+        }
         case HistoryAuthorityAction::create_generation: {
             if (!snapshot.parent_dial_grant || !snapshot.global_dial_grant)
             {

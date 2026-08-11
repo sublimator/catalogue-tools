@@ -158,6 +158,7 @@ struct HistorySearchCandidate
     bool advertises_ledger = false;
     bool attachable = false;
     bool attached = false;
+    bool demand_sponsored = false;
     bool blind_eligible = false;
     std::optional<std::chrono::steady_clock::time_point> retry_not_before;
 
@@ -187,7 +188,7 @@ struct HistorySearchSnapshot
 
     std::size_t initial_parent_dial_budget = 0;
     std::size_t remaining_parent_dials = 0;
-    std::size_t crawl_only_creations = 0;
+    std::size_t crawl_only_probes = 0;
     std::array<std::size_t, kHistorySourceLaneCount> source_attempts{};
 
     std::optional<HistoryBudgetGrantRef> parent_dial_grant;
@@ -222,6 +223,8 @@ struct HistoryAttachPlan
     HistoryControlRevision control;
     HistoryAuthorityGrantRef participant_grant;
     HistoryAuthorityTarget target;
+    HistorySourceLane source = HistorySourceLane::crawl_only;
+    std::optional<HistoryBudgetGrantRef> parent_probe_grant;
 };
 
 struct HistoryCreateGenerationPlan
