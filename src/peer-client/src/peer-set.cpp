@@ -7890,10 +7890,6 @@ PeerSet::drive_history_interest_on_strand(
             co_return result;
         }
 
-        // Attach before observing either owner. A pool commit after this point
-        // cancels this exact signal, so the following snapshot cannot race a
-        // wake into an unbounded sleep.
-        auto wait_signal = attach_wait_signal();
         auto const now = std::chrono::steady_clock::now();
         auto snapshot = history_search_snapshot_on_strand(acquisition, {});
         ++result.replans;
@@ -7911,6 +7907,12 @@ PeerSet::drive_history_interest_on_strand(
             co_return result;
         }
         result.interest = *revised;
+
+        // Publishing our own revision wakes this participant owner. Arm only
+        // after that self-wake, then observe the shared sponsor decision. A
+        // concurrent shared-owner change after the arm cancels this exact
+        // signal; local pool changes cannot interleave while on the strand.
+        auto wait_signal = attach_wait_signal();
 
         if (proposal.local_terminal)
         {

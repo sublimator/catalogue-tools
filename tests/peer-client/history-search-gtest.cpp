@@ -2076,6 +2076,9 @@ TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
     auto driven = future.get();
     ASSERT_TRUE(driven.local_terminal);
     EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_LT(driven.replans, 10u)
+        << "a driver must not consume the wake emitted by its own interest "
+           "revision and hot-loop while waiting";
 
     auto const events = request->drain();
     auto const progress_events =
