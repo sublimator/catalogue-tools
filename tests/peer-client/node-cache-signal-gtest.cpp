@@ -49,6 +49,20 @@ make_data(size_t size, uint8_t fill = 0x42)
     return std::vector<uint8_t>(size, fill);
 }
 
+LedgerDemandOptions
+expected_managed_ledger_demand(std::uint32_t ledger_seq)
+{
+    // Independent contract oracle for NodeCache's three peers across three
+    // header rounds. A caller-created parent must be identical to the parent
+    // created by either managed header or node admission.
+    return LedgerDemandOptions{
+        .ledger_seq = ledger_seq,
+        .fallback_at = std::chrono::steady_clock::time_point::min(),
+        .remaining_new_dials = 3 * 3,
+        .remaining_promotions = std::numeric_limits<std::size_t>::max(),
+        .remaining_blind_uses = std::numeric_limits<std::size_t>::max()};
+}
+
 }  // namespace
 
 TEST(SerializedTimerSignal, CompleteBeforeWaitIsLatched)
@@ -1387,17 +1401,7 @@ TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
         io,
         [&, cache, peers, scope]() -> asio::awaitable<void> {
             parent = co_await peers->co_get_or_create_ledger_demand(
-                scope,
-                LedgerDemandOptions{
-                    .ledger_seq = ledger_seq,
-                    .fallback_at =
-                        std::chrono::steady_clock::time_point::min(),
-                    .remaining_new_dials =
-                        std::numeric_limits<std::size_t>::max(),
-                    .remaining_promotions =
-                        std::numeric_limits<std::size_t>::max(),
-                    .remaining_blind_uses =
-                        std::numeric_limits<std::size_t>::max()});
+                scope, expected_managed_ledger_demand(ledger_seq));
             auto ex = co_await asio::this_coro::executor;
             auto result =
                 co_await asio::experimental::make_parallel_group(
@@ -1531,17 +1535,7 @@ TEST(NodeCacheIntegration, CoalescedHeaderWaitersKeepDistinctDemandOwners)
              done_out,
              delay]() -> asio::awaitable<void> {
                 *parent_out = co_await peers->co_get_or_create_ledger_demand(
-                    scope,
-                    LedgerDemandOptions{
-                        .ledger_seq = ledger_seq,
-                        .fallback_at =
-                            std::chrono::steady_clock::time_point::min(),
-                        .remaining_new_dials =
-                            std::numeric_limits<std::size_t>::max(),
-                        .remaining_promotions =
-                            std::numeric_limits<std::size_t>::max(),
-                        .remaining_blind_uses =
-                            std::numeric_limits<std::size_t>::max()});
+                    scope, expected_managed_ledger_demand(ledger_seq));
                 auto ex = co_await asio::this_coro::executor;
                 auto result =
                     co_await asio::experimental::make_parallel_group(

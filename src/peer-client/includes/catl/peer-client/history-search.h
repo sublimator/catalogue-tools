@@ -18,6 +18,7 @@ namespace catl::peer_client {
 inline constexpr std::size_t kHistorySourceLaneCount = 5;
 inline constexpr std::size_t kMaxHistorySearchCandidates = 4096;
 inline constexpr std::size_t kMaxHistorySearchWakes = 4096;
+inline constexpr std::size_t kMaxHistoryCandidateCorroboration = 4096;
 
 enum class HistorySourceLane : std::uint8_t {
     configured,
@@ -156,9 +157,21 @@ struct HistorySearchCandidate
     std::uint64_t fair_ticket = 0;
     bool eligible = false;
     bool advertises_ledger = false;
+    // Untrusted evidence that this endpoint is relevant to the requested
+    // ledger. It may rank a bounded dial/attachment, but never authorizes a
+    // direct known-ledger use; only advertises_ledger does that.
+    bool ledger_coverage_hint = false;
+    // Number of distinct current crawl reporters carrying that positive hint.
+    // This is untrusted and may only break ties inside the already bounded
+    // crawl-only lane. It cannot authorize use or strengthen provenance.
+    std::size_t reported_crawl_corroboration = 0;
     bool attachable = false;
     bool attached = false;
     bool demand_sponsored = false;
+    // This demand already spent a generation-probe token on the endpoint.
+    // The exact live sponsored generation may continue; a successor
+    // generation at the same endpoint may not consume another token.
+    bool probe_attempted = false;
     bool blind_eligible = false;
     std::optional<std::chrono::steady_clock::time_point> retry_not_before;
 
@@ -193,7 +206,7 @@ struct HistorySearchSnapshot
     // label=exact_authority_free_history_pool_and_participant_revision
     HistoryControlRevision control;
     //@@authority state=prv.S0127 status=provisional scope=field
-    //bind=catl::peer_client::HistorySearchSnapshot::observation@84be0831f2a86ff0
+    // bind=catl::peer_client::HistorySearchSnapshot::observation@84be0831f2a86ff0
     // owner=unresolved owner_hypothesis=peer_set
     // observed_home=history_search_snapshot
     // label=advisory_history_planning_revision_observation
@@ -205,9 +218,10 @@ struct HistorySearchSnapshot
     // bind=catl::peer_client::HistorySearchSnapshot::candidate_supply_open@413868f58e7fb6a3
     // owner=unresolved owner_hypothesis=peer_set
     // observed_home=history_search_snapshot
-    // label=service_policy_keeps_bounded_candidate_supply_wait_open
-    // This is a bounded retry-policy fact, not proof that a future archival
-    // peer exists or will be discovered.
+    // label=demand_authority_keeps_bounded_candidate_supply_wait_open
+    // This is a bounded retry-policy fact: service ingress remains open and
+    // this demand still owns authority to probe newly supplied candidates.
+    // It is not proof that a future archival peer exists or will be found.
     bool candidate_supply_open = false;
 
     std::size_t initial_parent_dial_budget = 0;

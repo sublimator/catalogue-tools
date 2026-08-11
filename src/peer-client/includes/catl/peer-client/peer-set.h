@@ -79,10 +79,15 @@ struct PeerSetOptions
     /// this threshold. Default 1M ledgers (~40 days of history).
     uint32_t archival_range_threshold = 1'000'000;
 
-    /// Maximum new peer generations one ledger-specific demand may sponsor,
-    /// whether it creates the dial or attaches to an existing in-flight dial.
-    /// Existing ready peers remain separately eligible for node/header use.
+    /// Maximum disconnected candidates the legacy covering-peer wait may
+    /// target during one call.
     std::size_t max_targeted_connect_attempts = 3;
+
+    /// Hard storage/admission ceiling for generation-probe tokens carried by
+    /// one modeled ledger demand. The operation supplies its own smaller
+    /// semantic budget; this limit is independent of any caller's round or
+    /// fan-out policy.
+    std::size_t max_history_generation_probes_per_demand = 64;
 
     /// Non-dialling Cut-3 parent limits. Child acquisitions borrow these
     /// counters; they never receive private copies.
@@ -91,8 +96,10 @@ struct PeerSetOptions
     std::size_t max_history_promotions_per_demand = 1;
     std::size_t max_history_blind_uses_per_demand = 1;
 
-    /// Retain bounded /crawl claims for diagnostics. This side table has no
-    /// path into discovery, ranking, dial admission, or persistent storage.
+    /// Retain bounded /crawl claims as untrusted ephemeral evidence. At the
+    /// Cut-4 planner boundary, positive target coverage and bounded distinct
+    /// reporter corroboration may rank the capped crawl-only lane; neither
+    /// authorizes use, strengthens provenance, or enters persistent storage.
     bool capture_crawl_observations = true;
 
     /// Cut-4 process-local physical and rate bounds. Admitted capacity remains
@@ -1630,6 +1637,10 @@ private:
         // before the same generation becomes usable, but that must not charge
         // a second probe token for the same physical attempt.
         std::set<std::uint64_t> sponsored_generations;
+        // Generation identity protects an active incarnation; endpoint
+        // identity prevents a terminal incarnation from being re-sponsored
+        // by the same bounded demand.
+        std::set<std::string> probed_endpoints;
         std::vector<BudgetToken> promotion_tokens;
         std::vector<BudgetToken> blind_tokens;
         std::array<std::size_t, kHistorySourceLaneCount> source_attempts{};
@@ -1819,8 +1830,9 @@ private:
         std::uint64_t crawl_epoch = 0;
         std::vector<CrawlObservation> observations;
     };
-    // Diagnostic-only reporter claims. No selector or connection-admission
-    // function reads this table.
+    // Untrusted reporter claims. The Cut-4 history snapshot may project only
+    // positive coverage and bounded within-lane corroboration; ordinary peer
+    // selection, direct-use authority, and connection admission do not read it.
     //@@authority state=prv.S0081 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::crawl_observation_batches_@b76408793188153d
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set

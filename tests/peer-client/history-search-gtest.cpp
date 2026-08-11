@@ -47,6 +47,24 @@ budget(std::uint64_t id)
         .owner_instance = 1, .token = id, .revision = 1};
 }
 
+void
+install_target_coverage_hint(
+    boost::asio::io_context& io,
+    std::shared_ptr<PeerSet> const& peers,
+    std::string const& endpoint,
+    std::uint32_t ledger_seq)
+{
+    PeerSetTestAccess::install_history_source(
+        io,
+        peers,
+        endpoint,
+        false,
+        false,
+        false,
+        false,
+        PeerStatus{.first_seq = ledger_seq, .last_seq = ledger_seq});
+}
+
 struct PlannerFixture : ::testing::Test
 {
     PlannerFixture()
@@ -163,6 +181,7 @@ TEST_F(PlannerFixture, AttachmentPrecedesBlindUseAndCreation)
         HistoryGenerationDisposition::queued_or_connecting,
         1);
     attach.attachable = true;
+    attach.ledger_coverage_hint = true;
     auto blind = candidate(
         "blind:1",
         HistorySourceLane::direct_verified,
@@ -183,6 +202,72 @@ TEST_F(PlannerFixture, AttachmentPrecedesBlindUseAndCreation)
     EXPECT_EQ(action(plan).target.endpoint, "joining:1");
 }
 
+TEST_F(PlannerFixture, ExactAttachmentWaitPrecedesAdditionalSponsorship)
+{
+    auto attached = candidate(
+        "attached:1",
+        HistorySourceLane::crawl_only,
+        HistoryGenerationDisposition::queued_or_connecting,
+        1);
+    attached.attached = true;
+    attached.ledger_coverage_hint = true;
+    auto additional = candidate(
+        "additional:1",
+        HistorySourceLane::crawl_only,
+        HistoryGenerationDisposition::queued_or_connecting,
+        2);
+    additional.attachable = true;
+    additional.ledger_coverage_hint = true;
+    auto retrying = candidate(
+        "retrying:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        3);
+    retrying.retry_not_before = now + 1s;
+    snapshot.candidates = {attached, additional, retrying};
+    snapshot.wakes.push_back(HistoryPlannedWake{
+        .kind = HistoryWakeSourceKind::attached_generation_deadline,
+        .at = now + 5s,
+        .endpoint = attached.target.endpoint,
+        .generation = attached.target.generation});
+
+    auto const plan = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(plan.wait_until);
+    EXPECT_FALSE(plan.next_action);
+    EXPECT_EQ(
+        plan.wait_until->kind,
+        HistoryWakeSourceKind::attached_generation_deadline);
+    EXPECT_EQ(plan.wait_until->endpoint, attached.target.endpoint);
+    EXPECT_EQ(plan.wait_until->generation, attached.target.generation);
+}
+
+TEST_F(PlannerFixture, ReadyAttachmentDeadlineCannotPretendCoverageMayChange)
+{
+    auto ready = candidate(
+        "ready-negative:1",
+        HistorySourceLane::direct_verified,
+        HistoryGenerationDisposition::ready_transient,
+        1);
+    ready.attached = true;
+    ready.demand_sponsored = true;
+    ready.blind_eligible = true;
+    auto next = candidate(
+        "next:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        2);
+    snapshot.candidates = {ready, next};
+    snapshot.wakes.push_back(HistoryPlannedWake{
+        .kind = HistoryWakeSourceKind::attached_generation_deadline,
+        .at = now + 5s,
+        .endpoint = ready.target.endpoint,
+        .generation = ready.target.generation});
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).action, HistoryAuthorityAction::create_generation);
+    EXPECT_EQ(action(plan).target.endpoint, next.target.endpoint);
+}
+
 TEST_F(PlannerFixture, FreshAttachmentNeedsProbeButSponsoredGenerationDoesNot)
 {
     auto attach = candidate(
@@ -191,6 +276,7 @@ TEST_F(PlannerFixture, FreshAttachmentNeedsProbeButSponsoredGenerationDoesNot)
         HistoryGenerationDisposition::queued_or_connecting,
         1);
     attach.attachable = true;
+    attach.ledger_coverage_hint = true;
     snapshot.candidates = {attach};
     snapshot.remaining_parent_dials = 0;
     snapshot.parent_dial_grant.reset();
@@ -206,10 +292,43 @@ TEST_F(PlannerFixture, FreshAttachmentNeedsProbeButSponsoredGenerationDoesNot)
     EXPECT_EQ(action(sponsored).target.endpoint, "joining:1");
 }
 
-TEST_F(PlannerFixture, ExhaustedSnapshotWaitsWhileCandidateSupplyRemainsOpen)
+TEST_F(PlannerFixture, GenericInFlightPeerDoesNotSpendTargetedProbe)
+{
+    snapshot.fallback_at = now;
+    auto generic = candidate(
+        "generic:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::queued_or_connecting,
+        1);
+    generic.attachable = true;
+    auto blind = candidate(
+        "blind:1",
+        HistorySourceLane::direct_verified,
+        HistoryGenerationDisposition::admitted,
+        2);
+    blind.blind_eligible = true;
+    snapshot.candidates = {generic, blind};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).action, HistoryAuthorityAction::submit_blind_use);
+    EXPECT_EQ(action(plan).target.endpoint, "blind:1");
+}
+
+TEST_F(PlannerFixture, CandidateSupplyCannotReviveExhaustedProbeAuthority)
 {
     snapshot.remaining_parent_dials = 0;
     snapshot.parent_dial_grant.reset();
+    snapshot.parent_blind_grant.reset();
+    snapshot.candidates.clear();
+    snapshot.candidate_supply_open = true;
+
+    auto const exhausted = plan_history_interest(snapshot, now);
+    EXPECT_FALSE(exhausted.wait_until);
+    EXPECT_EQ(exhausted.local_terminal, HistoryAcquisitionTerminal::exhausted);
+}
+
+TEST_F(PlannerFixture, CandidateSupplyWaitRetainsBoundedProbeAuthority)
+{
     snapshot.parent_blind_grant.reset();
     snapshot.candidates.clear();
     snapshot.candidate_supply_open = true;
@@ -221,11 +340,6 @@ TEST_F(PlannerFixture, ExhaustedSnapshotWaitsWhileCandidateSupplyRemainsOpen)
         waiting.wait_until->kind,
         HistoryWakeSourceKind::candidate_supply_change);
     EXPECT_EQ(waiting.wait_until->at, snapshot.absolute_deadline);
-
-    snapshot.candidate_supply_open = false;
-    auto const exhausted = plan_history_interest(snapshot, now);
-    EXPECT_FALSE(exhausted.wait_until);
-    EXPECT_EQ(exhausted.local_terminal, HistoryAcquisitionTerminal::exhausted);
 }
 
 TEST_F(PlannerFixture, BlindUseRequiresFallbackAndBothExactBudgetGrants)
@@ -284,7 +398,80 @@ TEST_F(PlannerFixture, LaneFairnessGivesEveryStrongerLaneAnOpportunity)
     EXPECT_EQ(action(plan).target.endpoint, "persistent:1");
 }
 
-TEST_F(PlannerFixture, CrawlOnlyQuotaCannotBorrowUnusedParentBudget)
+TEST_F(PlannerFixture, CoverageHintPrecedesStrongerGenericProvenance)
+{
+    auto configured = candidate(
+        "configured:1",
+        HistorySourceLane::configured,
+        HistoryGenerationDisposition::absent,
+        1);
+    auto covering = candidate(
+        "crawl-covering:1",
+        HistorySourceLane::crawl_only,
+        HistoryGenerationDisposition::absent,
+        2);
+    covering.ledger_coverage_hint = true;
+    snapshot.candidates = {configured, covering};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).target.endpoint, "crawl-covering:1");
+}
+
+TEST_F(PlannerFixture, CrawlCorroborationOnlyBreaksTiesInsideBoundedLane)
+{
+    auto lexical_first = candidate(
+        "a.example:1",
+        HistorySourceLane::crawl_only,
+        HistoryGenerationDisposition::absent,
+        1);
+    lexical_first.ledger_coverage_hint = true;
+    lexical_first.reported_crawl_corroboration = 1;
+    auto corroborated = candidate(
+        "z.example:1",
+        HistorySourceLane::crawl_only,
+        HistoryGenerationDisposition::absent,
+        2);
+    corroborated.ledger_coverage_hint = true;
+    corroborated.reported_crawl_corroboration = 3;
+    snapshot.candidates = {lexical_first, corroborated};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    EXPECT_EQ(action(plan).target.endpoint, corroborated.target.endpoint);
+}
+
+TEST_F(PlannerFixture, SpentProbeEndpointCannotSponsorSuccessorGeneration)
+{
+    auto spent = candidate(
+        "spent:1",
+        HistorySourceLane::persistent_success,
+        HistoryGenerationDisposition::absent,
+        1);
+    spent.ledger_coverage_hint = true;
+    spent.probe_attempted = true;
+    auto fresh = candidate(
+        "fresh:1",
+        HistorySourceLane::crawl_only,
+        HistoryGenerationDisposition::absent,
+        2);
+    fresh.ledger_coverage_hint = true;
+    snapshot.candidates = {spent, fresh};
+
+    auto const plan = plan_history_interest(snapshot, now);
+    ASSERT_TRUE(plan.next_action);
+    EXPECT_EQ(
+        plan.next_action->action,
+        HistoryAuthorityAction::create_generation);
+    EXPECT_EQ(plan.next_action->target.endpoint, "fresh:1");
+
+    snapshot.candidates.resize(1);
+    snapshot.candidate_supply_open = false;
+    auto const exhausted = plan_history_interest(snapshot, now);
+    EXPECT_FALSE(exhausted.next_action);
+    EXPECT_FALSE(exhausted.wait_until);
+    EXPECT_EQ(exhausted.local_terminal, HistoryAcquisitionTerminal::exhausted);
+}
+
+TEST_F(PlannerFixture, CrawlOnlyQuotaBorrowsOtherwiseIdleParentBudget)
 {
     snapshot.crawl_only_probes = 2;  // floor(6 / 3)
     snapshot.source_attempts = {9, 9, 9, 9, 0};
@@ -304,8 +491,11 @@ TEST_F(PlannerFixture, CrawlOnlyQuotaCannotBorrowUnusedParentBudget)
     EXPECT_EQ(action(plan).target.endpoint, "independent:1");
 
     snapshot.candidates.resize(1);
-    EXPECT_TRUE(
-        plan_history_interest(snapshot, now).local_terminal.has_value());
+    auto const borrowed = plan_history_interest(snapshot, now);
+    EXPECT_EQ(
+        action(borrowed).action,
+        HistoryAuthorityAction::create_generation);
+    EXPECT_EQ(action(borrowed).target.endpoint, "crawl:1");
 }
 
 TEST_F(PlannerFixture, OneTokenDemandChoosesNonCrawlCandidate)
@@ -686,7 +876,8 @@ TEST(PeerSetHistorySearch, SnapshotKeepsEvidenceLanesAndHintsDistinct)
         PeerStatus{.first_seq = 1, .last_seq = 2});
     PeerSetTestAccess::install_history_source(
         io, peers, "independent.example.com:51235", false, true, false, false);
-    PeerSetTestAccess::install_crawl_history_candidates(io, peers, 1, 40, 60);
+    PeerSetTestAccess::install_crawl_history_candidates(
+        io, peers, 1, 40, 60, 3);
 
     auto snapshot = run(io, peers->co_history_search_snapshot(acquisition));
     EXPECT_FALSE(static_cast<bool>(snapshot.control));
@@ -719,12 +910,15 @@ TEST(PeerSetHistorySearch, SnapshotKeepsEvidenceLanesAndHintsDistinct)
     EXPECT_EQ(crawl->source, HistorySourceLane::crawl_only);
     EXPECT_FALSE(crawl->advertises_ledger)
         << "crawl coverage is a creation hint, never direct-use evidence";
+    EXPECT_TRUE(crawl->ledger_coverage_hint);
+    EXPECT_EQ(crawl->reported_crawl_corroboration, 3u);
 
     auto proposal = plan_history_interest(snapshot, now);
     ASSERT_TRUE(proposal.next_action);
     auto selected = find(proposal.next_action->target.endpoint);
     ASSERT_NE(selected, snapshot.candidates.end());
-    EXPECT_EQ(selected->source, HistorySourceLane::configured);
+    EXPECT_EQ(selected->source, HistorySourceLane::crawl_only);
+    EXPECT_TRUE(selected->ledger_coverage_hint);
 }
 
 TEST(PeerSetHistorySearch, LateRetryGateDoesNotHideCoveredAdmittedPeer)
@@ -1068,6 +1262,14 @@ TEST(
 
     auto owned =
         run(io, peers->co_history_search_snapshot(acquisition, interest));
+    auto const owned_candidate = std::ranges::find_if(
+        owned.candidates,
+        [&endpoint](auto const& candidate) {
+            return candidate.target.endpoint == endpoint;
+        });
+    ASSERT_NE(owned_candidate, owned.candidates.end());
+    EXPECT_TRUE(owned_candidate->probe_attempted);
+    EXPECT_TRUE(owned_candidate->demand_sponsored);
     auto wait = plan_history_interest(owned, now);
     ASSERT_TRUE(wait.wait_until);
     EXPECT_EQ(
@@ -1286,6 +1488,12 @@ TEST(PeerSetHistoryExecution, DemandReadyStaysTransientAndInstallsExactUse)
 
     auto ready_snapshot =
         run(io, peers->co_history_search_snapshot(acquisition, interest));
+    EXPECT_FALSE(std::ranges::any_of(
+        ready_snapshot.wakes,
+        [](HistoryPlannedWake const& wake) {
+            return wake.kind ==
+                HistoryWakeSourceKind::attached_generation_deadline;
+        })) << "Ready is an observed disposition, not future connect progress";
     auto use_proposal = plan_history_interest(ready_snapshot, now);
     ASSERT_TRUE(use_proposal.next_action);
     ASSERT_EQ(
@@ -1753,6 +1961,7 @@ TEST(PeerSetHistoryExecution, AttachmentHasExactReverseOwnerAndInheritedWake)
             .max_history_attachments_per_generation = 1});
     auto const endpoint = std::string("queued.example.com:51235");
     PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    install_target_coverage_hint(io, peers, endpoint, 50);
     auto const generation =
         PeerSetTestAccess::generation_for_endpoint(io, peers, endpoint);
     ASSERT_NE(generation, 0u);
@@ -1901,6 +2110,8 @@ TEST(PeerSetHistoryExecution, AttachmentProbeBudgetDoesNotResetForNewGeneration)
     auto const second = std::string("probe-second.example.com:51235");
     PeerSetTestAccess::push_pending_connect(io, peers, first);
     PeerSetTestAccess::push_pending_connect(io, peers, second);
+    install_target_coverage_hint(io, peers, first, 50);
+    install_target_coverage_hint(io, peers, second, 50);
 
     auto const now = std::chrono::steady_clock::now();
     auto scope = catl::core::RequestScope::create(now + 30s);
@@ -1952,11 +2163,9 @@ TEST(PeerSetHistoryExecution, AttachmentProbeBudgetDoesNotResetForNewGeneration)
     auto second_plan = plan_history_interest(
         run(io, peers->co_history_search_snapshot(second_acquisition)), now);
     EXPECT_FALSE(second_plan.next_action);
-    ASSERT_TRUE(second_plan.wait_until);
+    EXPECT_FALSE(second_plan.wait_until);
     EXPECT_EQ(
-        second_plan.wait_until->kind,
-        HistoryWakeSourceKind::candidate_supply_change);
-    EXPECT_EQ(second_plan.wait_until->at, scope->absolute_deadline());
+        second_plan.local_terminal, HistoryAcquisitionTerminal::exhausted);
     auto parent = run(io, peers->co_ledger_demand_snapshot(demand));
     ASSERT_TRUE(parent);
     EXPECT_EQ(parent->remaining_new_dials, 0u);
@@ -2023,6 +2232,7 @@ TEST(PeerSetHistoryDriver, ExactAttachmentWakeReplansToReadyUse)
     auto peers = PeerSet::create(io);
     auto const endpoint = std::string("driver-queued.example.com:51235");
     PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    install_target_coverage_hint(io, peers, endpoint, 50);
     auto const generation =
         PeerSetTestAccess::generation_for_endpoint(io, peers, endpoint);
     ASSERT_NE(generation, 0u);
@@ -2088,6 +2298,7 @@ TEST(PeerSetHistoryDriver, RequestCancellationWakesAttachedWaitImmediately)
     auto peers = PeerSet::create(io);
     auto const endpoint = std::string("driver-cancel.example.com:51235");
     PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    install_target_coverage_hint(io, peers, endpoint, 50);
     auto const now = std::chrono::steady_clock::now();
     auto scope = catl::core::RequestScope::create(now + 5s);
     auto demand = run(
@@ -2140,6 +2351,7 @@ TEST(PeerSetHistoryDriver, AttachedWaitIgnoresUnrelatedPoolChurn)
     auto peers = PeerSet::create(io);
     auto const endpoint = std::string("driver-churn.example.com:51235");
     PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    install_target_coverage_hint(io, peers, endpoint, 50);
     auto const now = std::chrono::steady_clock::now();
     auto scope = catl::core::RequestScope::create(now + 5s);
     auto demand = run(
@@ -2275,7 +2487,7 @@ TEST(PeerSetHistoryDriver, OpenCandidateSupplyPreventsFalseSharedTerminal)
         io,
         peers->co_get_or_create_ledger_demand(
             scope,
-            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 0}));
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
     auto acquisition =
         run(io,
             peers->co_open_history_acquisition(
@@ -2383,6 +2595,7 @@ TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
     auto peers = PeerSet::create(io);
     auto const endpoint = std::string("driver-progress.example.com:51235");
     PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    install_target_coverage_hint(io, peers, endpoint, 50);
 
     auto const now = std::chrono::steady_clock::now();
     auto scope = catl::core::RequestScope::create(now + 5s);
@@ -2467,6 +2680,7 @@ TEST(PeerSetHistoryDriver, WaitReentersOwnerStrandAcrossConcurrentRunners)
     auto peers = PeerSet::create(io);
     auto const endpoint = std::string("driver-concurrent.example.com:51235");
     PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    install_target_coverage_hint(io, peers, endpoint, 50);
 
     auto const now = std::chrono::steady_clock::now();
     auto scope = catl::core::RequestScope::create(now + 2s);

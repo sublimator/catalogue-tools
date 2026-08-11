@@ -124,6 +124,40 @@ parse_decimal_u32(std::string_view text, uint32_t& value)
     return error == std::errc{} && end == text.data() + text.size();
 }
 
+std::optional<uint16_t>
+parse_peer_port(boost::json::value const& value)
+{
+    std::uint64_t parsed = 0;
+    if (value.is_string())
+    {
+        auto const& json = value.as_string();
+        auto const text = std::string_view(json.data(), json.size());
+        uint32_t decimal = 0;
+        if (!parse_decimal_u32(text, decimal))
+            return std::nullopt;
+        parsed = decimal;
+    }
+    else if (value.is_int64())
+    {
+        auto const integer = value.as_int64();
+        if (integer <= 0)
+            return std::nullopt;
+        parsed = static_cast<std::uint64_t>(integer);
+    }
+    else if (value.is_uint64())
+    {
+        parsed = value.as_uint64();
+    }
+    else
+    {
+        return std::nullopt;
+    }
+
+    if (parsed == 0 || parsed > std::numeric_limits<uint16_t>::max())
+        return std::nullopt;
+    return static_cast<uint16_t>(parsed);
+}
+
 bool
 ranges_touch(CrawlLedgerRange const& lhs, CrawlLedgerRange const& rhs)
 {
@@ -429,30 +463,22 @@ parse_peer_crawl_body(std::string_view body, CrawlParseLimits const& limits)
 
         auto const* ip_value = obj->if_contains("ip");
         auto const* port_value = obj->if_contains("port");
-        if (!ip_value || !port_value || !ip_value->is_string() ||
-            !port_value->is_string())
+        if (!ip_value || !port_value || !ip_value->is_string())
         {
             continue;
         }
 
         auto const& host_json = ip_value->as_string();
-        auto const& port_json = port_value->as_string();
         auto const host_view =
             std::string_view(host_json.data(), host_json.size());
-        auto const port_view =
-            std::string_view(port_json.data(), port_json.size());
         if (host_view.find('\0') != std::string_view::npos)
             continue;
-        uint32_t parsed_port = 0;
-        if (!parse_decimal_u32(port_view, parsed_port) || parsed_port == 0 ||
-            parsed_port > std::numeric_limits<uint16_t>::max())
-        {
+        auto const parsed_port = parse_peer_port(*port_value);
+        if (!parsed_port)
             continue;
-        }
 
         CrawlPeer peer;
-        peer.endpoint = format_endpoint(
-            std::string(host_view), static_cast<uint16_t>(parsed_port));
+        peer.endpoint = format_endpoint(std::string(host_view), *parsed_port);
 
         if (auto const* key = obj->if_contains("public_key");
             key && key->is_string())

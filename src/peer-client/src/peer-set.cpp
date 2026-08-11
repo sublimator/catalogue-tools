@@ -6006,7 +6006,8 @@ PeerSet::get_or_create_ledger_demand_on_strand(
             "history demand fallback must precede its deadline");
 
     options.remaining_new_dials = std::min(
-        options.remaining_new_dials, options_.max_targeted_connect_attempts);
+        options.remaining_new_dials,
+        options_.max_history_generation_probes_per_demand);
     options.remaining_promotions = std::min(
         options.remaining_promotions,
         options_.max_history_promotions_per_demand);
@@ -7046,8 +7047,6 @@ PeerSet::project_history_search_snapshot(
     snapshot.fallback_at = demand.options.fallback_at;
     snapshot.cancelled =
         demand.terminal.has_value() || acquisition.terminal.has_value();
-    snapshot.candidate_supply_open =
-        !shutdown_ingress_sealed_.load(std::memory_order_acquire);
     snapshot.initial_parent_dial_budget = demand.generation_probe_tokens.size();
     snapshot.crawl_only_probes = demand.crawl_only_probes;
     snapshot.source_attempts = demand.source_attempts;
@@ -7107,6 +7106,9 @@ PeerSet::project_history_search_snapshot(
     snapshot.global_dial_grant = grant(first_live(global_history_dial_tokens_));
     snapshot.global_blind_grant =
         grant(first_live(global_history_blind_tokens_));
+    snapshot.candidate_supply_open =
+        !shutdown_ingress_sealed_.load(std::memory_order_acquire) &&
+        snapshot.remaining_parent_dials != 0 && snapshot.parent_dial_grant;
 
     auto add_global_wake = [&snapshot](auto const& tokens) {
         auto const found = std::min_element(
@@ -7136,6 +7138,7 @@ PeerSet::project_history_search_snapshot(
     {
         HistorySearchCandidate value;
         bool crawl_positive = false;
+        std::vector<std::string> crawl_reporters;
     };
     std::map<std::string, CandidateRow> candidates;
     auto strengthen = [](HistorySourceLane& current, HistorySourceLane source) {
@@ -7185,10 +7188,18 @@ PeerSet::project_history_search_snapshot(
             independent = true;
         }
         if (source != HistorySourceLane::crawl_only || independent)
-            ensure(endpoint, source);
+        {
+            auto& candidate = ensure(endpoint, source);
+            candidate.value.ledger_coverage_hint =
+                (stats.range_is_current_live ||
+                 stats.range_is_persistent_hint) &&
+                stats.status.first_seq != 0 && stats.status.last_seq != 0 &&
+                stats.status.first_seq <= acquisition.context.ledger_seq &&
+                acquisition.context.ledger_seq <= stats.status.last_seq;
+        }
     }
 
-    for (auto const& [_, batch] : crawl_observation_batches_)
+    for (auto const& [reporter, batch] : crawl_observation_batches_)
     {
         for (auto const& observation : batch.observations)
         {
@@ -7205,6 +7216,12 @@ PeerSet::project_history_search_snapshot(
             auto& candidate = ensure(
                 observation.subject_endpoint, HistorySourceLane::crawl_only);
             candidate.crawl_positive = true;
+            candidate.value.ledger_coverage_hint = true;
+            if (std::ranges::find(candidate.crawl_reporters, reporter) ==
+                candidate.crawl_reporters.end())
+            {
+                candidate.crawl_reporters.push_back(reporter);
+            }
         }
     }
 
@@ -7220,6 +7237,8 @@ PeerSet::project_history_search_snapshot(
             candidate.value.advertises_ledger =
                 status->advertised_range.contains(
                     acquisition.context.ledger_seq);
+            candidate.value.ledger_coverage_hint =
+                candidate.value.advertises_ledger;
         }
     }
 
@@ -7244,6 +7263,8 @@ PeerSet::project_history_search_snapshot(
             demand.sponsored_generations.contains(generation_id);
         candidate.attachable = !candidate.attached;
         if (candidate.attached &&
+            candidate.disposition ==
+                HistoryGenerationDisposition::queued_or_connecting &&
             snapshot.wakes.size() < kMaxHistorySearchWakes)
         {
             snapshot.wakes.push_back(HistoryPlannedWake{
@@ -7297,6 +7318,8 @@ PeerSet::project_history_search_snapshot(
             candidate.value.advertises_ledger =
                 generation.lifecycle.status()->advertised_range.contains(
                     acquisition.context.ledger_seq);
+            candidate.value.ledger_coverage_hint =
+                candidate.value.advertises_ledger;
         }
         project_attachment(candidate.value, generation.lifecycle.generation());
     }
@@ -7318,6 +7341,8 @@ PeerSet::project_history_search_snapshot(
         kMaxHistorySearchCandidates % kHistorySourceLaneCount;
     for (auto& [endpoint, row] : candidates)
     {
+        row.value.probe_attempted = demand.probed_endpoints.contains(endpoint);
+        row.value.reported_crawl_corroboration = row.crawl_reporters.size();
         if (row.value.source == HistorySourceLane::crawl_only &&
             !row.crawl_positive)
         {
@@ -7699,10 +7724,12 @@ PeerSet::execute_history_grant_on_strand(
     }
 
     std::set<std::uint64_t>::node_type sponsored_generation_node;
+    std::set<std::string>::node_type sponsored_endpoint_node;
     if (parent_probe)
     {
         if (target.generation == 0 ||
-            demand->second.sponsored_generations.contains(target.generation))
+            demand->second.sponsored_generations.contains(target.generation) ||
+            demand->second.probed_endpoints.contains(target.endpoint))
         {
             return result;
         }
@@ -7710,6 +7737,9 @@ PeerSet::execute_history_grant_on_strand(
         prepared_sponsorship.insert(target.generation);
         sponsored_generation_node =
             prepared_sponsorship.extract(target.generation);
+        std::set<std::string> prepared_endpoints;
+        prepared_endpoints.insert(target.endpoint);
+        sponsored_endpoint_node = prepared_endpoints.extract(target.endpoint);
     }
 
     struct OwnerCommitContext
@@ -7727,6 +7757,7 @@ PeerSet::execute_history_grant_on_strand(
         HistoryAcquisitionRecord* created_origin_acquisition = nullptr;
         LedgerDemandRecord* probe_demand = nullptr;
         std::set<std::uint64_t>::node_type sponsored_generation_node;
+        std::set<std::string>::node_type sponsored_endpoint_node;
         std::string created_pending_endpoint;
         std::uint64_t created_generation_id = 0;
         bool replace_terminal_generation = false;
@@ -7751,6 +7782,7 @@ PeerSet::execute_history_grant_on_strand(
         .created_origin_acquisition = create ? &acquisition->second : nullptr,
         .probe_demand = parent_probe ? &demand->second : nullptr,
         .sponsored_generation_node = std::move(sponsored_generation_node),
+        .sponsored_endpoint_node = std::move(sponsored_endpoint_node),
         .created_pending_endpoint = std::move(created_pending_endpoint),
         .created_generation_id = created_generation_id,
         .replace_terminal_generation = replace_terminal_generation,
@@ -7779,7 +7811,10 @@ PeerSet::execute_history_grant_on_strand(
         {
             auto sponsored = commit.probe_demand->sponsored_generations.insert(
                 std::move(commit.sponsored_generation_node));
+            auto endpoint = commit.probe_demand->probed_endpoints.insert(
+                std::move(commit.sponsored_endpoint_node));
             assert(sponsored.inserted);
+            assert(endpoint.inserted);
         }
         if (commit.global_dial)
         {
@@ -7808,8 +7843,10 @@ PeerSet::execute_history_grant_on_strand(
             // commit=participant_then_request_mutex
             // touches=prv.S0088,prv.S0103,prv.S0104,prv.S0105,prv.S0110,prv.S0111,prv.S0115,prv.S0118,prv.S0119,prv.S0120
             // label=atomically_debit_exact_dials_and_install_demand_origin_generation
+            // clang-format off
             auto generation = commit.owner->peer_generations_.insert(
                 std::move(commit.created_generation_node));  //@@authority-target ids=prv.T0295
+            // clang-format on
             auto authority = commit.owner->targeted_connects_.insert(
                 std::move(commit.created_authority_node));
             auto queued = commit.owner->queued_.insert(
@@ -7920,7 +7957,7 @@ PeerSet::co_execute_history_grant(
 
 ReadyHistoryPeerUses
 //@@authority transition=prv.T0311 status=provisional scope=function
-//bind=catl::peer_client::try_ready_history_peer_uses_on_strand@a1ffa1889fb15b2e
+// bind=catl::peer_client::try_ready_history_peer_uses_on_strand@a1ffa1889fb15b2e
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0105,prv.S0108,prv.S0109,prv.S0110,prv.S0111
 // label=spend_bounded_currently_runnable_exact_history_uses_without_waiting
@@ -8310,6 +8347,9 @@ PeerSet::drive_history_interest_on_strand(
                        << ",coalesced:" << result.local_wakes_coalesced
                        << ", eligible_candidates=" << eligible << '/'
                        << snapshot.candidates.size()
+                       << ", probe_budget=" << snapshot.remaining_parent_dials
+                       << '/' << snapshot.initial_parent_dial_budget
+                       << ", crawl_probes=" << snapshot.crawl_only_probes
                        << ", physical_slots=" << snapshot.physical.total()
                        << '/' << snapshot.physical.max_physical()
                        << ", remaining=" << (remaining_ms + 999) / 1000 << 's';
@@ -8423,8 +8463,7 @@ PeerSet::drive_history_interest_on_strand(
                 status << "history source selection ledger "
                        << acquisition.context().ledger_seq
                        << ": no viable shared participant"
-                       << "; live=" << decision.live_participants
-                       << ", local=";
+                       << "; live=" << decision.live_participants << ", local=";
                 if (proposal.next_action)
                     status << "action";
                 else if (proposal.wait_until)

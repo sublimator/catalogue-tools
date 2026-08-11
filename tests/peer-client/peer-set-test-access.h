@@ -1293,25 +1293,36 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::size_t count,
         std::uint32_t first_ledger,
-        std::uint32_t last_ledger)
+        std::uint32_t last_ledger,
+        std::size_t reporter_count = 1)
     {
-        run_on_strand(io, peers, [count, first_ledger, last_ledger](auto& set) {
-            catl::peer_client::PeerSet::CrawlObservationBatch batch;
-            batch.observed_at = std::chrono::steady_clock::now();
-            batch.crawl_epoch = ++set.next_crawl_observation_epoch_;
-            batch.observations.reserve(count);
-            for (std::size_t i = 0; i < count; ++i)
-            {
-                batch.observations.push_back(
-                    catl::peer_client::PeerSet::CrawlObservation{
-                        .subject_endpoint =
-                            "crawl-" + std::to_string(i) + ".example.com:51235",
-                        .intervals = {{first_ledger, last_ledger}}});
-            }
-            set.crawl_observation_batches_.insert_or_assign(
-                "reporter.example.com:51235", std::move(batch));
-            set.notify_waiters();
-        });
+        run_on_strand(
+            io,
+            peers,
+            [count, first_ledger, last_ledger, reporter_count](auto& set) {
+                for (std::size_t reporter = 0; reporter < reporter_count;
+                     ++reporter)
+                {
+                    catl::peer_client::PeerSet::CrawlObservationBatch batch;
+                    batch.observed_at = std::chrono::steady_clock::now();
+                    batch.crawl_epoch = ++set.next_crawl_observation_epoch_;
+                    batch.observations.reserve(count);
+                    for (std::size_t i = 0; i < count; ++i)
+                    {
+                        batch.observations.push_back(
+                            catl::peer_client::PeerSet::CrawlObservation{
+                                .subject_endpoint =
+                                    "crawl-" + std::to_string(i) +
+                                    ".example.com:51235",
+                                .intervals = {{first_ledger, last_ledger}}});
+                    }
+                    set.crawl_observation_batches_.insert_or_assign(
+                        "reporter-" + std::to_string(reporter) +
+                            ".example.com:51235",
+                        std::move(batch));
+                }
+                set.notify_waiters();
+            });
     }
 
     static bool

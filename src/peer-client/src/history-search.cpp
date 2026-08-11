@@ -59,7 +59,9 @@ bool
 valid_candidate(HistorySearchCandidate const& candidate) noexcept
 {
     if (candidate.target.endpoint.empty() || !valid_lane(candidate.source) ||
-        candidate.fair_ticket == 0)
+        candidate.fair_ticket == 0 ||
+        candidate.reported_crawl_corroboration >
+            kMaxHistoryCandidateCorroboration)
     {
         return false;
     }
@@ -84,7 +86,9 @@ valid_snapshot(HistorySearchSnapshot const& snapshot, bool require_control)
         snapshot.candidates.size() > kMaxHistorySearchCandidates ||
         snapshot.wakes.size() > kMaxHistorySearchWakes ||
         !snapshot.physical.valid() ||
-        snapshot.remaining_parent_dials > snapshot.initial_parent_dial_budget)
+        snapshot.remaining_parent_dials > snapshot.initial_parent_dial_budget ||
+        (snapshot.candidate_supply_open &&
+         (snapshot.remaining_parent_dials == 0 || !snapshot.parent_dial_grant)))
     {
         return false;
     }
@@ -133,9 +137,16 @@ candidate_rank(
     HistorySearchCandidate const& candidate) noexcept
 {
     auto const lane = lane_index(candidate.source);
+    auto const crawl_corroboration_rank =
+        candidate.source == HistorySourceLane::crawl_only
+        ? kMaxHistoryCandidateCorroboration -
+            candidate.reported_crawl_corroboration
+        : kMaxHistoryCandidateCorroboration;
     return std::tuple{
+        !candidate.ledger_coverage_hint,
         snapshot.source_attempts[lane],
         lane,
+        crawl_corroboration_rank,
         candidate.fair_ticket,
         std::string_view(candidate.target.endpoint),
         candidate.target.generation};
@@ -167,7 +178,10 @@ best_candidate(
 }
 
 std::optional<HistoryPlannedWake>
-earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
+earliest_wake(
+    HistorySearchSnapshot const& snapshot,
+    Clock::time_point now,
+    std::optional<HistoryWakeSourceKind> only_kind = std::nullopt)
 {
     std::optional<HistoryPlannedWake> best;
     auto const has_create_candidate = std::any_of(
@@ -176,6 +190,7 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
         [&snapshot](HistorySearchCandidate const& candidate) {
             return candidate.eligible &&
                 candidate.disposition == HistoryGenerationDisposition::absent &&
+                !candidate.probe_attempted &&
                 !snapshot.excluded_endpoints.contains(
                     candidate.target.endpoint);
         });
@@ -207,12 +222,15 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
             auto const has_probe_authority = candidate.demand_sponsored ||
                 (snapshot.remaining_parent_dials != 0 &&
                  snapshot.parent_dial_grant.has_value());
+            auto const probe_identity_available =
+                !candidate.probe_attempted || candidate.demand_sponsored;
             auto const within_crawl_quota = candidate.demand_sponsored ||
                 candidate.source != HistorySourceLane::crawl_only ||
                 snapshot.crawl_only_probes <
                     crawl_quota(snapshot.initial_parent_dial_budget);
-            if (has_probe_authority && within_crawl_quota &&
-                candidate.attachable && !candidate.attached &&
+            if (has_probe_authority && probe_identity_available &&
+                within_crawl_quota && candidate.attachable &&
+                !candidate.attached &&
                 (candidate.disposition ==
                      HistoryGenerationDisposition::queued_or_connecting ||
                  candidate.disposition ==
@@ -229,7 +247,8 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
 
             return candidate.disposition ==
                 HistoryGenerationDisposition::absent &&
-                within_crawl_quota && creation_can_eventually_commit;
+                !candidate.probe_attempted && within_crawl_quota &&
+                creation_can_eventually_commit;
         };
     auto relevant = [&](HistoryPlannedWake const& wake) {
         switch (wake.kind)
@@ -251,6 +270,9 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
                     [&wake,
                      &snapshot](HistorySearchCandidate const& candidate) {
                         return candidate.eligible && candidate.attached &&
+                            candidate.disposition ==
+                            HistoryGenerationDisposition::
+                                queued_or_connecting &&
                             candidate.target.endpoint == wake.endpoint &&
                             candidate.target.generation == wake.generation &&
                             !snapshot.excluded_endpoints.contains(
@@ -274,6 +296,8 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
         return false;
     };
     auto consider = [&](HistoryPlannedWake const& wake) {
+        if (only_kind && wake.kind != *only_kind)
+            return;
         //@@mutation-site unrelated-wake-counts-as-history-progress
         if (!valid_wake(wake, now, snapshot.absolute_deadline) ||
             !relevant(wake))
@@ -401,6 +425,43 @@ plan_history_interest(
                 .action = kind, .target = candidate.target, .not_before = now}};
     };
 
+    auto const quota = crawl_quota(snapshot.initial_parent_dial_budget);
+    auto probe_runnable = [&snapshot,
+                           now](HistorySearchCandidate const& current) {
+        if (!candidate_now(snapshot, current, now))
+            return false;
+        if (current.probe_attempted && !current.demand_sponsored)
+            return false;
+        auto const has_probe_authority = current.demand_sponsored ||
+            (snapshot.remaining_parent_dials != 0 &&
+             snapshot.parent_dial_grant.has_value());
+        if (!has_probe_authority)
+            return false;
+        if ((current.demand_sponsored || current.ledger_coverage_hint) &&
+            current.attachable && !current.attached &&
+            (current.disposition ==
+                 HistoryGenerationDisposition::queued_or_connecting ||
+             current.disposition ==
+                 HistoryGenerationDisposition::ready_transient))
+        {
+            return true;
+        }
+        return current.disposition == HistoryGenerationDisposition::absent &&
+            snapshot.global_dial_grant && snapshot.physical.can_create();
+    };
+    auto const stronger_probe_exists = std::any_of(
+        snapshot.candidates.begin(),
+        snapshot.candidates.end(),
+        [&](HistorySearchCandidate const& current) {
+            return current.source != HistorySourceLane::crawl_only &&
+                probe_runnable(current);
+        });
+    auto within_crawl_quota = [&](HistorySearchCandidate const& current) {
+        return current.demand_sponsored ||
+            current.source != HistorySourceLane::crawl_only ||
+            snapshot.crawl_only_probes < quota || !stronger_probe_exists;
+    };
+
     if (auto const* candidate = best_candidate(
             snapshot, now, [](HistorySearchCandidate const& current) {
                 return current.advertises_ledger &&
@@ -414,17 +475,27 @@ plan_history_interest(
         return action(HistoryAuthorityAction::submit_known_use, *candidate);
     }
 
+    // One acquisition waits for its exact sponsored generation before it
+    // spends authority on another. Other pool generations continue
+    // independently; a terminal generation releases this attachment and
+    // wakes the planner to select its bounded successor.
+    if (auto wake = earliest_wake(
+            snapshot, now, HistoryWakeSourceKind::attached_generation_deadline))
+    {
+        return HistoryParticipantPlan{.wait_until = std::move(wake)};
+    }
+
     if (auto const* candidate = best_candidate(
-            snapshot, now, [&snapshot](HistorySearchCandidate const& current) {
+            snapshot, now, [&](HistorySearchCandidate const& current) {
                 auto const has_probe_authority = current.demand_sponsored ||
                     (snapshot.remaining_parent_dials != 0 &&
                      snapshot.parent_dial_grant.has_value());
-                auto const within_crawl_quota = current.demand_sponsored ||
-                    current.source != HistorySourceLane::crawl_only ||
-                    snapshot.crawl_only_probes <
-                        crawl_quota(snapshot.initial_parent_dial_budget);
-                return has_probe_authority && within_crawl_quota &&
-                    current.attachable && !current.attached &&
+                return has_probe_authority &&
+                    (!current.probe_attempted || current.demand_sponsored) &&
+                    (current.demand_sponsored ||
+                     current.ledger_coverage_hint) &&
+                    within_crawl_quota(current) && current.attachable &&
+                    !current.attached &&
                     (current.disposition ==
                          HistoryGenerationDisposition::queued_or_connecting ||
                      current.disposition ==
@@ -432,12 +503,6 @@ plan_history_interest(
             }))
     {
         return action(HistoryAuthorityAction::attach_or_adopt, *candidate);
-    }
-
-    if (auto wake = earliest_wake(snapshot, now); wake &&
-        wake->kind == HistoryWakeSourceKind::attached_generation_deadline)
-    {
-        return HistoryParticipantPlan{.wait_until = std::move(wake)};
     }
 
     if (now >= snapshot.fallback_at && snapshot.parent_blind_grant &&
@@ -460,12 +525,10 @@ plan_history_interest(
     if (snapshot.remaining_parent_dials != 0 && snapshot.parent_dial_grant &&
         snapshot.global_dial_grant && snapshot.physical.can_create())
     {
-        auto const quota = crawl_quota(snapshot.initial_parent_dial_budget);
         auto create_eligible = [&](HistorySearchCandidate const& current) {
             return current.disposition ==
                 HistoryGenerationDisposition::absent &&
-                (current.source != HistorySourceLane::crawl_only ||
-                 snapshot.crawl_only_probes < quota);
+                !current.probe_attempted && within_crawl_quota(current);
         };
         auto const non_crawl_exists = best_candidate(
             snapshot, now, [&](HistorySearchCandidate const& current) {

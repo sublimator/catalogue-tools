@@ -72,12 +72,29 @@ TEST(PeerCrawlClient, RejectsPartialPortsAndOversizedBodies)
 {
     auto const body = R"json({"overlay":{"active":[
         {"ip":"192.0.2.1","port":"51235oops","complete_ledgers":"1-2"},
-        {"ip":"192.0.2.2","port":"70000","complete_ledgers":"1-2"}
+        {"ip":"192.0.2.2","port":"70000","complete_ledgers":"1-2"},
+        {"ip":"192.0.2.3","port":0,"complete_ledgers":"1-2"},
+        {"ip":"192.0.2.4","port":-1,"complete_ledgers":"1-2"},
+        {"ip":"192.0.2.5","port":70000,"complete_ledgers":"1-2"},
+        {"ip":"192.0.2.6","port":51235.0,"complete_ledgers":"1-2"}
     ]}})json";
     EXPECT_TRUE(parse_peer_crawl_body(body).peers.empty());
 
     std::string oversized(kMaxCrawlBodyBytes + 1, 'x');
     EXPECT_THROW(parse_peer_crawl_body(oversized), std::length_error);
+}
+
+TEST(PeerCrawlClient, AcceptsCurrentNumericAndLegacyStringPorts)
+{
+    auto const body = R"json({"overlay":{"active":[
+        {"ip":"192.0.2.1","port":51235,"complete_ledgers":"1-2"},
+        {"ip":"2001:db8::1","port":"2459","complete_ledgers":"3-4"}
+    ]}})json";
+
+    auto const response = parse_peer_crawl_body(body);
+    ASSERT_EQ(response.peers.size(), 2u);
+    EXPECT_EQ(response.peers[0].endpoint, "192.0.2.1:51235");
+    EXPECT_EQ(response.peers[1].endpoint, "[2001:db8::1]:2459");
 }
 
 TEST(PeerCrawlClient, RetainsOnlySyntacticallyValidReportedNodeKeys)

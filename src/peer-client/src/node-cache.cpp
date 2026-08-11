@@ -47,6 +47,21 @@ constexpr HeaderAttemptPolicy kHeaderAttemptPolicy{
     .max_rounds = 3,
 };
 
+LedgerDemandOptions
+managed_ledger_demand_options(std::uint32_t ledger_seq)
+{
+    // Header and node acquisitions for one request+ledger identity share one
+    // parent. Construct their exact options here so either caller can create
+    // the parent without making admission depend on call order.
+    return LedgerDemandOptions{
+        .ledger_seq = ledger_seq,
+        .fallback_at = std::chrono::steady_clock::time_point::min(),
+        .remaining_new_dials =
+            kHeaderAttemptPolicy.max_fanout * kHeaderAttemptPolicy.max_rounds,
+        .remaining_promotions = std::numeric_limits<std::size_t>::max(),
+        .remaining_blind_uses = std::numeric_limits<std::size_t>::max()};
+}
+
 enum class HeaderWaitWake : std::uint8_t {
     round_terminal,
     shared_progress,
@@ -2093,17 +2108,7 @@ NodeCache::ensure_present(
             }
             auto demand =
                 co_await participant_owner->co_get_or_create_ledger_demand(
-                    request_scope,
-                    LedgerDemandOptions{
-                        .ledger_seq = ledger_seq,
-                        .fallback_at =
-                            std::chrono::steady_clock::time_point::min(),
-                        .remaining_new_dials =
-                            std::numeric_limits<std::size_t>::max(),
-                        .remaining_promotions =
-                            std::numeric_limits<std::size_t>::max(),
-                        .remaining_blind_uses =
-                            std::numeric_limits<std::size_t>::max()});
+                    request_scope, managed_ledger_demand_options(ledger_seq));
             acquisition =
                 co_await participant_owner->co_open_history_acquisition(
                     demand,
@@ -4432,23 +4437,7 @@ NodeCache::get_header_impl(
         {
             auto demand =
                 co_await participant_owner->co_get_or_create_ledger_demand(
-                    request_scope,
-                    LedgerDemandOptions{
-                        .ledger_seq = ledger_seq,
-                        // Peer status can trail the validated tip by a few
-                        // ledgers. Known coverage still wins in the planner;
-                        // this permits its single bounded blind header use
-                        // before declaring the exact anchor unavailable.
-                        // The sentinel matches node acquisitions sharing this
-                        // request-and-ledger parent.
-                        .fallback_at =
-                            std::chrono::steady_clock::time_point::min(),
-                        .remaining_new_dials =
-                            std::numeric_limits<std::size_t>::max(),
-                        .remaining_promotions =
-                            std::numeric_limits<std::size_t>::max(),
-                        .remaining_blind_uses =
-                            std::numeric_limits<std::size_t>::max()});
+                    request_scope, managed_ledger_demand_options(ledger_seq));
             acquisition =
                 co_await participant_owner->co_open_history_acquisition(
                     demand,
@@ -5295,6 +5284,28 @@ NodeCache::drive_managed_header_fetch(
                 participant->interest = driven.interest;
                 if (!driven.peer_use)
                 {
+                    std::ostringstream status;
+                    status << "header history selection ended without a peer: "
+                              "ledger="
+                           << ledger_seq << ", local_terminal=";
+                    if (driven.local_terminal)
+                        status << static_cast<int>(*driven.local_terminal);
+                    else
+                        status << "none";
+                    status << ", shared_terminal=";
+                    if (driven.shared_terminal)
+                        status << static_cast<int>(*driven.shared_terminal);
+                    else
+                        status << "none";
+                    status << ", replans=" << driven.replans
+                           << " [action=" << driven.replans_after_commit
+                           << ", local=" << driven.replans_after_local_change
+                           << ", timer=" << driven.replans_after_scheduled_wake
+                           << "]"
+                           << ", arbitrations=" << driven.arbitrations
+                           << ", grants/commits=" << driven.grants << '/'
+                           << driven.commits;
+                    catl::core::emit_status(status.str());
                     PLOGD(
                         log_,
                         "header history drive produced no use: ledger=",
@@ -5410,7 +5421,7 @@ NodeCache::drive_managed_header_fetch(
             }
 
             //@@authority transition=prv.T0312 status=provisional
-            //bind=expression_statement@bd84262baccefce1
+            // bind=expression_statement@bd84262baccefce1
             // scope=statement
             // owner=unresolved owner_hypothesis=node_cache
             // commit=header_state_strand

@@ -42,6 +42,7 @@ struct Fixture
               io,
               PeerSetOptions{
                   .max_targeted_connect_attempts = 3,
+                  .max_history_generation_probes_per_demand = 3,
                   .max_active_ledger_demands = 32,
                   .max_acquisitions_per_demand = 8,
                   .max_history_promotions_per_demand = 1,
