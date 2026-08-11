@@ -8399,6 +8399,24 @@ PeerSet::drive_history_interest_on_strand(
                 break;
             }
 
+            // A bounded wait stops being future shared viability at its wake
+            // instant, but that instant is a replan receipt, not exhaustion.
+            // Give the local plan's promised temporal disposition precedence
+            // over the shared owner's zero-future-work projection.
+            if (arbitration_now >= acquisition.absolute_deadline() ||
+                (proposal.wait_until &&
+                 proposal.wait_until->at <= arbitration_now))
+            {
+                // clang-format off
+                //@@authority transition=prv.T0313 status=provisional scope=statement bind=expression_statement@4fa57f301747fd6b
+                // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+                // touches=prv.S0105,prv.S0109
+                // label=consume_due_local_wait_as_replan_receipt_before_shared_exhaustion
+                next_replan_cause = ReplanCause::scheduled_wake;  //@@authority-target ids=prv.T0313
+                // clang-format on
+                break;
+            }
+
             if (decision.viable_participants == 0)
             {
                 std::ostringstream status;

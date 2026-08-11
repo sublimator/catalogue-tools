@@ -2317,6 +2317,66 @@ TEST(PeerSetHistoryDriver, OpenCandidateSupplyPreventsFalseSharedTerminal)
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
 }
 
+TEST(PeerSetHistoryDriver, ExpiredCandidateWaitReplansBeforeSharedTerminal)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .retry_backoff = 1s});
+    auto const now = std::chrono::steady_clock::now();
+    PeerSetTestAccess::defer_configured_history_candidates(io, peers, now);
+    auto scope = catl::core::RequestScope::create(now + 3s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{55}, .fetch_epoch = 1}));
+    auto initial = plan_history_interest(
+        run(io, peers->co_history_search_snapshot(acquisition)), now);
+    ASSERT_TRUE(initial.wait_until);
+    ASSERT_EQ(
+        initial.wait_until->kind,
+        HistoryWakeSourceKind::candidate_retry_expiry);
+
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{55}, 1);
+    auto interest = fetch->register_interest(peers, scope, demand, acquisition);
+    auto future = boost::asio::co_spawn(
+        io,
+        peers->co_drive_history_interest(
+            fetch, acquisition, interest, PeerUseKind::ledger_header),
+        boost::asio::use_future);
+    boost::asio::steady_timer cancel(io, 1250ms);
+    cancel.async_wait([scope](boost::system::error_code ec) {
+        if (!ec)
+            scope->cancel();
+    });
+    while (future.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+
+    auto driven = future.get();
+    EXPECT_FALSE(driven.acquired());
+    EXPECT_FALSE(driven.shared_terminal)
+        << "a due wait is a replan receipt, not proof that every participant "
+           "is exhausted";
+    ASSERT_TRUE(driven.local_terminal);
+    EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_GE(driven.replans_after_scheduled_wake, 1u);
+    EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
+}
+
 TEST(PeerSetHistoryDriver, AttachedWaitReportsCanonicalSelectionProgress)
 {
     boost::asio::io_context io;
