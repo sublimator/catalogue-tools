@@ -1,10 +1,11 @@
 # History peer selection Cuts 2B–4 — final implementation and live review
 
-Review target: the implementation series after `f35b7ad`, including this
-review in the final cutover commit.
+Review target: the implementation series after `f35b7ad`, through the shared
+planner timestamp correction `7363d5c` and ordinary reconnect wake correction
+`36e5f7e`, plus the final Cloud Run cutover evidence.
 
-Disposition: **ACCEPT the request-scoped history-selection cutover for
-deployment.** Shared planning, bounded peer acquisition, exact header/node
+Disposition: **ACCEPT and retain the request-scoped history-selection cutover
+in production.** Shared planning, bounded peer acquisition, exact header/node
 `PeerUse`, and proof-builder integration are implemented and exercised through
 the production transport. The named old Xahau proof did not complete in the
 observed live peer topology; it crossed the former abort, verified its first
@@ -77,11 +78,37 @@ The shared modeling lesson now records the general rule as **predicate subject
 eligibility, and eventual progress are separate facts, and a predecessor-phase
 deadline cannot silently reacquire terminal authority after admission.
 
+## Live-discovered ordinary reconnect liveness defect
+
+The first history candidate could acquire Xahau peers during startup, exhaust
+that initial frontier, and then remain permanently at zero peers. Its retry
+gates retained failure time and magnitude, but no executor-owned root remained
+after the attempt queue drained. `complete_connect_servant` pumped only already
+queued work, while `consume_peer_terminal` removed the endpoint and provided no
+future cause that could reach ordinary connection admission. The candidate's
+Xahau counters remained at two connects and two disconnects overnight; a fresh
+rollback instance immediately found Xahau peers.
+
+The correction retains one earliest-eligible retry wake plus an exact census
+of every admitted timer callback, including canceled and superseded callbacks.
+Shutdown cancels scheduling intent but joins that callback population before
+claiming drain. Attempt completion and exact admitted-peer terminal now
+replenish configured/discovered ordinary roots. Queue admission and wake
+selection share one steady-clock observation so the retry boundary cannot fall
+between two samples and swallow the only successor.
+
 ## Automated evidence
 
 - Full build: 49 targets completed; only pre-existing warnings remained.
-- `xprv-gtest`: 192/192 passed, including transport-bounded proof-quorum
+- `xprv-gtest`: 193/193 passed, including transport-bounded proof-quorum
   selection.
+- Full peer-client CTest: 755/755 passed.
+- Reconnect controls:
+  `RetryGateRetainsWakeUntilEndpointBecomesEligible`,
+  `RetryQueueAndWakeShareEligibilityObservationAtBoundary`, and
+  `StopCancelsAndJoinsRetainedConnectRetryWake` passed. The exact peer-terminal
+  control also preserves the endpoint as a retry root and observes its retained
+  wake.
 - `peer-session-interface-gtest`: 137/137 passed, including the managed exact
   header path and a real PeerClient exact node-batch walk with no legacy pin.
 - `peer-use-gtest`: 31/31 passed.
@@ -95,10 +122,31 @@ deadline cannot silently reacquire terminal authority after admission.
   keep-alive boundaries passed at one and four I/O threads. Every live row was
   graceful, no row required forced termination, both XRPL and Xahau engine
   fences were present, and no validation heartbeat effect followed a fence.
-  Artifacts: `/var/folders/cx/wck9rldx18gb36r4p0sh_vdr0000gn/T/xprv-shutdown-smoke.rov7wcoh`.
+  Final post-commit artifacts:
+  `/var/folders/cx/wck9rldx18gb36r4p0sh_vdr0000gn/T/xprv-shutdown-smoke.st7x4y8b`.
 - `git diff --check` passed.
 
 ## Live evidence
+
+### Reconnect candidate and production cutover
+
+- Cloud Build `27e7ef57-e22d-4107-ab9d-ad815ce6726b` built source identity
+  `36e5f7e`; runtime digest:
+  `sha256:2ca8ad56d2f0fa32491bd9c0541498c7bfba359185674fc09059a92719901824`.
+- `xprv-reconnect-36e5f7e` was created at zero traffic. Its exact process run
+  began with Xahau at one connect, one disconnect, and zero peers, then crossed
+  the five-second retry boundary and reached three connects, one disconnect,
+  and two peers. Across ten five-second samples the Xahau quorum advanced from
+  24,974,704 to 24,974,717.
+- The revision was promoted to 100 percent traffic with `xprv-00007-kkr`
+  retained as the rollback target. Post-cutover health reported build
+  `36e5f7e`; after the live proof probes Xahau had continued to ten connects,
+  eight disconnects, and two peers with quorum 24,974,817. The latest status
+  log independently showed three admitted Xahau peers and a current full
+  19-of-19 quorum.
+- The ERROR-or-higher Cloud Run audit contained only the three deliberately
+  observed Xahau HTTP 504 proof responses. There was no assertion, abort,
+  process fault, or undrained request.
 
 ### XRPL deep-history end-to-end control
 
@@ -139,6 +187,22 @@ deadline cannot silently reacquire terminal authority after admission.
   the observed archival-peer availability.
 - Response: `/private/tmp/xprv-phase-scope-fix-xahau-old.json`.
 
+### Exact promoted-revision proof controls
+
+- The XRPL deep-history transaction above returned HTTP 200 in 2.046 seconds
+  on `36e5f7e`. The 100,312-byte proof was submitted to production `/verify`,
+  which returned `{"verified":true}`. Artifact:
+  `/private/tmp/xprv-prod-xrpl-deep-36e5f7e.json`.
+- The recent Xahau control returned honest HTTP 504 timeouts in 60.869 and
+  11.165 seconds under the observed peer topology, including after a covering
+  peer was admitted. The named old Xahau case returned the same classified
+  timeout in 23.873 seconds. After all three, `active_proofs` was zero, the
+  process run ID was unchanged, Xahau reconnect counters continued advancing,
+  and both network quorum sequences remained current. Artifacts:
+  `/private/tmp/xprv-prod-xahau-recent-36e5f7e.json`,
+  `/private/tmp/xprv-prod-xahau-recent-36e5f7e-retry.json`, and
+  `/private/tmp/xprv-prod-xahau-old-36e5f7e.json`.
+
 ## Authority evidence
 
 - Final source graph after the phase-scope correction: PASS, 106 files, 467
@@ -157,12 +221,26 @@ deadline cannot silently reacquire terminal authority after admission.
   rejects the repository's newer `status`, `scope`, `bind`, and
   `@@authority-target` dialect. The current source-graph parser accepts all 467
   directives. This is a checker-version incompatibility, not hidden as a pass.
+- The reconnect-focused source graph is also valid: 44 files, 371 directives,
+  47 declared, 324 provisional, zero refused, and 47 parser warnings. Artifact:
+  `/private/tmp/catalogue-peer-reconnect-authority-final.json`.
+- Beta cppd/clangd corridor observations found exact paths from peer terminal
+  through replenish to queue admission, from timer schedule to its callback,
+  and directly from connect-servant completion to replenish. One broader query
+  hit its 200-node bound and was not treated as an absence proof. Compiler-edge
+  extraction remains corroboration until the persistent index and independent
+  batch graph agree over the complete translation-unit population.
 
 ## Deployment conclusion
 
-The accepted Cuts 2B–4 authority boundary is closed: exact request identity
-drives shared search; exact use identity drives transport; passive content
-arrival cannot mint or settle command authority; bounded acquisition and
-terminal cleanup fail closed. Automated and two independent live end-to-end
-controls are green. The remaining limitation observed for the named old Xahau
-case is external archival supply, surfaced truthfully as a bounded timeout.
+The accepted Cuts 2B–4 authority boundary is closed and revision
+`xprv-reconnect-36e5f7e` now serves 100 percent of Cloud Run traffic. Exact
+request identity drives shared search; exact use identity drives transport;
+passive content arrival cannot mint or settle command authority; bounded
+acquisition and terminal cleanup fail closed; deferred ordinary eligibility
+retains an owned future cause and a shutdown-joined callback population.
+Automated evidence and the XRPL deep-history end-to-end control are green.
+Current Xahau proof supply
+remains topology-dependent for both the named old case and the repeated recent
+case, surfaced truthfully as bounded timeouts without freezing the pool or the
+server.
