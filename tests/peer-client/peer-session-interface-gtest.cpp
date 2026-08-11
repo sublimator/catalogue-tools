@@ -8085,6 +8085,11 @@ TEST(PeerTerminalReceipt, CurrentGenerationTerminalRemovesPeer)
     EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), 0u);
     EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 1u);
     EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_TRUE(PeerSetTestAccess::tracker_contains(io, peers, key))
+        << "terminal range evidence expires, but the endpoint remains a retry "
+           "root";
+    EXPECT_TRUE(PeerSetTestAccess::has_connect_retry_wake(io, peers))
+        << "the retained backoff gate must have an executor-owned consumer";
 }
 
 TEST(PeerTerminalReceipt, StaleTerminalCannotRemoveNewerGeneration)

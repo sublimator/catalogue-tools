@@ -631,6 +631,109 @@ TEST(PeerSetPruning, RetryBackoffUsesFailureCountAndCapsAtFiveMinutes)
         std::chrono::minutes(5));
 }
 
+TEST(PeerSetPruning, RetryGateRetainsWakeUntilEndpointBecomesEligible)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 21337,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .retry_backoff = std::chrono::seconds(1),
+        });
+
+    auto const& bootstrap = get_bootstrap_peers(21337);
+    ASSERT_FALSE(bootstrap.empty());
+    auto endpoint = EndpointTracker::normalize_endpoint_identity(
+        bootstrap.front().host, bootstrap.front().port);
+    ASSERT_TRUE(endpoint);
+    PeerSetTestAccess::note_connect_failure(io, peers, *endpoint);
+
+    ASSERT_TRUE(PeerSetTestAccess::has_connect_retry_wake(io, peers));
+    PeerSetTestAccess::set_failed_at(
+        io,
+        peers,
+        *endpoint,
+        std::chrono::steady_clock::now() - std::chrono::milliseconds(980));
+    PeerSetTestAccess::replenish_ordinary_connections(io, peers);
+
+    io.restart();
+    io.run();
+
+    EXPECT_TRUE(PeerSetTestAccess::is_queued_connect(io, peers, *endpoint));
+    EXPECT_FALSE(PeerSetTestAccess::has_connect_retry_wake(io, peers));
+    EXPECT_EQ(PeerSetTestAccess::connect_retry_wait_count(io, peers), 0u);
+}
+
+TEST(PeerSetPruning, StopCancelsAndJoinsRetainedConnectRetryWake)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    auto const endpoint = std::string("stop-retry-wake.example.com:51235");
+    PeerSetTestAccess::add_discovered(io, peers, endpoint);
+    PeerSetTestAccess::set_crawled_at(
+        io, peers, endpoint, std::chrono::steady_clock::now());
+    PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    ASSERT_TRUE(PeerSetTestAccess::has_connect_retry_wake(io, peers));
+
+    bool stopped = false;
+    std::exception_ptr failure;
+    asio::co_spawn(io, peers->co_stop(), [&](std::exception_ptr ep) {
+        failure = std::move(ep);
+        stopped = true;
+    });
+    io.restart();
+    io.run();
+
+    EXPECT_EQ(failure, nullptr);
+    EXPECT_TRUE(stopped);
+    EXPECT_FALSE(PeerSetTestAccess::has_connect_retry_wake(io, peers));
+    EXPECT_EQ(PeerSetTestAccess::connect_retry_wait_count(io, peers), 0u);
+}
+
+TEST(PeerSetPruning, RetryQueueAndWakeShareEligibilityObservationAtBoundary)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 21337,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .retry_backoff = std::chrono::seconds(1),
+        });
+
+    auto const& bootstrap = get_bootstrap_peers(21337);
+    ASSERT_FALSE(bootstrap.empty());
+    auto endpoint = EndpointTracker::normalize_endpoint_identity(
+        bootstrap.front().host, bootstrap.front().port);
+    ASSERT_TRUE(endpoint);
+    PeerSetTestAccess::note_connect_failure(io, peers, *endpoint);
+
+    auto const eligible_at = std::chrono::steady_clock::now();
+    PeerSetTestAccess::set_failed_at(
+        io, peers, *endpoint, eligible_at - std::chrono::seconds(1));
+    PeerSetTestAccess::replenish_ordinary_connections_at(
+        io, peers, eligible_at - std::chrono::nanoseconds(1));
+
+    io.restart();
+    io.run();
+
+    EXPECT_TRUE(PeerSetTestAccess::is_queued_connect(io, peers, *endpoint))
+        << "the gate may expire between real clock samples without losing its "
+           "wake";
+    EXPECT_FALSE(PeerSetTestAccess::has_connect_retry_wake(io, peers));
+    EXPECT_EQ(PeerSetTestAccess::connect_retry_wait_count(io, peers), 0u);
+}
+
 TEST(PeerSetPruning, PumpConnectsHonorsComputedRetryBackoff)
 {
     asio::io_context io;

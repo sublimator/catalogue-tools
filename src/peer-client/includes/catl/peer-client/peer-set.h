@@ -28,6 +28,7 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/system/error_code.hpp>
 #include <chrono>
 #include <cstddef>
 #include <deque>
@@ -1096,6 +1097,11 @@ private:
     void
     queue_connect(std::string const& endpoint);
 
+    void
+    queue_connect_at(
+        std::string const& endpoint,
+        std::chrono::steady_clock::time_point observed_at);
+
     bool
     queue_targeted_connect(
         std::string const& endpoint,
@@ -1243,6 +1249,33 @@ private:
 
     std::chrono::steady_clock::duration
     retry_backoff_for(std::string const& endpoint) const;
+
+    struct ConnectRetryWake;
+
+    bool
+    ordinary_connect_retry_authorized(std::string const& endpoint) const;
+
+    void
+    replenish_ordinary_connections();
+
+    void
+    replenish_ordinary_connections_at(
+        std::chrono::steady_clock::time_point observed_at);
+
+    void
+    schedule_connect_retry_wake() noexcept;
+
+    void
+    schedule_connect_retry_wake_at(
+        std::chrono::steady_clock::time_point observed_at) noexcept;
+
+    void
+    consume_connect_retry_wake(
+        std::shared_ptr<ConnectRetryWake> const& wake,
+        boost::system::error_code const& ec) noexcept;
+
+    void
+    cancel_connect_retry_wake() noexcept;
 
     void
     record_failure_event(
@@ -1601,6 +1634,24 @@ private:
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=bounded_endpoint_retry_age_and_magnitude_gate
     std::map<std::string, EndpointRetryGate> retry_gates_;
+    struct ConnectRetryWake
+    {
+        std::shared_ptr<boost::asio::steady_timer> timer;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    // A retry gate is inert until an executor-owned wake can consume it. One
+    // current wake names the earliest eligible gate; superseded/cancelled
+    // handlers remain in the census until their exact callback runs.
+    //@@authority state=prv.S0125 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::connect_retry_wake_@e372c7b400d838cb
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=earliest_eligible_ordinary_connection_retry_wake
+    std::shared_ptr<ConnectRetryWake> connect_retry_wake_;
+    //@@authority state=prv.S0126 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::connect_retry_waits_@b25618e51b586990
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=admitted_connection_retry_callback_census
+    std::size_t connect_retry_waits_ = 0;
     struct FailureEvent
     {
         std::chrono::steady_clock::time_point at;

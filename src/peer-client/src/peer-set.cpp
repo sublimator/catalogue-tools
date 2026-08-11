@@ -533,7 +533,7 @@ PeerSet::start()
 //@@authority transition=prv.T0084 status=provisional scope=function
 // bind=catl::peer_client::co_stop@a62dab8774ffc758
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0034,prv.S0035,prv.S0036,prv.S0037,prv.S0038,prv.S0062
+// touches=prv.S0034,prv.S0035,prv.S0036,prv.S0037,prv.S0038,prv.S0062,prv.S0125,prv.S0126
 // label=seal_and_join_peer_sessions_connects_crawls_and_pins
 asio::awaitable<void>
 PeerSet::co_stop()
@@ -763,7 +763,7 @@ PeerSet::co_stop()
 //@@authority transition=prv.T0085 status=provisional scope=function
 // bind=catl::peer_client::begin_stop_on_strand@678597c2eaef130c
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0035,prv.S0037,prv.S0038
+// touches=prv.S0035,prv.S0037,prv.S0038,prv.S0125,prv.S0126
 // label=commit_peer_set_stopping_and_clear_queued_admission
 void
 PeerSet::begin_stop_on_strand()
@@ -773,6 +773,7 @@ PeerSet::begin_stop_on_strand()
         return;
 
     lifecycle_ = Lifecycle::stopping;
+    cancel_connect_retry_wake();
     PEER_SET_TRACE(
         "[",
         net_label_,
@@ -986,7 +987,7 @@ PeerSet::complete_connect_servant(
     {
         try
         {
-            pump_connects();
+            replenish_ordinary_connections();
         }
         catch (...)
         {
@@ -1331,6 +1332,14 @@ PeerSet::start_generation_drain(
                         //@@mutation-end peer-use-release-follows-physical-drain
                         self->draining_generations_.erase(generation);
                         self->notify_shutdown_progress();
+                        try
+                        {
+                            self->replenish_ordinary_connections();
+                        }
+                        catch (...)
+                        {
+                            self->schedule_connect_retry_wake();
+                        }
                         co_return;
                     }
 
@@ -1735,6 +1744,7 @@ PeerSet::shutdown_drained_on_strand() const noexcept
     return connections_.empty() && active_peer_pins_.empty() &&
         active_peer_uses_.empty() && draining_generations_.empty() &&
         in_flight_.empty() && queued_.empty() && pending_connects_.empty() &&
+        !connect_retry_wake_ && connect_retry_waits_ == 0 &&
         //@@mutation-site crawl-physical-receipt-required-for-terminal
         crawl_in_flight_.empty() && crawl_queued_.empty() &&
         //@@mutation-end crawl-physical-receipt-required-for-terminal
@@ -1863,6 +1873,7 @@ PeerSet::note_discovered(std::string const& endpoint, DiscoverySource source)
     prune_discovery_state();
     pump_crawls();
     pump_connects();
+    schedule_connect_retry_wake();
     notify_waiters();
 }
 
@@ -1894,6 +1905,7 @@ PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
     prune_discovery_state();
     pump_crawls();
     pump_connects();
+    schedule_connect_retry_wake();
     notify_waiters();
 }
 
@@ -2002,6 +2014,7 @@ PeerSet::note_connect_failure(std::string const& endpoint, std::string detail)
     record_failure_event(key, classify_failure_kind(detail, false), now);
     sort_pending_connects();
     notify_waiters();
+    schedule_connect_retry_wake();
 }
 
 void
@@ -2043,6 +2056,252 @@ PeerSet::retry_backoff_for(std::string const& endpoint) const
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::minutes(5));
     return std::min(backoff, cap);
+}
+
+bool
+PeerSet::ordinary_connect_retry_authorized(std::string const& endpoint) const
+{
+    ASSERT_ON_STRAND();
+    auto const key = canonical_endpoint(endpoint);
+    if (key.empty() || connections_.count(key) || in_flight_.count(key) ||
+        queued_.count(key))
+    {
+        return false;
+    }
+
+    if (should_connect_endpoint(key))
+        return true;
+
+    // Built-in and explicitly configured peers remain ordinary connection
+    // roots even when no crawl/status response has supplied a range yet.
+    if (!configured_endpoints_.contains(key))
+        return false;
+    return is_archival_endpoint(key) ? !at_archival_cap()
+                                     : !at_connection_cap();
+}
+
+void
+PeerSet::replenish_ordinary_connections()
+{
+    replenish_ordinary_connections_at(std::chrono::steady_clock::now());
+}
+
+void
+PeerSet::replenish_ordinary_connections_at(
+    std::chrono::steady_clock::time_point observed_at)
+{
+    ASSERT_ON_STRAND();
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        lifecycle_ != Lifecycle::running)
+    {
+        return;
+    }
+
+    std::set<std::string> endpoints = configured_endpoints_;
+    auto tracked = tracker_->all_endpoints();
+    endpoints.insert(tracked.begin(), tracked.end());
+    for (auto const& endpoint : endpoints)
+    {
+        if (ordinary_connect_retry_authorized(endpoint))
+            queue_connect_at(endpoint, observed_at);
+    }
+    pump_connects();
+    schedule_connect_retry_wake_at(observed_at);
+}
+
+void
+PeerSet::schedule_connect_retry_wake() noexcept
+{
+    schedule_connect_retry_wake_at(std::chrono::steady_clock::now());
+}
+
+//@@authority transition=prv.T0306 status=provisional scope=function
+// bind=catl::peer_client::schedule_connect_retry_wake_at@14eb6abbf6790d87
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0076,prv.S0125,prv.S0126
+// label=retain_earliest_eligible_ordinary_connection_retry_wake
+void
+PeerSet::schedule_connect_retry_wake_at(
+    std::chrono::steady_clock::time_point observed_at) noexcept
+{
+    ASSERT_ON_STRAND();
+    try
+    {
+        if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+            lifecycle_ != Lifecycle::running)
+        {
+            cancel_connect_retry_wake();
+            return;
+        }
+
+        std::set<std::string> endpoints = configured_endpoints_;
+        auto tracked = tracker_->all_endpoints();
+        endpoints.insert(tracked.begin(), tracked.end());
+
+        std::optional<std::chrono::steady_clock::time_point> earliest;
+        for (auto const& endpoint : endpoints)
+        {
+            if (!ordinary_connect_retry_authorized(endpoint))
+                continue;
+            auto const gate = retry_gates_.find(endpoint);
+            if (gate == retry_gates_.end())
+                continue;
+            auto const eligible_at =
+                gate->second.failed_at + retry_backoff_for(endpoint);
+            // An elapsed gate is consumed synchronously by replenish. If its
+            // queue admission was refused by the physical census, that
+            // census's exact terminal receipt is the next wake root.
+            if (eligible_at <= observed_at)
+                continue;
+            if (!earliest || eligible_at < *earliest)
+                earliest = eligible_at;
+        }
+
+        if (!earliest)
+        {
+            cancel_connect_retry_wake();
+            return;
+        }
+        if (connect_retry_wake_ && connect_retry_wake_->deadline <= *earliest)
+        {
+            return;
+        }
+
+        if (connect_retry_wake_)
+        {
+            connect_retry_wake_->timer->cancel();
+        }
+
+        auto wake = std::make_shared<ConnectRetryWake>();
+        wake->timer = std::make_shared<asio::steady_timer>(strand_, *earliest);
+        wake->deadline = *earliest;
+        connect_retry_wake_ = wake;
+        ++connect_retry_waits_;
+        try
+        {
+            wake->timer->async_wait([self = shared_from_this(), wake](
+                                        boost::system::error_code const& ec) {
+                self->consume_connect_retry_wake(wake, ec);
+            });
+        }
+        catch (...)
+        {
+            if (connect_retry_wake_ == wake)
+                connect_retry_wake_.reset();
+            --connect_retry_waits_;
+            notify_shutdown_progress();
+            throw;
+        }
+    }
+    catch (std::exception const& e)
+    {
+        try
+        {
+            PLOGE(
+                log_,
+                "[",
+                net_label_,
+                "] Failed to retain connection retry wake: ",
+                e.what());
+        }
+        catch (...)
+        {
+        }
+    }
+    catch (...)
+    {
+        try
+        {
+            PLOGE(
+                log_,
+                "[",
+                net_label_,
+                "] Failed to retain connection retry wake");
+        }
+        catch (...)
+        {
+        }
+    }
+}
+
+//@@authority transition=prv.T0307 status=provisional scope=function
+// bind=catl::peer_client::consume_connect_retry_wake@c23855a764cb4b02
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0009,prv.S0037,prv.S0076,prv.S0125,prv.S0126
+// label=consume_exact_retry_wake_and_admit_eligible_successors
+void
+PeerSet::consume_connect_retry_wake(
+    std::shared_ptr<ConnectRetryWake> const& wake,
+    boost::system::error_code const& ec) noexcept
+{
+    ASSERT_ON_STRAND();
+    assert(connect_retry_waits_ != 0);
+    --connect_retry_waits_;
+    auto const is_current = connect_retry_wake_ == wake;
+    if (is_current)
+        connect_retry_wake_.reset();
+    notify_shutdown_progress();
+
+    if (!is_current || ec ||
+        shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        lifecycle_ != Lifecycle::running)
+    {
+        return;
+    }
+
+    try
+    {
+        replenish_ordinary_connections();
+    }
+    catch (std::exception const& e)
+    {
+        try
+        {
+            PLOGE(
+                log_,
+                "[",
+                net_label_,
+                "] Connection retry wake failed: ",
+                e.what());
+        }
+        catch (...)
+        {
+        }
+        schedule_connect_retry_wake();
+    }
+    catch (...)
+    {
+        try
+        {
+            PLOGE(log_, "[", net_label_, "] Connection retry wake failed");
+        }
+        catch (...)
+        {
+        }
+        schedule_connect_retry_wake();
+    }
+}
+
+//@@authority transition=prv.T0308 status=provisional scope=function
+// bind=catl::peer_client::cancel_connect_retry_wake@16a4cb9948fd0ea5
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0125,prv.S0126
+// label=request_retry_wake_cancellation_without_counterfeit_receipt
+void
+PeerSet::cancel_connect_retry_wake() noexcept
+{
+    ASSERT_ON_STRAND();
+    auto wake = std::move(connect_retry_wake_);
+    if (!wake || !wake->timer)
+        return;
+    try
+    {
+        wake->timer->cancel();
+    }
+    catch (...)
+    {
+        // The retained callback census still prevents a false stop receipt.
+    }
 }
 
 void
@@ -2908,11 +3167,21 @@ PeerSet::queue_connect(std::string const& endpoint)
         });
         return;
     }
+    queue_connect_at(endpoint, std::chrono::steady_clock::now());
+}
+
+void
+PeerSet::queue_connect_at(
+    std::string const& endpoint,
+    std::chrono::steady_clock::time_point observed_at)
+{
+    ASSERT_ON_STRAND();
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     auto normalized = EndpointTracker::normalize_endpoint_identity(endpoint);
     if (!normalized)
         return;
     auto key = std::move(*normalized);
-    auto const now = std::chrono::steady_clock::now();
 
     if (connections_.count(key) || in_flight_.count(key))
         return;
@@ -2923,7 +3192,7 @@ PeerSet::queue_connect(std::string const& endpoint)
         if (authority.history_demand_authorized)
             return;
         authority.ordinary_discovery_authorized = true;
-        authority.ordinary_deadline = now + kOrdinaryConnectDeadline;
+        authority.ordinary_deadline = observed_at + kOrdinaryConnectDeadline;
         return;
     }
 
@@ -2931,7 +3200,7 @@ PeerSet::queue_connect(std::string const& endpoint)
     if (failed != retry_gates_.end())
     {
         auto backoff = retry_backoff_for(key);
-        if (now - failed->second.failed_at < backoff)
+        if (observed_at - failed->second.failed_at < backoff)
         {
             return;
         }
@@ -2949,14 +3218,14 @@ PeerSet::queue_connect(std::string const& endpoint)
     }
 
     QueuedConnectAuthority authority;
-    authority.physical_deadline = now + kOrdinaryConnectDeadline;
+    authority.physical_deadline = observed_at + kOrdinaryConnectDeadline;
     authority.generation =
         reserve_connection_generation(key, authority.physical_deadline);
     if (authority.generation == 0)
         return;
     auto const generation = authority.generation;
     authority.ordinary_discovery_authorized = true;
-    authority.ordinary_deadline = now + kOrdinaryConnectDeadline;
+    authority.ordinary_deadline = observed_at + kOrdinaryConnectDeadline;
     try
     {
         targeted_connects_.emplace(key, std::move(authority));
@@ -4050,6 +4319,7 @@ PeerSet::start_connect(std::string const& endpoint)
         configured_endpoints_.insert(*configured);
     queue_connect(endpoint);
     pump_connects();
+    schedule_connect_retry_wake();
 }
 
 //@@authority transition=prv.T0090 status=provisional scope=function
@@ -4073,6 +4343,7 @@ PeerSet::start_connect(std::string const& host, uint16_t port)
         configured_endpoints_.insert(*configured);
     queue_connect(endpoint);
     pump_connects();
+    schedule_connect_retry_wake();
 }
 
 boost::asio::awaitable<PeerGenerationPin>
@@ -4634,6 +4905,7 @@ PeerSet::bootstrap()
 
     pump_crawls();
     pump_connects();
+    schedule_connect_retry_wake();
 }
 
 void
@@ -4659,6 +4931,7 @@ PeerSet::start_tracked_endpoints()
     }
     pump_crawls();
     pump_connects();
+    schedule_connect_retry_wake();
 }
 
 void
@@ -4720,6 +4993,7 @@ PeerSet::try_undiscovered()
     prune_discovery_state();
     pump_crawls();
     pump_connects();
+    schedule_connect_retry_wake();
 }
 
 void
@@ -9686,14 +9960,16 @@ PeerSet::consume_peer_terminal(
 
     // Exact live match: this admitted instance's death is recorded once.
     auto& stats = endpoint_stats_[key];
+    auto const failed_at = std::chrono::steady_clock::now();
     stats.last_failure_at = now_unix();
     stats.last_seen_at = stats.last_failure_at;
-    stats.failure_count++;
+    auto& gate = retry_gates_[key];
+    gate.failed_at = failed_at;
+    gate.failure_count = std::max(gate.failure_count, stats.failure_count) + 1;
+    stats.failure_count = gate.failure_count;
     stats.connected_ok = false;
     record_failure_event(
-        key,
-        classify_failure_kind(reason.detail, false),
-        std::chrono::steady_clock::now());
+        key, classify_failure_kind(reason.detail, false), failed_at);
     PLOGI(
         log_,
         "[",
@@ -9708,8 +9984,12 @@ PeerSet::consume_peer_terminal(
     connections_.erase(it);
     ++total_disconnects_;
     tracker_->remove(key);
+    // The range was exact-generation evidence and is now stale, but the
+    // endpoint remains ordinary discovery authority for the bounded retry.
+    tracker_->add_discovered(key);
     sort_pending_connects();
     notify_waiters();
+    replenish_ordinary_connections();
 }
 
 void

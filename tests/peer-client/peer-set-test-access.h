@@ -1152,6 +1152,50 @@ public:
             });
     }
 
+    static void
+    replenish_ordinary_connections(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        run_on_strand(
+            io, peers, [](auto& set) { set.replenish_ordinary_connections(); });
+    }
+
+    static void
+    replenish_ordinary_connections_at(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::chrono::steady_clock::time_point observed_at)
+    {
+        run_on_strand(io, peers, [observed_at](auto& set) {
+            set.replenish_ordinary_connections_at(observed_at);
+        });
+    }
+
+    static bool
+    has_connect_retry_wake(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        bool active = false;
+        run_on_strand(io, peers, [&active](auto& set) {
+            active = static_cast<bool>(set.connect_retry_wake_);
+        });
+        return active;
+    }
+
+    static std::size_t
+    connect_retry_wait_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count](auto& set) {
+            count = set.connect_retry_waits_;
+        });
+        return count;
+    }
+
     static catl::peer_client::PeerSet::Snapshot
     snapshot(
         boost::asio::io_context& io,
