@@ -739,6 +739,16 @@ public:
         cache.header_request_timeout_for_test_ = timeout;
     }
 
+    static std::optional<std::uint8_t>
+    header_round_number(NodeCache& cache, std::uint32_t ledger_seq)
+    {
+        std::lock_guard lock(cache.mutex_);
+        auto const it = cache.header_cache_.find(ledger_seq);
+        if (it == cache.header_cache_.end() || !it->second.fetch)
+            return std::nullopt;
+        return it->second.fetch->round_number;
+    }
+
     static void
     set_node_round_hooks(
         NodeCache& cache,
@@ -6614,7 +6624,7 @@ TEST(PeerSessionInterface, ManagedScopedHeaderUsesExactPeerUseWithoutLegacyPin)
 
 TEST(
     PeerSessionInterface,
-    ManagedScopedHeaderFillsRoundFromGenerationThatBecomesReady)
+    ManagedScopedHeaderStagesCurrentlyReadyFanoutBeforeSubmitting)
 {
     using namespace std::chrono_literals;
 
@@ -6644,8 +6654,7 @@ TEST(
         });
     PeerSetTestAccess::insert_connected_peer(io, peers, first);
 
-    std::string const second_endpoint = "b-late-header:1";
-    PeerSetTestAccess::push_pending_connect(io, peers, second_endpoint);
+    std::string const second_endpoint = "b-ready-header:1";
     auto second = std::make_shared<FakePeerSession>(
         io, second_endpoint, true, ledger_seq, 5900, 6100);
     std::atomic<unsigned> second_sends = 0;
@@ -6653,6 +6662,7 @@ TEST(
         [&second_sends](uint32_t, Callback<LedgerHeaderResult>) {
             second_sends.fetch_add(1, std::memory_order_relaxed);
         });
+    PeerSetTestAccess::insert_connected_peer(io, peers, second);
 
     auto scope = catl::core::RequestScope::create(
         catl::core::RequestScope::Clock::now() + 2s);
@@ -6675,8 +6685,6 @@ TEST(
         asio::detached);
 
     std::thread runner([&]() { io.run(); });
-    std::this_thread::sleep_for(20ms);
-    PeerSetTestAccess::make_reserved_generation_ready(io, peers, second);
     auto const filled_by = std::chrono::steady_clock::now() + 250ms;
     while (second_sends.load(std::memory_order_relaxed) == 0 &&
            std::chrono::steady_clock::now() < filled_by)
@@ -6686,14 +6694,188 @@ TEST(
 
     EXPECT_EQ(first_sends.load(std::memory_order_relaxed), 1u);
     EXPECT_EQ(second_sends.load(std::memory_order_relaxed), 1u)
-        << "a newly ready exact generation must fill the same bounded round";
+        << "currently ready exact uses must stage in one sealed round";
 
-    auto cleared = asio::co_spawn(
-        io, cache->co_clear_headers(), asio::use_future);
+    auto cleared =
+        asio::co_spawn(io, cache->co_clear_headers(), asio::use_future);
     EXPECT_EQ(cleared.wait_for(2s), std::future_status::ready);
     EXPECT_NO_THROW(cleared.get());
     EXPECT_EQ(done_future.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(done_future.get(), Error::Cancelled);
+
+    work.reset();
+    io.stop();
+    runner.join();
+}
+
+TEST(
+    PeerSessionInterface,
+    ManagedHeaderFailureAdvancesWithoutWaitingForOptionalGeneration)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 500ms,
+        });
+    constexpr uint32_t ledger_seq = 6000;
+    auto first = std::make_shared<FakePeerSession>(
+        io, "a-failing-header:1", true, ledger_seq, 5900, 6100);
+    std::promise<void> first_sent;
+    std::future<void> first_sent_future = first_sent.get_future();
+    std::mutex callback_mutex;
+    Callback<LedgerHeaderResult> first_callback;
+    first->set_get_ledger_header_handler(
+        [&](uint32_t, Callback<LedgerHeaderResult> callback) {
+            {
+                std::lock_guard lock(callback_mutex);
+                first_callback = std::move(callback);
+            }
+            first_sent.set_value();
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, first);
+
+    std::string const delayed_endpoint = "b-delayed-header:1";
+    PeerSetTestAccess::push_pending_connect(io, peers, delayed_endpoint);
+
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + 2s);
+    std::promise<Error> done;
+    auto done_future = done.get_future();
+    asio::co_spawn(
+        io,
+        [cache, peers, scope, &done]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(
+                    ledger_seq, peers, PeerSessionPtr{}, scope);
+                done.set_value(Error::Success);
+            }
+            catch (PeerClientException const& error)
+            {
+                done.set_value(error.error);
+            }
+        },
+        asio::detached);
+
+    std::thread runner([&]() { io.run(); });
+    auto const first_status = first_sent_future.wait_for(1s);
+    EXPECT_EQ(first_status, std::future_status::ready);
+    if (first_status == std::future_status::ready)
+    {
+        std::lock_guard lock(callback_mutex);
+        EXPECT_TRUE(first_callback);
+        if (first_callback)
+            first_callback(Error::Timeout, LedgerHeaderResult{});
+    }
+
+    auto const advanced_by = std::chrono::steady_clock::now() + 250ms;
+    std::optional<std::uint8_t> observed_round;
+    while (std::chrono::steady_clock::now() < advanced_by)
+    {
+        observed_round =
+            NodeCacheTestAccess::header_round_number(*cache, ledger_seq);
+        if (observed_round && *observed_round >= 1)
+            break;
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_TRUE(observed_round);
+    if (observed_round)
+    {
+        EXPECT_GE(*observed_round, 1u)
+            << "a submitted terminal must advance the round without waiting "
+               "for optional future peer supply";
+    }
+
+    auto cleared =
+        asio::co_spawn(io, cache->co_clear_headers(), asio::use_future);
+    EXPECT_EQ(cleared.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(cleared.get());
+    EXPECT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(done_future.get(), Error::Cancelled);
+
+    work.reset();
+    io.stop();
+    runner.join();
+}
+
+TEST(
+    PeerSessionInterface,
+    ManagedHeaderAdmissionSharesTheRequestDeadlineWithItsOperation)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 20ms,
+        });
+    constexpr uint32_t ledger_seq = 6000;
+    std::string const endpoint = "late-admission-header:1";
+    PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    auto session = std::make_shared<FakePeerSession>(
+        io, endpoint, true, ledger_seq, 5900, 6100);
+    std::atomic<unsigned> sends = 0;
+    session->set_invoke_header_handler_inline(true);
+    session->set_get_ledger_header_handler(
+        [&sends](uint32_t, Callback<LedgerHeaderResult> callback) {
+            sends.fetch_add(1, std::memory_order_relaxed);
+            callback(Error::Success, LedgerHeaderResult{});
+        });
+
+    // The unmanaged operation formula would expire after 65ms. Managed
+    // history admission is deliberately completed later, but still before
+    // the request scope's one authoritative deadline.
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + 500ms);
+    std::promise<Error> done;
+    auto done_future = done.get_future();
+    asio::co_spawn(
+        io,
+        [cache, peers, scope, &done]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(
+                    ledger_seq, peers, PeerSessionPtr{}, scope);
+                done.set_value(Error::Success);
+            }
+            catch (PeerClientException const& error)
+            {
+                done.set_value(error.error);
+            }
+        },
+        asio::detached);
+
+    std::thread runner([&]() { io.run(); });
+    std::this_thread::sleep_for(100ms);
+    PeerSetTestAccess::make_reserved_generation_ready(io, peers, session);
+
+    EXPECT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(done_future.get(), Error::Success);
+    EXPECT_EQ(sends.load(std::memory_order_relaxed), 1u);
 
     work.reset();
     io.stop();
@@ -6723,12 +6905,7 @@ TEST(
         });
     constexpr uint32_t ledger_seq = 6000;
     auto session = std::make_shared<FakePeerSession>(
-        io,
-        "lagging-header-range:1",
-        true,
-        ledger_seq,
-        5900,
-        ledger_seq - 6);
+        io, "lagging-header-range:1", true, ledger_seq, 5900, ledger_seq - 6);
     std::atomic<unsigned> sends = 0;
     session->set_invoke_header_handler_inline(true);
     session->set_get_ledger_header_handler(

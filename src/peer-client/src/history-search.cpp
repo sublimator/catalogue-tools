@@ -46,6 +46,9 @@ valid_wake(
             return !wake.endpoint.empty() && wake.generation != 0;
         case HistoryWakeSourceKind::candidate_retry_expiry:
             return !wake.endpoint.empty();
+        case HistoryWakeSourceKind::candidate_supply_change:
+            return wake.endpoint.empty() && wake.generation == 0 &&
+                wake.token == 0;
         case HistoryWakeSourceKind::global_token_refill:
             return wake.token != 0;
     }
@@ -193,8 +196,7 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
     auto const retry_can_eventually_commit =
         [&snapshot, creation_can_eventually_commit](
             HistorySearchCandidate const& candidate) {
-            auto const ready_for_use =
-                candidate.disposition ==
+            auto const ready_for_use = candidate.disposition ==
                     HistoryGenerationDisposition::admitted ||
                 (candidate.disposition ==
                      HistoryGenerationDisposition::ready_transient &&
@@ -226,7 +228,7 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
             }
 
             return candidate.disposition ==
-                    HistoryGenerationDisposition::absent &&
+                HistoryGenerationDisposition::absent &&
                 within_crawl_quota && creation_can_eventually_commit;
         };
     auto relevant = [&](HistoryPlannedWake const& wake) {
@@ -266,6 +268,8 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
                                 candidate.target.endpoint) &&
                             retry_can_eventually_commit(candidate);
                     });
+            case HistoryWakeSourceKind::candidate_supply_change:
+                return snapshot.candidate_supply_open;
         }
         return false;
     };
@@ -376,7 +380,7 @@ HistoryPhysicalCensus::valid() const noexcept
 //@@authority transition=prv.T0286 status=provisional scope=function
 // bind=catl::peer_client::plan_history_interest@6fc42641a3b5935a
 // owner=unresolved owner_hypothesis=peer_set commit=pure
-// touches=prv.S0109,prv.S0114
+// touches=prv.S0109,prv.S0114,prv.S0134
 // label=derive_one_inert_exact_history_action_or_bounded_wake
 HistoryParticipantPlan
 plan_history_interest(
@@ -430,8 +434,7 @@ plan_history_interest(
         return action(HistoryAuthorityAction::attach_or_adopt, *candidate);
     }
 
-    if (auto wake = earliest_wake(snapshot, now);
-        wake &&
+    if (auto wake = earliest_wake(snapshot, now); wake &&
         wake->kind == HistoryWakeSourceKind::attached_generation_deadline)
     {
         return HistoryParticipantPlan{.wait_until = std::move(wake)};
@@ -486,6 +489,14 @@ plan_history_interest(
 
     if (auto wake = earliest_wake(snapshot, now))
         return HistoryParticipantPlan{.wait_until = std::move(wake)};
+
+    if (snapshot.candidate_supply_open)
+    {
+        return HistoryParticipantPlan{
+            .wait_until = HistoryPlannedWake{
+                .kind = HistoryWakeSourceKind::candidate_supply_change,
+                .at = snapshot.absolute_deadline}};
+    }
 
     return terminal_interest(HistoryAcquisitionTerminal::exhausted);
 }

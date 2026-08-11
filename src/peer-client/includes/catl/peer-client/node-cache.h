@@ -765,10 +765,30 @@ private:
     {
         std::shared_ptr<SerializedTimerSignal> signal;
         std::vector<PeerGenerationPin> peer_pins;
+        //@@authority state=prv.S0130 status=provisional scope=field
+        //bind=catl::peer_client::NodeCache::HeaderRound::peer_uses@da64acd7f4e406f5
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=retained_exact_header_round_use_completions
         std::vector<PeerUseCompletion> peer_uses;
         std::mutex peer_pins_mutex;
+        //@@authority state=prv.S0131 status=provisional scope=field
+        //bind=catl::peer_client::NodeCache::HeaderRound::outstanding@9be20166a80980b9
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=header_round_installed_unsettled_attempt_count
         std::atomic<int> outstanding{0};
-        std::atomic<bool> dispatch_complete{false};
+        //@@authority state=prv.S0132 status=provisional scope=field
+        //bind=catl::peer_client::NodeCache::HeaderRound::admission_sealed@ca5e4e91bcb1bd25
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=header_round_membership_sealed_before_submission
+        std::atomic<bool> admission_sealed{false};
+        //@@authority state=prv.S0133 status=provisional scope=field
+        //bind=catl::peer_client::NodeCache::HeaderRound::completed@f1c6dcd10954d408
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=sticky_header_round_terminal_winner
         std::atomic<bool> completed{false};
         bool closed = false;
         //@@authority state=prv.S0066 status=provisional scope=field
@@ -1056,10 +1076,10 @@ private:
         std::shared_ptr<HeaderFetchState> fetch,
         std::shared_ptr<HeaderRound> round);
 
-    void
+    bool
     send_header_use(
         uint32_t ledger_seq,
-        PeerUse use,
+        PeerUseCompletion completion,
         std::shared_ptr<HeaderFetchState> fetch,
         std::shared_ptr<HeaderRound> round);
 

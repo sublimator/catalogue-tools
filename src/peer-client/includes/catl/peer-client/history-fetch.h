@@ -29,6 +29,7 @@ enum class HistoryAuthorityAction : std::uint8_t {
 enum class HistoryWakeSourceKind : std::uint8_t {
     attached_generation_deadline,
     candidate_retry_expiry,
+    candidate_supply_change,
     global_token_refill,
     physical_slot_release,
     physical_watchdog,
@@ -571,8 +572,7 @@ private:
 
     /** Wake every retained participant owner after shared arbitration moves. */
     void
-    wake_participant_owners(
-        std::uint64_t excluded_owner_instance = 0) noexcept;
+    wake_participant_owners(std::uint64_t excluded_owner_instance = 0) noexcept;
 
     //@@authority state=prv.S0107 status=provisional scope=field
     // bind=catl::peer_client::SharedHistoryFetch::owner_instance_@2dc3c171a1e5f53c

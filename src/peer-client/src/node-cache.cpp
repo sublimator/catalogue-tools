@@ -36,6 +36,17 @@ namespace {
 constexpr auto kCancelPollInterval = std::chrono::milliseconds(25);
 constexpr auto kHeaderProgressInterval = std::chrono::seconds(1);
 
+struct HeaderAttemptPolicy
+{
+    std::size_t max_fanout;
+    std::uint8_t max_rounds;
+};
+
+constexpr HeaderAttemptPolicy kHeaderAttemptPolicy{
+    .max_fanout = 3,
+    .max_rounds = 3,
+};
+
 enum class HeaderWaitWake : std::uint8_t {
     round_terminal,
     shared_progress,
@@ -1035,7 +1046,7 @@ NodeCache::walk_to_impl(
             peer_pin = co_await peers->wait_for_covering_peer(
                 ledger_seq,
                 std::max(0, peer_refresh_timeout_secs_),
-                cancel); //@@authority-target ids=prv.T0010
+                cancel);  //@@authority-target ids=prv.T0010
             peer = peer_pin.get();
         }
         if (cancel && cancel->load(std::memory_order_relaxed))
@@ -1067,7 +1078,7 @@ NodeCache::walk_to_impl(
             // label=terminate_walk_when_history_covered_peer_search_exhausts
             co_return finish(WalkNoSuitablePeer{
                 ledger_seq,
-                std::move(coverage)}); //@@authority-target ids=prv.T0037
+                std::move(coverage)});  //@@authority-target ids=prv.T0037
         }
     }
 
@@ -1153,7 +1164,7 @@ NodeCache::walk_to_impl(
                         // label=project_round_failure_into_peer_history_evidence
                         peers->note_ledger_failure(
                             endpoint,
-                            ledger_seq); //@@authority-target ids=prv.T0029
+                            ledger_seq);  //@@authority-target ids=prv.T0029
                 }
             }
 
@@ -1185,7 +1196,7 @@ NodeCache::walk_to_impl(
                 // calls=co_select_covering_peers_for
                 // label=select_distinct_history_covered_retry_generation
                 bool retrying_covered_peer =
-                    false; //@@authority-target ids=prv.T0030
+                    false;  //@@authority-target ids=prv.T0030
                 auto alternatives =
                     co_await peers->co_select_covering_peers_for(
                         ledger_seq, 1, failed_peers);
@@ -1212,7 +1223,7 @@ NodeCache::walk_to_impl(
                         ledger_seq,
                         peer_refresh_timeout_secs_,
                         failed_peers,
-                        cancel); //@@authority-target ids=prv.T0031
+                        cancel);  //@@authority-target ids=prv.T0031
                     if (advertises_ledger(new_peer.get(), ledger_seq))
                         alternatives.push_back(std::move(new_peer));
                 }
@@ -1412,7 +1423,7 @@ NodeCache::walk_to_impl(
             co_return finish(WalkBranchAbsent{
                 path.back(),
                 static_cast<std::uint8_t>(
-                    target_nibble)}); //@@authority-target ids=prv.T0192
+                    target_nibble)});  //@@authority-target ids=prv.T0192
         }
 
         PLOGD(
@@ -1439,7 +1450,7 @@ NodeCache::walk_to_impl(
     // commit=walk_coroutine touches=prv.S0063
     // label=publish_invalid_depth_terminal
     co_return finish(
-        WalkDepthExhausted{64}); //@@authority-target ids=prv.T0193
+        WalkDepthExhausted{64});  //@@authority-target ids=prv.T0193
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1528,7 +1539,7 @@ NodeCache::ensure_present(
         // label=install_exact_shared_node_fetch_incarnation
         round->participant_authority = SharedHistoryFetch::create(
             HistoryFetchId{round->operation_id},
-            round->operation_id); //@@authority-target ids=prv.T0282
+            round->operation_id);  //@@authority-target ids=prv.T0282
         if (!round->participant_authority)
         {
             throw PeerClientException(
@@ -1541,7 +1552,7 @@ NodeCache::ensure_present(
         // touches=prv.S0040 label=mint_exact_node_operation_into_registry
         active_node_operations_.emplace(
             round->operation_id,
-            round); //@@authority-target ids=prv.T0093
+            round);  //@@authority-target ids=prv.T0093
 
         if (entry.round)
         {
@@ -1557,7 +1568,7 @@ NodeCache::ensure_present(
         entry.signal = signal;
         entry.round_opened_at = std::chrono::steady_clock::now();
         return std::pair{std::move(round), std::move(signal)};
-    }; //@@authority-target ids=prv.T0120
+    };  //@@authority-target ids=prv.T0120
     auto const project_round_evidence =
         [&](std::shared_ptr<NodeFetchRound> const& round) {
             if (!round)
@@ -1600,7 +1611,7 @@ NodeCache::ensure_present(
             // mutation_class=running_guarded
             // label=admit_or_join_hash_keyed_shared_node_row
             auto [it, inserted] = store_.try_emplace(
-                expected_hash); //@@authority-target ids=prv.T0011
+                expected_hash);  //@@authority-target ids=prv.T0011
             touch_lru(expected_hash);
 
             if (!inserted && it->second.present)
@@ -1658,7 +1669,7 @@ NodeCache::ensure_present(
                     // touches=prv.S0003 mutation_class=running_guarded
                     // label=release_superseded_round_generation_pins
                     it->second.peer_pins
-                        .clear(); //@@authority-target ids=prv.T0121
+                        .clear();  //@@authority-target ids=prv.T0121
                     superseded_signal = it->second.signal;
                     auto [round, signal] = open_round(it->second, true);
                     send_round = std::move(round);
@@ -1729,7 +1740,7 @@ NodeCache::ensure_present(
                 // commit=mutex touches=prv.S0002
                 // label=install_new_shared_round_signal
                 auto [round, signal] = open_round(
-                    it->second, true); //@@authority-target ids=prv.T0012
+                    it->second, true);  //@@authority-target ids=prv.T0012
                 //@@authority transition=prv.T0013 status=provisional
                 // bind=expression_statement@09a9e755a7a796c7
                 // scope=statement
@@ -1737,7 +1748,7 @@ NodeCache::ensure_present(
                 // commit=mutex touches=prv.S0005
                 // label=publish_exact_round_admission_time
                 send_round =
-                    std::move(round); //@@authority-target ids=prv.T0013
+                    std::move(round);  //@@authority-target ids=prv.T0013
                 send_signal = signal;
                 deadline_round = send_round;
                 deadline_signal = send_round->admission_deadline
@@ -1826,7 +1837,7 @@ NodeCache::ensure_present(
             // touches=prv.S0002
             // label=retire_shared_round_when_no_transport_accepts_dispatch
             retire_node_fetch_round(
-                expected_hash, send_signal); //@@authority-target ids=prv.T0046
+                expected_hash, send_signal);  //@@authority-target ids=prv.T0046
         };
 
         if (!advertises_ledger(peer, ledger_seq))
@@ -1860,7 +1871,7 @@ NodeCache::ensure_present(
                 // label=project_immutable_wire_after_competing_commit
                 co_return it != store_.end() && it->second.present
                     ? it->second.wire_data
-                    : nullptr; //@@authority-target ids=prv.T0122
+                    : nullptr;  //@@authority-target ids=prv.T0122
             }
             if (node_lifecycle_ != NodeLifecycle::running)
                 co_return nullptr;
@@ -1875,7 +1886,7 @@ NodeCache::ensure_present(
                 // mutation_class=running_guarded
                 // label=conditionally_retain_primary_peer_pin
                 it->second.peer_pins.push_back(
-                    peer_pin.share()); //@@authority-target ids=prv.T0001
+                    peer_pin.share());  //@@authority-target ids=prv.T0001
             }
             // The admission timestamp was committed with this exact signal.
             // This commit adds the primary transport pin without reopening
@@ -1905,7 +1916,7 @@ NodeCache::ensure_present(
                 ledger_seq,
                 *peer,
                 peer_pin ? peer_pin.share() : PeerGenerationPin{},
-                send_round); //@@authority-target ids=prv.T0002
+                send_round);  //@@authority-target ids=prv.T0002
             transport_owns_round =
                 submission != NodeFetchSubmission::not_submitted;
             if (submission == NodeFetchSubmission::raw_projected)
@@ -1954,7 +1965,7 @@ NodeCache::ensure_present(
                 auto fanout_pins = co_await peers->co_select_covering_peers_for(
                     ledger_seq,
                     2,
-                    std::move(exclude_set)); //@@authority-target ids=prv.T0033
+                    std::move(exclude_set));  //@@authority-target ids=prv.T0033
 
                 for (auto& extra : fanout_pins)
                 {
@@ -2044,7 +2055,7 @@ NodeCache::ensure_present(
             // owner_hypothesis=object_store commit=mutex
             // touches=prv.S0001 mutation_class=running_guarded
             // label=project_immutable_wire_to_new_rider
-            co_return it->second.wire_data; //@@authority-target ids=prv.T0123
+            co_return it->second.wire_data;  //@@authority-target ids=prv.T0123
         }
         //@@authority transition=prv.T0014 status=provisional scope=statement
         // bind=attach_waiter_locked@ba57252b7e839cc4
@@ -2052,7 +2063,7 @@ NodeCache::ensure_present(
         // commit=mutex touches=prv.S0004 calls=attach_waiter_locked
         // label=attach_request_rider_to_shared_round_progress
         wait = attach_waiter_locked(
-            it->second); //@@authority-target ids=prv.T0014
+            it->second);  //@@authority-target ids=prv.T0014
     }
 
     if (after_node_waiter_attached_for_test_)
@@ -2118,7 +2129,7 @@ NodeCache::ensure_present(
                 participant_owner,
                 request_scope,
                 demand,
-                acquisition); //@@authority-target ids=prv.T0283
+                acquisition);  //@@authority-target ids=prv.T0283
             registering_participant = false;
         }
         catch (PeerClientException const& error)
@@ -2270,7 +2281,7 @@ NodeCache::ensure_present(
                     // label=project_immutable_wire_to_woken_rider
                     participant_result =
                         it->second
-                            .wire_data; //@@authority-target ids=prv.T0124
+                            .wire_data;  //@@authority-target ids=prv.T0124
                     participant_terminal =
                         HistoryAcquisitionTerminal::completed;
                     leave_wait = true;
@@ -2331,7 +2342,7 @@ NodeCache::ensure_present(
                     expected_hash, wait.round, waited_signal, wait))
             {
                 continue;
-            } //@@authority-target ids=prv.T0015
+            }  //@@authority-target ids=prv.T0015
             project_round_evidence(wait.round);
             if (ec != asio::error::operation_aborted)
             {
@@ -2999,7 +3010,7 @@ NodeCache::send_fetch(
     // owner=unresolved owner_hypothesis=node_cache
     // commit=unresolved calls=ensure_response_handler
     // label=install_shared_response_route_on_selected_peer
-    ensure_response_handler(peer); //@@authority-target ids=prv.T0016
+    ensure_response_handler(peer);  //@@authority-target ids=prv.T0016
 
     // Build nodeid list: primary + speculative deeper positions
     std::vector<SHAMapNodeID> node_ids = {position};
@@ -3049,7 +3060,7 @@ NodeCache::send_fetch(
             peer.endpoint(),
             " hash=",
             expected_hash.hex().substr(
-                0, 16)); //@@authority-target ids=prv.T0043
+                0, 16));  //@@authority-target ids=prv.T0043
         return NodeFetchSubmission::not_submitted;
     };
 
@@ -3080,7 +3091,7 @@ NodeCache::send_fetch(
         // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
         // commit=atomic calls=submit_node_batch_on_pin
         // label=route_existing_managed_generation_through_coordinator_ingress
-        auto endpoint = peer.endpoint(); //@@authority-target ids=prv.T0042
+        auto endpoint = peer.endpoint();  //@@authority-target ids=prv.T0042
         auto const slot = round
             ? register_managed_submission(expected_hash, round, endpoint)
             : std::optional<std::size_t>{};
@@ -3212,7 +3223,7 @@ NodeCache::send_fetch(
                 if (self && round && slot)
                     self->settle_raw_submission(
                         expected_hash, round, *slot, ec);
-            }); //@@authority-target ids=prv.C0001,prv.T0003
+            });  //@@authority-target ids=prv.C0001,prv.T0003
     }
     catch (...)
     {
@@ -3324,7 +3335,8 @@ NodeCache::send_fetch_on_use(
             if (outcome == LedgerFetchCoordinator::SubmissionOutcome::written)
                 projected = ManagedSubmissionOutcome::written;
             else if (
-                outcome == LedgerFetchCoordinator::SubmissionOutcome::not_written)
+                outcome ==
+                LedgerFetchCoordinator::SubmissionOutcome::not_written)
                 projected = ManagedSubmissionOutcome::not_written;
             self->settle_managed_submission(
                 expected_hash, current_round, *slot, projected);
@@ -3405,7 +3417,7 @@ NodeCache::arm_node_round_deadline(
             // label=reserve_exact_deadline_servant_and_wake_signal_before_launch
             round->deadline_servants.emplace(
                 servant_id,
-                signal); //@@authority-target ids=prv.T0094
+                signal);  //@@authority-target ids=prv.T0094
         }
 
         if (before_node_deadline_launch_for_test_)
@@ -3466,7 +3478,7 @@ NodeCache::arm_node_round_deadline(
         // touches=prv.S0041
         // label=rollback_deadline_servant_reservation_after_launch_refusal
         on_node_deadline_servant_done(
-            round, servant_id); //@@authority-target ids=prv.T0095
+            round, servant_id);  //@@authority-target ids=prv.T0095
     }
     return false;
 }
@@ -3712,7 +3724,7 @@ NodeCache::on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg)
                 computed_hash,
                 std::vector<uint8_t>(
                     wire_span.begin(),
-                    wire_span.end())); //@@authority-target ids=prv.T0040
+                    wire_span.end()));  //@@authority-target ids=prv.T0040
             if (accepted)
                 observation.accepted = true;
         }
@@ -3780,7 +3792,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
         // owner=unresolved owner_hypothesis=node_cache commit=mutex
         // touches=prv.S0039 label=refuse_post_seal_node_store_mutation
         bool const node_store_open = node_lifecycle_ ==
-            NodeLifecycle::running; //@@authority-target ids=prv.T0102
+            NodeLifecycle::running;  //@@authority-target ids=prv.T0102
         if (!node_store_open)
         {
             return false;
@@ -4047,14 +4059,14 @@ NodeCache::send_header_fetch(
                         // commit=header_state_strand touches=prv.S0066
                         // label=classify_exact_header_endpoint_terminal
                         round->settled_endpoints.insert(
-                            endpoint); //@@authority-target ids=prv.T0202
+                            endpoint);  //@@authority-target ids=prv.T0202
                         if (carries_peer_ledger_failure_evidence(err))
                             round->ledger_failure_endpoints.insert(endpoint);
 
                         // If all fan-out peers have failed, wake this round's
                         // owner instead of waiting for its timeout.
                         if (round->outstanding.fetch_sub(1) == 1 &&
-                            round->dispatch_complete.load(
+                            round->admission_sealed.load(
                                 std::memory_order_acquire))
                         {
                             complete_header_round(round);
@@ -4078,25 +4090,19 @@ NodeCache::send_header_fetch(
         opts);
 }
 
-void
+bool
 NodeCache::send_header_use(
     uint32_t ledger_seq,
-    PeerUse use,
+    PeerUseCompletion completion,
     std::shared_ptr<HeaderFetchState> fetch,
     std::shared_ptr<HeaderRound> round)
 {
     fetches_++;
-    auto completion = round->try_begin_use(std::move(use));
     if (!completion)
-        return;
-    auto const endpoint = completion->endpoint();
+        return false;
+    auto const endpoint = completion.endpoint();
 
-    PLOGD(
-        log_,
-        "  send_header_use: seq=",
-        ledger_seq,
-        " peer=",
-        endpoint);
+    PLOGD(log_, "  send_header_use: seq=", ledger_seq, " peer=", endpoint);
 
     RequestOptions opts;
     opts.dedupe = false;
@@ -4108,81 +4114,83 @@ NodeCache::send_header_use(
     try
     {
         installed = PeerUseOperations::get_ledger_header(
-            *completion,
+            completion,
             ledger_seq,
             [weak_self, ledger_seq, fetch, round, endpoint](
-            PeerUseCompletion done,
-            Error err,
-            LedgerHeaderResult result) mutable {
-            auto self = weak_self.lock();
-            if (!self)
-            {
-                done.finish(classify_peer_use_error(err));
-                return;
-            }
+                PeerUseCompletion done,
+                Error err,
+                LedgerHeaderResult result) mutable {
+                auto self = weak_self.lock();
+                if (!self)
+                {
+                    done.finish(classify_peer_use_error(err));
+                    return;
+                }
 
-            try
-            {
-                asio::post(
-                    self->header_state_strand_,
-                    [weak_self,
-                     ledger_seq,
-                     fetch,
-                     round,
-                     endpoint,
-                     done = std::move(done),
-                     err,
-                     result = std::move(result)]() mutable {
-                    auto self = weak_self.lock();
-                    if (!self)
-                    {
-                        done.finish(classify_peer_use_error(err));
-                        return;
-                    }
+                try
+                {
+                    asio::post(
+                        self->header_state_strand_,
+                        [weak_self,
+                         ledger_seq,
+                         fetch,
+                         round,
+                         endpoint,
+                         done = std::move(done),
+                         err,
+                         result = std::move(result)]() mutable {
+                            auto self = weak_self.lock();
+                            if (!self)
+                            {
+                                done.finish(classify_peer_use_error(err));
+                                return;
+                            }
 
-                    {
-                        std::lock_guard lock(self->mutex_);
-                        auto const it = self->header_cache_.find(ledger_seq);
-                        if (it == self->header_cache_.end() ||
-                            it->second.fetch != fetch ||
-                            fetch->phase !=
-                                HeaderFetchState::Phase::running ||
-                            fetch->active_round != round)
-                        {
-                            done.finish(classify_peer_use_error(err));
-                            return;
-                        }
-                    }
+                            {
+                                std::lock_guard lock(self->mutex_);
+                                auto const it =
+                                    self->header_cache_.find(ledger_seq);
+                                if (it == self->header_cache_.end() ||
+                                    it->second.fetch != fetch ||
+                                    fetch->phase !=
+                                        HeaderFetchState::Phase::running ||
+                                    fetch->active_round != round)
+                                {
+                                    done.finish(classify_peer_use_error(err));
+                                    return;
+                                }
+                            }
 
-                    round->settled_endpoints.insert(endpoint);
-                    if (err != Error::Success)
-                    {
-                        if (carries_peer_ledger_failure_evidence(err))
-                            round->ledger_failure_endpoints.insert(endpoint);
-                        done.finish(classify_peer_use_error(err));
-                        if (round->outstanding.fetch_sub(
-                                1, std::memory_order_acq_rel) == 1 &&
-                            round->dispatch_complete.load(
-                                std::memory_order_acquire))
-                        {
-                            complete_header_round(round);
-                        }
-                        return;
-                    }
+                            round->settled_endpoints.insert(endpoint);
+                            if (err != Error::Success)
+                            {
+                                if (carries_peer_ledger_failure_evidence(err))
+                                    round->ledger_failure_endpoints.insert(
+                                        endpoint);
+                                done.finish(classify_peer_use_error(err));
+                                if (round->outstanding.fetch_sub(
+                                        1, std::memory_order_acq_rel) == 1 &&
+                                    round->admission_sealed.load(
+                                        std::memory_order_acquire))
+                                {
+                                    complete_header_round(round);
+                                }
+                                return;
+                            }
 
-                    round->outstanding.fetch_sub(
-                        1, std::memory_order_acq_rel);
-                    self->finish_header_fetch(
-                        ledger_seq,
-                        fetch,
-                        std::move(result),
-                        std::move(done));
-                    });
-            }
-            catch (...)
-            {
-                done.finish(PeerUseOutcome::cancelled);
-            }
+                            round->outstanding.fetch_sub(
+                                1, std::memory_order_acq_rel);
+                            self->finish_header_fetch(
+                                ledger_seq,
+                                fetch,
+                                std::move(result),
+                                std::move(done));
+                        });
+                }
+                catch (...)
+                {
+                    done.finish(PeerUseOutcome::cancelled);
+                }
             },
             opts);
     }
@@ -4190,7 +4198,7 @@ NodeCache::send_header_use(
     {
         round->settled_endpoints.insert(endpoint);
         if (round->outstanding.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
-            round->dispatch_complete.load(std::memory_order_acquire))
+            round->admission_sealed.load(std::memory_order_acquire))
         {
             complete_header_round(round);
         }
@@ -4199,14 +4207,15 @@ NodeCache::send_header_use(
 
     if (!installed)
     {
-        completion->finish(PeerUseOutcome::cancelled);
+        completion.finish(PeerUseOutcome::cancelled);
         round->settled_endpoints.insert(endpoint);
         if (round->outstanding.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
-            round->dispatch_complete.load(std::memory_order_acquire))
+            round->admission_sealed.load(std::memory_order_acquire))
         {
             complete_header_round(round);
         }
     }
+    return installed;
 }
 
 asio::awaitable<LedgerHeaderResult>
@@ -4283,14 +4292,16 @@ NodeCache::get_header_impl(
             asio::use_awaitable);
     }
 
-    // The immutable scope crosses the cache strand unchanged and is bound to
-    // this waiter's exact demand/acquisition participant below.
+    // The immutable scope crosses the cache strand unchanged. The first
+    // managed rider also bounds the physical header operation: history
+    // admission and the operation servant must not disagree about which
+    // deadline can still authorize a transport use.
     //@@authority transition=prv.T0261 status=provisional scope=statement
     // bind=expression_statement@5a99cce8f2b2c09d
     // owner=unresolved owner_hypothesis=node_cache commit=header_state_strand
     // touches=prv.S0102,prv.S0103
-    // label=carry_request_scope_into_shared_header_fetch_boundary
-    (void)request_scope; //@@authority-target ids=prv.T0261
+    // label=bind_managed_header_operation_and_history_admission_to_one_deadline
+    (void)request_scope;  //@@authority-target ids=prv.T0261
 
     // Clear is a closed admission boundary, not a best-effort map erase. A
     // caller that races it receives a typed refusal and may retry after the
@@ -4333,17 +4344,22 @@ NodeCache::get_header_impl(
         {
             auto const round_timeout =
                 std::max(fetch_timeout_, header_timeout_floor_);
+            auto const managed_mode = request_scope && peers;
+            auto const operation_deadline = managed_mode
+                ? request_scope->absolute_deadline()
+                : std::chrono::steady_clock::now() + round_timeout * 3 +
+                    std::chrono::seconds(5);
             fetch = std::make_shared<HeaderFetchState>();
             fetch->completion_signal = SerializedTimerSignal::create(
                 io_, asio::steady_timer::time_point::max());
-            fetch->deadline_signal = SerializedTimerSignal::create(
-                io_, round_timeout * 3 + std::chrono::seconds(5));
+            fetch->deadline_signal =
+                SerializedTimerSignal::create(io_, operation_deadline);
             fetch->driver_done_signal = SerializedTimerSignal::create(
                 io_, asio::steady_timer::time_point::max());
             fetch->deadline_done_signal = SerializedTimerSignal::create(
                 io_, asio::steady_timer::time_point::max());
             fetch->peers = std::move(peers);
-            fetch->managed_mode = request_scope && fetch->peers;
+            fetch->managed_mode = managed_mode;
             if (auto owner = peer_pin.release_owner())
                 fetch->release_owners.push_back(std::move(owner));
             if (fetch->peers &&
@@ -4450,11 +4466,10 @@ NodeCache::get_header_impl(
             interest = fetch->participant_authority->register_interest(
                 participant_owner, request_scope, demand, acquisition); //@@authority-target ids=prv.T0279
             // clang-format on
-            participant = std::make_shared<HeaderParticipant>(
-                HeaderParticipant{
-                    .owner = participant_owner,
-                    .acquisition = acquisition,
-                    .interest = interest});
+            participant = std::make_shared<HeaderParticipant>(HeaderParticipant{
+                .owner = participant_owner,
+                .acquisition = acquisition,
+                .interest = interest});
             fetch->participants.push_back(participant);
             registering_participant = false;
         }
@@ -4601,7 +4616,8 @@ NodeCache::get_header_impl(
             acquisition, terminal);
         std::rethrow_exception(failure);
     }
-    auto const current_interest = participant ? participant->interest : interest;
+    auto const current_interest =
+        participant ? participant->interest : interest;
     (void)fetch->participant_authority->detach(current_interest);
     co_await participant_owner->co_finish_history_acquisition(
         acquisition, HistoryAcquisitionTerminal::completed);
@@ -4872,8 +4888,8 @@ NodeCache::drive_header_fetch(
         co_return;
     }
 
-    static constexpr int kHeaderFanOut = 3;
-    static constexpr std::uint8_t kMaxRounds = 3;
+    auto constexpr kHeaderFanOut = kHeaderAttemptPolicy.max_fanout;
+    auto constexpr kMaxRounds = kHeaderAttemptPolicy.max_rounds;
     auto const header_timeout = std::max(fetch_timeout_, header_timeout_floor_);
 
     auto round_is_active =
@@ -4930,7 +4946,7 @@ NodeCache::drive_header_fetch(
             round->settled_endpoints.insert(endpoint);
             if (round->outstanding.fetch_sub(1, std::memory_order_acq_rel) ==
                     1 &&
-                round->dispatch_complete.load(std::memory_order_acquire))
+                round->admission_sealed.load(std::memory_order_acquire))
             {
                 complete_header_round(round);
             }
@@ -4942,8 +4958,8 @@ NodeCache::drive_header_fetch(
         [this, ledger_seq, &fetch, &round_is_active, &send_one, header_timeout](
             std::shared_ptr<HeaderRound> const& round,
             PeerGenerationPin primary_pin,
-            PeerSessionPtr primary_owner) -> asio::awaitable<int> {
-        int sent = 0;
+            PeerSessionPtr primary_owner) -> asio::awaitable<std::size_t> {
+        std::size_t sent = 0;
 
         PeerSession* primary =
             primary_pin ? primary_pin.get() : primary_owner.get();
@@ -4962,7 +4978,9 @@ NodeCache::drive_header_fetch(
         if (fetch->peers && sent < kHeaderFanOut && round_is_active(round))
         {
             auto extras = co_await fetch->peers->co_select_covering_peers_for(
-                ledger_seq, kHeaderFanOut - sent, fetch->tried_peers);
+                ledger_seq,
+                static_cast<int>(kHeaderFanOut - sent),
+                fetch->tried_peers);
             for (auto& extra : extras)
             {
                 if (!round_is_active(round))
@@ -5004,7 +5022,7 @@ NodeCache::drive_header_fetch(
         if (sent > 0 && round_is_active(round))
             round->signal->expires_after(header_timeout);
 
-        round->dispatch_complete.store(true, std::memory_order_release);
+        round->admission_sealed.store(true, std::memory_order_release);
         if (round->outstanding.load(std::memory_order_acquire) == 0)
             complete_header_round(round);
 
@@ -5037,7 +5055,7 @@ NodeCache::drive_header_fetch(
 
             auto const sent = co_await dispatch_round(
                 round, std::move(primary_pin), std::move(primary_owner));
-            fetch->total_peers_tried += sent;
+            fetch->total_peers_tried += static_cast<int>(sent);
 
             if (round_number == 0)
             {
@@ -5183,16 +5201,17 @@ NodeCache::drive_header_fetch(
 }
 
 asio::awaitable<void>
-//@@authority transition=prv.T0302 status=provisional scope=function bind=catl::peer_client::drive_managed_header_fetch@42072e91c35598a2
+//@@authority transition=prv.T0302 status=provisional scope=function
+// bind=catl::peer_client::drive_managed_header_fetch@42072e91c35598a2
 // owner=unresolved owner_hypothesis=node_cache commit=header_state_strand
-// touches=prv.S0066,prv.S0105,prv.S0108,prv.S0110,prv.S0111
-// label=fill_bounded_header_round_slots_with_exact_receipted_history_peer_uses
+// touches=prv.S0066,prv.S0130,prv.S0131,prv.S0132,prv.S0133
+// label=drive_header_rounds_from_sealed_currently_runnable_exact_use_batches
 NodeCache::drive_managed_header_fetch(
     uint32_t ledger_seq,
     std::shared_ptr<HeaderFetchState> fetch)
 {
-    static constexpr int kHeaderFanOut = 3;
-    static constexpr std::uint8_t kMaxRounds = 3;
+    auto constexpr kHeaderFanOut = kHeaderAttemptPolicy.max_fanout;
+    auto constexpr kMaxRounds = kHeaderAttemptPolicy.max_rounds;
     auto const header_timeout = std::max(fetch_timeout_, header_timeout_floor_);
 
     auto round_is_active =
@@ -5249,9 +5268,9 @@ NodeCache::drive_managed_header_fetch(
             if (!round)
                 co_return;
 
-            auto sent = 0;
+            std::vector<PeerUse> staged_uses;
             std::size_t terminal_participants = 0;
-            while (sent < kHeaderFanOut && round_is_active(round))
+            while (staged_uses.empty() && round_is_active(round))
             {
                 auto participant = next_participant();
                 if (!participant)
@@ -5267,8 +5286,8 @@ NodeCache::drive_managed_header_fetch(
                             participant->acquisition, endpoint);
                 }
 
-                auto driven = co_await participant->owner
-                    ->co_drive_history_interest(
+                auto driven =
+                    co_await participant->owner->co_drive_history_interest(
                         fetch->participant_authority,
                         participant->acquisition,
                         participant->interest,
@@ -5308,13 +5327,10 @@ NodeCache::drive_managed_header_fetch(
                 }
 
                 terminal_participants = 0;
-                auto const endpoint =
-                    driven.peer_use.generation().endpoint();
+                auto const endpoint = driven.peer_use.generation().endpoint();
                 fetch->tried_peers.insert(endpoint);
-                fetch->round_peers.push_back(endpoint);
-                (void)co_await participant->owner
-                    ->co_exclude_history_endpoint(
-                        participant->acquisition, endpoint);
+                (void)co_await participant->owner->co_exclude_history_endpoint(
+                    participant->acquisition, endpoint);
 
                 // A spent use is outstanding physical work, not a runnable
                 // shared-fetch plan. Publish a fresh passive revision before
@@ -5330,15 +5346,94 @@ NodeCache::drive_managed_header_fetch(
                     continue;
                 }
                 participant->interest = *passive;
+                staged_uses.push_back(std::move(driven.peer_use));
+            }
 
+            // Once one exact use exists, only currently runnable peer uses may
+            // join this round. This owner-side operation crosses to PeerSet but
+            // never waits for a connection, retry gate, capacity release, or
+            // discovery event. A generation that becomes ready later belongs
+            // to successor work, not an admission barrier for this round.
+            auto participants_without_ready_use = std::size_t{0};
+            while (!staged_uses.empty() && staged_uses.size() < kHeaderFanOut &&
+                   participants_without_ready_use <
+                       fetch->participants.size() &&
+                   round_is_active(round))
+            {
+                auto participant = next_participant();
+                if (!participant)
+                    break;
+
+                for (auto const& endpoint : fetch->tried_peers)
+                {
+                    (void)co_await participant->owner
+                        ->co_exclude_history_endpoint(
+                            participant->acquisition, endpoint);
+                }
+
+                auto ready =
+                    co_await participant->owner->co_try_ready_history_peer_uses(
+                        fetch->participant_authority,
+                        participant->acquisition,
+                        participant->interest,
+                        PeerUseKind::ledger_header,
+                        kHeaderFanOut - staged_uses.size());
+                participant->interest = ready.interest;
+                if (ready.peer_uses.empty())
+                {
+                    ++participants_without_ready_use;
+                    continue;
+                }
+
+                participants_without_ready_use = 0;
+                for (auto& use : ready.peer_uses)
+                {
+                    fetch->tried_peers.insert(use.generation().endpoint());
+                    staged_uses.push_back(std::move(use));
+                }
+            }
+
+            if (!round_is_active(round))
+            {
+                for (auto& use : staged_uses)
+                    use.finish(PeerUseOutcome::cancelled);
+                co_return;
+            }
+
+            std::vector<PeerUseCompletion> attempts;
+            attempts.reserve(staged_uses.size());
+            for (auto& use : staged_uses)
+            {
+                auto completion = round->try_begin_use(std::move(use));
+                if (completion)
+                    attempts.push_back(std::move(*completion));
+            }
+
+            //@@authority transition=prv.T0312 status=provisional
+            //bind=expression_statement@bd84262baccefce1
+            // scope=statement
+            // owner=unresolved owner_hypothesis=node_cache
+            // commit=header_state_strand
+            // touches=prv.S0130,prv.S0131,prv.S0132,prv.S0133
+            // label=seal_exact_header_round_membership_before_first_submission
+            round->admission_sealed.store(
+                true,
+                std::memory_order_release);  //@@authority-target ids=prv.T0312
+
+            if (!attempts.empty())
+                round->signal->expires_after(header_timeout);
+
+            auto sent = std::size_t{0};
+            fetch->round_peers.clear();
+            for (auto const& completion : attempts)
+            {
                 try
                 {
-                    send_header_use(
-                        ledger_seq,
-                        std::move(driven.peer_use),
-                        fetch,
-                        round);
-                    ++sent;
+                    if (send_header_use(ledger_seq, completion, fetch, round))
+                    {
+                        ++sent;
+                        fetch->round_peers.push_back(completion.endpoint());
+                    }
                 }
                 catch (...)
                 {
@@ -5346,12 +5441,10 @@ NodeCache::drive_managed_header_fetch(
                 }
             }
 
-            fetch->total_peers_tried += sent;
-            if (sent > 0 && round_is_active(round))
-                round->signal->expires_after(header_timeout);
-            round->dispatch_complete.store(true, std::memory_order_release);
             if (round->outstanding.load(std::memory_order_acquire) == 0)
                 complete_header_round(round);
+
+            fetch->total_peers_tried += static_cast<int>(sent);
 
             if (!round_is_active(round))
                 co_return;
@@ -5376,8 +5469,8 @@ NodeCache::drive_managed_header_fetch(
             catl::core::emit_status(
                 (round_number == 0 ? "anchor header: seq="
                                    : "header retry: seq=") +
-                std::to_string(ledger_seq) + " asking " +
-                std::to_string(sent) + " peer(s): " + peer_list);
+                std::to_string(ledger_seq) + " asking " + std::to_string(sent) +
+                " peer(s): " + peer_list);
             auto const round_started = std::chrono::steady_clock::now();
 
             WaitRegistration wait;
@@ -5420,8 +5513,7 @@ NodeCache::drive_managed_header_fetch(
                     {
                         co_return;
                     }
-                    events =
-                        it->second.progress.journal.replay(wait.cursor);
+                    events = it->second.progress.journal.replay(wait.cursor);
                     refresh_waiter_locked(it->second, wait);
                     wait.done_signal = round->signal;
                 }
@@ -5599,7 +5691,7 @@ NodeCache::co_stop_nodes()
             // commit=mutex touches=prv.S0042
             // mutation_class=seal_commit
             // label=publish_shared_node_stop_boundary
-            node_stop_state_ = stop; //@@authority-target ids=prv.T0108
+            node_stop_state_ = stop;  //@@authority-target ids=prv.T0108
             launch_driver = true;
         }
     }
@@ -5682,7 +5774,7 @@ NodeCache::co_stop_nodes()
         // label=join_shared_node_stop_without_cancelling_shared_driver
         auto const [wake_kind, wake_error] =
             co_await wait_for_signal_or_cancellation(
-                stop->completion_signal); //@@authority-target ids=prv.T0133
+                stop->completion_signal);  //@@authority-target ids=prv.T0133
         (void)wake_error;
         if (wake_kind == SignalWaitWake::rider_cancelled)
             throw boost::system::system_error(asio::error::operation_aborted);
@@ -5771,8 +5863,8 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
         // touches=prv.S0043
         // label=transfer_peer_set_strand_barriers_to_stop_driver
         owner_barriers = std::move(
-            node_pin_owner_barriers_); //@@authority-target ids=prv.T0104
-    } //@@authority-target ids=prv.T0126
+            node_pin_owner_barriers_);  //@@authority-target ids=prv.T0104
+    }  //@@authority-target ids=prv.T0126
 
     for (auto const& round : operations)
     {
@@ -5792,13 +5884,13 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
     for (auto const& signal : signals)
     {
         complete_timer_noexcept(signal);
-    } //@@authority-target ids=prv.T0110
+    }  //@@authority-target ids=prv.T0110
     //@@authority transition=prv.T0099 status=provisional scope=statement
     // bind=expression_statement@0de5953ebb00f70d
     // owner=unresolved owner_hypothesis=node_cache
     // commit=post_seal_driver touches=prv.S0003
     // label=destroy_node_cache_local_generation_pin_shares
-    pins.clear(); //@@authority-target ids=prv.T0099
+    pins.clear();  //@@authority-target ids=prv.T0099
     if (after_node_local_pins_destroyed_for_test_)
         after_node_local_pins_destroyed_for_test_();
 
@@ -5811,7 +5903,7 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
     {
         if (round->servants_done_signal)
             (void)co_await round->servants_done_signal->wait();
-    } //@@authority-target ids=prv.T0111
+    }  //@@authority-target ids=prv.T0111
     //@@authority transition=prv.T0112 status=provisional scope=statement
     // bind=for_range_loop@1d30198e3f9c8bb3
     // owner=unresolved owner_hypothesis=node_cache
@@ -5821,7 +5913,7 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
     {
         if (owner)
             co_await owner->co_generation_pin_release_barrier();
-    } //@@authority-target ids=prv.T0112
+    }  //@@authority-target ids=prv.T0112
     owner_barriers.clear();
 
     {
@@ -5835,7 +5927,7 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
             stop,
             operations,
             pins.empty(),
-            owner_barriers.empty()); //@@authority-target ids=prv.T0100
+            owner_barriers.empty());  //@@authority-target ids=prv.T0100
         if (!node_receipts_complete)
         {
             throw std::logic_error(
@@ -6065,7 +6157,7 @@ NodeCache::drive_header_clear(std::shared_ptr<HeaderClearState> clear)
         {
             active_header_fetches_.erase(it);
         }
-    } //@@authority-target ids=node_cache.complete_header_clear_drain
+    }  //@@authority-target ids=node_cache.complete_header_clear_drain
 }
 
 NodeCache::Stats

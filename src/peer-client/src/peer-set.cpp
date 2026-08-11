@@ -95,6 +95,8 @@ history_wake_name(HistoryWakeSourceKind kind) noexcept
             return "attached generation";
         case HistoryWakeSourceKind::candidate_retry_expiry:
             return "candidate retry";
+        case HistoryWakeSourceKind::candidate_supply_change:
+            return "candidate supply";
         case HistoryWakeSourceKind::global_token_refill:
             return "global token refill";
         case HistoryWakeSourceKind::physical_slot_release:
@@ -103,6 +105,23 @@ history_wake_name(HistoryWakeSourceKind kind) noexcept
             return "physical watchdog";
     }
     return "unknown";
+}
+
+bool
+same_history_interest(
+    HistoryInterestRef const& left,
+    HistoryInterestRef const& right) noexcept
+{
+    return left && right && left.fetch() == right.fetch() &&
+        left.fetch_epoch() == right.fetch_epoch() &&
+        left.interest() == right.interest() &&
+        left.participant_revision() == right.participant_revision() &&
+        left.demand() == right.demand() &&
+        left.acquisition() == right.acquisition() &&
+        left.request_scope() == right.request_scope() &&
+        left.participant_owner_instance() ==
+        right.participant_owner_instance() &&
+        left.deadline() == right.deadline();
 }
 
 std::uint64_t
@@ -511,11 +530,10 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
         options_.max_global_history_blind_uses, 1, kMaxHistoryGlobalTokens);
     options_.global_history_token_refill = std::max(
         options_.global_history_token_refill, std::chrono::milliseconds{1});
-    options_.max_history_attachments_per_generation =
-        std::clamp<std::size_t>(
-            options_.max_history_attachments_per_generation,
-            1,
-            kMaxHistorySearchCandidates);
+    options_.max_history_attachments_per_generation = std::clamp<std::size_t>(
+        options_.max_history_attachments_per_generation,
+        1,
+        kMaxHistorySearchCandidates);
     options_.history_connect_timeout = std::clamp(
         options_.history_connect_timeout,
         std::chrono::milliseconds{1},
@@ -697,7 +715,7 @@ PeerSet::co_stop()
                     // mutation_class=stop_driver calls=co_disconnect
                     // label=join_exact_session_physical_drain_receipt
                     co_await session
-                        ->co_disconnect(); //@@authority-target ids=prv.T0147
+                        ->co_disconnect();  //@@authority-target ids=prv.T0147
                 }
                 assert(self->strand_.running_in_this_thread());
                 self->finish_generation_peer_uses_after_drain(
@@ -892,7 +910,7 @@ PeerSet::begin_stop_on_strand()
             // commit=peer_set_strand touches=prv.S0037
             // calls=disconnect
             // label=request_connect_servant_cancellation_without_retirement
-            servant.session->disconnect(); //@@authority-target ids=prv.T0182
+            servant.session->disconnect();  //@@authority-target ids=prv.T0182
         }
         catch (...)
         {
@@ -987,7 +1005,7 @@ PeerSet::complete_connect_servant(
     // bind=expression_statement@3482ee1a8d9bce89
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0037 label=consume_background_connect_servant_receipt
-    in_flight_.erase(key); //@@authority-target ids=prv.T0091
+    in_flight_.erase(key);  //@@authority-target ids=prv.T0091
     abandon_unstarted_generation(key, generation);
     notify_shutdown_progress();
     PEER_SET_TRACE(
@@ -1091,7 +1109,7 @@ PeerSet::finish_connect_servant(
                 // calls=co_disconnect
                 // label=join_escaped_connect_servant_physical_receipt
                 co_await session
-                    ->co_disconnect(); //@@authority-target ids=prv.T0183
+                    ->co_disconnect();  //@@authority-target ids=prv.T0183
             }
             catch (...)
             {
@@ -1193,7 +1211,8 @@ PeerSet::replaceable_generation_tombstone(
 }
 
 std::uint64_t
-//@@authority transition=prv.T0290 status=provisional scope=function bind=catl::peer_client::reserve_connection_generation@a109c5943fcae182
+//@@authority transition=prv.T0290 status=provisional scope=function
+// bind=catl::peer_client::reserve_connection_generation@a109c5943fcae182
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0088,prv.S0115,prv.S0118
 // label=reserve_nonreused_generation_before_physical_queue_visibility
@@ -1237,8 +1256,7 @@ PeerSet::abandon_unstarted_generation(
     {
         return;
     }
-    release_generation_history_origin(
-        row->second, HistoryWorkReceipt::closed);
+    release_generation_history_origin(row->second, HistoryWorkReceipt::closed);
     peer_generations_.erase(row);
     notify_waiters();
 }
@@ -1358,14 +1376,14 @@ PeerSet::start_generation_drain(
                     try
                     {
                         //@@authority transition=prv.T0254 status=provisional
-                        //scope=statement
+                        // scope=statement
                         // bind=expression_statement@11bcc2d1692f1c01
                         // owner=unresolved owner_hypothesis=peer_set
                         // commit=peer_set_strand
                         // touches=prv.S0089,prv.S0097,prv.S0099
                         // label=retry_exact_generation_drain_before_fault_publication
                         //@@mutation-site
-                        //peer-use-release-follows-physical-drain
+                        // peer-use-release-follows-physical-drain
                         // clang-format off
                         co_await session->co_disconnect(); //@@authority-target ids=prv.T0254
                         // clang-format on
@@ -1662,7 +1680,7 @@ PeerSet::complete_crawl_servant(
     // bind=expression_statement@caf7c41aa56bab58
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
-    crawl_in_flight_.erase(key); //@@authority-target ids=prv.T0092
+    crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
     try
     {
         PLOGD(
@@ -2459,7 +2477,8 @@ PeerSet::post_history_fetch_wake() noexcept
 }
 
 void
-//@@authority transition=prv.T0309 status=provisional scope=function bind=catl::peer_client::advance_history_pool_revision@ccd2583138b894bd
+//@@authority transition=prv.T0309 status=provisional scope=function
+// bind=catl::peer_client::advance_history_pool_revision@ccd2583138b894bd
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0115,prv.S0128,prv.S0129
 // label=advance_exact_history_control_and_one_typed_scheduling_revision
@@ -3527,8 +3546,8 @@ PeerSet::claim_queued_connect_authority(
     }
     if (claimed.absolute_deadline)
     {
-        *claimed.absolute_deadline = std::min(
-            *claimed.absolute_deadline, claimed.physical_deadline);
+        *claimed.absolute_deadline =
+            std::min(*claimed.absolute_deadline, claimed.physical_deadline);
     }
     return claimed;
 }
@@ -5832,7 +5851,8 @@ PeerSet::seal_node_batch_command_on_strand(
 }
 
 std::optional<NodeBatchCommand>
-//@@authority transition=prv.T0303 status=provisional scope=function bind=catl::peer_client::seal_node_batch_command_on_use_on_strand@df8e96fae92e7a14
+//@@authority transition=prv.T0303 status=provisional scope=function
+// bind=catl::peer_client::seal_node_batch_command_on_use_on_strand@df8e96fae92e7a14
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0088,prv.S0090,prv.S0100
 // label=seal_node_batch_command_against_exact_active_peer_use
@@ -6251,7 +6271,8 @@ PeerSet::co_open_history_acquisition(
 }
 
 bool
-//@@authority transition=prv.T0301 status=provisional scope=function bind=catl::peer_client::exclude_history_endpoint_on_strand@9804f6269659fa99
+//@@authority transition=prv.T0301 status=provisional scope=function
+// bind=catl::peer_client::exclude_history_endpoint_on_strand@9804f6269659fa99
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0105
 // label=append_one_bounded_exact_retry_exclusion_to_live_acquisition
@@ -6260,8 +6281,7 @@ PeerSet::exclude_history_endpoint_on_strand(
     std::string endpoint)
 {
     ASSERT_ON_STRAND();
-    if (!acquisition ||
-        acquisition.peer_set_instance_ != peer_set_instance_id_)
+    if (!acquisition || acquisition.peer_set_instance_ != peer_set_instance_id_)
     {
         throw PeerClientException(
             Error::BadRequest, "history acquisition is foreign");
@@ -6271,8 +6291,7 @@ PeerSet::exclude_history_endpoint_on_strand(
     if (found == history_acquisitions_.end() ||
         found->second.demand != acquisition.demand_ ||
         found->second.context.fetch != acquisition.context_.fetch ||
-        found->second.context.fetch_epoch !=
-            acquisition.context_.fetch_epoch)
+        found->second.context.fetch_epoch != acquisition.context_.fetch_epoch)
     {
         throw PeerClientException(
             Error::BadRequest, "history acquisition is stale");
@@ -6285,8 +6304,7 @@ PeerSet::exclude_history_endpoint_on_strand(
         return false;
     if (found->second.excluded_endpoints.contains(endpoint))
         return true;
-    if (found->second.excluded_endpoints.size() >=
-        kMaxHistorySearchCandidates)
+    if (found->second.excluded_endpoints.size() >= kMaxHistorySearchCandidates)
     {
         throw PeerClientException(
             Error::ResourceExhausted,
@@ -6321,7 +6339,8 @@ PeerSet::co_exclude_history_endpoint(
 }
 
 void
-//@@authority transition=prv.T0291 status=provisional scope=function bind=catl::peer_client::release_history_acquisition_attachments@96cdb28dd05705c5
+//@@authority transition=prv.T0291 status=provisional scope=function
+// bind=catl::peer_client::release_history_acquisition_attachments@96cdb28dd05705c5
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0110,prv.S0111,prv.S0115,prv.S0116,prv.S0117
 // label=remove_acquisition_reverse_attachments_and_close_exact_grants
@@ -6360,12 +6379,12 @@ PeerSet::release_history_acquisition_attachments(
 }
 
 void
-//@@authority transition=prv.T0293 status=provisional scope=function bind=catl::peer_client::release_history_acquisition_origins@26b95fd2195edb5e
+//@@authority transition=prv.T0293 status=provisional scope=function
+// bind=catl::peer_client::release_history_acquisition_origins@26b95fd2195edb5e
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0088,prv.S0110,prv.S0111,prv.S0115,prv.S0119,prv.S0120
 // label=close_exact_demand_origin_or_request_its_physical_drain
-PeerSet::release_history_acquisition_origins(
-    AcquisitionId acquisition) noexcept
+PeerSet::release_history_acquisition_origins(AcquisitionId acquisition) noexcept
 {
     ASSERT_ON_STRAND();
     auto owner = history_acquisitions_.find(acquisition);
@@ -6375,7 +6394,8 @@ PeerSet::release_history_acquisition_origins(
     std::uint64_t cursor = 0;
     for (;;)
     {
-        auto const next = owner->second.retained_generations.upper_bound(cursor);
+        auto const next =
+            owner->second.retained_generations.upper_bound(cursor);
         if (next == owner->second.retained_generations.end())
             break;
         auto const generation_id = *next;
@@ -6483,7 +6503,8 @@ PeerSet::release_history_acquisition_origins(
 }
 
 void
-//@@authority transition=prv.T0292 status=provisional scope=function bind=catl::peer_client::release_generation_history_attachments@ee2f8e7143b8162e
+//@@authority transition=prv.T0292 status=provisional scope=function
+// bind=catl::peer_client::release_generation_history_attachments@ee2f8e7143b8162e
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0110,prv.S0111,prv.S0115,prv.S0116,prv.S0117
 // label=fanout_generation_terminal_and_close_exact_attachment_grants
@@ -6494,8 +6515,7 @@ PeerSet::release_generation_history_attachments(
     if (generation.history_attachments.empty())
         return;
     auto const generation_id = generation.lifecycle.generation();
-    for (auto& [acquisition_id, attachment] :
-         generation.history_attachments)
+    for (auto& [acquisition_id, attachment] : generation.history_attachments)
     {
         auto acquisition = history_acquisitions_.find(acquisition_id);
         if (acquisition != history_acquisitions_.end())
@@ -6511,7 +6531,8 @@ PeerSet::release_generation_history_attachments(
 }
 
 void
-//@@authority transition=prv.T0294 status=provisional scope=function bind=catl::peer_client::release_generation_history_origin@2eac0df594a7a700
+//@@authority transition=prv.T0294 status=provisional scope=function
+// bind=catl::peer_client::release_generation_history_origin@2eac0df594a7a700
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0110,prv.S0111,prv.S0115,prv.S0119,prv.S0120
 // label=acknowledge_exact_history_generation_origin_after_release_receipt
@@ -6551,7 +6572,8 @@ PeerSet::release_generation_history_origin(
 }
 
 void
-//@@authority transition=prv.T0296 status=provisional scope=function bind=catl::peer_client::on_history_generation_watchdog@23ce312040ed58a7
+//@@authority transition=prv.T0296 status=provisional scope=function
+// bind=catl::peer_client::on_history_generation_watchdog@23ce312040ed58a7
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0088,prv.S0089,prv.S0115,prv.S0116,prv.S0117,prv.S0118,prv.S0119,prv.S0120,prv.S0121
 // label=expire_exact_demand_generation_without_releasing_before_receipt
@@ -6564,8 +6586,7 @@ PeerSet::on_history_generation_watchdog(
     if (generation == peer_generations_.end() ||
         generation->second.lifecycle.generation() != generation_id ||
         !generation->second.history_origin ||
-        generation->second.physical_deadline >
-            std::chrono::steady_clock::now())
+        generation->second.physical_deadline > std::chrono::steady_clock::now())
     {
         return;
     }
@@ -6614,7 +6635,8 @@ PeerSet::on_history_generation_watchdog(
 }
 
 std::optional<std::pair<std::size_t, std::size_t>>
-//@@authority transition=prv.T0297 status=provisional scope=function bind=catl::peer_client::capture_history_redirect_successors@cea6928fe23b0306
+//@@authority transition=prv.T0297 status=provisional scope=function
+// bind=catl::peer_client::capture_history_redirect_successors@cea6928fe23b0306
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0115,prv.S0116,prv.S0119,prv.S0120,prv.S0122
 // label=fanout_bounded_redirect_values_to_exact_generation_owners
@@ -6666,11 +6688,11 @@ PeerSet::capture_history_redirect_successors(
                 }
                 changed =
                     acquisition->second.redirect_successors.insert(successor)
-                        .second || changed;
+                        .second ||
+                    changed;
             }
         };
-        add_to(
-            generation->second.history_origin->retainer_control.acquisition);
+        add_to(generation->second.history_origin->retainer_control.acquisition);
         for (auto const& [acquisition, _] :
              generation->second.history_attachments)
         {
@@ -7000,9 +7022,10 @@ PeerSet::history_search_snapshot_on_strand(
 }
 
 HistorySearchSnapshot
-//@@authority transition=prv.T0288 status=provisional scope=function bind=catl::peer_client::project_history_search_snapshot@fce59ab3514cad01
+//@@authority transition=prv.T0288 status=provisional scope=function
+// bind=catl::peer_client::project_history_search_snapshot@fce59ab3514cad01
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0008,prv.S0073,prv.S0081,prv.S0088,prv.S0104,prv.S0105,prv.S0114,prv.S0115,prv.S0116,prv.S0117,prv.S0118,prv.S0127,prv.S0128,prv.S0129
+// touches=prv.S0008,prv.S0073,prv.S0081,prv.S0088,prv.S0104,prv.S0105,prv.S0114,prv.S0115,prv.S0116,prv.S0117,prv.S0118,prv.S0127,prv.S0128,prv.S0129,prv.S0134
 // label=project_distinct_evidence_lanes_tokens_and_physical_census
 PeerSet::project_history_search_snapshot(
     HistoryAcquisitionRecord const& acquisition,
@@ -7023,6 +7046,8 @@ PeerSet::project_history_search_snapshot(
     snapshot.fallback_at = demand.options.fallback_at;
     snapshot.cancelled =
         demand.terminal.has_value() || acquisition.terminal.has_value();
+    snapshot.candidate_supply_open =
+        !shutdown_ingress_sealed_.load(std::memory_order_acquire);
     snapshot.initial_parent_dial_budget = demand.generation_probe_tokens.size();
     snapshot.crawl_only_probes = demand.crawl_only_probes;
     snapshot.source_attempts = demand.source_attempts;
@@ -7198,40 +7223,38 @@ PeerSet::project_history_search_snapshot(
         }
     }
 
-    auto project_attachment =
-        [&snapshot, &acquisition, &demand, &now, this](
-            HistorySearchCandidate& candidate,
-            std::uint64_t generation_id) {
-            auto generation = peer_generations_.find(candidate.target.endpoint);
-            if (generation == peer_generations_.end() || generation_id == 0 ||
-                generation->second.lifecycle.generation() != generation_id ||
-                generation->second.physical_deadline <= now)
-            {
-                candidate.eligible = false;
-                return;
-            }
-            candidate.eligible = true;
-            candidate.attached =
-                acquisition.attached_generations.contains(generation_id) ||
-                (generation->second.history_origin &&
-                 generation->second.history_origin->retainer_control.acquisition ==
-                     acquisition.id);
-            candidate.demand_sponsored =
-                demand.sponsored_generations.contains(generation_id);
-            candidate.attachable = !candidate.attached;
-            if (candidate.attached &&
-                snapshot.wakes.size() < kMaxHistorySearchWakes)
-            {
-                snapshot.wakes.push_back(HistoryPlannedWake{
-                    .kind =
-                        HistoryWakeSourceKind::attached_generation_deadline,
-                    .at = std::min(
-                        generation->second.physical_deadline,
-                        demand.absolute_deadline),
-                    .endpoint = candidate.target.endpoint,
-                    .generation = generation_id});
-            }
-        };
+    auto project_attachment = [&snapshot, &acquisition, &demand, &now, this](
+                                  HistorySearchCandidate& candidate,
+                                  std::uint64_t generation_id) {
+        auto generation = peer_generations_.find(candidate.target.endpoint);
+        if (generation == peer_generations_.end() || generation_id == 0 ||
+            generation->second.lifecycle.generation() != generation_id ||
+            generation->second.physical_deadline <= now)
+        {
+            candidate.eligible = false;
+            return;
+        }
+        candidate.eligible = true;
+        candidate.attached =
+            acquisition.attached_generations.contains(generation_id) ||
+            (generation->second.history_origin &&
+             generation->second.history_origin->retainer_control.acquisition ==
+                 acquisition.id);
+        candidate.demand_sponsored =
+            demand.sponsored_generations.contains(generation_id);
+        candidate.attachable = !candidate.attached;
+        if (candidate.attached &&
+            snapshot.wakes.size() < kMaxHistorySearchWakes)
+        {
+            snapshot.wakes.push_back(HistoryPlannedWake{
+                .kind = HistoryWakeSourceKind::attached_generation_deadline,
+                .at = std::min(
+                    generation->second.physical_deadline,
+                    demand.absolute_deadline),
+                .endpoint = candidate.target.endpoint,
+                .generation = generation_id});
+        }
+    };
 
     for (auto const& [endpoint, servant] : in_flight_)
     {
@@ -7260,15 +7283,12 @@ PeerSet::project_history_search_snapshot(
     {
         if (generation.lifecycle.lifecycle() != PeerLifecycle::ready ||
             connections_.contains(endpoint) ||
-            draining_generations_.contains(
-                generation.lifecycle.generation()))
+            draining_generations_.contains(generation.lifecycle.generation()))
         {
             continue;
         }
-        auto& candidate =
-            ensure(endpoint, HistorySourceLane::direct_verified);
-        candidate.value.target.generation =
-            generation.lifecycle.generation();
+        auto& candidate = ensure(endpoint, HistorySourceLane::direct_verified);
+        candidate.value.target.generation = generation.lifecycle.generation();
         candidate.value.disposition =
             HistoryGenerationDisposition::ready_transient;
         candidate.value.blind_eligible = true;
@@ -7278,8 +7298,7 @@ PeerSet::project_history_search_snapshot(
                 generation.lifecycle.status()->advertised_range.contains(
                     acquisition.context.ledger_seq);
         }
-        project_attachment(
-            candidate.value, generation.lifecycle.generation());
+        project_attachment(candidate.value, generation.lifecycle.generation());
     }
     for (auto const& [generation, draining] : draining_generations_)
     {
@@ -7368,8 +7387,10 @@ PeerSet::co_history_search_snapshot(
 }
 
 HistorySearchExecution
-//@@authority transition=prv.T0289 status=provisional scope=function bind=catl::peer_client::execute_history_grant_on_strand@53fcbb8f477966f8
-// owner=unresolved owner_hypothesis=peer_set commit=participant_then_request_mutex
+//@@authority transition=prv.T0289 status=provisional scope=function
+// bind=catl::peer_client::execute_history_grant_on_strand@53fcbb8f477966f8
+// owner=unresolved owner_hypothesis=peer_set
+// commit=participant_then_request_mutex
 // touches=prv.S0088,prv.S0090,prv.S0091,prv.S0094,prv.S0103,prv.S0104,prv.S0105,prv.S0110,prv.S0111,prv.S0115,prv.S0116,prv.S0117,prv.S0118,prv.S0119,prv.S0120
 // label=replan_and_atomically_spend_ready_use_attachment_or_generation
 PeerSet::execute_history_grant_on_strand(
@@ -7426,10 +7447,10 @@ PeerSet::execute_history_grant_on_strand(
     auto const* create = std::get_if<HistoryCreateGenerationPlan>(&plan);
     if (!known && !blind && !attach && !create)
         return result;
-    auto const& target = known ? known->target :
-        blind                     ? blind->target :
-        attach                    ? attach->target :
-                                    create->target;
+    auto const& target = known ? known->target
+        : blind                ? blind->target
+        : attach               ? attach->target
+                               : create->target;
     std::unique_ptr<PreparedPeerUse> prepared;
     if (known || blind)
     {
@@ -7452,8 +7473,8 @@ PeerSet::execute_history_grant_on_strand(
         }
         auto const exact_transient_owner = !admitted &&
             ((generation_row->second.history_origin &&
-              generation_row->second.history_origin->retainer_control.acquisition ==
-                  acquisition->second.id &&
+              generation_row->second.history_origin->retainer_control
+                      .acquisition == acquisition->second.id &&
               !generation_row->second.history_origin->close_requested) ||
              acquisition->second.attached_generations.contains(
                  target.generation));
@@ -7483,8 +7504,7 @@ PeerSet::execute_history_grant_on_strand(
         prepared->active_node.mapped().history_grant = grant;
     }
 
-    using AttachmentMap =
-        std::map<AcquisitionId, HistoryGenerationAttachment>;
+    using AttachmentMap = std::map<AcquisitionId, HistoryGenerationAttachment>;
     AttachmentMap::node_type attachment_node;
     std::set<std::uint64_t>::node_type reverse_attachment_node;
     PeerGeneration* attachment_generation = nullptr;
@@ -7517,18 +7537,15 @@ PeerSet::execute_history_grant_on_strand(
                 .deadline = std::min(
                     generation->second.physical_deadline,
                     demand->second.absolute_deadline)});
-        attachment_node =
-            prepared_attachments.extract(acquisition->second.id);
+        attachment_node = prepared_attachments.extract(acquisition->second.id);
         std::set<std::uint64_t> prepared_reverse;
         prepared_reverse.insert(target.generation);
-        reverse_attachment_node =
-            prepared_reverse.extract(target.generation);
+        reverse_attachment_node = prepared_reverse.extract(target.generation);
         attachment_generation = &generation->second;
     }
 
     using GenerationMap = std::map<std::string, PeerGeneration>;
-    using QueuedAuthorityMap =
-        std::map<std::string, QueuedConnectAuthority>;
+    using QueuedAuthorityMap = std::map<std::string, QueuedConnectAuthority>;
     GenerationMap::node_type created_generation_node;
     QueuedAuthorityMap::node_type created_authority_node;
     std::set<std::string>::node_type created_queue_node;
@@ -7536,8 +7553,7 @@ PeerSet::execute_history_grant_on_strand(
     std::string created_pending_endpoint;
     std::uint64_t created_generation_id = 0;
     bool replace_terminal_generation = false;
-    auto created_physical_deadline =
-        std::chrono::steady_clock::time_point{};
+    auto created_physical_deadline = std::chrono::steady_clock::time_point{};
     if (create)
     {
         auto normalized =
@@ -7592,19 +7608,17 @@ PeerSet::execute_history_grant_on_strand(
         auto watchdog = std::make_shared<asio::steady_timer>(
             strand_, created_physical_deadline);
         auto weak = weak_from_this();
-        watchdog->async_wait(
-            [weak,
-             endpoint = target.endpoint,
-             generation = created_generation_id](
-                boost::system::error_code const& ec) noexcept {
-                if (ec == asio::error::operation_aborted)
-                    return;
-                if (auto owner = weak.lock())
-                {
-                    owner->on_history_generation_watchdog(
-                        endpoint, generation);
-                }
-            });
+        watchdog->async_wait([weak,
+                              endpoint = target.endpoint,
+                              generation = created_generation_id](
+                                 boost::system::error_code const& ec) noexcept {
+            if (ec == asio::error::operation_aborted)
+                return;
+            if (auto owner = weak.lock())
+            {
+                owner->on_history_generation_watchdog(endpoint, generation);
+            }
+        });
         prepared_generation->second.history_origin = HistoryGenerationOrigin{
             .creation_control = create->control,
             .source = create->source,
@@ -7622,8 +7636,7 @@ PeerSet::execute_history_grant_on_strand(
                 .generation = created_generation_id,
                 .physical_deadline = created_physical_deadline,
                 .history_demand_authorized = true});
-        created_authority_node =
-            prepared_authorities.extract(target.endpoint);
+        created_authority_node = prepared_authorities.extract(target.endpoint);
         std::set<std::string> prepared_queue;
         prepared_queue.insert(target.endpoint);
         created_queue_node = prepared_queue.extract(target.endpoint);
@@ -7635,9 +7648,7 @@ PeerSet::execute_history_grant_on_strand(
         pending_connects_.reserve(pending_connects_.size() + 1);
     }
 
-    auto find_token = [this](
-                          auto& tokens,
-                          HistoryBudgetGrantRef const& ref)
+    auto find_token = [this](auto& tokens, HistoryBudgetGrantRef const& ref)
         -> LedgerDemandRecord::BudgetToken* {
         if (!ref || ref.owner_instance != peer_set_instance_id_)
             return nullptr;
@@ -7657,8 +7668,8 @@ PeerSet::execute_history_grant_on_strand(
         //@@mutation-site blind-history-use-requires-parent-and-global-debit
         parent_blind =
             find_token(demand->second.blind_tokens, blind->parent_blind_grant);
-        global_blind = find_token(
-            global_history_blind_tokens_, blind->global_blind_grant);
+        global_blind =
+            find_token(global_history_blind_tokens_, blind->global_blind_grant);
         if (!parent_blind || !global_blind)
             return result;
         //@@mutation-end blind-history-use-requires-parent-and-global-debit
@@ -7680,8 +7691,8 @@ PeerSet::execute_history_grant_on_strand(
         //@@mutation-site history-generation-requires-parent-and-global-debit
         parent_probe = find_token(
             demand->second.generation_probe_tokens, create->parent_dial_grant);
-        global_dial = find_token(
-            global_history_dial_tokens_, create->global_dial_grant);
+        global_dial =
+            find_token(global_history_dial_tokens_, create->global_dial_grant);
         if (!parent_probe || !global_dial)
             return result;
         //@@mutation-end history-generation-requires-parent-and-global-debit
@@ -7777,23 +7788,28 @@ PeerSet::execute_history_grant_on_strand(
         }
         if (commit.created_generation_id != 0)
         {
-            //@@mutation-site history-generation-queue-origin-and-debits-share-owner-flip
+            //@@mutation-site
+            // history-generation-queue-origin-and-debits-share-owner-flip
             if (commit.replace_terminal_generation)
             {
-                //@@authority transition=prv.T0304 status=provisional scope=statement bind=declaration@64507850aa424c2e
+                //@@authority transition=prv.T0304 status=provisional
+                // scope=statement bind=declaration@64507850aa424c2e
                 // owner=unresolved owner_hypothesis=peer_set
                 // commit=participant_then_request_mutex touches=prv.S0088
                 // label=retire_only_fully_quiescent_terminal_generation_tombstone
                 auto retired = commit.owner->peer_generations_.extract(
-                    commit.created_generation_node.key()); //@@authority-target ids=prv.T0304
+                    commit.created_generation_node
+                        .key());  //@@authority-target ids=prv.T0304
                 assert(!retired.empty());
             }
-            //@@authority transition=prv.T0295 status=provisional scope=statement bind=declaration@b97cb1639915ef03
-            // owner=unresolved owner_hypothesis=peer_set commit=participant_then_request_mutex
+            //@@authority transition=prv.T0295 status=provisional
+            // scope=statement bind=declaration@b97cb1639915ef03
+            // owner=unresolved owner_hypothesis=peer_set
+            // commit=participant_then_request_mutex
             // touches=prv.S0088,prv.S0103,prv.S0104,prv.S0105,prv.S0110,prv.S0111,prv.S0115,prv.S0118,prv.S0119,prv.S0120
             // label=atomically_debit_exact_dials_and_install_demand_origin_generation
             auto generation = commit.owner->peer_generations_.insert(
-                std::move(commit.created_generation_node)); //@@authority-target ids=prv.T0295
+                std::move(commit.created_generation_node));  //@@authority-target ids=prv.T0295
             auto authority = commit.owner->targeted_connects_.insert(
                 std::move(commit.created_authority_node));
             auto queued = commit.owner->queued_.insert(
@@ -7809,7 +7825,8 @@ PeerSet::execute_history_grant_on_strand(
                 std::move(commit.created_pending_endpoint));
             commit.owner->next_connection_generation_ =
                 commit.created_generation_id;
-            //@@mutation-end history-generation-queue-origin-and-debits-share-owner-flip
+            //@@mutation-end
+            // history-generation-queue-origin-and-debits-share-owner-flip
         }
         else if (commit.attachment_generation)
         {
@@ -7850,10 +7867,10 @@ PeerSet::execute_history_grant_on_strand(
     };
     auto spend = fetch->try_spend_with_owner_commit(
         grant,
-        known  ? HistoryAuthorityAction::submit_known_use :
-        blind  ? HistoryAuthorityAction::submit_blind_use :
-        attach ? HistoryAuthorityAction::attach_or_adopt :
-                 HistoryAuthorityAction::create_generation,
+        known        ? HistoryAuthorityAction::submit_known_use
+            : blind  ? HistoryAuthorityAction::submit_blind_use
+            : attach ? HistoryAuthorityAction::attach_or_adopt
+                     : HistoryAuthorityAction::create_generation,
         target,
         std::chrono::steady_clock::now(),
         &context,
@@ -7891,10 +7908,8 @@ PeerSet::co_execute_history_grant(
             strand_, catl::core::retain_current_request());
         co_return co_await asio::co_spawn(
             std::move(owner_executor),
-            [self,
-             fetch = std::move(fetch),
-             grant,
-             kind]() -> asio::awaitable<HistorySearchExecution> {
+            [self, fetch = std::move(fetch), grant, kind]()
+                -> asio::awaitable<HistorySearchExecution> {
                 co_return self->execute_history_grant_on_strand(
                     fetch, grant, kind);
             },
@@ -7903,8 +7918,117 @@ PeerSet::co_execute_history_grant(
     co_return execute_history_grant_on_strand(fetch, grant, kind);
 }
 
+ReadyHistoryPeerUses
+//@@authority transition=prv.T0311 status=provisional scope=function
+//bind=catl::peer_client::try_ready_history_peer_uses_on_strand@a1ffa1889fb15b2e
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0105,prv.S0108,prv.S0109,prv.S0110,prv.S0111
+// label=spend_bounded_currently_runnable_exact_history_uses_without_waiting
+PeerSet::try_ready_history_peer_uses_on_strand(
+    std::shared_ptr<SharedHistoryFetch> const& fetch,
+    HistoryAcquisitionRef const& acquisition,
+    HistoryInterestRef const& interest,
+    PeerUseKind kind,
+    std::size_t max_count)
+{
+    ASSERT_ON_STRAND();
+    ReadyHistoryPeerUses result{.interest = interest};
+    if (!fetch || !acquisition || !interest || max_count == 0 ||
+        interest.participant_owner_instance() != peer_set_instance_id_ ||
+        interest.acquisition() != acquisition.context().acquisition ||
+        interest.demand() != acquisition.demand_id() ||
+        interest.fetch() != acquisition.context().fetch ||
+        interest.fetch_epoch() != acquisition.context().fetch_epoch)
+    {
+        return result;
+    }
+
+    while (result.peer_uses.size() < max_count)
+    {
+        auto const now = std::chrono::steady_clock::now();
+        auto snapshot =
+            history_search_snapshot_on_strand(acquisition, result.interest);
+        auto proposal = plan_history_interest(snapshot, now);
+        if (!proposal.next_action ||
+            (proposal.next_action->action !=
+                 HistoryAuthorityAction::submit_known_use &&
+             proposal.next_action->action !=
+                 HistoryAuthorityAction::submit_blind_use))
+        {
+            break;
+        }
+
+        auto revised =
+            fetch->revise_interest(result.interest, std::move(proposal), now);
+        if (!revised)
+            break;
+        result.interest = *revised;
+
+        auto const decision = fetch->select_sponsor(now);
+        if (!decision.sponsor ||
+            !same_history_interest(*decision.sponsor, result.interest))
+        {
+            break;
+        }
+        auto grant = fetch->mint_grant(*decision.sponsor, now);
+        if (!grant)
+            break;
+
+        auto execution = execute_history_grant_on_strand(fetch, grant, kind);
+        if (!execution.peer_use)
+        {
+            if (auto passive = fetch->revise_interest(result.interest, {}, now))
+                result.interest = *passive;
+            break;
+        }
+
+        auto const endpoint = execution.peer_use.generation().endpoint();
+        (void)exclude_history_endpoint_on_strand(acquisition, endpoint);
+        auto passive = fetch->revise_interest(result.interest, {}, now);
+        if (!passive)
+        {
+            execution.peer_use.finish(PeerUseOutcome::cancelled);
+            break;
+        }
+        result.interest = *passive;
+        result.peer_uses.push_back(std::move(execution.peer_use));
+    }
+    return result;
+}
+
+boost::asio::awaitable<ReadyHistoryPeerUses>
+PeerSet::co_try_ready_history_peer_uses(
+    std::shared_ptr<SharedHistoryFetch> fetch,
+    HistoryAcquisitionRef acquisition,
+    HistoryInterestRef interest,
+    PeerUseKind kind,
+    std::size_t max_count)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto owner_executor = catl::core::ContextExecutor(
+            strand_, catl::core::retain_current_request());
+        co_return co_await asio::co_spawn(
+            std::move(owner_executor),
+            [self,
+             fetch = std::move(fetch),
+             acquisition,
+             interest,
+             kind,
+             max_count]() -> asio::awaitable<ReadyHistoryPeerUses> {
+                co_return self->try_ready_history_peer_uses_on_strand(
+                    fetch, acquisition, interest, kind, max_count);
+            },
+            asio::use_awaitable);
+    }
+    co_return try_ready_history_peer_uses_on_strand(
+        fetch, acquisition, interest, kind, max_count);
+}
+
 PeerSet::HistoryWakeDisposition
-//@@authority transition=prv.T0310 status=provisional scope=function bind=catl::peer_client::classify_history_wake_on_strand@7432ded2c5f86373
+//@@authority transition=prv.T0310 status=provisional scope=function
+// bind=catl::peer_client::classify_history_wake_on_strand@7432ded2c5f86373
 // owner=unresolved owner_hypothesis=peer_set commit=pure
 // touches=prv.S0088,prv.S0104,prv.S0105,prv.S0109,prv.S0114,prv.S0115,prv.S0127,prv.S0128,prv.S0129
 // label=classify_observed_history_change_as_reuse_coalesce_or_replan
@@ -7919,8 +8043,7 @@ PeerSet::classify_history_wake_on_strand(
     auto const local =
         history_acquisitions_.find(acquisition.context().acquisition);
     auto const parent = ledger_demands_.find(acquisition.demand_id());
-    if (history_pool_revision_ == 0 ||
-        history_availability_revision_ == 0 ||
+    if (history_pool_revision_ == 0 || history_availability_revision_ == 0 ||
         history_discovery_revision_ == 0 ||
         local == history_acquisitions_.end() ||
         parent == ledger_demands_.end() || local->second.terminal ||
@@ -7968,7 +8091,8 @@ PeerSet::classify_history_wake_on_strand(
 }
 
 boost::asio::awaitable<HistorySearchDriveResult>
-//@@authority transition=prv.T0300 status=provisional scope=function bind=catl::peer_client::drive_history_interest_on_strand@9ad65daf4bb809cb
+//@@authority transition=prv.T0300 status=provisional scope=function
+// bind=catl::peer_client::drive_history_interest_on_strand@9ad65daf4bb809cb
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0105,prv.S0108,prv.S0109,prv.S0110,prv.S0115,prv.S0127,prv.S0128,prv.S0129
 // label=drive_one_revisioned_history_participant_to_exact_use_or_terminal
@@ -7991,19 +8115,6 @@ PeerSet::drive_history_interest_on_strand(
             Error::BadRequest, "history driver binding mismatch");
     }
 
-    auto same_interest = [](HistoryInterestRef const& left,
-                            HistoryInterestRef const& right) noexcept {
-        return left && right && left.fetch() == right.fetch() &&
-            left.fetch_epoch() == right.fetch_epoch() &&
-            left.interest() == right.interest() &&
-            left.participant_revision() == right.participant_revision() &&
-            left.demand() == right.demand() &&
-            left.acquisition() == right.acquisition() &&
-            left.request_scope() == right.request_scope() &&
-            left.participant_owner_instance() ==
-                right.participant_owner_instance() &&
-            left.deadline() == right.deadline();
-    };
     auto finish_local = [&](HistoryAcquisitionTerminal terminal) noexcept {
         result.local_terminal = terminal;
         (void)fetch->detach(result.interest);
@@ -8090,11 +8201,10 @@ PeerSet::drive_history_interest_on_strand(
             if (history_pool_revision_ == observed_pool_revision)
                 return false;
 
-            auto const availability_changed =
-                history_availability_revision_ !=
+            auto const availability_changed = history_availability_revision_ !=
                 observed_pool.availability_revision;
-            auto const discovery_changed = history_discovery_revision_ !=
-                observed_pool.discovery_revision;
+            auto const discovery_changed =
+                history_discovery_revision_ != observed_pool.discovery_revision;
             observed_pool_revision = history_pool_revision_;
             observed_pool = HistoryPoolObservation{
                 .availability_revision = history_availability_revision_,
@@ -8140,7 +8250,7 @@ PeerSet::drive_history_interest_on_strand(
             ++result.arbitrations;
             auto const decision = fetch->select_sponsor(arbitration_now);
             auto const selected_here = decision.sponsor &&
-                same_interest(*decision.sponsor, result.interest);
+                same_history_interest(*decision.sponsor, result.interest);
             if (arbitration_now >= next_progress_at)
             {
                 do
@@ -8291,6 +8401,25 @@ PeerSet::drive_history_interest_on_strand(
 
             if (decision.viable_participants == 0)
             {
+                std::ostringstream status;
+                status << "history source selection ledger "
+                       << acquisition.context().ledger_seq
+                       << ": no viable shared participant"
+                       << "; live=" << decision.live_participants
+                       << ", local=";
+                if (proposal.next_action)
+                    status << "action";
+                else if (proposal.wait_until)
+                    status << "wait:"
+                           << history_wake_name(proposal.wait_until->kind);
+                else if (proposal.local_terminal)
+                    status << "terminal:"
+                           << static_cast<int>(*proposal.local_terminal);
+                else
+                    status << "empty";
+                status << ", supply="
+                       << (snapshot.candidate_supply_open ? "open" : "closed");
+                catl::core::emit_status(status.str());
                 (void)fetch->terminalize_if_no_viable_action(arbitration_now);
                 auto const terminal = fetch->snapshot().terminal;
                 if (terminal)
@@ -8503,42 +8632,38 @@ PeerSet::prepare_peer_use(
         auto weak = weak_from_this();
         prepared->control = std::make_shared<detail::PeerUseControl>();
         prepared->state = std::make_shared<detail::PeerUseState>();
-        auto receipt =
-            std::make_shared<detail::PeerUseReceiptState>(strand_);
+        auto receipt = std::make_shared<detail::PeerUseReceiptState>(strand_);
         prepared->control->session = generation_row->second.session;
         prepared->control->generation = generation;
         prepared->control->request = request;
         prepared->control->ticket = ticket;
         prepared->control->owner = weak;
         prepared->control->receipt = receipt;
-        prepared->control->finish =
-            [weak, ticket](PeerUseOutcome outcome,
-                           detail::PeerUseProposalSource source) {
-                if (auto self = weak.lock())
+        prepared->control->finish = [weak, ticket](
+                                        PeerUseOutcome outcome,
+                                        detail::PeerUseProposalSource source) {
+            if (auto self = weak.lock())
+            {
+                auto remaining =
+                    self->drop_peer_use_finish_posts_for_test_.load(
+                        std::memory_order_acquire);
+                while (remaining != 0 &&
+                       !self->drop_peer_use_finish_posts_for_test_
+                            .compare_exchange_weak(
+                                remaining,
+                                remaining - 1,
+                                std::memory_order_acq_rel,
+                                std::memory_order_acquire))
                 {
-                    auto remaining =
-                        self->drop_peer_use_finish_posts_for_test_.load(
-                            std::memory_order_acquire);
-                    while (
-                        remaining != 0 &&
-                        !self->drop_peer_use_finish_posts_for_test_
-                             .compare_exchange_weak(
-                                 remaining,
-                                 remaining - 1,
-                                 std::memory_order_acq_rel,
-                                 std::memory_order_acquire))
-                    {
-                    }
-                    if (remaining != 0)
-                        return;
-                    asio::post(
-                        self->strand_,
-                        [self, ticket, outcome, source]() noexcept {
-                            self->finish_peer_use(
-                                ticket, outcome, source);
-                        });
                 }
-            };
+                if (remaining != 0)
+                    return;
+                asio::post(
+                    self->strand_, [self, ticket, outcome, source]() noexcept {
+                        self->finish_peer_use(ticket, outcome, source);
+                    });
+            }
+        };
         prepared->state->control = prepared->control;
         prepared->deadline = std::make_shared<asio::steady_timer>(
             strand_, request.absolute_deadline);
@@ -8562,8 +8687,7 @@ PeerSet::prepare_peer_use(
         prepared->active_node = active.extract(prepared->use_id);
         std::set<std::uint64_t> membership;
         membership.insert(prepared->use_id);
-        prepared->generation_use_node =
-            membership.extract(prepared->use_id);
+        prepared->generation_use_node = membership.extract(prepared->use_id);
         return prepared;
     }
     catch (...)
@@ -8573,7 +8697,8 @@ PeerSet::prepare_peer_use(
 }
 
 PeerUse
-//@@authority transition=prv.T0243 status=provisional scope=function bind=catl::peer_client::commit_prepared_peer_use@a6f1e4f58014d31c
+//@@authority transition=prv.T0243 status=provisional scope=function
+// bind=catl::peer_client::commit_prepared_peer_use@a6f1e4f58014d31c
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0088,prv.S0090,prv.S0091,prv.S0093,prv.S0094,prv.S0095,prv.S0096,prv.S0100
 // label=install_exact_generation_peer_use_before_caller_resumes
@@ -8797,7 +8922,7 @@ PeerSet::mark_generation_peer_uses_finishing(
                     break;
                 case GenerationDrainCause::local_use:
                     //@@mutation-site
-                    //peer-use-local-drain-does-not-blame-sibling
+                    // peer-use-local-drain-does-not-blame-sibling
                     use.forced_outcome = trigger && trigger->use_id == use_id
                         ? outcome
                         : PeerUseOutcome::cancelled;
@@ -9390,7 +9515,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_history_search_progress_and_latch_zero_if_exhausted
         catl::core::emit_status(
-            status.str()); //@@authority-target ids=prv.T0226
+            status.str());  //@@authority-target ids=prv.T0226
     };
     auto emit_terminal_zero_progress = [&]() {
         if (!zero_countdown_published)
@@ -9460,7 +9585,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=peer_set_strand touches=prv.S0077
         // label=establish_zero_countdown_before_no_covering_peer_status
-        emit_terminal_zero_progress(); //@@authority-target ids=prv.T0227
+        emit_terminal_zero_progress();  //@@authority-target ids=prv.T0227
         cleanup.clean_now();
         auto const elapsed_secs =
             std::chrono::duration_cast<std::chrono::seconds>(
@@ -9503,7 +9628,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_no_covering_peer_status_after_zero_countdown
         catl::core::emit_status(
-            status.str()); //@@authority-target ids=prv.T0228
+            status.str());  //@@authority-target ids=prv.T0228
     };
 
     PLOGI(

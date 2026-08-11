@@ -192,7 +192,8 @@ struct HistorySearchSnapshot
     // observed_home=history_search_snapshot
     // label=exact_authority_free_history_pool_and_participant_revision
     HistoryControlRevision control;
-    //@@authority state=prv.S0127 status=provisional scope=field bind=catl::peer_client::HistorySearchSnapshot::observation@84be0831f2a86ff0
+    //@@authority state=prv.S0127 status=provisional scope=field
+    //bind=catl::peer_client::HistorySearchSnapshot::observation@84be0831f2a86ff0
     // owner=unresolved owner_hypothesis=peer_set
     // observed_home=history_search_snapshot
     // label=advisory_history_planning_revision_observation
@@ -200,6 +201,14 @@ struct HistorySearchSnapshot
     std::chrono::steady_clock::time_point absolute_deadline{};
     std::chrono::steady_clock::time_point fallback_at{};
     bool cancelled = false;
+    //@@authority state=prv.S0134 status=provisional scope=field
+    // bind=catl::peer_client::HistorySearchSnapshot::candidate_supply_open@413868f58e7fb6a3
+    // owner=unresolved owner_hypothesis=peer_set
+    // observed_home=history_search_snapshot
+    // label=service_policy_keeps_bounded_candidate_supply_wait_open
+    // This is a bounded retry-policy fact, not proof that a future archival
+    // peer exists or will be discovered.
+    bool candidate_supply_open = false;
 
     std::size_t initial_parent_dial_budget = 0;
     std::size_t remaining_parent_dials = 0;

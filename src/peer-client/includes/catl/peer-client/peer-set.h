@@ -167,6 +167,13 @@ struct HistorySearchDriveResult
     }
 };
 
+/** Currently runnable exact uses obtained without waiting for future supply. */
+struct ReadyHistoryPeerUses
+{
+    HistoryInterestRef interest;
+    std::vector<PeerUse> peer_uses;
+};
+
 class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
     friend class ::PeerSetTestAccess;
@@ -473,7 +480,8 @@ public:
     /// Add one exact endpoint to a live child's bounded retry exclusions.
     boost::asio::awaitable<bool>
     co_exclude_history_endpoint(
-        HistoryAcquisitionRef acquisition, std::string endpoint);
+        HistoryAcquisitionRef acquisition,
+        std::string endpoint);
 
     /// Acknowledged child terminal transition. First terminal wins.
     boost::asio::awaitable<void>
@@ -512,6 +520,22 @@ public:
         HistoryAcquisitionRef acquisition,
         HistoryInterestRef interest,
         PeerUseKind kind);
+
+    /**
+     * Try to spend up to max_count currently runnable exact-use actions.
+     *
+     * This operation crosses to the PeerSet strand but never waits for a
+     * future connection, retry gate, capacity release, or discovery event.
+     * The returned interest is the latest exact participant revision even
+     * when no use is immediately runnable.
+     */
+    boost::asio::awaitable<ReadyHistoryPeerUses>
+    co_try_ready_history_peer_uses(
+        std::shared_ptr<SharedHistoryFetch> fetch,
+        HistoryAcquisitionRef acquisition,
+        HistoryInterestRef interest,
+        PeerUseKind kind,
+        std::size_t max_count);
 
     /// A receipt for every generation-pin release command posted before this
     /// call. This does not assert that unrelated pins are absent; it proves
@@ -787,7 +811,8 @@ private:
 
     bool
     exclude_history_endpoint_on_strand(
-        HistoryAcquisitionRef const& acquisition, std::string endpoint);
+        HistoryAcquisitionRef const& acquisition,
+        std::string endpoint);
 
     void
     finish_history_acquisition_on_strand(
@@ -801,8 +826,7 @@ private:
     release_history_acquisition_origins(AcquisitionId acquisition) noexcept;
 
     void
-    release_generation_history_attachments(
-        PeerGeneration& generation) noexcept;
+    release_generation_history_attachments(PeerGeneration& generation) noexcept;
 
     void
     release_generation_history_origin(
@@ -854,6 +878,14 @@ private:
         std::shared_ptr<SharedHistoryFetch> const& fetch,
         HistoryAuthorityGrantRef const& grant,
         PeerUseKind kind);
+
+    ReadyHistoryPeerUses
+    try_ready_history_peer_uses_on_strand(
+        std::shared_ptr<SharedHistoryFetch> const& fetch,
+        HistoryAcquisitionRef const& acquisition,
+        HistoryInterestRef const& interest,
+        PeerUseKind kind,
+        std::size_t max_count);
 
     boost::asio::awaitable<HistorySearchDriveResult>
     drive_history_interest_on_strand(
@@ -993,8 +1025,8 @@ private:
         std::chrono::steady_clock::time_point physical_deadline);
 
     [[nodiscard]] bool
-    replaceable_generation_tombstone(PeerGeneration const& generation) const
-        noexcept;
+    replaceable_generation_tombstone(
+        PeerGeneration const& generation) const noexcept;
 
     void
     abandon_unstarted_generation(
@@ -1478,20 +1510,24 @@ private:
         PeerGenerationLifecycle lifecycle;
         PeerSessionPtr session;
         std::set<std::uint64_t> active_use_ids;
-        //@@authority state=prv.S0119 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::history_origin@aaa91bca6043e702
+        //@@authority state=prv.S0119 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::PeerGeneration::history_origin@aaa91bca6043e702
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=immutable_exact_history_demand_generation_origin
         std::optional<HistoryGenerationOrigin> history_origin;
-        //@@authority state=prv.S0116 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::history_attachments@2a3b072ed8f9d424
+        //@@authority state=prv.S0116 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::PeerGeneration::history_attachments@2a3b072ed8f9d424
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=bounded_generation_to_history_acquisition_attachments
         std::map<AcquisitionId, HistoryGenerationAttachment>
             history_attachments;
-        //@@authority state=prv.S0118 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::physical_deadline@f2cf88320d67fe0c
+        //@@authority state=prv.S0118 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::PeerGeneration::physical_deadline@f2cf88320d67fe0c
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=immutable_pre_admission_or_transient_generation_deadline
         std::chrono::steady_clock::time_point physical_deadline{};
-        //@@authority state=prv.S0121 status=provisional scope=field bind=catl::peer_client::PeerSet::PeerGeneration::history_watchdog@4b83b94a02576e68
+        //@@authority state=prv.S0121 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::PeerGeneration::history_watchdog@4b83b94a02576e68
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=exact_demand_generation_physical_watchdog
         std::shared_ptr<boost::asio::steady_timer> history_watchdog;
@@ -1606,15 +1642,18 @@ private:
         LedgerDemandId demand;
         HistorySelectionContext context;
         std::unordered_set<std::string> excluded_endpoints;
-        //@@authority state=prv.S0117 status=provisional scope=field bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::attached_generations@85328cc34b5fb2f7
+        //@@authority state=prv.S0117 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::attached_generations@85328cc34b5fb2f7
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=history_acquisition_to_exact_generation_reverse_attachments
         std::set<std::uint64_t> attached_generations;
-        //@@authority state=prv.S0120 status=provisional scope=field bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::retained_generations@a467ad72c4cf7525
+        //@@authority state=prv.S0120 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::retained_generations@a467ad72c4cf7525
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=history_acquisition_to_exact_retained_generation_reverse_index
         std::set<std::uint64_t> retained_generations;
-        //@@authority state=prv.S0122 status=provisional scope=field bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::redirect_successors@c810dfde6dc3fc66
+        //@@authority state=prv.S0122 status=provisional scope=field
+        // bind=catl::peer_client::PeerSet::HistoryAcquisitionRecord::redirect_successors@c810dfde6dc3fc66
         // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
         // label=bounded_acquisition_scoped_redirect_successor_values
         std::set<std::string> redirect_successors;
@@ -1638,15 +1677,18 @@ private:
     std::uint64_t next_history_budget_token_id_ = 1;
     std::vector<LedgerDemandRecord::BudgetToken> global_history_dial_tokens_;
     std::vector<LedgerDemandRecord::BudgetToken> global_history_blind_tokens_;
-    //@@authority state=prv.S0115 status=provisional scope=field bind=catl::peer_client::PeerSet::history_pool_revision_@43682a6dd9503a79
+    //@@authority state=prv.S0115 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::history_pool_revision_@43682a6dd9503a79
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=monotonic_history_pool_control_revision
     std::uint64_t history_pool_revision_ = 1;
-    //@@authority state=prv.S0128 status=provisional scope=field bind=catl::peer_client::PeerSet::history_availability_revision_@f0fa1bd888d92259
+    //@@authority state=prv.S0128 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::history_availability_revision_@f0fa1bd888d92259
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=monotonic_history_availability_scheduling_revision
     std::uint64_t history_availability_revision_ = 1;
-    //@@authority state=prv.S0129 status=provisional scope=field bind=catl::peer_client::PeerSet::history_discovery_revision_@6e8ea9570c30c7ef
+    //@@authority state=prv.S0129 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::history_discovery_revision_@6e8ea9570c30c7ef
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=monotonic_history_discovery_scheduling_revision
     std::uint64_t history_discovery_revision_ = 1;
