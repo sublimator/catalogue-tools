@@ -454,11 +454,13 @@ TEST_F(PlannerFixture, ExactWakeCannotOutliveExhaustedParentAuthority)
     snapshot.remaining_parent_dials = 0;
     snapshot.parent_dial_grant.reset();
     snapshot.global_dial_grant.reset();
-    snapshot.candidates = {candidate(
+    auto deferred = candidate(
         "new:1",
         HistorySourceLane::configured,
         HistoryGenerationDisposition::absent,
-        1)};
+        1);
+    deferred.retry_not_before = now + 1s;
+    snapshot.candidates = {std::move(deferred)};
     snapshot.wakes = {
         HistoryPlannedWake{
             .kind = HistoryWakeSourceKind::global_token_refill,
@@ -468,7 +470,12 @@ TEST_F(PlannerFixture, ExactWakeCannotOutliveExhaustedParentAuthority)
             .kind = HistoryWakeSourceKind::physical_slot_release,
             .at = now + 1s,
             .endpoint = "closing:1",
-            .generation = 8}};
+            .generation = 8},
+        HistoryPlannedWake{
+            .kind = HistoryWakeSourceKind::candidate_retry_expiry,
+            .at = now + 1s,
+            .endpoint = "new:1",
+            .generation = 1}};
 
     EXPECT_TRUE(
         plan_history_interest(snapshot, now).local_terminal.has_value());

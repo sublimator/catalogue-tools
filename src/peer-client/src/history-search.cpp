@@ -190,6 +190,45 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
                         candidate.target.endpoint);
             }) &&
         snapshot.parent_blind_grant.has_value();
+    auto const retry_can_eventually_commit =
+        [&snapshot, creation_can_eventually_commit](
+            HistorySearchCandidate const& candidate) {
+            auto const ready_for_use =
+                candidate.disposition ==
+                    HistoryGenerationDisposition::admitted ||
+                (candidate.disposition ==
+                     HistoryGenerationDisposition::ready_transient &&
+                 candidate.attached);
+            if (candidate.advertises_ledger && ready_for_use)
+                return true;
+
+            auto const has_probe_authority = candidate.demand_sponsored ||
+                (snapshot.remaining_parent_dials != 0 &&
+                 snapshot.parent_dial_grant.has_value());
+            auto const within_crawl_quota = candidate.demand_sponsored ||
+                candidate.source != HistorySourceLane::crawl_only ||
+                snapshot.crawl_only_probes <
+                    crawl_quota(snapshot.initial_parent_dial_budget);
+            if (has_probe_authority && within_crawl_quota &&
+                candidate.attachable && !candidate.attached &&
+                (candidate.disposition ==
+                     HistoryGenerationDisposition::queued_or_connecting ||
+                 candidate.disposition ==
+                     HistoryGenerationDisposition::ready_transient))
+            {
+                return true;
+            }
+
+            if (candidate.blind_eligible && ready_for_use &&
+                snapshot.parent_blind_grant && snapshot.global_blind_grant)
+            {
+                return true;
+            }
+
+            return candidate.disposition ==
+                    HistoryGenerationDisposition::absent &&
+                within_crawl_quota && creation_can_eventually_commit;
+        };
     auto relevant = [&](HistoryPlannedWake const& wake) {
         switch (wake.kind)
         {
@@ -219,12 +258,13 @@ earliest_wake(HistorySearchSnapshot const& snapshot, Clock::time_point now)
                 return std::any_of(
                     snapshot.candidates.begin(),
                     snapshot.candidates.end(),
-                    [&wake,
-                     &snapshot](HistorySearchCandidate const& candidate) {
+                    [&wake, &snapshot, &retry_can_eventually_commit](
+                        HistorySearchCandidate const& candidate) {
                         return candidate.eligible &&
                             candidate.target.endpoint == wake.endpoint &&
                             !snapshot.excluded_endpoints.contains(
-                                candidate.target.endpoint);
+                                candidate.target.endpoint) &&
+                            retry_can_eventually_commit(candidate);
                     });
         }
         return false;

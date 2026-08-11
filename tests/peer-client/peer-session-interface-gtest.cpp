@@ -6614,6 +6614,94 @@ TEST(PeerSessionInterface, ManagedScopedHeaderUsesExactPeerUseWithoutLegacyPin)
 
 TEST(
     PeerSessionInterface,
+    ManagedScopedHeaderFillsRoundFromGenerationThatBecomesReady)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 500ms,
+        });
+    constexpr uint32_t ledger_seq = 6000;
+    auto first = std::make_shared<FakePeerSession>(
+        io, "a-hanging-header:1", true, ledger_seq, 5900, 6100);
+    std::atomic<unsigned> first_sends = 0;
+    first->set_get_ledger_header_handler(
+        [&first_sends](uint32_t, Callback<LedgerHeaderResult>) {
+            first_sends.fetch_add(1, std::memory_order_relaxed);
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, first);
+
+    std::string const second_endpoint = "b-late-header:1";
+    PeerSetTestAccess::push_pending_connect(io, peers, second_endpoint);
+    auto second = std::make_shared<FakePeerSession>(
+        io, second_endpoint, true, ledger_seq, 5900, 6100);
+    std::atomic<unsigned> second_sends = 0;
+    second->set_get_ledger_header_handler(
+        [&second_sends](uint32_t, Callback<LedgerHeaderResult>) {
+            second_sends.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    auto scope = catl::core::RequestScope::create(
+        catl::core::RequestScope::Clock::now() + 2s);
+    std::promise<Error> done;
+    auto done_future = done.get_future();
+    asio::co_spawn(
+        io,
+        [cache, peers, scope, &done]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(
+                    ledger_seq, peers, PeerSessionPtr{}, scope);
+                done.set_value(Error::Success);
+            }
+            catch (PeerClientException const& error)
+            {
+                done.set_value(error.error);
+            }
+        },
+        asio::detached);
+
+    std::thread runner([&]() { io.run(); });
+    std::this_thread::sleep_for(20ms);
+    PeerSetTestAccess::make_reserved_generation_ready(io, peers, second);
+    auto const filled_by = std::chrono::steady_clock::now() + 250ms;
+    while (second_sends.load(std::memory_order_relaxed) == 0 &&
+           std::chrono::steady_clock::now() < filled_by)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+
+    EXPECT_EQ(first_sends.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(second_sends.load(std::memory_order_relaxed), 1u)
+        << "a newly ready exact generation must fill the same bounded round";
+
+    auto cleared = asio::co_spawn(
+        io, cache->co_clear_headers(), asio::use_future);
+    EXPECT_EQ(cleared.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(cleared.get());
+    EXPECT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(done_future.get(), Error::Cancelled);
+
+    work.reset();
+    io.stop();
+    runner.join();
+}
+
+TEST(
+    PeerSessionInterface,
     ManagedScopedHeaderUsesBoundedBlindPeerUseWhenStatusRangeLagsTip)
 {
     using namespace std::chrono_literals;

@@ -5186,7 +5186,7 @@ asio::awaitable<void>
 //@@authority transition=prv.T0302 status=provisional scope=function bind=catl::peer_client::drive_managed_header_fetch@42072e91c35598a2
 // owner=unresolved owner_hypothesis=node_cache commit=header_state_strand
 // touches=prv.S0066,prv.S0105,prv.S0108,prv.S0110,prv.S0111
-// label=dispatch_bounded_header_rounds_only_through_exact_history_peer_uses
+// label=fill_bounded_header_round_slots_with_exact_receipted_history_peer_uses
 NodeCache::drive_managed_header_fetch(
     uint32_t ledger_seq,
     std::shared_ptr<HeaderFetchState> fetch)
@@ -5267,23 +5267,6 @@ NodeCache::drive_managed_header_fetch(
                             participant->acquisition, endpoint);
                 }
 
-                if (sent > 0)
-                {
-                    auto const snapshot = co_await participant->owner
-                        ->co_history_search_snapshot(
-                            participant->acquisition, participant->interest);
-                    auto const next = plan_history_interest(
-                        snapshot, std::chrono::steady_clock::now());
-                    if (!next.next_action ||
-                        (next.next_action->action !=
-                             HistoryAuthorityAction::submit_known_use &&
-                         next.next_action->action !=
-                             HistoryAuthorityAction::submit_blind_use))
-                    {
-                        break;
-                    }
-                }
-
                 auto driven = co_await participant->owner
                     ->co_drive_history_interest(
                         fetch->participant_authority,
@@ -5333,9 +5316,11 @@ NodeCache::drive_managed_header_fetch(
                     ->co_exclude_history_endpoint(
                         participant->acquisition, endpoint);
 
-                // A spent use is outstanding physical work, not continued
-                // scheduling viability. Publish a fresh passive revision
-                // before another participant enters the fair arbiter.
+                // A spent use is outstanding physical work, not a runnable
+                // shared-fetch plan. Publish a fresh passive revision before
+                // the next fair arbitration. The round's explicit fan-out
+                // bound, rather than participant cardinality, limits how many
+                // independently receipted uses may remain outstanding.
                 auto passive = fetch->participant_authority->revise_interest(
                     participant->interest, {});
                 if (!passive)
