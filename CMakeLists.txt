@@ -90,6 +90,9 @@ add_subdirectory(src/cuckoofilter)
 # Add the core library
 add_subdirectory(src/core)
 
+# Add the writ owned-asynchrony library
+add_subdirectory(src/writ)
+
 # Add the nodestore library
 add_subdirectory(src/nodestore)
 
