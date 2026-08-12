@@ -18,6 +18,7 @@
 
 namespace asio = boost::asio;
 using namespace std::chrono_literals;
+using writ::retire_outcome;
 using writ::wait_outcome;
 
 namespace {
@@ -68,8 +69,8 @@ TEST(WritCensus, AdmitSealRetireDrainsAndCompletesTheWake)
     auto woken = asio::co_spawn(
         io, c.drained_signal()->co_wait_until(in(5s)), asio::use_future);
 
-    bool first_retire_drained = true;
-    bool second_retire_drained = false;
+    auto first_retire = retire_outcome::refused;
+    auto second_retire = retire_outcome::refused;
     asio::post(h.executor(), [&]() {
         auto a = c.admit("a");
         auto b = c.admit("b");
@@ -77,15 +78,50 @@ TEST(WritCensus, AdmitSealRetireDrainsAndCompletesTheWake)
         ASSERT_TRUE(b && *b);
         c.seal();
         EXPECT_FALSE(c.drained()) << "sealed but two members live";
-        first_retire_drained = c.retire(std::move(*a));
-        second_retire_drained = c.retire(std::move(*b));
+        first_retire = c.retire(std::move(*a));
+        second_retire = c.retire(std::move(*b));
     });
 
     EXPECT_EQ(await(io, woken), wait_outcome::signaled)
         << "the drain is received from its owner through the retained wake";
-    EXPECT_FALSE(first_retire_drained);
-    EXPECT_TRUE(second_retire_drained)
+    EXPECT_EQ(first_retire, retire_outcome::retired);
+    EXPECT_EQ(second_retire, retire_outcome::drained)
         << "exactly the drain-completing retirement reports it";
+}
+
+// Round 5's control: the closed retire_outcome population keeps a
+// successful non-final retirement (consumed, census still owed) typed apart
+// from a refusal (nothing consumed) — the previous bool collapsed the two
+// and callers had to recover consumption by inspecting the moved-from
+// token, a side channel the census/v1 schema never declared.
+TEST(WritCensus, SuccessfulNonFinalRetirementIsDistinctFromRefusal)
+{
+    asio::io_context io;
+    writ::home h(io);
+    string_census first(h);
+    string_census second(h);
+
+    asio::post(h.executor(), [&]() {
+        auto a = first.admit("a");
+        auto b = first.admit("b");
+        ASSERT_TRUE(a && *a);
+        ASSERT_TRUE(b && *b);
+        first.seal();
+
+        EXPECT_EQ(second.retire(std::move(*a)), retire_outcome::refused)
+            << "foreign retirement refuses";
+        EXPECT_TRUE(*a) << "and the refusal consumed nothing";
+
+        EXPECT_EQ(first.retire(std::move(*a)), retire_outcome::retired)
+            << "a consuming retirement that does not drain is 'retired'";
+        EXPECT_FALSE(*a) << "and it DID consume the obligation";
+        EXPECT_FALSE(first.drained());
+
+        EXPECT_EQ(first.retire(std::move(*b)), retire_outcome::drained)
+            << "the final retirement alone reports 'drained'";
+        EXPECT_TRUE(first.drained());
+    });
+    drain_io(io);
 }
 
 // An empty population before seal is a photograph, not quiescence: the
@@ -246,11 +282,11 @@ TEST(WritCensus, ForeignRetireRefusesWithoutConsumingTheObligation)
     asio::post(h.executor(), [&]() {
         auto m = first.admit("a");
         ASSERT_TRUE(m && *m);
-        EXPECT_FALSE(second.retire(std::move(*m)))
+        EXPECT_EQ(second.retire(std::move(*m)), retire_outcome::refused)
             << "a foreign member must refuse";
         EXPECT_TRUE(*m) << "the refusal must leave the obligation intact";
         first.seal();
-        EXPECT_TRUE(first.retire(std::move(*m)))
+        EXPECT_EQ(first.retire(std::move(*m)), retire_outcome::drained)
             << "the surviving token still balances its rightful census";
         EXPECT_TRUE(first.drained());
     });
@@ -284,12 +320,12 @@ TEST(WritCensusDeathTest, FailFastAbortsOnALeakedMember)
 
     // Only the CHILD dropped its copy of the obligation; the parent still
     // holds a live member and must balance it honestly, or this very test
-    // would leak (and abort under the armed gate) at scope end. retire's
-    // return reports drained-ness, not consumption — the defused token is
-    // the consumption witness.
+    // would leak (and abort under the armed gate) at scope end. (This
+    // cleanup once misread the old bool as consumption and went red — the
+    // self-catch that fed round 5's typed retire_outcome.)
     asio::post(h.executor(), [&]() {
-        (void)c.retire(std::move(*dropped));
-        EXPECT_FALSE(*dropped) << "the parent's obligation must be consumed";
+        EXPECT_EQ(c.retire(std::move(*dropped)), retire_outcome::retired)
+            << "consumed, census unsealed so not drained";
         dropped.reset();
     });
     drain_io(io);

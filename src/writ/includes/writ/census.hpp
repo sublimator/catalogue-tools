@@ -66,6 +66,19 @@
 
 namespace writ {
 
+/// The closed disposition of one retirement attempt. `refused` preserves
+/// the caller's member token (a refusal must never counterfeit
+/// consumption); `retired` and `drained` both consume it, and `drained`
+/// additionally reports that THIS retirement completed the census. Round 5:
+/// the previous bool collapsed refused with retired and forced callers to
+/// recover consumption from the token — an implicit side channel the
+/// census/v1 schema never declared.
+enum class [[nodiscard]] retire_outcome : std::uint8_t {
+    refused,
+    retired,
+    drained,
+};
+
 template <typename Key>
 class census
 {
@@ -270,26 +283,26 @@ public:
         s.complete_if_drained();
     }
 
-    /// On the home. Consumes the obligation exactly once on success and
-    /// returns true when this retirement drained the census. A refusal
-    /// (foreign or empty member) does NOT consume: the token stays live in
-    /// the caller's hands, because a refusal must never counterfeit
-    /// consumption — the obligation it carries still has to balance
-    /// somewhere.
-    bool
+    /// On the home. The outcome is the closed retire_outcome population:
+    /// `refused` (foreign or empty member) does NOT consume — the token
+    /// stays live in the caller's hands, because a refusal must never
+    /// counterfeit consumption; `retired` consumed the obligation with the
+    /// census still owing others; `drained` consumed it AND completed the
+    /// census.
+    retire_outcome
     retire(member&& m) noexcept
     {
         auto& s = *state_;
         WRIT_ASSERT_HOME(s.owner);
         if (m.id_ == 0 || m.census_.lock() != state_)
-            return false;
+            return retire_outcome::refused;
         auto const it = s.live.find(m.key_);
         if (it == s.live.end() || it->second != m.id_)
-            return false;
+            return retire_outcome::refused;
         s.live.erase(it);
         m.defuse();
         s.complete_if_drained();
-        return s.drained();
+        return s.drained() ? retire_outcome::drained : retire_outcome::retired;
     }
 
     // ── observations ─────────────────────────────────────────────────

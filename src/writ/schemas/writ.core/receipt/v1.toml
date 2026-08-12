@@ -6,7 +6,7 @@ binds = "src/writ/includes/writ/receipt.hpp"
 [[operations]]
 name = "mint"
 derives = "construction"
-claim = "receipt<Tag> is constructible exactly by whoever can construct Tag; the Tag's constructor IS the capability"
+claim = "receipt<Tag>::mint is the only public construction; possession of a Tag is the capability, and the factory validates the disposition against the Tag-declared population, refusing out-of-range values with the uniform nullopt"
 
 [[operations]]
 name = "slot.retain"
@@ -19,6 +19,7 @@ derives = "one-shot-consumption"
 claim = "exchange-with-empty before returning"
 
 [dispositions]
+mint = ["receipt", "refused-invalid-disposition"]
 retain = ["latched", "refused-loser-intact"]
 consume = ["fact", "absent"]
 
@@ -29,8 +30,14 @@ control = "receipt-gtest.cpp static_assert (outsiders cannot construct the fact)
 
 [[rules]]
 id = "the-tag-is-move-only"
-law = "a copyable Tag could be copied out of fact() and re-minted with a chosen disposition through the public constructor; the library rejects copyable Tags at compile time"
+law = "a copyable Tag could be copied out of fact() and re-minted with a chosen disposition; the library rejects copyable Tags at compile time"
 control = "receipt-gtest.cpp static_assert (round-4 counterexample closed)"
+
+[[rules]]
+id = "the-population-is-validated"
+law = "an enum TYPE is nominal, not a closed enumerator population: static_cast can conjure values no enumerator names, so the Tag declares its population and the validated factory refuses everything outside it — invalid construction is impossible as a fact, not prose"
+control = "WritReceipt.ConjuredDispositionValueIsRefusedAtTheMint"
+compile_control = "receipt-gtest.cpp static_assert (raw constructor is private)"
 
 [[rules]]
 id = "first-fact-latched-refusal-preserves-loser"

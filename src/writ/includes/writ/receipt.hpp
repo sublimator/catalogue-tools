@@ -8,24 +8,31 @@
 // Kept deliberately generic per the round-2 constraint: owner, generation,
 // and operation identity are typed PAYLOAD (the Tag), never baked-in fields.
 //
-// The capability model is the Tag itself, and it has TWO load-bearing legs:
+// The capability model is the Tag itself, and it has THREE load-bearing
+// legs:
 //
-//   construction    a receipt<Tag> can be constructed exactly by whoever can
+//   construction    a receipt<Tag> can be minted exactly by whoever can
 //   is the mint     construct Tag. An owner makes Tag's constructor private
 //                   and befriends only its minting site; first-mint forgery
 //                   then fails to compile.
 //
 //   the Tag is      fact() hands out Tag const&. If Tag were copyable, any
 //   move-only       receipt holder could copy the Tag back out and re-mint
-//                   it with a different disposition through this same public
-//                   constructor — round 4's compiled counterexample. The
-//                   static_asserts below therefore reject copyable Tags
-//                   outright: possession of a receipt must never grant the
-//                   mint capability.
+//                   it with a different disposition — round 4's compiled
+//                   counterexample. The static_asserts below reject copyable
+//                   Tags outright: possession of a receipt must never grant
+//                   the mint capability.
 //
-// The disposition domain is Tag-declared and closed (an enum whose invalid
-// construction is impossible) — "a type name is a proof claim, and one legal
-// variant contradicting the name is a modeling defect."
+//   the population  an enum TYPE is nominal, not a closed enumerator
+//   is validated    population: C++ admits static_cast'd values no
+//                   enumerator names (round 5's blocker). The Tag therefore
+//                   declares its population (is_disposition), the raw
+//                   constructor is private, and the only public mint is a
+//                   validated factory whose refusal is the uniform
+//                   std::nullopt. "Invalid construction is impossible" is a
+//                   true sentence, not schema prose — "a type name is a
+//                   proof claim, and one legal variant contradicting the
+//                   name is a modeling defect."
 //
 // Honest claim boundary, stated where it can't be missed: this type proves
 // UNFORGEABILITY and single-consumption only. Producer totality — that the
@@ -41,6 +48,7 @@
 // authority-bearing state, and moving a callable/fact into a local is not a
 // consumption transition unless the slot empties first.
 
+#include <concepts>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -58,6 +66,14 @@ public:
         "a receipt's disposition domain must be a closed enum declared by "
         "its Tag");
     static_assert(
+        requires(disposition_type d) {
+            { Tag::is_disposition(d) } noexcept -> std::same_as<bool>;
+        },
+        "a Tag must declare its closed population — static constexpr bool "
+        "is_disposition(disposition) noexcept — because an enum TYPE is "
+        "nominal, not a closed enumerator population (static_cast can "
+        "conjure values no enumerator names)");
+    static_assert(
         std::is_move_constructible_v<Tag>,
         "a receipt transports its Tag by move");
     static_assert(
@@ -70,9 +86,16 @@ public:
         "receipt moves are declared noexcept; a Tag whose move can throw "
         "would make that declaration a lie");
 
-    receipt(Tag fact, disposition_type disposition)
-        : fact_(std::move(fact)), disposition_(disposition)
+    /// The ONE way to obtain a receipt: possession of a Tag plus a
+    /// disposition the Tag's own closed population admits. An out-of-range
+    /// cast receives the uniform std::nullopt refusal instead of becoming
+    /// an unclassifiable terminal fact.
+    [[nodiscard]] static std::optional<receipt>
+    mint(Tag fact, disposition_type disposition) noexcept
     {
+        if (!Tag::is_disposition(disposition))
+            return std::nullopt;
+        return receipt(std::move(fact), disposition);
     }
 
     receipt(receipt&&) noexcept = default;
@@ -95,6 +118,11 @@ public:
     }
 
 private:
+    receipt(Tag fact, disposition_type disposition)
+        : fact_(std::move(fact)), disposition_(disposition)
+    {
+    }
+
     Tag fact_;
     disposition_type disposition_;
 };

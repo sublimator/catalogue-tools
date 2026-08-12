@@ -24,6 +24,22 @@ struct drain_fact
         receipt_failed,
     };
 
+    // The closed population, declared where the compiler can hold it: an
+    // enum TYPE is nominal, and static_cast can conjure values no
+    // enumerator names, so the Tag says which values exist.
+    static constexpr bool
+    is_disposition(disposition d) noexcept
+    {
+        switch (d)
+        {
+            case disposition::drained:
+            case disposition::forced_teardown:
+            case disposition::receipt_failed:
+                return true;
+        }
+        return false;
+    }
+
     std::string owner;
     std::uint64_t generation = 0;
 
@@ -45,10 +61,24 @@ private:
 
 struct drain_authority
 {
+    // The validated factory can refuse, so even the legitimate authority
+    // receives an optional; its enumerator-literal mints unwrap safely.
     static writ::receipt<drain_fact>
     mint(std::string owner, std::uint64_t generation, drain_fact::disposition d)
     {
-        return writ::receipt<drain_fact>(
+        auto minted = try_mint(std::move(owner), generation, d);
+        return std::move(minted).value();
+    }
+
+    // The raw seam for the invalid-value control: passes the disposition
+    // through unvalidated so the test can present a conjured value.
+    static std::optional<writ::receipt<drain_fact>>
+    try_mint(
+        std::string owner,
+        std::uint64_t generation,
+        drain_fact::disposition d)
+    {
+        return writ::receipt<drain_fact>::mint(
             drain_fact(std::move(owner), generation), d);
     }
 };
@@ -73,6 +103,14 @@ static_assert(
         drain_fact const&,
         drain_fact::disposition>,
     "a receipt must not be mintable from a merely-observed fact");
+// Round 5: the raw constructor is private — every mint, even the
+// authority's own, crosses the validated factory.
+static_assert(
+    !std::is_constructible_v<
+        writ::receipt<drain_fact>,
+        drain_fact,
+        drain_fact::disposition>,
+    "the only public mint is the validated factory");
 
 // A receipt is a fact, not a value: move-only, never copied, never
 // conjured empty.
@@ -90,6 +128,23 @@ TEST(WritReceipt, CarriesTypedIdentityAndClosedDisposition)
     EXPECT_EQ(r.fact().owner, "peer.example:1");
     EXPECT_EQ(r.fact().generation, 42u);
     EXPECT_EQ(r.disposition(), drain_fact::disposition::drained);
+}
+
+// Round 5's runtime control: C++ lets even the legitimate authority conjure
+// an enum value no enumerator names. The validated factory refuses it with
+// the uniform nullopt, so an unclassifiable terminal fact cannot exist.
+TEST(WritReceipt, ConjuredDispositionValueIsRefusedAtTheMint)
+{
+    auto const conjured = static_cast<drain_fact::disposition>(255);
+    ASSERT_FALSE(drain_fact::is_disposition(conjured))
+        << "the value under test must be outside the declared population";
+
+    EXPECT_FALSE(drain_authority::try_mint("a:1", 1, conjured).has_value())
+        << "the mint must refuse a value outside the closed population";
+    EXPECT_TRUE(
+        drain_authority::try_mint("a:1", 1, drain_fact::disposition::drained)
+            .has_value())
+        << "and admit every declared variant";
 }
 
 // The first fact is latched; a later publication cannot overwrite history's

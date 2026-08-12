@@ -14,7 +14,7 @@ claim = "fences every later admission; a census is judged only against a closed 
 
 [[events]]
 name = "retire"
-claim = "consumes the obligation exactly once on success; returns whether THIS retirement drained the census"
+claim = "one retirement attempt with a closed typed outcome: refused preserves the token, retired consumes it, drained consumes it and completes the census"
 
 [[events]]
 name = "leak"
@@ -22,7 +22,7 @@ claim = "a member dropped without retirement; commits on the dropping thread"
 
 [dispositions]
 admit = ["member", "refused"]
-retire = ["consumed", "refused"]
+retire = ["refused", "retired", "drained"]
 drained = ["sealed AND zero-live AND zero-leaked"]
 
 [[rules]]
@@ -60,6 +60,11 @@ subprocess_control = "WritCensusDeathTest.FailFastAbortsOnALeakedMember"
 id = "refusal-preserves-obligation"
 law = "a refused retirement does not consume the member token; the obligation still has to balance at its rightful owner"
 control = "WritCensus.ForeignRetireRefusesWithoutConsumingTheObligation"
+
+[[rules]]
+id = "retire-disposition-is-typed"
+law = "consumed-without-draining and refused are distinct typed outcomes, never one collapsed boolean recovered from a side channel"
+control = "WritCensus.SuccessfulNonFinalRetirementIsDistinctFromRefusal"
 
 [[rules]]
 id = "member-identity-is-minted"

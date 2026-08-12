@@ -79,8 +79,11 @@ TEST(WritRetainedSignal, CompletionBeforeSubscriptionIsRetained)
 }
 
 // Cancellation is sampled at the subscriber boundary and dominates a shared
-// wake queued in the same owner turn. The canceled subscriber must not be
-// resurrected as signaled.
+// wake queued in the same owner turn — for THAT subscriber only. The
+// canceled subscriber must not be resurrected as signaled, and a live
+// sibling registered against the same signal must still consume the shared
+// completion normally (round 5: the schema's rule claimed the sibling half
+// before this test evidenced it).
 TEST(WritRetainedSignal, CancelThenSignalInOneOwnerTurnIsCanceled)
 {
     asio::io_context io;
@@ -92,7 +95,9 @@ TEST(WritRetainedSignal, CancelThenSignalInOneOwnerTurnIsCanceled)
         io,
         signal->co_wait_until(in(5s)),
         asio::bind_cancellation_slot(cancellation.slot(), asio::use_future));
-    drain(io);  // the subscriber is now registered and suspended
+    auto sibling =
+        asio::co_spawn(io, signal->co_wait_until(in(5s)), asio::use_future);
+    drain(io);  // both subscribers are now registered and suspended
 
     asio::post(h.executor(), [&cancellation, signal]() {
         cancellation.emit(asio::cancellation_type::terminal);
@@ -100,6 +105,9 @@ TEST(WritRetainedSignal, CancelThenSignalInOneOwnerTurnIsCanceled)
     });
 
     EXPECT_EQ(await(io, woken), wait_outcome::canceled);
+    EXPECT_EQ(await(io, sibling), wait_outcome::signaled)
+        << "the sibling still consumes the shared wake the canceled "
+           "subscriber could not";
 }
 
 // One subscriber's deadline retires only that subscriber: it can neither

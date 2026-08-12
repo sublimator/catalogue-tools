@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <type_traits>
 
 namespace {
 
@@ -14,6 +15,17 @@ struct session
 };
 
 }  // namespace
+
+// Round 5's blocker, landed as permanent trait controls: a mint is an owner
+// capability. A copy would carry the same epoch AND sequence and mint
+// identical (epoch, value) generations — duplicated identity authority,
+// defeating the epoch repair without ever inventing a generation directly —
+// and a default move would leave the source integers intact with the same
+// effect. Neither exists.
+static_assert(!std::is_copy_constructible_v<writ::mint>);
+static_assert(!std::is_copy_assignable_v<writ::mint>);
+static_assert(!std::is_move_constructible_v<writ::mint>);
+static_assert(!std::is_move_assignable_v<writ::mint>);
 
 TEST(WritExact, MintIsMonotonicAndZeroIsNeverMinted)
 {

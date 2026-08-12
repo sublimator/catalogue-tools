@@ -123,6 +123,13 @@ private:
 /// serialization (a home); the mint itself is deliberately not thread-safe
 /// (its epoch allocation is the one cross-thread step, and it happens once,
 /// at construction).
+///
+/// A mint is an owner capability and is therefore neither copyable NOR
+/// movable: a copy would carry the same epoch and sequence and mint
+/// identical generations — duplicated identity authority, the exact thing
+/// the epoch exists to prevent — and a move would need a destructive
+/// moved-from state to avoid the same aliasing. The only owner-recreation
+/// path is the restore seam, which is a NEW mint (fresh epoch) on purpose.
 class mint
 {
 public:
@@ -136,6 +143,13 @@ public:
     explicit mint(std::uint64_t last) noexcept : last_(last)
     {
     }
+
+    mint(mint const&) = delete;
+    mint&
+    operator=(mint const&) = delete;
+    mint(mint&&) = delete;
+    mint&
+    operator=(mint&&) = delete;
 
     /// The next generation, or the zero refusal on exhaustion. Refusal is
     /// sticky: once the last representable sequence has been minted (or the
