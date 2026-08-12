@@ -211,39 +211,6 @@ enum class WaitOutcome {
     canceled,
 };
 
-static asio::awaitable<void>
-//@@authority transition=prv.T0322 status=provisional scope=function bind=catl::peer_client::resume_on_owner_strand@3821c2e67fe71738
-// owner=unresolved owner_hypothesis=peer_set
-// commit=parameter_owner_strand
-// label=resume_suspended_wait_continuation_inside_exact_owner_strand
-resume_on_owner_strand(
-    asio::strand<asio::io_context::executor_type>& strand,
-    std::shared_ptr<catl::core::RequestContext const> request_context)
-{
-    if (!strand.running_in_this_thread())
-    {
-        // asio::post(strand, use_awaitable) is not an executor hop: post first
-        // reaches `strand`, then dispatches the completion handler through its
-        // associated executor. Invoke the awaitable completion handler inside
-        // the strand instead, so the suspended coroutine itself resumes under
-        // the owner serialization boundary.
-        co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
-            [&strand, request_context = std::move(request_context)](
-                auto handler) mutable {
-                asio::post(
-                    strand,
-                    [request_context = std::move(request_context),
-                     handler = std::move(handler)]() mutable {
-                        catl::core::RequestContextGuard guard(
-                            std::move(request_context));
-                        std::move(handler)();
-                    });
-            },
-            asio::use_awaitable);
-    }
-    co_return;
-}
-
 std::string
 describe_peer_history_coverage(PeerHistoryCoverage const& coverage)
 {
@@ -281,17 +248,10 @@ wait_for_signal_or_timeout(
     std::chrono::milliseconds timeout,
     std::shared_ptr<std::atomic<bool>> cancel = nullptr)
 {
-    auto request_context = catl::core::retain_current_request();
     if (cancel && cancel->load(std::memory_order_relaxed))
-    {
-        co_await resume_on_owner_strand(strand, request_context);
         co_return WaitOutcome::canceled;
-    }
     if (timeout <= std::chrono::milliseconds::zero())
-    {
-        co_await resume_on_owner_strand(strand, request_context);
         co_return WaitOutcome::timed_out;
-    }
 
     static constexpr auto kCancelPoll = std::chrono::milliseconds(25);
     auto remaining = timeout;
@@ -322,20 +282,13 @@ wait_for_signal_or_timeout(
                     asio::experimental::wait_for_one(), asio::use_awaitable);
 
         if (order[0] == 0)
-        {
-            co_await resume_on_owner_strand(strand, request_context);
             co_return WaitOutcome::signaled;
-        }
 
         remaining -= slice;
         if (cancel && cancel->load(std::memory_order_relaxed))
-        {
-            co_await resume_on_owner_strand(strand, request_context);
             co_return WaitOutcome::canceled;
-        }
     }
 
-    co_await resume_on_owner_strand(strand, request_context);
     co_return WaitOutcome::timed_out;
 }
 
@@ -8088,7 +8041,7 @@ PeerSet::execute_history_grant_on_strand(
             // label=atomically_debit_exact_dials_and_install_demand_origin_generation
             // clang-format off
             auto generation = commit.owner->peer_generations_.insert(
-                std::move(commit.created_generation_node));  //@@authority-target ids=prv.T0295
+                std::move(commit.created_generation_node)); //@@authority-target ids=prv.T0295
             // clang-format on
             auto authority = commit.owner->targeted_connects_.insert(
                 std::move(commit.created_authority_node));
@@ -8385,7 +8338,7 @@ PeerSet::classify_history_wake_on_strand(
 
 boost::asio::awaitable<HistorySearchDriveResult>
 //@@authority transition=prv.T0300 status=provisional scope=function
-// bind=catl::peer_client::drive_history_interest_on_strand@9ad65daf4bb809cb
+// bind=catl::peer_client::drive_history_interest_on_strand@1a23b253289a811d
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0105,prv.S0108,prv.S0109,prv.S0110,prv.S0115,prv.S0127,prv.S0128,prv.S0129,prv.S0135
 // label=drive_one_revisioned_history_participant_to_exact_use_or_terminal
@@ -8393,7 +8346,8 @@ PeerSet::drive_history_interest_on_strand(
     std::shared_ptr<SharedHistoryFetch> fetch,
     HistoryAcquisitionRef acquisition,
     HistoryInterestRef interest,
-    PeerUseKind kind)
+    PeerUseKind kind,
+    std::shared_ptr<catl::core::RequestContext const> request_context)
 {
     ASSERT_ON_STRAND();
     HistorySearchDriveResult result{.interest = interest};
@@ -8615,7 +8569,7 @@ PeerSet::drive_history_interest_on_strand(
                        << ", physical_slots=" << snapshot.physical.total()
                        << '/' << snapshot.physical.max_physical()
                        << ", remaining=" << (remaining_ms + 999) / 1000 << 's';
-                catl::core::emit_status(status.str());
+                catl::core::emit_status(request_context, status.str());
             }
 
             if (selected_here)
@@ -8710,11 +8664,11 @@ PeerSet::drive_history_interest_on_strand(
                  proposal.wait_until->at <= arbitration_now))
             {
                 // clang-format off
-                //@@authority transition=prv.T0313 status=provisional scope=statement bind=expression_statement@4fa57f301747fd6b
+                //@@authority transition=prv.T0313 status=provisional scope=statement bind=expression_statement@426876f34916fa74
                 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
                 // touches=prv.S0105,prv.S0109
                 // label=consume_due_local_wait_as_replan_receipt_before_shared_exhaustion
-                next_replan_cause = ReplanCause::scheduled_wake;  //@@authority-target ids=prv.T0313
+                next_replan_cause = ReplanCause::scheduled_wake; //@@authority-target ids=prv.T0313
                 // clang-format on
                 break;
             }
@@ -8738,7 +8692,7 @@ PeerSet::drive_history_interest_on_strand(
                     status << "empty";
                 status << ", supply="
                        << (snapshot.candidate_supply_open ? "open" : "closed");
-                catl::core::emit_status(status.str());
+                catl::core::emit_status(request_context, status.str());
                 (void)fetch->terminalize_if_no_viable_action(arbitration_now);
                 auto const terminal = fetch->snapshot().terminal;
                 if (terminal)
@@ -8843,25 +8797,33 @@ PeerSet::co_drive_history_interest(
     HistoryInterestRef interest,
     PeerUseKind kind)
 {
-    if (!strand_.running_in_this_thread())
-    {
-        auto self = shared_from_this();
-        auto owner_executor = catl::core::ContextExecutor(
-            strand_, catl::core::retain_current_request());
-        co_return co_await asio::co_spawn(
-            std::move(owner_executor),
-            [self,
-             fetch = std::move(fetch),
-             acquisition,
-             interest,
-             kind]() mutable -> asio::awaitable<HistorySearchDriveResult> {
-                co_return co_await self->drive_history_interest_on_strand(
-                    std::move(fetch), acquisition, interest, kind);
-            },
-            asio::use_awaitable);
-    }
-    co_return co_await drive_history_interest_on_strand(
-        std::move(fetch), acquisition, interest, kind);
+    auto request_context = catl::core::retain_current_request();
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0322 status=provisional scope=statement bind=co_return_statement@ddf9e4175ea37a97
+    // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+    // execution_home=peer_set.strand birth=co_spawn executor_expr=strand_
+    // carries=request_context drives=drive_history_interest_on_strand
+    // continuation=birth_executor
+    // label=establish_history_driver_owner_birth_and_carry_request_capability
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self,
+         fetch = std::move(fetch),
+         acquisition,
+         interest,
+         kind,
+         request_context = std::move(request_context)]() mutable
+        -> asio::awaitable<HistorySearchDriveResult> {
+            co_return co_await self->drive_history_interest_on_strand(
+                std::move(fetch),
+                acquisition,
+                interest,
+                kind,
+                std::move(request_context));
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0322
+    // clang-format on
 }
 
 PeerUse
@@ -9620,21 +9582,29 @@ PeerSet::wait_for_covering_peer(
         co_return PeerGenerationPin{};
 
     auto self = shared_from_this();
-    auto request_executor = catl::core::ContextExecutor(
-        strand_, catl::core::retain_current_request());
+    auto request_context = catl::core::retain_current_request();
+    // clang-format off
+    //@@authority transition=prv.T0323 status=provisional scope=statement bind=co_return_statement@2a05499c4a7d73d7
+    // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+    // execution_home=peer_set.strand birth=co_spawn executor_expr=strand_
+    // carries=request_context drives=wait_for_covering_peer_on_strand
+    // continuation=birth_executor
+    // label=establish_covering_search_owner_birth_and_carry_request_capability
     co_return co_await asio::co_spawn(
-        request_executor,
+        strand_,
         [self,
          ledger_seq,
          timeout_secs,
          excluded,
-         cancel = std::move(
-             cancel)]() mutable -> asio::awaitable<PeerGenerationPin> {
+         cancel = std::move(cancel),
+         request_context = std::move(
+             request_context)]() mutable -> asio::awaitable<PeerGenerationPin> {
             auto client = co_await self->wait_for_covering_peer_on_strand(
                 ledger_seq,
                 timeout_secs,
                 std::move(excluded),
-                std::move(cancel));
+                std::move(cancel),
+                std::move(request_context));
             if (!client)
                 co_return PeerGenerationPin{};
             auto const* status = self->ready_status_for(client);
@@ -9642,16 +9612,17 @@ PeerSet::wait_for_covering_peer(
                 co_return PeerGenerationPin{};
             co_return self->make_peer_pin(client);
         },
-        asio::use_awaitable);
+        asio::use_awaitable); //@@authority-target ids=prv.T0323
+    // clang-format on
 }
 
 //@@authority state=prv.S0077 status=provisional scope=function
-// bind=catl::peer_client::wait_for_covering_peer_on_strand@94275c1f11b606ec
+// bind=catl::peer_client::wait_for_covering_peer_on_strand@fbba14a39e48786a
 // owner=unresolved owner_hypothesis=peer_history_search_frame
 // observed_home=PeerSet::wait_for_covering_peer_on_strand_coroutine_frame
 // label=request_visible_history_search_deadline_and_zero_publication_latch
 //@@authority transition=prv.T0028 status=provisional scope=function
-// bind=catl::peer_client::wait_for_covering_peer_on_strand@94275c1f11b606ec
+// bind=catl::peer_client::wait_for_covering_peer_on_strand@fbba14a39e48786a
 // owner=unresolved owner_hypothesis=peer_set commit=strand
 // touches=prv.S0011,prv.S0077
 // label=own_history_covered_peer_search_lifecycle
@@ -9660,7 +9631,8 @@ PeerSet::wait_for_covering_peer_on_strand(
     uint32_t ledger_seq,
     int timeout_secs,
     std::unordered_set<std::string> excluded,
-    std::shared_ptr<std::atomic<bool>> cancel)
+    std::shared_ptr<std::atomic<bool>> cancel,
+    std::shared_ptr<catl::core::RequestContext const> request_context)
 {
     ASSERT_ON_STRAND();
 
@@ -9829,12 +9801,12 @@ PeerSet::wait_for_covering_peer_on_strand(
             remaining_secs,
             "s");
         //@@authority transition=prv.T0226 status=provisional scope=statement
-        // bind=emit_status@5c5110c03f0c10b2
+        // bind=emit_status@e41832b3fdfd3151
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_history_search_progress_and_latch_zero_if_exhausted
         catl::core::emit_status(
-            status.str());  //@@authority-target ids=prv.T0226
+            request_context, status.str());  //@@authority-target ids=prv.T0226
     };
     auto emit_terminal_zero_progress = [&]() {
         if (!zero_countdown_published)
@@ -9900,7 +9872,7 @@ PeerSet::wait_for_covering_peer_on_strand(
 
     auto publish_no_covering_peer_after_zero = [&]() {
         //@@authority transition=prv.T0227 status=provisional scope=statement
-        // bind=expression_statement@14b56be20164f4b7
+        // bind=expression_statement@04a77f51716cdddb
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=peer_set_strand touches=prv.S0077
         // label=establish_zero_countdown_before_no_covering_peer_status
@@ -9942,12 +9914,12 @@ PeerSet::wait_for_covering_peer_on_strand(
                << "s; candidates=" << selected_candidates.size() << '/'
                << options_.max_targeted_connect_attempts;
         //@@authority transition=prv.T0228 status=provisional scope=statement
-        // bind=emit_status@5c5110c03f0c10b2
+        // bind=emit_status@e41832b3fdfd3151
         // owner=unresolved owner_hypothesis=peer_history_search_frame
         // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
         // label=publish_no_covering_peer_status_after_zero_countdown
         catl::core::emit_status(
-            status.str());  //@@authority-target ids=prv.T0228
+            request_context, status.str());  //@@authority-target ids=prv.T0228
     };
 
     PLOGI(

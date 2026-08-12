@@ -3,6 +3,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/ssl.hpp>
@@ -10,6 +11,8 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
+
+#include <stdexcept>
 
 namespace catl::rpc {
 
@@ -20,6 +23,44 @@ using tcp = asio::ip::tcp;
 
 LogPartition RpcClient::log_("rpc-client", LogLevel::INHERIT);
 
+detail::RpcConcurrencyGate::RpcConcurrencyGate(
+    asio::any_io_executor executor,
+    int capacity)
+    : permits_(std::move(executor), capacity > 0 ? capacity : 1)
+{
+    if (capacity <= 0)
+        throw std::invalid_argument("RPC concurrency must be positive");
+    for (int i = 0; i < capacity; ++i)
+    {
+        if (!permits_.try_send(boost::system::error_code{}))
+            throw std::logic_error("failed to seed RPC concurrency permits");
+    }
+}
+
+asio::awaitable<void>
+detail::RpcConcurrencyGate::acquire()
+{
+    boost::system::error_code ec;
+    co_await permits_.async_receive(
+        asio::redirect_error(asio::use_awaitable, ec));
+    if (ec)
+        throw boost::system::system_error(ec);
+}
+
+void
+detail::RpcConcurrencyGate::release() noexcept
+{
+    try
+    {
+        if (!permits_.try_send(boost::system::error_code{}))
+            std::terminate();
+    }
+    catch (...)
+    {
+        std::terminate();
+    }
+}
+
 RpcClient::RpcClient(
     asio::io_context& io,
     std::string host,
@@ -28,12 +69,11 @@ RpcClient::RpcClient(
     : io_(io)
     , host_(std::move(host))
     , port_(port)
-    , max_concurrent_(max_concurrent)
-    , slot_signal_(std::make_shared<asio::steady_timer>(io))
+    , concurrency_gate_(std::make_shared<detail::RpcConcurrencyGate>(
+          io.get_executor(),
+          max_concurrent))
 {
-    // Timer starts expired — first waiter will re-arm with expires_at(max).
 }
-
 
 void
 RpcClient::call(
@@ -54,37 +94,41 @@ RpcClient::call(
     // Run the HTTP request as a coroutine, deliver result via callback
     auto host = host_;
     auto port = port_;
-    auto* in_flight = &in_flight_;
-    auto max_concurrent = max_concurrent_;
-    auto slot_signal = slot_signal_;
+    auto concurrency_gate = concurrency_gate_;
 
     boost::asio::co_spawn(
         io_,
         [host,
          port,
-         in_flight,
-         max_concurrent,
-         slot_signal,
+         concurrency_gate = std::move(concurrency_gate),
          body_str = std::move(body_str),
          callback = std::move(callback)]() mutable -> asio::awaitable<void> {
             RpcResult rpc_result;
+            struct PermitReceipt
+            {
+                std::shared_ptr<detail::RpcConcurrencyGate> gate;
+                bool held = false;
+
+                ~PermitReceipt()
+                {
+                    release();
+                }
+
+                void
+                release() noexcept
+                {
+                    if (!held)
+                        return;
+                    held = false;
+                    gate->release();
+                }
+            } permit{concurrency_gate};
 
             try
             {
+                co_await concurrency_gate->acquire();
+                permit.held = true;
                 auto executor = co_await asio::this_coro::executor;
-
-                // Concurrency gate — wait for a slot via signal.
-                // Waiter re-arms the timer; releaser just cancel()s.
-                // No TOCTOU: only the waiter touches expires_at.
-                while (in_flight->load() >= max_concurrent)
-                {
-                    slot_signal->expires_at(
-                        asio::steady_timer::time_point::max());
-                    boost::system::error_code ec;
-                    co_await slot_signal->async_wait(
-                        asio::redirect_error(asio::use_awaitable, ec));
-                }
-                in_flight->fetch_add(1);
 
                 // SSL context
                 ssl::context ctx(ssl::context::tlsv12_client);
@@ -102,9 +146,9 @@ RpcClient::call(
                 co_await tcp_stream.async_connect(
                     endpoints, asio::use_awaitable);
 
-                // Set SNI hostname (required by Cloudflare and most modern TLS servers)
-                SSL_set_tlsext_host_name(
-                    stream.native_handle(), host.c_str());
+                // Set SNI hostname (required by Cloudflare and most modern TLS
+                // servers)
+                SSL_set_tlsext_host_name(stream.native_handle(), host.c_str());
 
                 // SSL handshake
                 tcp_stream.expires_after(std::chrono::seconds(10));
@@ -189,10 +233,7 @@ RpcClient::call(
                 rpc_result.success = false;
             }
 
-            // Release concurrency slot and wake next waiter.
-            // Just cancel() — the waiter re-arms the timer itself.
-            in_flight->fetch_sub(1);
-            slot_signal->cancel();
+            permit.release();
 
             callback(std::move(rpc_result));
         },

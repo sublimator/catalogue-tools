@@ -98,21 +98,18 @@ public:
             a);
     }
 
-    /// Comparisons — two ContextExecutors are equal if their bases are.
+    /// Equality includes the propagated capability because two wrappers with
+    /// different request contexts do not have identical execution effects.
     friend bool
-    operator==(
-        ContextExecutor const& a,
-        ContextExecutor const& b) noexcept
+    operator==(ContextExecutor const& a, ContextExecutor const& b) noexcept
     {
-        return a.base_ == b.base_;
+        return a.base_ == b.base_ && a.ctx_ == b.ctx_;
     }
 
     friend bool
-    operator!=(
-        ContextExecutor const& a,
-        ContextExecutor const& b) noexcept
+    operator!=(ContextExecutor const& a, ContextExecutor const& b) noexcept
     {
-        return a.base_ != b.base_;
+        return !(a == b);
     }
 
     /// Expose the base executor for Asio traits.
@@ -134,22 +131,22 @@ public:
     template <typename Property>
     auto
     require(Property const& p) const
-        -> ContextExecutor<decltype(
-            boost::asio::require(std::declval<BaseExecutor const&>(), p))>
+        -> ContextExecutor<decltype(boost::asio::require(
+            std::declval<BaseExecutor const&>(),
+            p))>
     {
-        return ContextExecutor<decltype(
-            boost::asio::require(base_, p))>(
+        return ContextExecutor<decltype(boost::asio::require(base_, p))>(
             boost::asio::require(base_, p), ctx_);
     }
 
     template <typename Property>
     auto
     prefer(Property const& p) const
-        -> ContextExecutor<decltype(
-            boost::asio::prefer(std::declval<BaseExecutor const&>(), p))>
+        -> ContextExecutor<decltype(boost::asio::prefer(
+            std::declval<BaseExecutor const&>(),
+            p))>
     {
-        return ContextExecutor<decltype(
-            boost::asio::prefer(base_, p))>(
+        return ContextExecutor<decltype(boost::asio::prefer(base_, p))>(
             boost::asio::prefer(base_, p), ctx_);
     }
 
@@ -159,10 +156,3 @@ private:
 };
 
 }  // namespace catl::core
-
-// Tell Asio this is a valid executor
-template <typename BaseExecutor>
-struct boost::asio::is_executor<catl::core::ContextExecutor<BaseExecutor>>
-    : std::true_type
-{
-};

@@ -48,6 +48,10 @@
 
 class PeerSetTestAccess;  // forward decl for test friend
 
+namespace catl::core {
+struct RequestContext;
+}
+
 namespace catl::peer_client {
 
 namespace detail {
@@ -739,7 +743,8 @@ private:
         uint32_t ledger_seq,
         int timeout_secs,
         std::unordered_set<std::string> excluded,
-        std::shared_ptr<std::atomic<bool>> cancel);
+        std::shared_ptr<std::atomic<bool>> cancel,
+        std::shared_ptr<catl::core::RequestContext const> request_context);
 
     //@@authority transition=peer_set.mint_generation_pin owner=peer_set
     // bind=catl::peer_client::PeerSet::make_peer_pin@04236598c8359c88
@@ -905,7 +910,8 @@ private:
         std::shared_ptr<SharedHistoryFetch> fetch,
         HistoryAcquisitionRef acquisition,
         HistoryInterestRef interest,
-        PeerUseKind kind);
+        PeerUseKind kind,
+        std::shared_ptr<catl::core::RequestContext const> request_context);
 
     HistoryWakeDisposition
     classify_history_wake_on_strand(

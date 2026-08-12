@@ -8,9 +8,9 @@
 // to get the current request's ID without explicit parameter passing.
 //
 // Safe across thread migration when resumption is scheduled through the
-// wrapper. A composed operation that directly invokes an awaitable completion
-// handler on another executor must explicitly re-enter the wrapped owner
-// executor; merely awaiting post(other_executor) does not migrate a coroutine.
+// wrapper. A child born on another executor must carry the shared context as
+// explicit data; neither awaiting post(other_executor) nor directly invoking a
+// nested awaitable handler is a portable coroutine migration primitive.
 
 #include <chrono>
 #include <memory>
@@ -31,7 +31,7 @@ struct RequestContext
     // status messages. The SSE handler drains them periodically.
     mutable std::mutex status_mutex;
     //@@authority state=prv.S0074 status=provisional scope=field
-    //bind=catl::core::RequestContext::status_events@52d5358cb4a3d5fc
+    // bind=catl::core::RequestContext::status_events@52d5358cb4a3d5fc
     // owner=unresolved owner_hypothesis=request_context
     // observed_home=request_context
     // label=request_owned_status_event_queue
@@ -50,7 +50,7 @@ struct RequestContext
     }
 
     //@@authority transition=prv.T0218 status=provisional scope=function
-    //bind=catl::core::RequestContext::emit@e6c1f1a8c2b8b6f0
+    // bind=catl::core::RequestContext::emit@e6c1f1a8c2b8b6f0
     // owner=unresolved owner_hypothesis=request_context commit=status_mutex
     // touches=prv.S0074
     // label=publish_request_owned_status_observation
@@ -98,6 +98,15 @@ inline void
 emit_status(std::string msg)
 {
     if (auto const* ctx = current_request())
+        ctx->emit(std::move(msg));
+}
+
+/// Emit through an explicitly retained request capability. Use this when
+/// serialization and request context deliberately have different executors.
+inline void
+emit_status(std::shared_ptr<RequestContext const> const& ctx, std::string msg)
+{
+    if (ctx)
         ctx->emit(std::move(msg));
 }
 

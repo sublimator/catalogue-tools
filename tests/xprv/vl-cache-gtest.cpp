@@ -130,6 +130,28 @@ public:
             result->set_value(strand.running_in_this_thread());
         };
     }
+
+    static void
+    observe_public_entry_executor(
+        std::shared_ptr<VlCache> const& cache,
+        std::shared_ptr<std::promise<bool>> result)
+    {
+        cache->public_entry_observer_for_test_ = [strand = cache->strand_,
+                                                  result = std::move(result)] {
+            result->set_value(strand.running_in_this_thread());
+        };
+    }
+
+    static void
+    observe_public_resume_executor(
+        std::shared_ptr<VlCache> const& cache,
+        std::shared_ptr<std::promise<bool>> result)
+    {
+        cache->public_resume_observer_for_test_ = [strand = cache->strand_,
+                                                   result = std::move(result)] {
+            result->set_value(strand.running_in_this_thread());
+        };
+    }
 };
 
 namespace {
@@ -449,6 +471,70 @@ TEST(VlCacheShutdown, StopCheckAndWaitInstallationRunOnOwnerStrand)
 
     io.stop();
     runners.join();
+}
+
+TEST(VlCacheExecution, PublicAwaitableEstablishesOwnerStrandBirth)
+{
+    boost::asio::io_context io;
+    auto cache = VlCache::create(io, "unused.invalid");
+    auto observed = std::make_shared<std::promise<bool>>();
+    auto observation = observed->get_future();
+    VlCacheTestAccess::observe_public_entry_executor(cache, observed);
+
+    auto foreign = boost::asio::make_strand(io);
+    auto loaded = boost::asio::co_spawn(
+        foreign, cache->co_is_loaded(), boost::asio::use_future);
+    auto work = boost::asio::make_work_guard(io);
+    std::thread first([&io]() { io.run(); });
+    std::thread second([&io]() { io.run(); });
+
+    EXPECT_FALSE(loaded.get());
+    EXPECT_TRUE(observation.get());
+    work.reset();
+    io.stop();
+    first.join();
+    second.join();
+}
+
+TEST(VlCacheExecution, SuspendedPublicAwaitableResumesOnOwnerStrand)
+{
+    boost::asio::io_context io;
+    auto cache = VlCache::create(io, "unused.invalid");
+    auto fetch_admitted = std::make_shared<
+        std::promise<catl::vl::VlCallback>>();
+    auto fetch = fetch_admitted->get_future();
+    VlCacheTestAccess::set_fetcher(
+        cache,
+        [fetch_admitted](catl::vl::VlCallback callback) {
+            fetch_admitted->set_value(std::move(callback));
+        });
+    auto resumed = std::make_shared<std::promise<bool>>();
+    auto resume_observation = resumed->get_future();
+    VlCacheTestAccess::observe_public_resume_executor(cache, resumed);
+
+    auto foreign = boost::asio::make_strand(io);
+    auto loaded = boost::asio::co_spawn(
+        foreign, cache->co_get(), boost::asio::use_future);
+    auto work = boost::asio::make_work_guard(io);
+    std::thread first([&io]() { io.run(); });
+    std::thread second([&io]() { io.run(); });
+
+    ASSERT_EQ(fetch.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(loaded.wait_for(0ms), std::future_status::timeout);
+    fetch.get()(successful_vl_result());
+    ASSERT_EQ(loaded.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(loaded.get().sequence, 1u);
+    ASSERT_EQ(resume_observation.wait_for(5s), std::future_status::ready);
+    EXPECT_TRUE(resume_observation.get());
+
+    auto stopped = boost::asio::co_spawn(
+        foreign, cache->co_stop(), boost::asio::use_future);
+    ASSERT_EQ(stopped.wait_for(5s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    work.reset();
+    io.stop();
+    first.join();
+    second.join();
 }
 
 TEST(VlCacheShutdown, StalePhysicalTerminalCannotRetireReplacementOperation)

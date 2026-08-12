@@ -59,7 +59,8 @@ public:
     co_stop();
 
     /// Awaitable: returns a copy of the cached VL.
-    /// Blocks until the first fetch completes. Hops to strand internally.
+    /// Blocks until the first fetch completes. The complete owner coroutine is
+    /// born on this cache's strand.
     boost::asio::awaitable<catl::vl::ValidatorList>
     co_get();
 
@@ -113,6 +114,15 @@ private:
 
     void
     wake_waiters();
+
+    boost::asio::awaitable<catl::vl::ValidatorList>
+    co_get_on_strand();
+
+    boost::asio::awaitable<catl::vl::ValidatorList>
+    co_refresh_on_strand();
+
+    boost::asio::awaitable<bool>
+    co_is_loaded_on_strand();
 
     void
     begin_stop_on_strand();
@@ -182,6 +192,8 @@ private:
         fetch_terminal_observer_for_test_;
     std::function<void()> initiation_failure_diagnostic_for_test_;
     std::function<void()> stop_entry_observer_for_test_;
+    std::function<void()> public_entry_observer_for_test_;
+    std::function<void()> public_resume_observer_for_test_;
     std::size_t fail_fetch_operation_starts_for_test_ = 0;
 
     static LogPartition log_;

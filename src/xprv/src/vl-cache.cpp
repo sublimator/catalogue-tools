@@ -12,6 +12,7 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <stdexcept>
 
 namespace xprv {
@@ -216,7 +217,8 @@ VlCache::do_fetch()
                         self->vl_host_,
                         first_load ? " (initial)" : " (refresh)");
 
-                    // Notify subscriber (e.g. ValidationQuorumTracker) on every load
+                    // Notify subscriber (e.g. ValidationQuorumTracker) on every
+                    // load
                     if (self->on_refresh_)
                     {
                         self->on_refresh_(*self->vl_);
@@ -297,14 +299,15 @@ VlCache::do_fetch()
         catch (...)
         {
         }
-        //@@authority transition=prv.T0216 status=provisional scope=statement bind=expression_statement@04751e2fe4506cda
+        //@@authority transition=prv.T0216 status=provisional scope=statement
+        // bind=expression_statement@04751e2fe4506cda
         // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
         // boundary_ref=vl_fetch.operation_terminal
         // receipt=vl_fetch.operation_terminal receipt_role=publish
         // label=publish_synchronous_fetch_start_refusal_terminal
         on_fetch(
             active_fetch_,
-            std::move(failed)); //@@authority-target ids=prv.T0216
+            std::move(failed));  //@@authority-target ids=prv.T0216
     };
 
     try
@@ -325,7 +328,7 @@ VlCache::do_fetch()
             // scope=statement owner=unresolved owner_hypothesis=vl_cache
             // commit=vl_cache_strand touches=prv.S0067
             // label=install_exact_validator_list_fetch_cancellation_capability
-            active_fetch_ = operation; //@@authority-target ids=prv.T0208
+            active_fetch_ = operation;  //@@authority-target ids=prv.T0208
             if (fail_fetch_operation_starts_for_test_ != 0)
             {
                 --fail_fetch_operation_starts_for_test_;
@@ -456,7 +459,7 @@ VlCache::begin_stop_on_strand()
             // label=request_active_validator_list_fetch_cancellation
             requested =
                 active_fetch_
-                    ->request_cancel(); //@@authority-target ids=prv.T0209
+                    ->request_cancel();  //@@authority-target ids=prv.T0209
         }
         else if (cancel_fetch_for_test_)
         {
@@ -474,7 +477,7 @@ VlCache::begin_stop_on_strand()
         // commit=vl_cache_strand touches=prv.S0068
         // label=retain_owner_accepted_fetch_cancellation_request
         active_fetch_cancel_requested_ =
-            requested; //@@authority-target ids=prv.T0214
+            requested;  //@@authority-target ids=prv.T0214
     }
     try
     {
@@ -585,9 +588,28 @@ VlCache::wake_waiters()
 asio::awaitable<catl::vl::ValidatorList>
 VlCache::co_get()
 {
-    // Hop to our strand to read vl_
     auto self = shared_from_this();
-    co_await asio::post(strand_, asio::use_awaitable);
+    // clang-format off
+    //@@authority transition=prv.T0324 status=provisional scope=statement bind=co_return_statement@8a7534e7f3dc3b15
+    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+    // execution_home=vl_cache.strand birth=co_spawn executor_expr=strand_
+    // drives=co_get_on_strand continuation=birth_executor
+    // label=establish_validator_list_get_owner_birth
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<catl::vl::ValidatorList> {
+            co_return co_await self->co_get_on_strand();
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0324
+    // clang-format on
+}
+
+asio::awaitable<catl::vl::ValidatorList>
+VlCache::co_get_on_strand()
+{
+    assert(strand_.running_in_this_thread());
+    if (public_entry_observer_for_test_)
+        public_entry_observer_for_test_();
 
     if (phase_ != Phase::running)
         throw boost::system::system_error(asio::error::operation_aborted);
@@ -639,7 +661,7 @@ VlCache::co_get()
             {
             }
         }
-    } cleanup{this, strand_, self, signal};
+    } cleanup{this, strand_, weak_from_this(), signal};
 
     while (true)
     {
@@ -651,8 +673,8 @@ VlCache::co_get()
         auto const cancel_state = co_await asio::this_coro::cancellation_state;
         if (cancel_state.cancelled() != asio::cancellation_type::none)
             throw boost::system::system_error(asio::error::operation_aborted);
-
-        co_await asio::post(strand_, asio::use_awaitable);
+        if (public_resume_observer_for_test_)
+            public_resume_observer_for_test_();
 
         if (phase_ != Phase::running)
         {
@@ -681,7 +703,27 @@ asio::awaitable<catl::vl::ValidatorList>
 VlCache::co_refresh()
 {
     auto self = shared_from_this();
-    co_await asio::post(strand_, asio::use_awaitable);
+    // clang-format off
+    //@@authority transition=prv.T0325 status=provisional scope=statement bind=co_return_statement@f7ea1f5282c1bfc5
+    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+    // execution_home=vl_cache.strand birth=co_spawn executor_expr=strand_
+    // drives=co_refresh_on_strand continuation=birth_executor
+    // label=establish_validator_list_refresh_owner_birth
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<catl::vl::ValidatorList> {
+            co_return co_await self->co_refresh_on_strand();
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0325
+    // clang-format on
+}
+
+asio::awaitable<catl::vl::ValidatorList>
+VlCache::co_refresh_on_strand()
+{
+    assert(strand_.running_in_this_thread());
+    if (public_entry_observer_for_test_)
+        public_entry_observer_for_test_();
 
     if (phase_ != Phase::running)
         throw boost::system::system_error(asio::error::operation_aborted);
@@ -735,7 +777,7 @@ VlCache::co_refresh()
             {
             }
         }
-    } cleanup{this, strand_, self, signal};
+    } cleanup{this, strand_, weak_from_this(), signal};
 
     while (true)
     {
@@ -747,8 +789,8 @@ VlCache::co_refresh()
         auto const cancel_state = co_await asio::this_coro::cancellation_state;
         if (cancel_state.cancelled() != asio::cancellation_type::none)
             throw boost::system::system_error(asio::error::operation_aborted);
-
-        co_await asio::post(strand_, asio::use_awaitable);
+        if (public_resume_observer_for_test_)
+            public_resume_observer_for_test_();
 
         if (phase_ != Phase::running)
         {
@@ -776,7 +818,28 @@ VlCache::co_refresh()
 asio::awaitable<bool>
 VlCache::co_is_loaded()
 {
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0326 status=provisional scope=statement bind=co_return_statement@77f6cfb99078e27f
+    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+    // execution_home=vl_cache.strand birth=co_spawn executor_expr=strand_
+    // drives=co_is_loaded_on_strand continuation=birth_executor
+    // label=establish_validator_list_status_owner_birth
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<bool> {
+            co_return co_await self->co_is_loaded_on_strand();
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0326
+    // clang-format on
+}
+
+asio::awaitable<bool>
+VlCache::co_is_loaded_on_strand()
+{
+    assert(strand_.running_in_this_thread());
+    if (public_entry_observer_for_test_)
+        public_entry_observer_for_test_();
     co_return vl_.has_value() && is_active(*vl_);
 }
 

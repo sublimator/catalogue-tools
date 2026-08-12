@@ -20,6 +20,7 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -4703,9 +4704,10 @@ NodeCache::retire_header_fetch(std::shared_ptr<HeaderFetchState> fetch)
     for (auto const& owner : fetch->release_owners)
         co_await owner->co_generation_pin_release_barrier();
 
-    if (!header_state_strand_.running_in_this_thread())
-        co_await asio::post(header_state_strand_, asio::use_awaitable);
-
+    // on_header_servant_done creates this coroutine with the exact owner
+    // strand as its birth executor. A post(strand, use_awaitable) here would
+    // not repair a foreign birth and therefore cannot be an ownership fence.
+    assert(header_state_strand_.running_in_this_thread());
     auto const it = active_header_fetches_.find(fetch->operation_id);
     if (it != active_header_fetches_.end() && it->second == fetch)
         active_header_fetches_.erase(it);
@@ -6155,9 +6157,10 @@ NodeCache::drive_header_clear(std::shared_ptr<HeaderClearState> clear)
     for (auto const& peers : peer_sets)
         co_await peers->co_generation_pin_release_barrier();
 
-    if (!header_state_strand_.running_in_this_thread())
-        co_await asio::post(header_state_strand_, asio::use_awaitable);
-
+    // co_clear_headers births this complete drain servant on the exact header
+    // owner strand. A post(strand, use_awaitable) cannot repair a foreign
+    // coroutine birth and is not an ownership fence.
+    assert(header_state_strand_.running_in_this_thread());
     //@@authority transition=node_cache.complete_header_clear_drain
     // bind=for_range_loop@f7048c9fe53a8fa9
     // owner=node_cache commit=header-state-strand scope=statement

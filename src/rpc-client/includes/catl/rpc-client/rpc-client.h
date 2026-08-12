@@ -13,10 +13,11 @@
 
 #include <catl/core/logger.h>
 
+#include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/steady_timer.hpp>
 #include <boost/json.hpp>
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -25,6 +26,30 @@
 namespace catl::rpc {
 
 namespace asio = boost::asio;
+
+namespace detail {
+
+/// A thread-safe bounded permit channel. Receiving consumes exactly one
+/// permit; release returns exactly one permit and refuses over-release.
+class RpcConcurrencyGate
+{
+public:
+    RpcConcurrencyGate(asio::any_io_executor executor, int capacity);
+
+    asio::awaitable<void>
+    acquire();
+
+    void
+    release() noexcept;
+
+private:
+    using PermitChannel =
+        asio::experimental::concurrent_channel<void(boost::system::error_code)>;
+
+    PermitChannel permits_;
+};
+
+}  // namespace detail
 
 // ─── Exception hierarchy ─────────────────────────────────────────────
 
@@ -115,18 +140,7 @@ private:
     asio::io_context& io_;
     std::string host_;
     uint16_t port_;
-    int max_concurrent_;
-    std::atomic<int> in_flight_{0};
-
-    /// Concurrency gate signal. Single shared timer used by all waiters.
-    ///
-    /// Pattern (avoids TOCTOU between releaser cancel + re-arm):
-    ///   Waiter: set expires_at(max) → co_await → wakes → re-check
-    ///           in_flight → if still full, re-arm and await again.
-    ///   Releaser: just cancel(). Waiter owns the re-arm.
-    ///
-    /// Shared_ptr so coroutines can outlive RpcClient if needed.
-    std::shared_ptr<asio::steady_timer> slot_signal_;
+    std::shared_ptr<detail::RpcConcurrencyGate> concurrency_gate_;
 
     static LogPartition log_;
 };
