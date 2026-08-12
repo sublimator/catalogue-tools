@@ -1907,6 +1907,10 @@ private:
     std::string endpoint_cache_error_;
     // Persistent one-shot priorities registered through prioritize_ledger().
     std::set<uint32_t> prioritized_ledgers_;
+    //@@authority state=prv.S0139 status=provisional scope=field
+    //bind=catl::peer_client::PeerSet::wait_signal_@822def61e81f9f9e
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=current_retained_history_wait_signal_generation
     std::shared_ptr<detail::HistoryWaitSignal> wait_signal_;
     mutable std::mutex unsolicited_handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;

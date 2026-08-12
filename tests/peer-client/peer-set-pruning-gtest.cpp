@@ -3,6 +3,8 @@
 #include <catl/peer-client/peer-set.h>
 
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/post.hpp>
@@ -69,31 +71,10 @@ TEST(PeerSetPruning, WaitSignalWakesOnDiscoveryAcrossThreads)
     asio::co_spawn(
         io,
         [&, signal]() -> asio::awaitable<void> {
-            auto ex = co_await asio::this_coro::executor;
-            auto result =
-                co_await asio::experimental::make_parallel_group(
-                    asio::co_spawn(
-                        ex,
-                        [signal]() -> asio::awaitable<void> {
-                            (void)co_await signal->wait();
-                        },
-                        asio::deferred),
-                    asio::co_spawn(
-                        ex,
-                        []() -> asio::awaitable<void> {
-                            auto ex = co_await asio::this_coro::executor;
-                            asio::steady_timer timer(
-                                ex, std::chrono::seconds(5));
-                            boost::system::error_code ec;
-                            co_await timer.async_wait(
-                                asio::redirect_error(asio::use_awaitable, ec));
-                        },
-                        asio::deferred))
-                    .async_wait(
-                        asio::experimental::wait_for_one(),
-                        asio::use_awaitable);
-
-            woke_on_signal = (std::get<0>(result)[0] == 0);
+            auto const result = co_await signal->wait_until(
+                std::chrono::steady_clock::now() + std::chrono::seconds(5));
+            woke_on_signal = result ==
+                catl::peer_client::detail::HistoryWaitResult::signaled;
             done = true;
         },
         asio::detached);
@@ -231,29 +212,20 @@ TEST(PeerSetPruning, WaitSignalTimeoutDoesNotPoisonSibling)
     auto sibling = asio::co_spawn(io, signal->wait(), asio::use_future);
     auto timeout = asio::co_spawn(
         io,
-        [signal]() -> asio::awaitable<std::size_t> {
-            auto ex = co_await asio::this_coro::executor;
-            auto result =
-                co_await asio::experimental::make_parallel_group(
-                    asio::co_spawn(ex, signal->wait(), asio::deferred),
-                    asio::co_spawn(
-                        ex,
-                        [ex]() -> asio::awaitable<void> {
-                            asio::steady_timer timer(
-                                ex, std::chrono::milliseconds(5));
-                            co_await timer.async_wait(asio::use_awaitable);
-                        },
-                        asio::deferred))
-                    .async_wait(
-                        asio::experimental::wait_for_one(),
-                        asio::use_awaitable);
-            co_return std::get<0>(result)[0];
+        [signal]()
+            -> asio::awaitable<
+                catl::peer_client::detail::HistoryWaitResult> {
+            co_return co_await signal->wait_until(
+                std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(5));
         },
         asio::use_future);
 
     io.run_for(std::chrono::milliseconds(20));
     ASSERT_EQ(timeout.wait_for(std::chrono::seconds(0)), std::future_status::ready);
-    EXPECT_EQ(timeout.get(), 1u);
+    EXPECT_EQ(
+        timeout.get(),
+        catl::peer_client::detail::HistoryWaitResult::deadline_elapsed);
     EXPECT_EQ(
         sibling.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
 
@@ -264,6 +236,116 @@ TEST(PeerSetPruning, WaitSignalTimeoutDoesNotPoisonSibling)
     ASSERT_EQ(
         sibling.wait_for(std::chrono::seconds(0)), std::future_status::ready);
     EXPECT_EQ(sibling.get(), asio::error::operation_aborted);
+}
+
+TEST(PeerSetPruning, WaitSignalCancellationDoesNotPoisonSibling)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
+    asio::cancellation_signal cancellation;
+    auto canceled = asio::co_spawn(
+        io,
+        signal->wait_until(std::chrono::steady_clock::time_point::max()),
+        asio::bind_cancellation_slot(cancellation.slot(), asio::use_future));
+    auto sibling = asio::co_spawn(
+        io,
+        signal->wait_until(std::chrono::steady_clock::time_point::max()),
+        asio::use_future);
+
+    io.run_for(std::chrono::milliseconds(5));
+    io.restart();
+    cancellation.emit(asio::cancellation_type::all);
+    io.run_for(std::chrono::milliseconds(20));
+    ASSERT_EQ(
+        canceled.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(
+        canceled.get(),
+        catl::peer_client::detail::HistoryWaitResult::canceled);
+    EXPECT_EQ(
+        sibling.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    if (io.stopped())
+        io.restart();
+    PeerSetTestAccess::post_history_pool_wake(peers, false);
+    io.run();
+    ASSERT_EQ(
+        sibling.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(
+        sibling.get(),
+        catl::peer_client::detail::HistoryWaitResult::signaled);
+}
+
+TEST(PeerSetPruning, WaitSignalMapsPreexistingCancellation)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
+    asio::cancellation_signal cancellation;
+    auto canceled = asio::co_spawn(
+        io,
+        signal->wait_until(std::chrono::steady_clock::time_point::max()),
+        asio::bind_cancellation_slot(cancellation.slot(), asio::use_future));
+
+    cancellation.emit(asio::cancellation_type::all);
+    io.run();
+
+    ASSERT_EQ(
+        canceled.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(
+        canceled.get(),
+        catl::peer_client::detail::HistoryWaitResult::canceled);
+}
+
+TEST(PeerSetPruning, WaitSignalCancellationWinsConcurrentSharedWake)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
+    asio::cancellation_signal cancellation;
+    auto canceled = asio::co_spawn(
+        io,
+        signal->wait_until(std::chrono::steady_clock::time_point::max()),
+        asio::bind_cancellation_slot(cancellation.slot(), asio::use_future));
+    auto sibling = asio::co_spawn(
+        io,
+        signal->wait_until(std::chrono::steady_clock::time_point::max()),
+        asio::use_future);
+
+    io.run_for(std::chrono::milliseconds(5));
+    io.restart();
+    PeerSetTestAccess::post_cancel_and_history_pool_wake(
+        peers, cancellation, false);
+    io.run();
+
+    ASSERT_EQ(
+        canceled.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(
+        canceled.get(),
+        catl::peer_client::detail::HistoryWaitResult::canceled);
+    ASSERT_EQ(
+        sibling.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(
+        sibling.get(),
+        catl::peer_client::detail::HistoryWaitResult::signaled);
 }
 
 TEST(PeerSetPruning, CrawlObservationsStayOutsideSelectionState)
@@ -561,31 +643,10 @@ TEST(PeerSetPruning, WaitSignalWakesOnStatusUpdate)
     asio::co_spawn(
         io,
         [&, signal]() -> asio::awaitable<void> {
-            auto ex = co_await asio::this_coro::executor;
-            auto result =
-                co_await asio::experimental::make_parallel_group(
-                    asio::co_spawn(
-                        ex,
-                        [signal]() -> asio::awaitable<void> {
-                            (void)co_await signal->wait();
-                        },
-                        asio::deferred),
-                    asio::co_spawn(
-                        ex,
-                        []() -> asio::awaitable<void> {
-                            auto ex = co_await asio::this_coro::executor;
-                            asio::steady_timer timer(
-                                ex, std::chrono::seconds(5));
-                            boost::system::error_code ec;
-                            co_await timer.async_wait(
-                                asio::redirect_error(asio::use_awaitable, ec));
-                        },
-                        asio::deferred))
-                    .async_wait(
-                        asio::experimental::wait_for_one(),
-                        asio::use_awaitable);
-
-            woke_on_signal = (std::get<0>(result)[0] == 0);
+            auto const result = co_await signal->wait_until(
+                std::chrono::steady_clock::now() + std::chrono::seconds(5));
+            woke_on_signal = result ==
+                catl::peer_client::detail::HistoryWaitResult::signaled;
             done = true;
         },
         asio::detached);
@@ -606,6 +667,33 @@ TEST(PeerSetPruning, WaitSignalWakesOnStatusUpdate)
 
     EXPECT_TRUE(done);
     EXPECT_TRUE(woke_on_signal);
+}
+
+TEST(PeerSetPruning, WaitForAnyPeerAsioCancellationReturnsNoPeer)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    asio::cancellation_signal cancellation;
+    auto future = asio::co_spawn(
+        io,
+        peers->wait_for_any_peer(5),
+        asio::bind_cancellation_slot(cancellation.slot(), asio::use_future));
+
+    asio::steady_timer cancel(io, std::chrono::milliseconds(10));
+    cancel.async_wait([&](boost::system::error_code const&) {
+        cancellation.emit(asio::cancellation_type::all);
+    });
+    io.run_for(std::chrono::milliseconds(250));
+
+    ASSERT_EQ(
+        future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_FALSE(future.get());
 }
 
 TEST(PeerSetPruning, RemovesExpiredStateButRetainsFreshRetryEvidence)

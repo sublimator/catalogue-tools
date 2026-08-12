@@ -11,9 +11,7 @@
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
 #include <cassert>
 #include <cctype>
 #include <iterator>
@@ -64,46 +62,121 @@ namespace catl::peer_client {
 detail::HistoryWaitSignal::HistoryWaitSignal(
     asio::strand<asio::io_context::executor_type> strand)
     : strand_(std::move(strand))
-    , timer_(strand_, asio::steady_timer::time_point::max())
 {
 }
 
 asio::awaitable<boost::system::error_code>
 detail::HistoryWaitSignal::wait()
 {
-    if (!strand_.running_in_this_thread())
+    auto const result =
+        co_await wait_until(std::chrono::steady_clock::time_point::max());
+    co_return result == HistoryWaitResult::deadline_elapsed
+        ? boost::system::error_code{}
+        : boost::system::error_code{asio::error::operation_aborted};
+}
+
+asio::awaitable<detail::HistoryWaitResult>
+detail::HistoryWaitSignal::wait_until(
+    std::chrono::steady_clock::time_point deadline)
+{
+    auto const caller_cancellation =
+        co_await asio::this_coro::cancellation_state;
+    if (caller_cancellation.cancelled() != asio::cancellation_type::none)
+        co_return HistoryWaitResult::canceled;
+
+    auto self = shared_from_this();
+    try
     {
+        // clang-format off
+        //@@authority transition=prv.T0327 status=provisional scope=statement bind=co_return_statement@8f5a21f18e51210b
+        // owner=unresolved owner_hypothesis=history_wait_signal
+        // commit=history_wait_signal_strand execution_home=history_wait_signal.strand
+        // birth=co_spawn executor_expr=strand_ drives=wait_until_on_strand
+        // continuation=birth_executor
+        // label=unconditionally_birth_exact_history_wait_on_owner_strand
         co_return co_await asio::co_spawn(
             strand_,
-            [this]() -> asio::awaitable<boost::system::error_code> {
-                co_return co_await wait();
+            [self = std::move(self),
+             deadline]() -> asio::awaitable<HistoryWaitResult> {
+                co_return co_await self->wait_until_on_strand(deadline);
             },
-            asio::use_awaitable);
+            asio::use_awaitable); //@@authority-target ids=prv.T0327
+        // clang-format on
     }
-    if (completed_)
-        co_return asio::error::operation_aborted;
+    catch (boost::system::system_error const& error)
+    {
+        if (error.code() == asio::error::operation_aborted)
+            co_return HistoryWaitResult::canceled;
+        throw;
+    }
+}
 
-    boost::system::error_code ec;
-    co_await timer_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+//@@authority transition=prv.T0328 status=provisional scope=function
+//bind=catl::peer_client::wait_until_on_strand@5944d6cb24b36038
+// owner=unresolved owner_hypothesis=history_wait_signal
+// commit=history_wait_signal_strand touches=prv.S0137,prv.S0138
+// label=register_wait_and_consume_exact_signal_deadline_or_cancellation
+asio::awaitable<detail::HistoryWaitResult>
+detail::HistoryWaitSignal::wait_until_on_strand(
+    std::chrono::steady_clock::time_point deadline)
+{
+    assert(strand_.running_in_this_thread());
+    auto cancellation = co_await asio::this_coro::cancellation_state;
+    if (cancellation.cancelled() != asio::cancellation_type::none)
+        co_return HistoryWaitResult::canceled;
     if (completed_)
-        co_return asio::error::operation_aborted;
-    co_return ec;
+        co_return HistoryWaitResult::signaled;
+
+    auto waiter = std::make_shared<asio::steady_timer>(strand_, deadline);
+    std::erase_if(
+        waiters_, [](auto const& retained) { return retained.expired(); });
+    waiters_.push_back(waiter);
+    boost::system::error_code ec;
+    co_await waiter->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    assert(strand_.running_in_this_thread());
+    cancellation = co_await asio::this_coro::cancellation_state;
+    std::erase_if(waiters_, [&waiter](auto const& retained) {
+        auto current = retained.lock();
+        return !current || current == waiter;
+    });
+    // Cancellation belongs to this exact subscriber and therefore wins over
+    // a later shared completion. A sibling still observes that completion as
+    // signaled; this waiter may not re-enter arbitration after cancellation.
+    if (cancellation.cancelled() != asio::cancellation_type::none)
+        co_return HistoryWaitResult::canceled;
+    if (completed_)
+        co_return HistoryWaitResult::signaled;
+    if (!ec)
+        co_return HistoryWaitResult::deadline_elapsed;
+    co_return HistoryWaitResult::canceled;
 }
 
 void
+//@@authority transition=prv.T0329 status=provisional scope=function
+//bind=catl::peer_client::complete@d17a45d661fbd0c6
+// owner=unresolved owner_hypothesis=history_wait_signal
+// commit=history_wait_signal_strand touches=prv.S0137,prv.S0138
+// label=retain_completion_and_wake_every_registered_subscriber
 detail::HistoryWaitSignal::complete() noexcept
 {
     assert(strand_.running_in_this_thread());
     if (completed_)
         return;
     completed_ = true;
-    try
+    for (auto const& retained : waiters_)
     {
-        timer_.cancel();
+        if (auto waiter = retained.lock())
+        {
+            try
+            {
+                waiter->cancel();
+            }
+            catch (...)
+            {
+            }
+        }
     }
-    catch (...)
-    {
-    }
+    waiters_.clear();
 }
 
 namespace {
@@ -259,30 +332,13 @@ wait_for_signal_or_timeout(
     while (remaining > std::chrono::milliseconds::zero())
     {
         auto slice = cancel ? std::min(remaining, kCancelPoll) : remaining;
-        auto [order, ex0, ec0, ex1, ec1] =
-            co_await asio::experimental::make_parallel_group(
-                asio::co_spawn(
-                    strand,
-                    [signal]() -> asio::awaitable<boost::system::error_code> {
-                        co_return co_await signal->wait();
-                    },
-                    asio::deferred),
-                asio::co_spawn(
-                    strand,
-                    [strand,
-                     slice]() -> asio::awaitable<boost::system::error_code> {
-                        asio::steady_timer timer(strand, slice);
-                        boost::system::error_code ec;
-                        co_await timer.async_wait(
-                            asio::redirect_error(asio::use_awaitable, ec));
-                        co_return ec;
-                    },
-                    asio::deferred))
-                .async_wait(
-                    asio::experimental::wait_for_one(), asio::use_awaitable);
-
-        if (order[0] == 0)
+        auto const result = co_await signal->wait_until(
+            std::chrono::steady_clock::now() + slice);
+        assert(strand.running_in_this_thread());
+        if (result == detail::HistoryWaitResult::signaled)
             co_return WaitOutcome::signaled;
+        if (result == detail::HistoryWaitResult::canceled)
+            co_return WaitOutcome::canceled;
 
         remaining -= slice;
         if (cancel && cancel->load(std::memory_order_relaxed))
@@ -2540,6 +2596,10 @@ PeerSet::prune_recent_failure_events(std::chrono::steady_clock::time_point now)
 }
 
 std::shared_ptr<detail::HistoryWaitSignal>
+//@@authority transition=prv.T0330 status=provisional scope=function
+//bind=catl::peer_client::attach_wait_signal@4f794714667db4aa
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0139 label=attach_current_retained_history_wait_generation
 PeerSet::attach_wait_signal()
 {
     ASSERT_ON_STRAND();
@@ -2549,6 +2609,10 @@ PeerSet::attach_wait_signal()
 }
 
 void
+//@@authority transition=prv.T0331 status=provisional scope=function
+//bind=catl::peer_client::wake_waiters_without_revision@3b1a9e99611a94a7
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0139 label=rotate_then_complete_prior_history_wait_generation
 PeerSet::wake_waiters_without_revision() noexcept
 {
     ASSERT_ON_STRAND();
@@ -8604,6 +8668,11 @@ PeerSet::drive_history_interest_on_strand(
                     auto const outcome = co_await wait_for_signal_or_timeout(
                         strand_, std::move(wait_signal), wait_for);
                     ASSERT_ON_STRAND();
+                    if (outcome == WaitOutcome::canceled)
+                    {
+                        finish_local(HistoryAcquisitionTerminal::cancelled);
+                        co_return result;
+                    }
                     if (history_pool_revision_ != observed_pool_revision)
                     {
                         if (observe_pool_change())
@@ -8755,6 +8824,11 @@ PeerSet::drive_history_interest_on_strand(
             auto const outcome = co_await wait_for_signal_or_timeout(
                 strand_, std::move(wait_signal), wait_for);
             ASSERT_ON_STRAND();
+            if (outcome == WaitOutcome::canceled)
+            {
+                finish_local(HistoryAcquisitionTerminal::cancelled);
+                co_return result;
+            }
             if (history_pool_revision_ != observed_pool_revision)
             {
                 if (observe_pool_change())
@@ -9540,8 +9614,11 @@ PeerSet::wait_for_any_peer_on_strand(
         auto const wait_for =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 wait_until - std::chrono::steady_clock::now());
-        co_await wait_for_signal_or_timeout(strand_, wait_signal, wait_for);
+        auto const outcome =
+            co_await wait_for_signal_or_timeout(strand_, wait_signal, wait_for);
         ASSERT_ON_STRAND();
+        if (outcome == WaitOutcome::canceled)
+            co_return nullptr;
         if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
             co_return nullptr;
     }

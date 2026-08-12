@@ -5,6 +5,8 @@
 #include <catl/core/context-executor.h>
 #include <catl/core/request-context.h>
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
@@ -2338,6 +2340,63 @@ TEST(PeerSetHistoryDriver, RequestCancellationWakesAttachedWaitImmediately)
     ASSERT_TRUE(driven.local_terminal);
     EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
     EXPECT_LT(std::chrono::steady_clock::now() - cancel_at, 1s);
+    EXPECT_EQ(
+        PeerSetTestAccess::history_acquisition_attachment_count(
+            io, peers, acquisition.context().acquisition),
+        0u);
+    EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
+}
+
+TEST(PeerSetHistoryDriver, AsioCancellationTerminatesBeforeAnotherGrant)
+{
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(io);
+    auto const endpoint = std::string("driver-asio-cancel.example.com:51235");
+    PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    install_target_coverage_hint(io, peers, endpoint, 50);
+    auto scope = catl::core::RequestScope::create(
+        std::chrono::steady_clock::now() + 5s);
+    auto demand = run(
+        io,
+        peers->co_get_or_create_ledger_demand(
+            scope,
+            LedgerDemandOptions{.ledger_seq = 50, .remaining_new_dials = 1}));
+    auto acquisition =
+        run(io,
+            peers->co_open_history_acquisition(
+                demand,
+                HistoryAcquisitionOptions{
+                    .fetch = HistoryFetchId{45}, .fetch_epoch = 1}));
+    auto fetch = SharedHistoryFetch::create(HistoryFetchId{45}, 1);
+    auto interest = fetch->register_interest(peers, scope, demand, acquisition);
+    boost::asio::cancellation_signal cancellation;
+    auto future = boost::asio::co_spawn(
+        io,
+        peers->co_drive_history_interest(
+            fetch, acquisition, interest, PeerUseKind::ledger_header),
+        boost::asio::bind_cancellation_slot(
+            cancellation.slot(), boost::asio::use_future));
+
+    io.run_for(20ms);
+    io.restart();
+    ASSERT_EQ(
+        PeerSetTestAccess::history_acquisition_attachment_count(
+            io, peers, acquisition.context().acquisition),
+        1u);
+    PeerSetTestAccess::post_cancel_and_history_pool_wake(
+        peers, cancellation, false);
+    while (future.wait_for(1ms) != std::future_status::ready)
+    {
+        io.poll();
+        io.restart();
+    }
+
+    auto driven = future.get();
+    EXPECT_FALSE(driven.acquired());
+    ASSERT_TRUE(driven.local_terminal);
+    EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_EQ(driven.grants, 1u)
+        << "cancellation while attached must not authorize another grant";
     EXPECT_EQ(
         PeerSetTestAccess::history_acquisition_attachment_count(
             io, peers, acquisition.context().acquisition),

@@ -6,6 +6,7 @@
 #include <catl/peer-client/peer-set.h>
 
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
 
@@ -1113,6 +1114,23 @@ public:
                     : catl::peer_client::PeerSet::HistoryPoolChange::
                           availability);
         });
+    }
+
+    static void
+    post_cancel_and_history_pool_wake(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        boost::asio::cancellation_signal& cancellation,
+        bool discovery)
+    {
+        boost::asio::post(
+            peers->strand_, [&cancellation, peers, discovery]() {
+                cancellation.emit(boost::asio::cancellation_type::all);
+                peers->notify_waiters(
+                    discovery ? catl::peer_client::PeerSet::HistoryPoolChange::
+                                      discovery
+                              : catl::peer_client::PeerSet::HistoryPoolChange::
+                                    availability);
+            });
     }
 
     static void
