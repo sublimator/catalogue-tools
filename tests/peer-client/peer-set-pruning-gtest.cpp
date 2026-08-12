@@ -75,9 +75,7 @@ TEST(PeerSetPruning, WaitSignalWakesOnDiscoveryAcrossThreads)
                     asio::co_spawn(
                         ex,
                         [signal]() -> asio::awaitable<void> {
-                            boost::system::error_code ec;
-                            co_await signal->async_wait(
-                                asio::redirect_error(asio::use_awaitable, ec));
+                            (void)co_await signal->wait();
                         },
                         asio::deferred),
                     asio::co_spawn(
@@ -112,6 +110,160 @@ TEST(PeerSetPruning, WaitSignalWakesOnDiscoveryAcrossThreads)
 
     EXPECT_TRUE(done);
     EXPECT_TRUE(woke_on_signal);
+}
+
+TEST(PeerSetPruning, WaitSignalRetainsWakeBeforeRegistration)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
+
+    PeerSetTestAccess::post_history_pool_wake(peers, false);
+    io.run();
+    io.restart();
+
+    auto waited = asio::co_spawn(
+        io,
+        [signal]() -> asio::awaitable<boost::system::error_code> {
+            co_return co_await signal->wait();
+        },
+        asio::use_future);
+    io.run();
+
+    ASSERT_EQ(waited.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(waited.get(), asio::error::operation_aborted);
+}
+
+TEST(PeerSetPruning, CrawlDemotionPublishesExactCandidateSupplyDelta)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto const endpoint = std::string("crawl-demotion.example.com:51235");
+
+    auto const initial =
+        PeerSetTestAccess::candidate_supply_revision(io, peers);
+    PeerSetTestAccess::post_note_discovered(
+        peers, endpoint, DiscoverySource::Unknown);
+    io.run();
+    io.restart();
+    auto const independently_discovered =
+        PeerSetTestAccess::candidate_supply_revision(io, peers);
+    EXPECT_GT(independently_discovered, initial);
+
+    PeerSetTestAccess::post_note_discovered(
+        peers, endpoint, DiscoverySource::Crawl);
+    io.run();
+    io.restart();
+    auto const crawl_only =
+        PeerSetTestAccess::candidate_supply_revision(io, peers);
+    EXPECT_GT(crawl_only, independently_discovered)
+        << "crawl provenance removes this otherwise unknown endpoint from "
+           "independent candidate supply";
+
+    PeerSetTestAccess::post_note_discovered(
+        peers, endpoint, DiscoverySource::Crawl);
+    io.run();
+    io.restart();
+    EXPECT_EQ(
+        PeerSetTestAccess::candidate_supply_revision(io, peers), crawl_only)
+        << "repeating the same crawl provenance is not another semantic "
+           "candidate change";
+}
+
+TEST(PeerSetPruning, WaitSignalWakesFanoutAndRotatesFreshGeneration)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
+    auto first = asio::co_spawn(io, signal->wait(), asio::use_future);
+    auto second = asio::co_spawn(io, signal->wait(), asio::use_future);
+
+    PeerSetTestAccess::post_history_pool_wake(peers, false);
+    io.run();
+    ASSERT_EQ(first.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    ASSERT_EQ(second.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(first.get(), asio::error::operation_aborted);
+    EXPECT_EQ(second.get(), asio::error::operation_aborted);
+
+    io.restart();
+    auto fresh = PeerSetTestAccess::attach_wait_signal(io, peers);
+    auto third = asio::co_spawn(io, fresh->wait(), asio::use_future);
+    io.run_for(std::chrono::milliseconds(5));
+    EXPECT_EQ(third.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    if (io.stopped())
+        io.restart();
+    PeerSetTestAccess::post_history_pool_wake(peers, false);
+    io.run();
+    ASSERT_EQ(third.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(third.get(), asio::error::operation_aborted);
+}
+
+TEST(PeerSetPruning, WaitSignalTimeoutDoesNotPoisonSibling)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto signal = PeerSetTestAccess::attach_wait_signal(io, peers);
+    auto sibling = asio::co_spawn(io, signal->wait(), asio::use_future);
+    auto timeout = asio::co_spawn(
+        io,
+        [signal]() -> asio::awaitable<std::size_t> {
+            auto ex = co_await asio::this_coro::executor;
+            auto result =
+                co_await asio::experimental::make_parallel_group(
+                    asio::co_spawn(ex, signal->wait(), asio::deferred),
+                    asio::co_spawn(
+                        ex,
+                        [ex]() -> asio::awaitable<void> {
+                            asio::steady_timer timer(
+                                ex, std::chrono::milliseconds(5));
+                            co_await timer.async_wait(asio::use_awaitable);
+                        },
+                        asio::deferred))
+                    .async_wait(
+                        asio::experimental::wait_for_one(),
+                        asio::use_awaitable);
+            co_return std::get<0>(result)[0];
+        },
+        asio::use_future);
+
+    io.run_for(std::chrono::milliseconds(20));
+    ASSERT_EQ(timeout.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(timeout.get(), 1u);
+    EXPECT_EQ(
+        sibling.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    if (io.stopped())
+        io.restart();
+    PeerSetTestAccess::post_history_pool_wake(peers, false);
+    io.run();
+    ASSERT_EQ(
+        sibling.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(sibling.get(), asio::error::operation_aborted);
 }
 
 TEST(PeerSetPruning, CrawlObservationsStayOutsideSelectionState)
@@ -415,9 +567,7 @@ TEST(PeerSetPruning, WaitSignalWakesOnStatusUpdate)
                     asio::co_spawn(
                         ex,
                         [signal]() -> asio::awaitable<void> {
-                            boost::system::error_code ec;
-                            co_await signal->async_wait(
-                                asio::redirect_error(asio::use_awaitable, ec));
+                            (void)co_await signal->wait();
                         },
                         asio::deferred),
                     asio::co_spawn(

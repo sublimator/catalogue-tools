@@ -1004,6 +1004,69 @@ TEST(PeerEndpointCache, PublicTargetWaitLeavesNoCrawlOrAuthorizationResidue)
     EXPECT_TRUE(snapshot.wanted_ledgers.empty());
 }
 
+TEST(PeerEndpointCache, CachedCandidateImportWakesOnlyOnProjectionDelta)
+{
+    TempCachePath temp{"peer-endpoint-cache-candidate-delta"};
+    auto cache = PeerEndpointCache::open(temp.string());
+    constexpr uint32_t network_id = 42;
+    constexpr uint32_t wanted = 500;
+    auto const endpoint = std::string{"45.139.107.65:21337"};
+    cache->remember_status(
+        network_id,
+        endpoint,
+        PeerStatus{
+            .first_seq = 1,
+            .last_seq = 1000,
+            .current_seq = 1000,
+        });
+
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = network_id,
+            .endpoint_cache_path = temp.string(),
+            .cached_endpoint_limit = 64,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    auto changed = PeerSetTestAccess::attach_wait_signal(io, peers);
+    auto changed_wait =
+        boost::asio::co_spawn(io, changed->wait(), boost::asio::use_future);
+    auto candidates = PeerSetTestAccess::load_cached_history_candidates(
+        io, peers, wanted);
+    io.run();
+    ASSERT_EQ(candidates, (std::vector<std::string>{endpoint}));
+    ASSERT_EQ(
+        changed_wait.wait_for(std::chrono::seconds(0)),
+        std::future_status::ready);
+    EXPECT_EQ(changed_wait.get(), boost::asio::error::operation_aborted);
+
+    io.restart();
+    auto unchanged = PeerSetTestAccess::attach_wait_signal(io, peers);
+    auto unchanged_wait =
+        boost::asio::co_spawn(io, unchanged->wait(), boost::asio::use_future);
+    candidates = PeerSetTestAccess::load_cached_history_candidates(
+        io, peers, wanted);
+    io.run_for(std::chrono::milliseconds(20));
+    ASSERT_EQ(candidates, (std::vector<std::string>{endpoint}));
+    EXPECT_EQ(
+        unchanged_wait.wait_for(std::chrono::seconds(0)),
+        std::future_status::timeout)
+        << "re-importing the same persistent projection is not candidate "
+           "supply change";
+
+    if (io.stopped())
+        io.restart();
+    PeerSetTestAccess::post_history_pool_wake(peers, false);
+    io.run();
+    ASSERT_EQ(
+        unchanged_wait.wait_for(std::chrono::seconds(0)),
+        std::future_status::ready);
+    EXPECT_EQ(unchanged_wait.get(), boost::asio::error::operation_aborted);
+}
+
 TEST(
     PeerEndpointCache,
     TargetedLookupDeduplicatesKnownUnknownAliasWithoutPublishingCachedRange)

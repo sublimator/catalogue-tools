@@ -2494,6 +2494,48 @@ TEST(PeerSetHistoryDriver, OpenCandidateSupplyPreventsFalseSharedTerminal)
                 demand,
                 HistoryAcquisitionOptions{
                     .fetch = HistoryFetchId{54}, .fetch_epoch = 1}));
+
+    auto const duplicate_discovery =
+        std::string("duplicate-discovery.example.com:51235");
+    auto const duplicate_status =
+        std::string("duplicate-status.example.com:51235");
+    auto const duplicate_crawl =
+        std::string("duplicate-crawl.example.com:51235");
+    PeerStatus repeated_status{
+        .first_seq = 1, .last_seq = 100, .current_seq = 100};
+    auto repeated_crawl = [&](bool split_intervals = false) {
+        CrawlResponse response;
+        response.peers = {CrawlPeer{
+            .endpoint = duplicate_crawl,
+            .reported_public_key = "duplicate-crawl-key",
+            .complete_ledgers = {{.first_seq = 1, .last_seq = 100}},
+            .reported_intervals = split_intervals
+                ? std::vector<CrawlLedgerRange>{{41, 100}, {1, 40}}
+                : std::vector<CrawlLedgerRange>{{1, 100}}}};
+        if (split_intervals)
+        {
+            response.peers.push_back(CrawlPeer{
+                .endpoint = "empty-crawl-observation.example.com:51235",
+                .reported_public_key = "empty-crawl-key"});
+        }
+        return response;
+    };
+    PeerSetTestAccess::post_note_discovered(peers, duplicate_discovery);
+    PeerSetTestAccess::post_note_status(peers, duplicate_status, repeated_status);
+    io.poll();
+    io.restart();
+    PeerSetTestAccess::apply_crawl_response(
+        io,
+        peers,
+        "duplicate-reporter.example.com:51235",
+        repeated_crawl());
+    for (auto const& endpoint :
+         {duplicate_discovery, duplicate_status, duplicate_crawl})
+    {
+        EXPECT_TRUE(
+            run(io, peers->co_exclude_history_endpoint(acquisition, endpoint)));
+    }
+
     auto fetch = SharedHistoryFetch::create(HistoryFetchId{54}, 1);
     auto interest = fetch->register_interest(peers, scope, demand, acquisition);
     auto future = boost::asio::co_spawn(
@@ -2509,7 +2551,43 @@ TEST(PeerSetHistoryDriver, OpenCandidateSupplyPreventsFalseSharedTerminal)
         << "an empty current snapshot is not proof that service-owned future "
            "candidate supply is closed";
 
-    PeerSetTestAccess::post_history_pool_wake(peers, true);
+    for (std::size_t i = 0; i < 100; ++i)
+    {
+        PeerSetTestAccess::post_note_discovered(peers, duplicate_discovery);
+        PeerSetTestAccess::post_note_status(
+            peers, duplicate_status, repeated_status);
+        PeerSetTestAccess::apply_crawl_response(
+            io,
+            peers,
+            "duplicate-reporter.example.com:51235",
+            repeated_crawl(i % 2 != 0));
+    }
+    EXPECT_EQ(future.wait_for(0ms), std::future_status::timeout);
+    EXPECT_FALSE(fetch->snapshot().terminal);
+
+    // Saturating the bounded stats table with crawl-only locators exercises
+    // its eviction path. Neither insertion nor eviction is a planner-visible
+    // candidate delta, so the dedicated revision must remain quiet.
+    for (std::size_t i = 0; i < 2005; ++i)
+    {
+        PeerSetTestAccess::post_note_discovered(
+            peers,
+            "crawl-only-noise-" + std::to_string(i) + ".example.com:51235",
+            DiscoverySource::Crawl);
+    }
+    io.run_for(200ms);
+    io.restart();
+    EXPECT_EQ(future.wait_for(0ms), std::future_status::timeout);
+    EXPECT_FALSE(fetch->snapshot().terminal);
+
+    CrawlResponse crawl;
+    crawl.peers = {CrawlPeer{
+        .endpoint = "crawl-candidate.example.com:51235",
+        .reported_public_key = "crawl-candidate-key",
+        .complete_ledgers = {{.first_seq = 1, .last_seq = 100}},
+        .reported_intervals = {{.first_seq = 1, .last_seq = 100}}}};
+    PeerSetTestAccess::apply_crawl_response(
+        io, peers, "crawl-reporter.example.com:51235", std::move(crawl));
     io.run_for(20ms);
     io.restart();
     EXPECT_EQ(future.wait_for(0ms), std::future_status::timeout);
@@ -2526,6 +2604,13 @@ TEST(PeerSetHistoryDriver, OpenCandidateSupplyPreventsFalseSharedTerminal)
     EXPECT_FALSE(driven.shared_terminal);
     ASSERT_TRUE(driven.local_terminal);
     EXPECT_EQ(*driven.local_terminal, HistoryAcquisitionTerminal::cancelled);
+    EXPECT_LE(driven.replans, 3u)
+        << "duplicate real discovery, status, and crawl observations must not "
+           "masquerade as changed candidate supply";
+    EXPECT_GE(driven.replans_after_local_change, 1u)
+        << "a successful crawl that publishes a candidate must wake the "
+           "candidate-supply decision";
+    EXPECT_GE(driven.pool_wakes_reused, 90u);
     EXPECT_EQ(fetch->snapshot().spent_unacknowledged, 0u);
 }
 

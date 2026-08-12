@@ -1,9 +1,12 @@
 #pragma once
 
+#include <catl/peer-client/detail/history-wait-signal.h>
+
 #include <catl/peer-client/peer-client.h>
 #include <catl/peer-client/peer-set.h>
 
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
 
 #include <algorithm>
@@ -1047,12 +1050,12 @@ public:
         });
     }
 
-    static std::shared_ptr<boost::asio::steady_timer>
+    static std::shared_ptr<catl::peer_client::detail::HistoryWaitSignal>
     attach_wait_signal(
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers)
     {
-        std::shared_ptr<boost::asio::steady_timer> signal;
+        std::shared_ptr<catl::peer_client::detail::HistoryWaitSignal> signal;
         run_on_strand(io, peers, [&signal](auto& set) {
             signal = set.attach_wait_signal();
         });
@@ -1062,12 +1065,27 @@ public:
     static void
     post_note_discovered(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
-        std::string endpoint)
+        std::string endpoint,
+        catl::peer_client::DiscoverySource source =
+            catl::peer_client::DiscoverySource::Unknown)
     {
         boost::asio::post(
-            peers->strand_, [peers, endpoint = std::move(endpoint)]() mutable {
-                peers->note_discovered(endpoint);
+            peers->strand_,
+            [peers, endpoint = std::move(endpoint), source]() mutable {
+                peers->note_discovered(endpoint, source);
             });
+    }
+
+    static std::uint64_t
+    candidate_supply_revision(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::uint64_t revision = 0;
+        run_on_strand(io, peers, [&revision](auto& set) {
+            revision = set.history_candidate_supply_revision_;
+        });
+        return revision;
     }
 
     static void
@@ -1285,6 +1303,19 @@ public:
                 }
                 set.notify_waiters();
             });
+    }
+
+    static std::vector<std::string>
+    load_cached_history_candidates(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::uint32_t ledger_seq)
+    {
+        std::vector<std::string> candidates;
+        run_on_strand(io, peers, [&](auto& set) {
+            candidates = set.load_cached_candidates_for(ledger_seq);
+        });
+        return candidates;
     }
 
     static void
@@ -2395,6 +2426,13 @@ private:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         Fn&& fn)
     {
+        // Keep the context runnable after this helper's local poll reaches
+        // quiescence. Taking restart ownership remains legal only for a
+        // context whose previous run/poll calls have returned.
+        auto work = boost::asio::make_work_guard(io);
+        if (io.stopped())
+            io.restart();
+
         std::promise<void> done;
         auto fut = done.get_future();
         auto failure = std::make_shared<std::exception_ptr>();
@@ -2416,18 +2454,19 @@ private:
                 done.set_value();
             });
 
-        // A previous non-blocking poll may have observed an empty queue and
-        // put the context into its stopped state. Posting does not restart an
-        // io_context, so restart before the first poll as well as after the
-        // helper completes.
-        io.restart();
         while (fut.wait_for(std::chrono::milliseconds(1)) !=
                std::future_status::ready)
         {
             io.poll();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        io.restart();
+
+        work.reset();
+        // Preserve the helper's leave-runnable contract for a locally-driven
+        // context. An external runner must own another guard, so stopped here
+        // proves its run/poll epoch has already returned.
+        if (io.stopped())
+            io.restart();
 
         if (*failure)
             std::rethrow_exception(*failure);

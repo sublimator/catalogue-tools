@@ -184,6 +184,7 @@ struct HistoryPoolObservation
 {
     std::uint64_t availability_revision = 0;
     std::uint64_t discovery_revision = 0;
+    std::uint64_t candidate_supply_revision = 0;
 
     bool
     operator==(HistoryPoolObservation const&) const = default;

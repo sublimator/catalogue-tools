@@ -50,6 +50,10 @@ class PeerSetTestAccess;  // forward decl for test friend
 
 namespace catl::peer_client {
 
+namespace detail {
+class HistoryWaitSignal;
+}
+
 /// Well-known bootstrap peers by network ID.
 struct BootstrapPeer
 {
@@ -574,6 +578,8 @@ private:
     enum class HistoryPoolChange : std::uint8_t {
         availability,
         discovery,
+        availability_and_candidate_supply,
+        discovery_and_candidate_supply,
     };
     enum class HistoryWakeDisposition : std::uint8_t {
         reuse,
@@ -907,7 +913,8 @@ private:
         HistoryParticipantPlan const& proposal,
         HistorySearchSnapshot const& snapshot,
         bool availability_changed,
-        bool discovery_changed) const noexcept;
+        bool discovery_changed,
+        bool candidate_supply_changed) const noexcept;
 
     void
     refresh_global_history_tokens(
@@ -1204,7 +1211,8 @@ private:
     bool
     capture_crawl_observations(
         std::string const& reporter,
-        CrawlResponse const& response) noexcept;
+        CrawlResponse const& response,
+        bool* candidate_projection_changed = nullptr) noexcept;
 
     void
     apply_crawl_response(
@@ -1282,7 +1290,7 @@ private:
     /// Remove stale endpoint_stats_ entries to bound memory.
     /// Keeps entries that are connected, in-flight, queued, or recently seen.
     /// Also prunes expired failed_ledgers sub-entries.
-    void
+    bool
     prune_endpoint_stats();
 
     /// Bound long-lived discovery state (tracker, crawl history, backoff map).
@@ -1291,6 +1299,12 @@ private:
 
     void
     update_endpoint_stats(PeerEndpointCache::Entry const& entry);
+
+    void
+    merge_endpoint_stats_on_strand(PeerEndpointCache::Entry const& entry);
+
+    void
+    note_configured_endpoint(std::string const& endpoint);
 
     void
     note_discovered(
@@ -1353,7 +1367,7 @@ private:
     void
     prune_recent_failure_events(std::chrono::steady_clock::time_point now);
 
-    std::shared_ptr<boost::asio::steady_timer>
+    std::shared_ptr<detail::HistoryWaitSignal>
     attach_wait_signal();
 
     void
@@ -1466,6 +1480,21 @@ private:
         };
         std::unordered_map<uint32_t, LedgerFailure> failed_ledgers;
     };
+    struct HistoryCandidateProjection
+    {
+        bool present = false;
+        HistorySourceLane source = HistorySourceLane::crawl_only;
+        bool range_authoritative = false;
+        std::uint32_t first_seq = 0;
+        std::uint32_t last_seq = 0;
+
+        bool
+        operator==(HistoryCandidateProjection const&) const = default;
+    };
+
+    HistoryCandidateProjection
+    history_candidate_projection_for(std::string const& endpoint) const;
+
     //@@authority state=prv.S0008 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::endpoint_stats_@9bdf35aba9a4d0ef
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
@@ -1703,6 +1732,11 @@ private:
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=monotonic_history_discovery_scheduling_revision
     std::uint64_t history_discovery_revision_ = 1;
+    //@@authority state=prv.S0135 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::history_candidate_supply_revision_@68c7d39323bc5212
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=monotonic_history_candidate_supply_scheduling_revision
+    std::uint64_t history_candidate_supply_revision_ = 1;
     //@@authority state=prv.S0093 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::peer_set_instance_id_@564c32da7db0f1b9
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
@@ -1846,6 +1880,10 @@ private:
     std::uint64_t crawl_malformed_interval_tokens_ = 0;
     std::uint64_t crawl_truncated_observations_ = 0;
     std::uint64_t crawl_observation_capture_failures_ = 0;
+    //@@authority state=prv.S0136 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::configured_endpoints_@aa25f8e01178d430
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=normalized_configured_history_candidate_roots
     std::set<std::string> configured_endpoints_;
     // Active target ledgers from in-flight wait_for_covering_peer calls.
     // Used by candidate admission and same-pool rotation to prioritize peers
@@ -1863,7 +1901,7 @@ private:
     std::string endpoint_cache_error_;
     // Persistent one-shot priorities registered through prioritize_ledger().
     std::set<uint32_t> prioritized_ledgers_;
-    std::shared_ptr<boost::asio::steady_timer> wait_signal_;
+    std::shared_ptr<detail::HistoryWaitSignal> wait_signal_;
     mutable std::mutex unsolicited_handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
 };
