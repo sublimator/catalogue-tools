@@ -7,9 +7,10 @@
 // Any code (logging, metrics, etc.) can check the thread_local
 // to get the current request's ID without explicit parameter passing.
 //
-// Safe across thread migration: the executor wrapper handles
-// save/restore on every co_await resume, regardless of which
-// thread the coroutine lands on.
+// Safe across thread migration when resumption is scheduled through the
+// wrapper. A composed operation that directly invokes an awaitable completion
+// handler on another executor must explicitly re-enter the wrapped owner
+// executor; merely awaiting post(other_executor) does not migrate a coroutine.
 
 #include <chrono>
 #include <memory>

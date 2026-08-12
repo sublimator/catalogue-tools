@@ -8,6 +8,7 @@
 #include <catl/core/request-context.h>
 
 #include <algorithm>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
@@ -210,6 +211,39 @@ enum class WaitOutcome {
     canceled,
 };
 
+static asio::awaitable<void>
+//@@authority transition=prv.T0322 status=provisional scope=function bind=catl::peer_client::resume_on_owner_strand@3821c2e67fe71738
+// owner=unresolved owner_hypothesis=peer_set
+// commit=parameter_owner_strand
+// label=resume_suspended_wait_continuation_inside_exact_owner_strand
+resume_on_owner_strand(
+    asio::strand<asio::io_context::executor_type>& strand,
+    std::shared_ptr<catl::core::RequestContext const> request_context)
+{
+    if (!strand.running_in_this_thread())
+    {
+        // asio::post(strand, use_awaitable) is not an executor hop: post first
+        // reaches `strand`, then dispatches the completion handler through its
+        // associated executor. Invoke the awaitable completion handler inside
+        // the strand instead, so the suspended coroutine itself resumes under
+        // the owner serialization boundary.
+        co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
+            [&strand, request_context = std::move(request_context)](
+                auto handler) mutable {
+                asio::post(
+                    strand,
+                    [request_context = std::move(request_context),
+                     handler = std::move(handler)]() mutable {
+                        catl::core::RequestContextGuard guard(
+                            std::move(request_context));
+                        std::move(handler)();
+                    });
+            },
+            asio::use_awaitable);
+    }
+    co_return;
+}
+
 std::string
 describe_peer_history_coverage(PeerHistoryCoverage const& coverage)
 {
@@ -247,10 +281,17 @@ wait_for_signal_or_timeout(
     std::chrono::milliseconds timeout,
     std::shared_ptr<std::atomic<bool>> cancel = nullptr)
 {
+    auto request_context = catl::core::retain_current_request();
     if (cancel && cancel->load(std::memory_order_relaxed))
+    {
+        co_await resume_on_owner_strand(strand, request_context);
         co_return WaitOutcome::canceled;
+    }
     if (timeout <= std::chrono::milliseconds::zero())
+    {
+        co_await resume_on_owner_strand(strand, request_context);
         co_return WaitOutcome::timed_out;
+    }
 
     static constexpr auto kCancelPoll = std::chrono::milliseconds(25);
     auto remaining = timeout;
@@ -281,13 +322,20 @@ wait_for_signal_or_timeout(
                     asio::experimental::wait_for_one(), asio::use_awaitable);
 
         if (order[0] == 0)
+        {
+            co_await resume_on_owner_strand(strand, request_context);
             co_return WaitOutcome::signaled;
+        }
 
         remaining -= slice;
         if (cancel && cancel->load(std::memory_order_relaxed))
+        {
+            co_await resume_on_owner_strand(strand, request_context);
             co_return WaitOutcome::canceled;
+        }
     }
 
+    co_await resume_on_owner_strand(strand, request_context);
     co_return WaitOutcome::timed_out;
 }
 
@@ -8601,10 +8649,6 @@ PeerSet::drive_history_interest_on_strand(
                             wait_until - current);
                     auto const outcome = co_await wait_for_signal_or_timeout(
                         strand_, std::move(wait_signal), wait_for);
-                    co_await asio::post(
-                        catl::core::ContextExecutor(
-                            strand_, catl::core::retain_current_request()),
-                        asio::use_awaitable);
                     ASSERT_ON_STRAND();
                     if (history_pool_revision_ != observed_pool_revision)
                     {
@@ -8756,10 +8800,6 @@ PeerSet::drive_history_interest_on_strand(
                 wait_until - current);
             auto const outcome = co_await wait_for_signal_or_timeout(
                 strand_, std::move(wait_signal), wait_for);
-            co_await asio::post(
-                catl::core::ContextExecutor(
-                    strand_, catl::core::retain_current_request()),
-                asio::use_awaitable);
             ASSERT_ON_STRAND();
             if (history_pool_revision_ != observed_pool_revision)
             {
@@ -9539,10 +9579,6 @@ PeerSet::wait_for_any_peer_on_strand(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 wait_until - std::chrono::steady_clock::now());
         co_await wait_for_signal_or_timeout(strand_, wait_signal, wait_for);
-        co_await asio::post(
-            catl::core::ContextExecutor(
-                strand_, catl::core::retain_current_request()),
-            asio::use_awaitable);
         ASSERT_ON_STRAND();
         if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
             co_return nullptr;
@@ -10049,10 +10085,6 @@ PeerSet::wait_for_covering_peer_on_strand(
                 wait_until - std::chrono::steady_clock::now());
         auto outcome = co_await wait_for_signal_or_timeout(
             strand_, wait_signal, wait_for, cancel);
-        co_await asio::post(
-            catl::core::ContextExecutor(
-                strand_, catl::core::retain_current_request()),
-            asio::use_awaitable);
         ASSERT_ON_STRAND();
         if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
             outcome == WaitOutcome::canceled)
