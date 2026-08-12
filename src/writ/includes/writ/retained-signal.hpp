@@ -86,7 +86,10 @@ public:
     void
     complete() noexcept;
 
-    /// Owner-side, from any thread: post the completion onto the home.
+    /// Owner-side, from any thread: post the completion onto the home. The
+    /// signal must be owned by shared_ptr. A failed post is swallowed: wakes
+    /// are advisory projections of already-committed state, and every
+    /// subscriber's own deadline is the fail-closed fallback.
     void
     post_complete() noexcept;
 
