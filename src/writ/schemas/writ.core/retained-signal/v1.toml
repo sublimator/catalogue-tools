@@ -1,0 +1,53 @@
+id = "writ.core/retained-signal/v1"
+machine = "retained_signal"
+status = "provisional"
+binds = "src/writ/includes/writ/retained-signal.hpp"
+imports = ["writ.core/home/v1"]
+
+[[events]]
+name = "complete"
+sources = ["complete", "post_complete"]
+claim = "retain the completion fact and wake every registered subscriber; idempotent; absorbing"
+
+[[events]]
+name = "register"
+sources = ["register_wait", "wait_until", "co_wait_until"]
+claim = "arm before observing; a retained completion is consumed without suspending"
+
+[[events]]
+name = "consume"
+sources = ["consume_wait", "wait_until", "co_wait_until"]
+claim = "classify one woken subscriber and retire its registration"
+
+[dispositions]
+wait_outcome = ["signaled", "deadline_elapsed", "canceled"]
+
+[[rules]]
+id = "retained-completion"
+law = "a completion published before subscription is state, not an edge: a later wait consumes it without suspending"
+control = "WritRetainedSignal.CompletionBeforeSubscriptionIsRetained"
+
+[[rules]]
+id = "subscriber-deadline-isolation"
+law = "one subscriber's deadline retires only that subscriber; it can neither consume the retained wake nor poison a sibling"
+control = "WritRetainedSignal.SiblingDeadlineCannotConsumeOrPoisonTheWake"
+
+[[rules]]
+id = "cancellation-dominates-shared-wake"
+law = "cancellation sampled at the subscriber boundary wins over a shared completion queued in the same owner turn; siblings still consume the wake"
+control = "WritRetainedSignal.CancelThenSignalInOneOwnerTurnIsCanceled"
+
+[[rules]]
+id = "preexisting-cancellation-refuses"
+law = "a subscriber whose caller was already canceled never registers"
+control = "WritRetainedSignal.PreexistingCancellationRefusesTheWait"
+
+[[rules]]
+id = "generations-rotate"
+law = "a completed signal stays completed; repeated wakes rotate a fresh signal so an arming subscriber can never miss the current generation"
+control = "WritRetainedSignal.FreshSignalAfterRetainedCompletionStartsClean"
+
+[[rules]]
+id = "post-complete-swallow-is-bounded"
+law = "a failed cross-thread completion post is swallowed only because wakes are advisory projections of committed state and every subscriber holds its own deadline; no claim exists for deadline-free waits"
+evidence = "stated at the post_complete declaration; deadline-free wait() deliberately does not exist"

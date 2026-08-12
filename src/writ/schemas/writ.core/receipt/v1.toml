@@ -1,0 +1,48 @@
+id = "writ.core/receipt/v1"
+machine = "receipt"
+status = "provisional"
+binds = "src/writ/includes/writ/receipt.hpp"
+
+[[operations]]
+name = "mint"
+derives = "construction"
+claim = "receipt<Tag> is constructible exactly by whoever can construct Tag; the Tag's constructor IS the capability"
+
+[[operations]]
+name = "slot.retain"
+derives = "latch"
+claim = "the first fact is latched; refusal moves nothing"
+
+[[operations]]
+name = "slot.consume"
+derives = "one-shot-consumption"
+claim = "exchange-with-empty before returning"
+
+[dispositions]
+retain = ["latched", "refused-loser-intact"]
+consume = ["fact", "absent"]
+
+[[rules]]
+id = "tag-constructibility-is-the-mint"
+law = "first-mint forgery fails to compile: a non-friend cannot construct the Tag"
+control = "receipt-gtest.cpp static_assert (outsiders cannot construct the fact)"
+
+[[rules]]
+id = "the-tag-is-move-only"
+law = "a copyable Tag could be copied out of fact() and re-minted with a chosen disposition through the public constructor; the library rejects copyable Tags at compile time"
+control = "receipt-gtest.cpp static_assert (round-4 counterexample closed)"
+
+[[rules]]
+id = "first-fact-latched-refusal-preserves-loser"
+law = "a later publication cannot overwrite history's winner, and the refused loser keeps its unconsumed fact"
+control = "WritReceipt.SlotRetainsExactlyOneFactAndRefusalPreservesTheLoser"
+
+[[rules]]
+id = "exchange-with-empty"
+law = "re-entry during consumption observes absence; a one-shot fact cannot be double-observed"
+control = "WritReceipt.ConsumeEmptiesTheSlotBeforeReturning"
+
+[[rules]]
+id = "claim-boundary"
+law = "this machine proves unforgeability and single consumption ONLY; producer totality (the minter cannot wedge before minting) is census's job, and a receipt does not imply it"
+evidence = "stated in the header; the reason receipt shipped only together with census"

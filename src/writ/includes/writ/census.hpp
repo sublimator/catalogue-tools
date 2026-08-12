@@ -2,6 +2,7 @@
 
 // writ::census — an admitted population with sealed admission and a
 // received (never inferred) drain.
+// schema: writ.core/census/v1
 //
 // Extracted from the peer-client's servant censuses (`in_flight_`,
 // `crawl_in_flight_`, `draining_generations_`) and co_stop's drain loops.
@@ -22,30 +23,45 @@
 //                     home, not the size of the largest visible container").
 //
 //   a leak wedges     a member dropped without retirement is recorded and
-//   VISIBLY           drained() stays false forever. That wedge is the
-//                     feature: the fossil shutdown waits on unaccounted
+//   VISIBLY, even     drained() stays false forever. That wedge is the
+//   through teardown  feature: the fossil shutdown waits on unaccounted
 //                     obligations silently; a census makes the wedge
-//                     attributable. The leak is reported on stderr and
-//                     aborts under WRIT_HOME_FAIL_FAST.
+//                     attributable. The leak FACT (stderr line, fail-fast
+//                     abort, sticky counter) commits on the DROPPING thread,
+//                     before any executor is involved — a post to a stopped
+//                     or destroyed executor can destroy its handler without
+//                     running it, so only live-row bookkeeping rides the
+//                     post and the wedge itself cannot be lost to teardown
+//                     (round 4: the previous shape posted the whole commit
+//                     and lost the leak exactly on the shutdown edge it
+//                     existed for).
+//
+// Member identities come from a writ::mint, so identity exhaustion is a
+// sticky admission refusal, never a wrap through zero.
 //
 // The drained wake is a writ::retained_signal — completed exactly when the
 // census drains, retained for late joiners (quiescence is received from its
 // owner). Drained is absorbing, so one signal generation suffices.
 //
-// All operations are home-confined except the member destructor's leak
-// notice, which may run anywhere and posts home-ward.
+// All operations are home-confined except two, stated where they happen:
+// the member destructor's leak commit (any thread), and leaked(), which
+// reads the cross-thread counter and stays legal even after the home's
+// executor is gone.
 
+#include <writ/exact.hpp>
 #include <writ/home.hpp>
 #include <writ/retained-signal.hpp>
 
 #include <boost/asio/post.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 namespace writ {
@@ -53,6 +69,13 @@ namespace writ {
 template <typename Key>
 class census
 {
+    static_assert(
+        std::is_nothrow_move_constructible_v<Key> &&
+            std::is_nothrow_move_assignable_v<Key>,
+        "census member tokens move their Key inside noexcept move operations "
+        "and the noexcept leak path; a throwing-move Key would make those "
+        "declarations lies");
+
     struct state
     {
         explicit state(home h)
@@ -63,15 +86,16 @@ class census
 
         home owner;
         std::map<Key, std::uint64_t> live;
-        std::uint64_t next_member = 0;
+        mint member_mint;
         bool sealed = false;
-        std::size_t leaked = 0;
+        std::atomic<std::size_t> leaked{0};
         std::shared_ptr<retained_signal> drained_wake;
 
         bool
         drained() const noexcept
         {
-            return sealed && live.empty() && leaked == 0;
+            return sealed && live.empty() &&
+                leaked.load(std::memory_order_acquire) == 0;
         }
 
         void
@@ -81,21 +105,16 @@ class census
                 drained_wake->complete();
         }
 
-        // Cross-thread entry: a member was dropped without retirement.
+        // Home-side bookkeeping for a leak already committed on the dropping
+        // thread: consume the live row so live() stays honest. Deliberately
+        // never completes the drain wake — the committed leak has already
+        // wedged it.
         void
-        leak(Key key, std::uint64_t id) noexcept
+        erase_leaked_row(Key const& key, std::uint64_t id) noexcept
         {
-            std::fprintf(
-                stderr,
-                "WRIT-CENSUS-LEAK: member %llu\n",
-                static_cast<unsigned long long>(id));
-            std::fflush(stderr);
-            if (std::getenv("WRIT_HOME_FAIL_FAST") != nullptr)
-                std::abort();
             auto const it = live.find(key);
             if (it != live.end() && it->second == id)
                 live.erase(it);
-            ++leaked;  // sticky: drained() can never become true
         }
     };
 
@@ -165,40 +184,44 @@ public:
             census_.reset();
         }
 
-        // Dropped live: record the leak on the home. May run on any thread;
-        // if the census itself is gone, the leak is print-only.
+        // Dropped live: the leak FACT commits here, on the dropping thread —
+        // stderr line, fail-fast abort, sticky cross-thread counter — BEFORE
+        // any executor is involved. Only the live-row bookkeeping rides the
+        // home-ward post, so executor teardown can lose tidiness, never the
+        // wedge.
         void
         abandon() noexcept
         {
             if (id_ == 0)
                 return;
-            auto owner = census_.lock();
             auto const id = std::exchange(id_, 0);
+            auto owner = census_.lock();
+            std::fprintf(
+                stderr,
+                "WRIT-CENSUS-LEAK: member %llu%s\n",
+                static_cast<unsigned long long>(id),
+                owner ? "" : " outlived census");
+            std::fflush(stderr);
+            if (std::getenv("WRIT_HOME_FAIL_FAST") != nullptr)
+                std::abort();
             if (!owner)
-            {
-                std::fprintf(
-                    stderr,
-                    "WRIT-CENSUS-LEAK: member %llu outlived census\n",
-                    static_cast<unsigned long long>(id));
-                std::fflush(stderr);
                 return;
-            }
+            owner->leaked.fetch_add(1, std::memory_order_acq_rel);
             try
             {
                 boost::asio::post(
                     owner->owner.executor(),
-                    [owner, key = std::move(key_), id]() mutable noexcept {
-                        owner->leak(std::move(key), id);
+                    [owner, key = std::move(key_), id]() noexcept {
+                        owner->erase_leaked_row(key, id);
                     });
             }
             catch (...)
             {
-                std::fprintf(
-                    stderr,
-                    "WRIT-CENSUS-LEAK: member %llu (post failed)\n",
-                    static_cast<unsigned long long>(id));
-                std::fflush(stderr);
+                // The row stays live and the counter is already committed:
+                // both halves of the wedge hold, and the report above has
+                // already been made.
             }
+            census_.reset();
         }
 
         std::weak_ptr<state> census_;
@@ -217,8 +240,9 @@ public:
     census&
     operator=(census&&) noexcept = default;
 
-    /// On the home. Refuses after seal and refuses a duplicate LIVE key
-    /// (the row itself is the dedup state). A retired key may be
+    /// On the home. Refuses after seal, refuses a duplicate LIVE key (the
+    /// row itself is the dedup state), and refuses on member-identity
+    /// exhaustion (the mint's sticky refusal). A retired key may be
     /// re-admitted; chained stages that must avoid a transient zero use
     /// distinct member identities.
     [[nodiscard]] std::optional<member>
@@ -228,9 +252,11 @@ public:
         WRIT_ASSERT_HOME(s.owner);
         if (s.sealed || s.live.contains(key))
             return std::nullopt;
-        auto const id = ++s.next_member;
-        s.live.emplace(key, id);
-        return member(state_, std::move(key), id);
+        auto const id = s.member_mint.next();
+        if (!id)
+            return std::nullopt;
+        s.live.emplace(key, id.value());
+        return member(state_, std::move(key), id.value());
     }
 
     /// On the home. Fences every later admit; an already-empty census
@@ -266,7 +292,7 @@ public:
         return s.drained();
     }
 
-    // ── observations, on the home ────────────────────────────────────
+    // ── observations ─────────────────────────────────────────────────
 
     std::size_t
     live() const noexcept
@@ -275,11 +301,14 @@ public:
         return state_->live.size();
     }
 
+    /// The sticky leak count. Unlike every other observation this one is
+    /// legal from ANY thread: leaks commit on the dropping thread, and the
+    /// count must remain observable even after the home's executor is gone
+    /// (the teardown control reads it with the io_context stopped).
     std::size_t
     leaked() const noexcept
     {
-        WRIT_ASSERT_HOME(state_->owner);
-        return state_->leaked;
+        return state_->leaked.load(std::memory_order_acquire);
     }
 
     bool

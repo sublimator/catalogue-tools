@@ -9,9 +9,11 @@
 
 namespace {
 
-// The capability model under test: the Tag's constructor IS the mint.
-// Only drain_authority can construct drain_fact, therefore only it can
-// produce receipt<drain_fact>. Identity is typed payload, not baked fields.
+// The capability model under test: the Tag's constructor IS the mint, and
+// the Tag is move-only so the mint capability cannot be copied back out of a
+// legitimate receipt. Only drain_authority can construct drain_fact,
+// therefore only it can produce receipt<drain_fact>. Identity is typed
+// payload, not baked fields.
 struct drain_authority;
 
 struct drain_fact
@@ -24,6 +26,13 @@ struct drain_fact
 
     std::string owner;
     std::uint64_t generation = 0;
+
+    drain_fact(drain_fact const&) = delete;
+    drain_fact&
+    operator=(drain_fact const&) = delete;
+    drain_fact(drain_fact&&) noexcept = default;
+    drain_fact&
+    operator=(drain_fact&&) noexcept = default;
 
 private:
     friend struct drain_authority;
@@ -44,11 +53,26 @@ struct drain_authority
     }
 };
 
-// Forgery fails to compile: this translation unit is not a friend of
-// drain_fact, so it cannot construct the Tag and therefore cannot mint.
+// First-mint forgery fails to compile: this translation unit is not a friend
+// of drain_fact, so it cannot construct the Tag and therefore cannot mint.
 static_assert(
     !std::is_constructible_v<drain_fact, std::string, std::uint64_t>,
     "outsiders must not be able to construct the fact");
+
+// Round 4's compiled counterexample, landed as the compile-time control it
+// demanded: `drain_fact copied = receipt.fact();` followed by re-minting
+// through the public receipt constructor. The library now rejects copyable
+// Tags outright, so the copy step — the only door — does not compile.
+static_assert(
+    !std::is_copy_constructible_v<drain_fact>,
+    "a copyable Tag could be copied out of fact() and re-minted; the Tag "
+    "must be move-only");
+static_assert(
+    !std::is_constructible_v<
+        writ::receipt<drain_fact>,
+        drain_fact const&,
+        drain_fact::disposition>,
+    "a receipt must not be mintable from a merely-observed fact");
 
 // A receipt is a fact, not a value: move-only, never copied, never
 // conjured empty.
@@ -69,17 +93,24 @@ TEST(WritReceipt, CarriesTypedIdentityAndClosedDisposition)
 }
 
 // The first fact is latched; a later publication cannot overwrite history's
-// winner.
-TEST(WritReceipt, SlotRetainsExactlyOneFact)
+// winner — and the refusal must not consume the loser, whose obligation
+// still has to balance somewhere (the census::retire rule, applied here).
+TEST(WritReceipt, SlotRetainsExactlyOneFactAndRefusalPreservesTheLoser)
 {
     writ::receipt_slot<drain_fact> slot;
     EXPECT_FALSE(slot.occupied());
 
     ASSERT_TRUE(slot.retain(
         drain_authority::mint("a:1", 1, drain_fact::disposition::drained)));
-    EXPECT_FALSE(slot.retain(drain_authority::mint(
-        "a:1", 1, drain_fact::disposition::forced_teardown)))
+
+    auto late = drain_authority::mint(
+        "a:1", 1, drain_fact::disposition::forced_teardown);
+    EXPECT_FALSE(slot.retain(std::move(late)))
         << "a later fact must not overwrite the latched winner";
+    EXPECT_EQ(late.fact().owner, "a:1")
+        << "the refusal must leave the loser's fact intact";
+    EXPECT_EQ(late.disposition(), drain_fact::disposition::forced_teardown)
+        << "and its disposition unconsumed";
 
     auto consumed = slot.consume();
     ASSERT_TRUE(consumed.has_value());

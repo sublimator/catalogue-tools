@@ -1,0 +1,51 @@
+id = "writ.core/home/v1"
+machine = "home"
+status = "provisional"
+binds = "src/writ/includes/writ/home.hpp"
+
+# Operations the C++ source adapter derives mechanically from library calls.
+[[operations]]
+name = "spawn"
+derives = "birth"
+claim = "the complete child coroutine is born on this home; use_awaitable completions of home-born I/O objects re-enter its serialized boundary"
+
+[[operations]]
+name = "timer"
+derives = "association"
+claim = "a timer whose completions (including cancel()) re-enter the home"
+
+[[operations]]
+name = "running_here"
+derives = "observation"
+claim = "diagnostic containment probe; never proof, never exclusivity"
+
+[[operations]]
+name = "assert_here"
+derives = "observation"
+effects = ["stderr:OFF-HOME", "abort:WRIT_HOME_FAIL_FAST"]
+
+[[rules]]
+id = "birth-on-home"
+law = "a home-born child that suspends on a home-born object resumes inside the home's boundary on every iteration, under concurrent runners"
+control = "WritHome.SuspendedOperationResumesUnderHomeAcrossConcurrentRunners"
+
+[[rules]]
+id = "birth-is-not-relocation"
+law = "a parent co_awaiting home.spawn re-enters through ITS OWN executor afterward; the claim is positive only"
+control = "WritHome.ChildBirthDoesNotRelocateTheParentContinuation"
+
+[[rules]]
+id = "containment-not-exclusivity"
+law = "inline completion dispatch may nest boundaries, so two homes can report running_here simultaneously; assert the boundary you require, never the absence of another"
+control = "WritHome.ChildBirthDoesNotRelocateTheParentContinuation"
+
+[[rules]]
+id = "probe-is-witness-not-proof"
+law = "confinement is a diagnosed precondition, not an enforced type property; the probe reports identically in Debug and Release and aborts only under WRIT_HOME_FAIL_FAST"
+control = "WritHome.WitnessReportsOnHomeAndTripsOffHome"
+subprocess_control = "WritHomeDeathTest.FailFastAbortsTheOffHomeProbe"
+
+[[rules]]
+id = "probe-never-inlined"
+law = "the thread-local strand-stack read stays out of line so a defective optimizer cannot hoist it across suspension points into the audited frame (LLVM #63022, clang 16)"
+evidence = "out-of-line home::running_here symbol in the optimized binary; clang-16 report"

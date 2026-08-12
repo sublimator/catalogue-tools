@@ -8,7 +8,6 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
-#include <cassert>
 #include <utility>
 
 namespace asio = boost::asio;
@@ -22,7 +21,7 @@ retained_signal::retained_signal(home h) : home_(std::move(h))
 void
 retained_signal::complete() noexcept
 {
-    assert(home_.running_here());
+    WRIT_ASSERT_HOME(home_);
     if (completed_)
         return;
     completed_ = true;
@@ -59,14 +58,14 @@ retained_signal::post_complete() noexcept
 bool
 retained_signal::completed() const noexcept
 {
-    assert(home_.running_here());
+    WRIT_ASSERT_HOME(home_);
     return completed_;
 }
 
 std::shared_ptr<asio::steady_timer>
 retained_signal::register_wait(time_point deadline)
 {
-    assert(home_.running_here());
+    WRIT_ASSERT_HOME(home_);
     if (completed_)
         return {};
     auto waiter =
@@ -83,7 +82,7 @@ retained_signal::consume_wait(
     boost::system::error_code const& error,
     asio::cancellation_type_t cancellation) noexcept
 {
-    assert(home_.running_here());
+    WRIT_ASSERT_HOME(home_);
     std::erase_if(waiters_, [&waiter](auto const& retained) {
         auto current = retained.lock();
         return !current || current == waiter;

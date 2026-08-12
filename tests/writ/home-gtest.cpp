@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <future>
 #include <thread>
 
@@ -112,6 +113,12 @@ TEST(WritHome, ChildBirthDoesNotRelocateTheParentContinuation)
 // unless WRIT_HOME_FAIL_FAST is set).
 TEST(WritHome, WitnessReportsOnHomeAndTripsOffHome)
 {
+    if (std::getenv("WRIT_HOME_FAIL_FAST") != nullptr)
+        GTEST_SKIP() << "negative control: the deliberate off-home probes "
+                        "abort under WRIT_HOME_FAIL_FAST; that abort is "
+                        "certified by "
+                        "WritHomeDeathTest.FailFastAbortsTheOffHomeProbe";
+
     asio::io_context io;
     writ::home h(io);
 
@@ -128,4 +135,21 @@ TEST(WritHome, WitnessReportsOnHomeAndTripsOffHome)
     EXPECT_TRUE(on_home);
     EXPECT_FALSE(off_home_from_plain_handler)
         << "a plain io_context handler is outside the home's boundary";
+}
+
+// The subprocess half of the split gate: fail-fast's abort is certified
+// here, in a child process, so the in-process negative control above may
+// skip under WRIT_HOME_FAIL_FAST without leaving the behavior unproven. The
+// environment variable is set INSIDE the death statement, so only the child
+// is armed.
+TEST(WritHomeDeathTest, FailFastAbortsTheOffHomeProbe)
+{
+    asio::io_context io;
+    writ::home h(io);
+    EXPECT_DEATH(
+        {
+            ::setenv("WRIT_HOME_FAIL_FAST", "1", 1);
+            (void)h.assert_here("death-control", __FILE__, __LINE__);
+        },
+        "OFF-HOME: death-control");
 }

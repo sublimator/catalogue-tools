@@ -2,6 +2,7 @@
 
 // writ::retained_signal — a retained one-shot wake with per-subscriber
 // deadlines and typed outcomes.
+// schema: writ.core/retained-signal/v1
 //
 // Extracted from the peer-client's HistoryWaitSignal, which replaced a
 // parallel_group signal/deadline race after that composition's

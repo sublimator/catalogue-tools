@@ -1,0 +1,48 @@
+id = "writ.core/exact/v1"
+machine = "exact"
+status = "provisional"
+binds = "src/writ/includes/writ/exact.hpp"
+
+[[operations]]
+name = "mint.next"
+derives = "mint"
+claim = "a fresh (epoch, sequence) generation, or the sticky zero refusal on exhaustion"
+
+[[operations]]
+name = "incarnation.ref"
+derives = "issue"
+claim = "an inert handle naming exactly one (object, generation) pair"
+
+[[operations]]
+name = "lock_exact"
+derives = "validation"
+claim = "scope-first, against the owner's presented current incarnation"
+
+[dispositions]
+lock_exact = ["object", "uniform-nullptr-refusal"]
+next = ["generation", "zero-refusal"]
+
+[[rules]]
+id = "scope-first-uniform-refusal"
+law = "dead, replaced, foreign, and never-issued handles receive the identical nullptr; presence is never leaked through the refusal shape"
+control = "WritExact.RefusalIsUniformAcrossDeadForeignAndEmpty"
+
+[[rules]]
+id = "incarnation-is-not-a-key"
+law = "the same object re-admitted under a fresh generation is a different incarnation; the old handle refuses"
+control = "WritExact.SameObjectReincarnatedRefusesTheOldRef"
+
+[[rules]]
+id = "counter-honesty"
+law = "generations are never reused; exhaustion is a sticky refusal, never a wrap, and refusals do not move the counter"
+control = "WritExact.ExhaustionIsStickyRefusalNotWrap"
+
+[[rules]]
+id = "owner-identity-is-unforgeable"
+law = "a generation names its mint's process-unique epoch as well as its sequence, and only a mint constructs a nonzero generation; two owners at the same object and colliding sequence refuse one another"
+control = "WritExact.ForeignOwnerWithCollidingSequenceRefuses"
+
+[[rules]]
+id = "restored-owner-boundary"
+law = "the restore seam resumes the sequence, never the epoch: a recreated owner refuses every predecessor ref"
+control = "WritExact.RestoredOwnerRefusesPredecessorRefs"

@@ -1,0 +1,67 @@
+id = "writ.core/census/v1"
+machine = "census"
+status = "provisional"
+binds = "src/writ/includes/writ/census.hpp"
+imports = ["writ.core/home/v1", "writ.core/retained-signal/v1", "writ.core/exact/v1"]
+
+[[events]]
+name = "admit"
+claim = "registration is the ONLY way into the population; happens BEFORE the fallible launch"
+
+[[events]]
+name = "seal"
+claim = "fences every later admission; a census is judged only against a closed population"
+
+[[events]]
+name = "retire"
+claim = "consumes the obligation exactly once on success; returns whether THIS retirement drained the census"
+
+[[events]]
+name = "leak"
+claim = "a member dropped without retirement; commits on the dropping thread"
+
+[dispositions]
+admit = ["member", "refused"]
+retire = ["consumed", "refused"]
+drained = ["sealed AND zero-live AND zero-leaked"]
+
+[[rules]]
+id = "never-started-still-retires"
+law = "a synchronously refused launch (or a body that never started) still holds its member and retires it; never-started is a caller disposition, not an excuse to vanish"
+control = "WritCensus.NeverStartedStillRetiresThroughTheCensus"
+
+[[rules]]
+id = "sealed-admission"
+law = "seal fences every later admit; the live row itself is the dedup state; a retired key may be re-admitted as a successor identity"
+control = "WritCensus.SealFencesLateAdmissionAndDuplicatesRefuse"
+
+[[rules]]
+id = "zero-is-a-photograph"
+law = "an empty population before seal is not quiescence"
+control = "WritCensus.ZeroBeforeSealIsNotDrained"
+
+[[rules]]
+id = "drain-is-received-not-inferred"
+law = "quiescence arrives through the owner's retained wake, retained for late joiners"
+control = "WritCensus.AdmitSealRetireDrainsAndCompletesTheWake"
+
+[[rules]]
+id = "leak-wedges-visibly"
+law = "a leak is reported, counted sticky, and wedges drained() forever, instead of the fossil's silent hang on an unaccounted obligation"
+control = "WritCensus.LeakedMemberWedgesTheDrainVisibly"
+
+[[rules]]
+id = "leak-survives-teardown"
+law = "the leak fact (report, fail-fast abort, sticky counter) commits on the dropping thread before any executor is involved; only live-row bookkeeping rides the post, so a stopped or destroyed executor loses tidiness, never the wedge"
+control = "WritCensus.LeakCommitsEvenWhenTheExecutorNeverRunsAgain"
+subprocess_control = "WritCensusDeathTest.FailFastAbortsOnALeakedMember"
+
+[[rules]]
+id = "refusal-preserves-obligation"
+law = "a refused retirement does not consume the member token; the obligation still has to balance at its rightful owner"
+control = "WritCensus.ForeignRetireRefusesWithoutConsumingTheObligation"
+
+[[rules]]
+id = "member-identity-is-minted"
+law = "member ids come from a writ::mint, so identity exhaustion is a sticky admission refusal, never a wrap through zero"
+evidence = "census::admit refuses when mint::next refuses"

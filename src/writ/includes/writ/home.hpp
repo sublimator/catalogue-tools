@@ -1,6 +1,7 @@
 #pragma once
 
 // writ::home — an execution authority.
+// schema: writ.core/home/v1
 //
 // A home is the strand on which one owner's state transitions are serialized.
 // It represents authority to EXECUTE there; it does not own any state object
@@ -76,6 +77,16 @@ public:
     /// WRIT_HOME_FAIL_FAST environment variable is set — the same fail-fast
     /// discipline as the peer-client strand asserts, with the probe hardened
     /// as above.
+    ///
+    /// The confinement contract, stated once for every writ primitive: the
+    /// home is a DIAGNOSED precondition, not an enforced type property. An
+    /// off-home call into owner state is already undefined behavior when
+    /// this probe observes it; the probe reports it identically in Debug and
+    /// Release (and turns it into an abort under WRIT_HOME_FAIL_FAST) but
+    /// cannot prevent or repair it — there is no typed off-home refusal,
+    /// because a refusal computed off-home would itself be an unserialized
+    /// observation of owner state. Enforcement-by-construction is the birth
+    /// gateways' job (spawn, co_wait_until); the probe only witnesses.
     bool
     assert_here(char const* what, char const* file, int line) const noexcept;
 

@@ -22,9 +22,12 @@ TEST(WritExact, MintIsMonotonicAndZeroIsNeverMinted)
     auto const second = m.next();
     ASSERT_TRUE(first);
     ASSERT_TRUE(second);
-    EXPECT_EQ(first.value, 1u);
-    EXPECT_EQ(second.value, 2u);
+    EXPECT_EQ(first.value(), 1u);
+    EXPECT_EQ(second.value(), 2u);
     EXPECT_LT(first, second);
+    EXPECT_EQ(first.epoch(), second.epoch())
+        << "one mint is one owner: its generations share its epoch";
+    EXPECT_NE(first.epoch(), 0u);
 }
 
 // Exhaustion is a sticky refusal, never a wrap: the last representable value
@@ -37,7 +40,7 @@ TEST(WritExact, ExhaustionIsStickyRefusalNotWrap)
 
     auto const last = m.next();
     ASSERT_TRUE(last);
-    EXPECT_EQ(last.value, max);
+    EXPECT_EQ(last.value(), max);
 
     EXPECT_FALSE(m.next());
     EXPECT_FALSE(m.next()) << "refusal must be sticky";
@@ -65,7 +68,7 @@ TEST(WritExact, StaleRefRefusesAfterReplacement)
 
     auto const successor = m.next();
     ASSERT_TRUE(successor);
-    EXPECT_EQ(successor.value, 3u)
+    EXPECT_EQ(successor.value(), 3u)
         << "refusals must not have disturbed the mint";
 }
 
@@ -107,4 +110,53 @@ TEST(WritExact, RefusalIsUniformAcrossDeadForeignAndEmpty)
     writ::incarnation<session> empty_owner;
     EXPECT_EQ(current.ref().lock_exact(empty_owner), nullptr)
         << "an empty owner refuses every ref";
+}
+
+// The round-4 review's compiled counterexample, landed as the control it
+// demanded: two independent owners hold the SAME object at the SAME local
+// sequence, and each must refuse the other's ref. Before the epoch fix this
+// printed foreign_alias=1; the epoch inside generation is what refuses now.
+TEST(WritExact, ForeignOwnerWithCollidingSequenceRefuses)
+{
+    auto shared = std::make_shared<session>(session{7});
+    writ::mint first_mint;
+    writ::mint second_mint;
+    writ::incarnation<session> ours(shared, first_mint.next());
+    writ::incarnation<session> foreign(shared, second_mint.next());
+
+    ASSERT_EQ(ours.gen().value(), foreign.gen().value())
+        << "the collision under test: identical object, identical sequence";
+    ASSERT_NE(ours.gen().epoch(), foreign.gen().epoch())
+        << "distinct owners must occupy distinct epochs";
+
+    EXPECT_EQ(ours.ref().lock_exact(foreign), nullptr)
+        << "a foreign owner must refuse our ref";
+    EXPECT_EQ(foreign.ref().lock_exact(ours), nullptr)
+        << "and we must refuse the foreign owner's ref";
+    ASSERT_NE(ours.ref().lock_exact(ours), nullptr);
+    ASSERT_NE(foreign.ref().lock_exact(foreign), nullptr);
+}
+
+// The review's required sibling case: a recreated owner is a new incarnation
+// boundary. The restore seam resumes the SEQUENCE, never the epoch, so a
+// predecessor's ref refuses against the restored owner even when the object
+// survived and the sequences collide exactly.
+TEST(WritExact, RestoredOwnerRefusesPredecessorRefs)
+{
+    auto object = std::make_shared<session>(session{1});
+    writ::mint original;
+    writ::incarnation<session> current(object, original.next());
+    auto const predecessor = current.ref();
+    ASSERT_NE(predecessor.lock_exact(current), nullptr);
+
+    // The owner dies and is restored from its persisted counter, around the
+    // same still-living object.
+    writ::mint restored(0);
+    writ::incarnation<session> successor(object, restored.next());
+    ASSERT_EQ(predecessor.gen().value(), successor.gen().value())
+        << "the restored sequence collides by construction";
+
+    EXPECT_EQ(predecessor.lock_exact(successor), nullptr)
+        << "a recreated owner must refuse every predecessor ref";
+    ASSERT_NE(successor.ref().lock_exact(successor), nullptr);
 }
