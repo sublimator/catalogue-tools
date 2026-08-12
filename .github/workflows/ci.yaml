@@ -25,12 +25,12 @@ jobs:
             cxx: g++-13
             version: 13
           - compiler: clang
-            cc: clang-16
-            cxx: clang++-16
-            version: 16
+            cc: clang-20
+            cxx: clang++-20
+            version: 20
     env:
       build_dir: build
-      CACHE_VERSION: 7
+      CACHE_VERSION: 8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
           
           # For Clang, install with libc++ support
           if [ "${{ matrix.compiler }}" = "clang" ]; then
-            sudo apt-get install -y clang-16 libc++-dev libc++abi-dev
+            sudo apt-get install -y clang-20 libc++-dev libc++abi-dev
           fi
 
           # Log clang and gcc versions
@@ -72,9 +72,9 @@ jobs:
         with:
           path: |
             ~/.conan2
-          key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}=${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          key: ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-${{ matrix.compiler }}${{ matrix.version }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
           restore-keys: |
-            ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-${{ matrix.build_type }}-
+            ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-${{ matrix.compiler }}${{ matrix.version }}-${{ matrix.build_type }}-
 
       - name: Configure Conan
         run: |
@@ -83,6 +83,8 @@ jobs:
           cat >$(conan config home)/profiles/default <<EOF
           include(detected)
           [settings]
+          compiler=${{ matrix.compiler }}
+          compiler.version=${{ matrix.version }}
           compiler.cppstd=20
           compiler.libcxx=libstdc++
           build_type=${{ matrix.build_type }}
@@ -117,7 +119,7 @@ jobs:
         with:
           path: |
             ~/.conan2
-          key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          key: ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-${{ matrix.compiler }}${{ matrix.version }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
 
       - name: Configure CMake
         run: |
@@ -180,9 +182,9 @@ jobs:
         san: [thread, address]
     env:
       build_dir: build-san
-      CACHE_VERSION: 7
-      cc: clang-16
-      cxx: clang++-16
+      CACHE_VERSION: 8
+      cc: clang-20
+      cxx: clang++-20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -192,7 +194,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang-16 build-essential libstdc++-14-dev
+          sudo apt-get install -y ninja-build clang-20 build-essential libstdc++-14-dev
           pip install --upgrade conan
 
       - name: Restore Conan cache
@@ -200,9 +202,9 @@ jobs:
         with:
           path: |
             ~/.conan2
-          key: ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-clang-Release-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          key: ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-clang20-Release-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
           restore-keys: |
-            ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-clang-Release-
+            ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-clang20-Release-
 
       - name: Configure Conan
         run: |
@@ -211,6 +213,8 @@ jobs:
           cat >$(conan config home)/profiles/default <<EOF
           include(detected)
           [settings]
+          compiler=clang
+          compiler.version=20
           compiler.cppstd=20
           compiler.libcxx=libstdc++
           build_type=Release

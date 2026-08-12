@@ -33,7 +33,7 @@ These approaches together enable rapid data access, reduced memory footprint, an
 ### Prerequisites
 
 - CMake 3.12+
-- C++20 compatible compiler (GCC 13+ or Clang 16+)
+- C++20 compatible compiler (GCC 13+ or Clang 20+)
 - Conan package manager (version 2)
 
 ### Setup Python Environment
