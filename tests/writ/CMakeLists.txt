@@ -19,3 +19,16 @@ add_executable(writ_exact_gtest exact-gtest.cpp)
 target_link_libraries(writ_exact_gtest PRIVATE catl::writ GTest::gtest_main)
 
 gtest_discover_tests(writ_exact_gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(writ_census_gtest census-gtest.cpp)
+
+target_link_libraries(writ_census_gtest PRIVATE catl::writ Boost::headers
+                                                GTest::gtest_main)
+
+gtest_discover_tests(writ_census_gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(writ_receipt_gtest receipt-gtest.cpp)
+
+target_link_libraries(writ_receipt_gtest PRIVATE catl::writ GTest::gtest_main)
+
+gtest_discover_tests(writ_receipt_gtest DISCOVERY_TIMEOUT 30)
