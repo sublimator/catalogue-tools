@@ -741,6 +741,7 @@ PeerSet::co_stop()
                 " pending_crawls=",
                 self->pending_crawls_.size());
 
+            //@@start co-stop-pin-drain
             // A live generation pin is a predecessor's promise that its exact
             // admitted session remains usable. Closing first would invalidate
             // authority that PeerSet has already exported.
@@ -763,6 +764,7 @@ PeerSet::co_stop()
                 co_await progress->async_wait(
                     asio::redirect_error(asio::use_awaitable, ec));
             }
+            //@@end co-stop-pin-drain
 
             // Consume each physical session lifecycle on its own strand. The
             // exact-generation check makes a concurrent natural terminal and
@@ -8819,6 +8821,7 @@ PeerSet::drive_history_interest_on_strand(
                 continue;
             }
 
+            //@@start drive-loop-wait-ceremony
             auto const wait_for = std::chrono::ceil<std::chrono::milliseconds>(
                 wait_until - current);
             auto const outcome = co_await wait_for_signal_or_timeout(
@@ -8860,6 +8863,7 @@ PeerSet::drive_history_interest_on_strand(
                 continue;
             }
             ++result.shared_wakes_reused;
+            //@@end drive-loop-wait-ceremony
         }
     }
 }
