@@ -3,6 +3,19 @@ machine = "census"
 status = "provisional"
 binds = "src/writ/includes/writ/census.hpp"
 imports = ["writ.core/home/v1", "writ.core/retained-signal/v1", "writ.core/exact/v1"]
+# Fossil origins (pass-0, fuzzy; canonical map: .ai-docs/writ/design/origin-map.md)
+origins = [
+    "prv.S0037",  # in_flight_ connect-servant census
+    "prv.S0038",  # crawl_in_flight_ crawl-servant census
+    "prv.T0091",  # consume connect-servant receipt
+    "prv.T0092",  # consume crawl-servant receipt
+    "prv.S0089",  # draining_generations_
+    "prv.S0040",  # active_node_operations_
+    "prv.S0041",  # deadline servants
+    "prv.S0024",  # vl-cache armed refresh/retry handler obligation
+    "prv.S0025",  # vl-cache in-flight fetch obligation
+    "src/peer-client/src/peer-set.cpp:1899",  # shutdown_drained_on_strand 12-term conjunction
+]
 
 [[events]]
 name = "admit"
