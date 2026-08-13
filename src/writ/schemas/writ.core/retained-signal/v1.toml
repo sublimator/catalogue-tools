@@ -3,21 +3,6 @@ machine = "retained_signal"
 status = "provisional"
 binds = "src/writ/includes/writ/retained-signal.hpp"
 imports = ["writ.core/home/v1"]
-# Fossil origins (pass-0, fuzzy; canonical map: .ai-docs/writ/design/origin-map.md)
-origins = [
-    "prv.S0137",  # HistoryWaitSignal waiters_ (the direct parent)
-    "prv.S0138",  # HistoryWaitSignal completed_ (retained fact)
-    "prv.T0328",  # register/consume subscriber protocol
-    "prv.T0329",  # complete: retain and wake every subscriber
-    "prv.T0330",  # attach current retained generation
-    "prv.T0331",  # rotate-then-complete (generation rotation)
-    "prv.S0139",  # wait_signal_ retained generation
-    "prv.S0002",  # SerializedTimerSignal shared-round lineage (node-cache)
-    "prv.S0004",  # progress-signal lineage
-    "prv.S0042",  # node-stop completion signal
-    "prv.S0026",  # vl-cache stop_progress_ one-shot latch
-    "src/xprv/src/vl-cache.cpp:580",  # wake_waiters() (no id)
-]
 
 [[events]]
 name = "complete"

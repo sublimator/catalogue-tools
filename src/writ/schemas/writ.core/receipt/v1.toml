@@ -2,14 +2,6 @@ id = "writ.core/receipt/v1"
 machine = "receipt"
 status = "provisional"
 binds = "src/writ/includes/writ/receipt.hpp"
-# Fossil origins (pass-0, fuzzy; canonical map: .ai-docs/writ/design/origin-map.md)
-origins = [
-    "prv.T0096",  # consume exact deadline-servant receipt (node-cache)
-    "prv.T0186",  # commit first-wins connect terminal (latch shape)
-    "prv.S0059",  # first-wins initial connect terminal result
-    "prv.S0058",  # retained first logical terminal cause
-    "src/peer-client/includes/catl/peer-client/peer-use.h",  # PeerUseReceiptState cluster
-]
 
 [[operations]]
 name = "mint"

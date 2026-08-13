@@ -2,16 +2,6 @@ id = "writ.core/home/v1"
 machine = "home"
 status = "provisional"
 binds = "src/writ/includes/writ/home.hpp"
-# Fossil origins (pass-0, fuzzy; canonical map: .ai-docs/writ/design/origin-map.md)
-origins = [
-    "prv.T0327",  # HistoryWaitSignal::wait_until co_spawn birth (peer-set.cpp)
-    "prv.T0322",  # history driver owner birth
-    "prv.T0323",  # covering-search owner birth
-    "prv.T0324",  # vl-cache co_get owner birth
-    "prv.T0325",  # vl-cache co_refresh owner birth
-    "prv.T0326",  # vl-cache co_is_loaded owner birth
-    "src/peer-client/src/peer-set.cpp:26",  # ASSERT_ON_STRAND macro (no id)
-]
 
 # Operations the C++ source adapter derives mechanically from library calls.
 [[operations]]

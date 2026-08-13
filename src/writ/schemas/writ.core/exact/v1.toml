@@ -2,16 +2,6 @@ id = "writ.core/exact/v1"
 machine = "exact"
 status = "provisional"
 binds = "src/writ/includes/writ/exact.hpp"
-# Fossil origins (pass-0, fuzzy; canonical map: .ai-docs/writ/design/origin-map.md)
-origins = [
-    "prv.T0290",  # reserve_connection_generation (the mint)
-    "prv.S0088",  # peer_generations_ (incarnation registry)
-    "prv.S0067",  # vl-cache active_fetch_ exact-operation capability
-    "prv.S0068",  # vl-cache accepted-cancel latch on the exact operation
-    "prv.T0208",  # install exact fetch capability
-    "prv.T0209",  # request cancel against the exact operation
-    "src/peer-client/src/peer-set.cpp:248",  # mint_peer_set_instance_id (epoch fossil)
-]
 
 [[operations]]
 name = "mint.next"
