@@ -633,10 +633,10 @@ VlCache::co_get_on_strand()
         co_return *vl_;
     }
 
+    auto const generation = fetch_generation_;
     if (!fetch_in_progress_)
         do_fetch();
 
-    auto const generation = fetch_generation_;
     auto signal = std::make_shared<asio::steady_timer>(
         strand_, asio::steady_timer::time_point::max());
     //@@authority transition=prv.T0334 status=provisional scope=statement
@@ -685,6 +685,22 @@ VlCache::co_get_on_strand()
 
     while (true)
     {
+        // The fetch may have completed synchronously during admission, before
+        // this subscriber existed. The revision is retained state; consume it
+        // before suspending instead of relying on timer cancellation as a
+        // retained wake.
+        //@@authority transition=prv.T0337 status=provisional scope=statement
+        // bind=declaration@d95e5844c9f21ee6
+        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+        // touches=prv.S0141
+        // writ_roles=retained_signal.revalidate
+        // label=revalidate_retained_get_completion_before_suspension
+        // clang-format off
+        auto const retained_completion = fetch_generation_ != generation; //@@authority-target ids=prv.T0337
+        // clang-format on
+        if (retained_completion)
+            break;
+
         signal->expires_at(asio::steady_timer::time_point::max());
         boost::system::error_code ec;
         co_await signal->async_wait(
@@ -696,7 +712,9 @@ VlCache::co_get_on_strand()
         // touches=prv.S0140
         // writ_roles=retained_signal.deadline_or_cancel
         // label=consume_fetch_wait_cancellation_and_abort
+        // clang-format off
         auto const cancel_state = co_await asio::this_coro::cancellation_state; //@@authority-target ids=prv.T0335
+        // clang-format on
         if (cancel_state.cancelled() != asio::cancellation_type::none)
             throw boost::system::system_error(asio::error::operation_aborted);
         if (public_resume_observer_for_test_)
@@ -707,22 +725,19 @@ VlCache::co_get_on_strand()
             cleanup.clean_now();
             throw boost::system::system_error(asio::error::operation_aborted);
         }
-
-        if (fetch_generation_ == generation)
-            continue;
-
-        cleanup.clean_now();
-
-        if (!vl_ || !is_active(*vl_))
-        {
-            throw std::runtime_error(
-                "VL fetch failed: " +
-                (last_fetch_error_.empty() ? std::string("unknown error")
-                                           : last_fetch_error_));
-        }
-
-        co_return *vl_;
     }
+
+    cleanup.clean_now();
+
+    if (!vl_ || !is_active(*vl_))
+    {
+        throw std::runtime_error(
+            "VL fetch failed: " +
+            (last_fetch_error_.empty() ? std::string("unknown error")
+                                       : last_fetch_error_));
+    }
+
+    co_return *vl_;
 }
 
 asio::awaitable<catl::vl::ValidatorList>
@@ -813,6 +828,20 @@ VlCache::co_refresh_on_strand()
 
     while (true)
     {
+        // As in co_get_on_strand, synchronous completion can precede waiter
+        // registration. Consume the retained revision before suspending.
+        //@@authority transition=prv.T0338 status=provisional scope=statement
+        // bind=declaration@e4b58695589de607
+        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+        // touches=prv.S0141
+        // writ_roles=retained_signal.revalidate
+        // label=revalidate_retained_refresh_completion_before_suspension
+        // clang-format off
+        auto const retained_completion = fetch_generation_ != generation; //@@authority-target ids=prv.T0338
+        // clang-format on
+        if (retained_completion)
+            break;
+
         signal->expires_at(asio::steady_timer::time_point::max());
         boost::system::error_code ec;
         co_await signal->async_wait(
@@ -829,22 +858,19 @@ VlCache::co_refresh_on_strand()
             cleanup.clean_now();
             throw boost::system::system_error(asio::error::operation_aborted);
         }
-
-        if (fetch_generation_ == generation)
-            continue;
-
-        cleanup.clean_now();
-
-        if (!last_fetch_ok_ || !vl_ || !is_active(*vl_))
-        {
-            throw std::runtime_error(
-                "VL refresh failed: " +
-                (last_fetch_error_.empty() ? std::string("unknown error")
-                                           : last_fetch_error_));
-        }
-
-        co_return *vl_;
     }
+
+    cleanup.clean_now();
+
+    if (!last_fetch_ok_ || !vl_ || !is_active(*vl_))
+    {
+        throw std::runtime_error(
+            "VL refresh failed: " +
+            (last_fetch_error_.empty() ? std::string("unknown error")
+                                       : last_fetch_error_));
+    }
+
+    co_return *vl_;
 }
 
 asio::awaitable<bool>

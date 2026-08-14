@@ -880,21 +880,14 @@ TEST(VlCacheRetainedSignal, CompletionWakesArmedWaiterAndLateGetShortCircuits)
     EXPECT_EQ(fetches, 1u) << "the cache hit must not admit a second fetch";
 }
 
-// writ-claim: NONE satisfied — this control WITNESSES THE KNOWN LOST-WAKE
-// DEFECT in co_get_on_strand (Codex blocker at 85320b4). When the fetch
-// callback completes SYNCHRONOUSLY inside do_fetch during co_get
-// admission (production equivalent: the synchronous initiation-refusal
-// path), the revision advances and wake_waiters runs BEFORE the waiter
-// samples prv.S0141 or registers in prv.S0140; the waiter then samples
-// the post-advance revision and suspends forever although vl_ is present.
-// The correct retained pattern (register, then re-check the revision
-// immediately before suspension — all state is strand-owned) would close
-// the race. THIS TEST IS GREEN WHILE THE DEFECT EXISTS: it asserts the
-// defective behavior on purpose, in the audits' strict-xfail sense. When
-// the writ::retained_signal fitting (or any repair) closes the race, the
-// final assertion MUST go red — that red is the repair announcing itself.
-// Do not "fix" this test by deleting it; rewrite it to assert completion.
-TEST(VlCacheRetainedSignal, SynchronousAdmissionCompletionLosesTheWakeToday)
+// writ-claim: retained_signal.retained_fact + retained_signal.retain +
+// retained_signal.revalidate, witnesses prv.S0141, prv.T0332 and prv.T0337.
+// A fetch may complete synchronously during co_get admission, before its
+// waiter is registered. The retained revision must be re-observed before
+// suspension; timer cancellation alone cannot carry this wake.
+TEST(
+    VlCacheRetainedSignal,
+    SynchronousAdmissionCompletionCannotLoseRetainedRevision)
 {
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
@@ -912,11 +905,10 @@ TEST(VlCacheRetainedSignal, SynchronousAdmissionCompletionLosesTheWakeToday)
     scheduler.run_until_idle();
     ASSERT_EQ(fetches, 1u);
 
-    EXPECT_EQ(waiter.wait_for(0ms), std::future_status::timeout)
-        << "REPAIR DETECTED: the synchronous-admission waiter completed. "
-           "The lost-wake defect this control documents has been closed — "
-           "rewrite this test to assert ready + sequence 1, and retire the "
-           "defect note from the role-bridge record.";
+    ASSERT_EQ(waiter.wait_for(0ms), std::future_status::ready)
+        << "a synchronous terminal must be consumed through the retained "
+           "revision rather than lost before waiter registration";
+    EXPECT_EQ(waiter.get().sequence, 1u);
 }
 
 // writ-claim: retained_signal.deadline_or_cancel + subscriber_registry
@@ -1009,6 +1001,48 @@ TEST(VlCacheRetainedSignal, RefreshWaiterSamplesFreshRevisionNotRetainedOne)
     EXPECT_EQ(refresh.get().sequence, 2u)
         << "the refresh subscriber completes only on the next revision "
            "advance, with the new list";
+}
+
+// writ-claim: retained_signal.revalidate, witness prv.T0338. The refresh path
+// samples its revision before admission, but a synchronous terminal can still
+// arrive before waiter registration. It must consume the changed revision
+// before suspending, just like co_get.
+TEST(
+    VlCacheRetainedSignal,
+    SynchronousRefreshCompletionCannotLoseRetainedRevision)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback first;
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&first, &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            if (fetches == 1)
+            {
+                first = std::move(callback);
+                return;
+            }
+            auto refreshed = successful_vl_result();
+            refreshed.vl.sequence = 2;
+            callback(std::move(refreshed));
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(first);
+    first(successful_vl_result());
+    scheduler.run_until_idle();
+
+    auto refresh =
+        boost::asio::co_spawn(io, cache->co_refresh(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(fetches, 2u);
+    ASSERT_EQ(refresh.wait_for(0ms), std::future_status::ready)
+        << "a synchronous refresh terminal must be consumed through the "
+           "retained revision";
+    EXPECT_EQ(refresh.get().sequence, 2u);
 }
 
 }  // namespace
