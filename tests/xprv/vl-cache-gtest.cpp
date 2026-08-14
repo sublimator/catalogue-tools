@@ -3,6 +3,9 @@
 #include "../test-support/deterministic-scheduler.h"
 #include "../test-support/io-context-runners.h"
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -824,6 +827,141 @@ TEST(VlCacheShutdown, OrdinaryWaiterTerminatesWhenStopIsRequested)
     scheduler.run_until_idle();
 
     EXPECT_NO_THROW(stopped.get());
+}
+
+// The three tests below back the corrected VlCache retained-signal role
+// claims (writ.core/retained-signal/v1, motif anchored at prv.S0140) with
+// runtime behavior the demand graph does not itself claim. Green here is
+// behavioral evidence for the named roles, NOT schema conformance.
+
+// writ-claim: retained_signal.retained_fact + retained_signal.retain
+// witnesses prv.S0141 (completion revision), prv.T0332 (advance at exact
+// retirement). The publication must be RETAINED: a subscriber arriving
+// after the completion needs no wake and no second fetch.
+TEST(VlCacheRetainedSignal, CompletionRevisionIsRetainedForLateSubscribers)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending, &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            pending = std::move(callback);
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+
+    auto early =
+        boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(early.wait_for(0ms), std::future_status::timeout);
+
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+    ASSERT_EQ(early.wait_for(0ms), std::future_status::ready);
+    EXPECT_EQ(early.get().sequence, 1u);
+
+    auto late =
+        boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(late.wait_for(0ms), std::future_status::ready)
+        << "a subscriber after completion must be satisfied by the retained "
+           "fact without waiting";
+    EXPECT_EQ(late.get().sequence, 1u);
+    EXPECT_EQ(fetches, 1u)
+        << "the retained completion must not admit a second fetch";
+}
+
+// writ-claim: retained_signal.deadline_or_cancel + subscriber_registry
+// witnesses prv.T0335 (cancellation consume), prv.S0140 (per-waiter
+// registry). One waiter's terminal cancellation must consume ONLY its own
+// wait: the sibling keeps its registration and receives the publication.
+TEST(VlCacheRetainedSignal, WaiterCancellationCannotConsumeWakeOrDisturbSibling)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending](catl::vl::VlCallback callback) {
+            pending = std::move(callback);
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+
+    boost::asio::cancellation_signal cancel_a;
+    auto waiter_a = boost::asio::co_spawn(
+        io,
+        cache->co_get(),
+        boost::asio::bind_cancellation_slot(
+            cancel_a.slot(), boost::asio::use_future));
+    auto waiter_b =
+        boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(waiter_a.wait_for(0ms), std::future_status::timeout);
+    ASSERT_EQ(waiter_b.wait_for(0ms), std::future_status::timeout);
+
+    cancel_a.emit(boost::asio::cancellation_type::terminal);
+    scheduler.run_until_idle();
+    ASSERT_EQ(waiter_a.wait_for(0ms), std::future_status::ready);
+    EXPECT_THROW(waiter_a.get(), boost::system::system_error);
+    ASSERT_EQ(waiter_b.wait_for(0ms), std::future_status::timeout)
+        << "cancelling one waiter must not consume the sibling's wait";
+
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+    ASSERT_EQ(waiter_b.wait_for(0ms), std::future_status::ready);
+    EXPECT_EQ(waiter_b.get().sequence, 1u)
+        << "the sibling must still receive the retained publication";
+}
+
+// writ-claim: retained_signal.subscribe
+// witness prv.T0334 (register after sampling the revision). A refresh
+// subscriber samples the revision FRESH at registration: the already-
+// retained completion from the previous fetch must not satisfy it, and it
+// completes only when the revision advances again.
+TEST(VlCacheRetainedSignal, RefreshWaiterSamplesFreshRevisionNotRetainedOne)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending, &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            pending = std::move(callback);
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+    ASSERT_EQ(fetches, 1u);
+
+    auto refresh =
+        boost::asio::co_spawn(io, cache->co_refresh(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(fetches, 2u) << "co_refresh must admit a new fetch";
+    ASSERT_EQ(refresh.wait_for(0ms), std::future_status::timeout)
+        << "the refresh subscriber must not be satisfied by the retained "
+           "completion of the first fetch";
+
+    auto second = successful_vl_result();
+    second.vl.sequence = 2;
+    pending(std::move(second));
+    scheduler.run_until_idle();
+    ASSERT_EQ(refresh.wait_for(0ms), std::future_status::ready);
+    EXPECT_EQ(refresh.get().sequence, 2u)
+        << "the refresh subscriber completes only on the next revision "
+           "advance, with the new list";
 }
 
 }  // namespace
