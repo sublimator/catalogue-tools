@@ -327,6 +327,7 @@ VlCache::do_fetch()
             // bind=expression_statement@bf6644464277f70a
             // scope=statement owner=unresolved owner_hypothesis=vl_cache
             // commit=vl_cache_strand touches=prv.S0067
+            // writ_roles=exact.install_or_issue
             // label=install_exact_validator_list_fetch_cancellation_capability
             active_fetch_ = operation;  //@@authority-target ids=prv.T0208
             if (fail_fetch_operation_starts_for_test_ != 0)
@@ -373,8 +374,8 @@ VlCache::retire_fetch_on_strand(
     // bind=expression_statement@c0a327372583afbf
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
     // touches=prv.S0141,prv.S0067
-    // writ_roles=exact.mint_generation
-    // label=mint_next_validator_list_fetch_generation
+    // writ_roles=retained_signal.retain
+    // label=advance_validator_list_fetch_completion_revision_after_exact_retirement
     ++fetch_generation_;  //@@authority-target ids=prv.T0332
     return true;
 }
