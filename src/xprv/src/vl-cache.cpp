@@ -354,6 +354,7 @@ VlCache::do_fetch()
 // commit=vl_cache_strand touches=prv.S0025,prv.S0067,prv.S0068
 // boundary_ref=vl_fetch.operation_terminal
 // receipt=vl_fetch.operation_terminal receipt_role=consume
+// writ_roles=exact.validate_or_consume
 // label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
 bool
 VlCache::retire_fetch_on_strand(
@@ -372,6 +373,7 @@ VlCache::retire_fetch_on_strand(
     // bind=expression_statement@c0a327372583afbf
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
     // touches=prv.S0141,prv.S0067
+    // writ_roles=exact.mint_generation
     // label=mint_next_validator_list_fetch_generation
     ++fetch_generation_;  //@@authority-target ids=prv.T0332
     return true;
@@ -585,6 +587,7 @@ VlCache::schedule_retry(std::chrono::seconds delay)
 // bind=xprv::wake_waiters@d8aae799c039b7ae
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
 // touches=prv.S0140
+// writ_roles=retained_signal.publish
 // label=wake_every_registered_fetch_waiter
 void
 VlCache::wake_waiters()
@@ -639,6 +642,7 @@ VlCache::co_get_on_strand()
     // bind=expression_statement@690a732601aeff18
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
     // touches=prv.S0140,prv.S0141
+    // writ_roles=retained_signal.subscribe
     // label=register_fetch_wake_waiter_after_sampling_generation
     waiters_.push_back(signal);  //@@authority-target ids=prv.T0334
 
@@ -689,6 +693,7 @@ VlCache::co_get_on_strand()
         // bind=declaration@ebafec8af9998ea8
         // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
         // touches=prv.S0140
+        // writ_roles=retained_signal.deadline_or_cancel
         // label=consume_fetch_wait_cancellation_and_abort
         auto const cancel_state = co_await asio::this_coro::cancellation_state; //@@authority-target ids=prv.T0335
         if (cancel_state.cancelled() != asio::cancellation_type::none)

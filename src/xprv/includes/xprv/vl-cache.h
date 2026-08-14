@@ -150,6 +150,7 @@ private:
     //@@authority state=prv.S0140 status=provisional scope=field
     // bind=xprv::VlCache::waiters_@ac8170ff62e4cdaa
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // writ_roles=retained_signal.retained_fact
     // label=registered_per_waiter_validator_list_fetch_wake_timers
     std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
@@ -175,6 +176,7 @@ private:
     //@@authority state=prv.S0067 status=provisional scope=field
     // bind=xprv::VlCache::active_fetch_@4f2904e878920aea
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // writ_roles=exact.identity
     // label=exact_active_validator_list_fetch_operation_capability
     catl::vl::VlFetchOperationPtr active_fetch_;
     //@@authority state=prv.S0068 status=provisional scope=field
@@ -185,6 +187,7 @@ private:
     //@@authority state=prv.S0141 status=provisional scope=field
     // bind=xprv::VlCache::fetch_generation_@d9e48c98dcaf4526
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // writ_roles=exact.identity
     // label=monotonic_validator_list_fetch_generation
     uint64_t fetch_generation_ = 0;
     bool last_fetch_ok_ = false;
