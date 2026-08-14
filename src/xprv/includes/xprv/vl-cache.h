@@ -14,6 +14,8 @@
 
 #include <catl/core/logger.h>
 #include <catl/vl-client/vl-client.h>
+#include <writ/home.hpp>
+#include <writ/retained-signal.hpp>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
@@ -24,7 +26,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace xprv {
 
@@ -113,15 +114,15 @@ private:
     schedule_retry(std::chrono::seconds delay);
 
     void
-    wake_waiters();
+    publish_fetch_wait_change() noexcept;
 
-    boost::asio::awaitable<catl::vl::ValidatorList>
+    writ::home_awaitable<catl::vl::ValidatorList>
     co_get_on_strand();
 
-    boost::asio::awaitable<catl::vl::ValidatorList>
+    writ::home_awaitable<catl::vl::ValidatorList>
     co_refresh_on_strand();
 
-    boost::asio::awaitable<bool>
+    writ::home_awaitable<bool>
     co_is_loaded_on_strand();
 
     void
@@ -136,6 +137,7 @@ private:
 
     boost::asio::io_context& io_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
+    writ::home home_;
     std::string vl_host_;
     uint16_t vl_port_;
 
@@ -148,11 +150,11 @@ private:
     // label=shared_validator_list_stopped_receipt_latch
     boost::asio::steady_timer stop_progress_;
     //@@authority state=prv.S0140 status=provisional scope=field
-    // bind=xprv::VlCache::waiters_@ac8170ff62e4cdaa
+    // bind=xprv::VlCache::fetch_wait_signal_@7d5b64d47245244c
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
-    // writ_roles=retained_signal.subscriber_registry
-    // label=registered_per_waiter_validator_list_fetch_wake_timers
-    std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
+    // writ_roles=retained_signal.instance
+    // label=retained_validator_list_fetch_terminal_or_stop_generation
+    std::shared_ptr<writ::retained_signal> fetch_wait_signal_;
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
     std::chrono::seconds initial_retry_{2};       // first retry delay
     std::chrono::seconds initial_retry_cap_{
@@ -184,12 +186,6 @@ private:
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
     // label=accepted_active_fetch_cancellation_request_latch
     bool active_fetch_cancel_requested_ = false;
-    //@@authority state=prv.S0141 status=provisional scope=field
-    // bind=xprv::VlCache::fetch_generation_@d9e48c98dcaf4526
-    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
-    // writ_roles=retained_signal.retained_fact
-    // label=monotonic_validator_list_fetch_completion_revision
-    uint64_t fetch_generation_ = 0;
     bool last_fetch_ok_ = false;
     std::string last_fetch_error_;
     ValidatorManifestHistory validator_manifest_history_;

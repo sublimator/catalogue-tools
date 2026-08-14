@@ -128,6 +128,12 @@ private:
     executor_type executor_;
 };
 
+/// A coroutine frame whose stored executor is one Writ home's executor type.
+/// This is intentionally narrower than an alias for ordinary Asio awaitables:
+/// the bound executor is part of the frame's execution-home contract.
+template <typename T = void>
+using home_awaitable = boost::asio::awaitable<T, home::executor_type>;
+
 }  // namespace writ
 
 /// Owner-state touch-point assert. Expands to a call through the out-of-line

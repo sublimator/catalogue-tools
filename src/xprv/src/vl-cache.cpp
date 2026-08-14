@@ -30,6 +30,21 @@ is_active(catl::vl::ValidatorList const& vl)
         VlFreshnessDisposition::reject;
 }
 
+void
+consume_fetch_wait_outcome(writ::wait_outcome const outcome)
+{
+    //@@writ attachment=catl.ann.A0522
+    switch (outcome)
+    {
+        case writ::wait_outcome::signaled:
+            return;
+        case writ::wait_outcome::deadline_elapsed:
+            throw boost::system::system_error(asio::error::timed_out);
+        case writ::wait_outcome::canceled:
+            throw boost::system::system_error(asio::error::operation_aborted);
+    }
+}
+
 }  // namespace
 
 LogPartition VlCache::log_("vl-cache", LogLevel::INHERIT);
@@ -37,6 +52,7 @@ LogPartition VlCache::log_("vl-cache", LogLevel::INHERIT);
 VlCache::VlCache(asio::io_context& io, std::string vl_host, uint16_t vl_port)
     : io_(io)
     , strand_(asio::make_strand(io))
+    , home_(strand_)
     , vl_host_(std::move(vl_host))
     , vl_port_(vl_port)
     , refresh_(strand_)
@@ -66,6 +82,7 @@ VlCache::start()
 void
 VlCache::do_fetch()
 {
+    WRIT_ASSERT_HOME(home_);
     if (phase_ != Phase::running || fetch_in_progress_)
         return;
 
@@ -80,6 +97,14 @@ VlCache::do_fetch()
     catch (...)
     {
     }
+
+    // A signal generation belongs to one admitted fetch. Mint it before the
+    // admission becomes visible so a synchronous terminal is retained even
+    // when it precedes subscriber registration. Terminal publication stays
+    // allocation-free; the next fetch admission replaces the completed
+    // generation.
+    //@@writ attachment=catl.ann.A0520
+    fetch_wait_signal_ = std::make_shared<writ::retained_signal>(home_);
     fetch_in_progress_ = true;
 
     struct FetchAdmissionRollback
@@ -140,7 +165,7 @@ VlCache::do_fetch()
             {
                 if (self->phase_ != Phase::running)
                 {
-                    self->wake_waiters();
+                    self->publish_fetch_wait_change();
                     return;
                 }
 
@@ -196,7 +221,7 @@ VlCache::do_fetch()
                     self->last_fetch_ok_ = true;
                     self->last_fetch_error_.clear();
                     self->initial_retry_ = std::chrono::seconds(2);
-                    self->wake_waiters();
+                    self->publish_fetch_wait_change();
                     self->schedule_refresh();
                     return;
                 }
@@ -224,7 +249,7 @@ VlCache::do_fetch()
                         self->on_refresh_(*self->vl_);
                     }
 
-                    self->wake_waiters();
+                    self->publish_fetch_wait_change();
                     self->schedule_refresh();
                 }
                 else
@@ -232,7 +257,7 @@ VlCache::do_fetch()
                     self->last_fetch_ok_ = false;
                     self->last_fetch_error_ = result.error;
                     PLOGE(VlCache::log_, "VL fetch failed: ", result.error);
-                    self->wake_waiters();
+                    self->publish_fetch_wait_change();
 
                     if (!self->vl_.has_value() || !is_active(*self->vl_))
                     {
@@ -262,14 +287,14 @@ VlCache::do_fetch()
                 self->last_fetch_error_ =
                     std::string("VL result observer failed: ") + e.what();
                 PLOGE(VlCache::log_, self->last_fetch_error_);
-                self->wake_waiters();
+                self->publish_fetch_wait_change();
             }
             catch (...)
             {
                 self->last_fetch_ok_ = false;
                 self->last_fetch_error_ = "VL result observer failed";
                 PLOGE(VlCache::log_, self->last_fetch_error_);
-                self->wake_waiters();
+                self->publish_fetch_wait_change();
             }
         };
 
@@ -361,7 +386,7 @@ bool
 VlCache::retire_fetch_on_strand(
     catl::vl::VlFetchOperationPtr const& operation) noexcept
 {
-    assert(strand_.running_in_this_thread());
+    WRIT_ASSERT_HOME(home_);
     if (operation ? active_fetch_ != operation
                   : static_cast<bool>(active_fetch_))
     {
@@ -370,13 +395,6 @@ VlCache::retire_fetch_on_strand(
     active_fetch_.reset();
     active_fetch_cancel_requested_ = false;
     fetch_in_progress_ = false;
-    //@@authority transition=prv.T0332 status=provisional scope=statement
-    // bind=expression_statement@c0a327372583afbf
-    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-    // touches=prv.S0141,prv.S0067
-    // writ_roles=retained_signal.retain
-    // label=advance_validator_list_fetch_completion_revision_after_exact_retirement
-    ++fetch_generation_;  //@@authority-target ids=prv.T0332
     return true;
 }
 
@@ -435,7 +453,7 @@ VlCache::co_stop()
 void
 VlCache::begin_stop_on_strand()
 {
-    assert(strand_.running_in_this_thread());
+    WRIT_ASSERT_HOME(home_);
     if (phase_ == Phase::stopped)
         return;
     phase_ = Phase::stopping;
@@ -494,7 +512,7 @@ VlCache::begin_stop_on_strand()
     catch (...)
     {
     }
-    wake_waiters();
+    publish_fetch_wait_change();
     try_finish_stop_on_strand();
 }
 
@@ -585,18 +603,20 @@ VlCache::schedule_retry(std::chrono::seconds delay)
 }
 
 //@@authority transition=prv.T0333 status=provisional scope=function
-// bind=xprv::wake_waiters@d8aae799c039b7ae
+// bind=xprv::publish_fetch_wait_change@aa946fda0e29e5c3
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
 // touches=prv.S0140
 // writ_roles=retained_signal.publish
-// label=wake_every_registered_fetch_waiter
+// label=retain_fetch_terminal_or_stop_and_wake_current_generation
 void
-VlCache::wake_waiters()
+VlCache::publish_fetch_wait_change() noexcept
 {
-    auto waiters = std::move(waiters_);
-    waiters_.clear();
-    for (auto& timer : waiters)
-        timer->cancel();
+    WRIT_ASSERT_HOME(home_);
+    if (fetch_wait_signal_)
+    {
+        //@@writ attachment=catl.ann.A0521
+        fetch_wait_signal_->complete();
+    }
 }
 
 asio::awaitable<catl::vl::ValidatorList>
@@ -604,24 +624,24 @@ VlCache::co_get()
 {
     auto self = shared_from_this();
     // clang-format off
-    //@@authority transition=prv.T0324 status=provisional scope=statement bind=co_return_statement@8a7534e7f3dc3b15
+    //@@authority transition=prv.T0324 status=provisional scope=statement bind=co_return_statement@15aacd7542b9b9a0
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
     // execution_home=vl_cache.strand birth=co_spawn executor_expr=strand_
     // drives=co_get_on_strand continuation=birth_executor
     // label=establish_validator_list_get_owner_birth
     co_return co_await asio::co_spawn(
         strand_,
-        [self]() -> asio::awaitable<catl::vl::ValidatorList> {
+        [self]() -> writ::home_awaitable<catl::vl::ValidatorList> {
             co_return co_await self->co_get_on_strand();
         },
         asio::use_awaitable); //@@authority-target ids=prv.T0324
     // clang-format on
 }
 
-asio::awaitable<catl::vl::ValidatorList>
+writ::home_awaitable<catl::vl::ValidatorList>
 VlCache::co_get_on_strand()
 {
-    assert(strand_.running_in_this_thread());
+    WRIT_ASSERT_HOME(home_);
     if (public_entry_observer_for_test_)
         public_entry_observer_for_test_();
 
@@ -633,101 +653,29 @@ VlCache::co_get_on_strand()
         co_return *vl_;
     }
 
-    auto const generation = fetch_generation_;
     if (!fetch_in_progress_)
         do_fetch();
+    auto signal = fetch_wait_signal_;
+    if (!signal)
+        throw std::logic_error("VL fetch admitted without a wait generation");
 
-    auto signal = std::make_shared<asio::steady_timer>(
-        strand_, asio::steady_timer::time_point::max());
     //@@authority transition=prv.T0334 status=provisional scope=statement
-    // bind=expression_statement@690a732601aeff18
+    // bind=declaration@0a6686f13eb84bda
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-    // touches=prv.S0140,prv.S0141
+    // touches=prv.S0140
     // writ_roles=retained_signal.subscribe
-    // label=register_fetch_wake_waiter_after_sampling_generation
-    waiters_.push_back(signal);  //@@authority-target ids=prv.T0334
+    // label=wait_for_retained_fetch_terminal_or_stop_generation
+    // clang-format off
+    //@@writ attachment=catl.ann.A0523
+    auto const outcome = co_await signal->wait_until(
+        asio::steady_timer::time_point::max()); //@@authority-target ids=prv.T0334
+    // clang-format on
+    consume_fetch_wait_outcome(outcome);
+    if (public_resume_observer_for_test_)
+        public_resume_observer_for_test_();
 
-    struct WaiterCleanup
-    {
-        VlCache* owner = nullptr;
-        asio::strand<asio::io_context::executor_type> strand;
-        std::weak_ptr<VlCache> self;
-        std::shared_ptr<asio::steady_timer> signal;
-
-        void
-        clean_now()
-        {
-            if (!signal)
-                return;
-            std::erase(owner->waiters_, signal);
-            signal.reset();
-        }
-
-        ~WaiterCleanup()
-        {
-            if (!signal)
-                return;
-            try
-            {
-                asio::post(
-                    strand,
-                    [self = std::move(self),
-                     signal = std::move(signal)]() mutable {
-                        if (auto locked = self.lock())
-                            std::erase(locked->waiters_, signal);
-                    });
-            }
-            catch (...)
-            {
-            }
-        }
-    } cleanup{this, strand_, weak_from_this(), signal};
-
-    while (true)
-    {
-        // The fetch may have completed synchronously during admission, before
-        // this subscriber existed. The revision is retained state; consume it
-        // before suspending instead of relying on timer cancellation as a
-        // retained wake.
-        //@@authority transition=prv.T0337 status=provisional scope=statement
-        // bind=declaration@d95e5844c9f21ee6
-        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-        // touches=prv.S0141
-        // writ_roles=retained_signal.revalidate
-        // label=revalidate_retained_get_completion_before_suspension
-        // clang-format off
-        auto const retained_completion = fetch_generation_ != generation; //@@authority-target ids=prv.T0337
-        // clang-format on
-        if (retained_completion)
-            break;
-
-        signal->expires_at(asio::steady_timer::time_point::max());
-        boost::system::error_code ec;
-        co_await signal->async_wait(
-            asio::redirect_error(asio::use_awaitable, ec));
-
-        //@@authority transition=prv.T0335 status=provisional scope=statement
-        // bind=declaration@ebafec8af9998ea8
-        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-        // touches=prv.S0140
-        // writ_roles=retained_signal.deadline_or_cancel
-        // label=consume_fetch_wait_cancellation_and_abort
-        // clang-format off
-        auto const cancel_state = co_await asio::this_coro::cancellation_state; //@@authority-target ids=prv.T0335
-        // clang-format on
-        if (cancel_state.cancelled() != asio::cancellation_type::none)
-            throw boost::system::system_error(asio::error::operation_aborted);
-        if (public_resume_observer_for_test_)
-            public_resume_observer_for_test_();
-
-        if (phase_ != Phase::running)
-        {
-            cleanup.clean_now();
-            throw boost::system::system_error(asio::error::operation_aborted);
-        }
-    }
-
-    cleanup.clean_now();
+    if (phase_ != Phase::running)
+        throw boost::system::system_error(asio::error::operation_aborted);
 
     if (!vl_ || !is_active(*vl_))
     {
@@ -745,31 +693,30 @@ VlCache::co_refresh()
 {
     auto self = shared_from_this();
     // clang-format off
-    //@@authority transition=prv.T0325 status=provisional scope=statement bind=co_return_statement@f7ea1f5282c1bfc5
+    //@@authority transition=prv.T0325 status=provisional scope=statement bind=co_return_statement@ba278a65c206ef16
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
     // execution_home=vl_cache.strand birth=co_spawn executor_expr=strand_
     // drives=co_refresh_on_strand continuation=birth_executor
     // label=establish_validator_list_refresh_owner_birth
     co_return co_await asio::co_spawn(
         strand_,
-        [self]() -> asio::awaitable<catl::vl::ValidatorList> {
+        [self]() -> writ::home_awaitable<catl::vl::ValidatorList> {
             co_return co_await self->co_refresh_on_strand();
         },
         asio::use_awaitable); //@@authority-target ids=prv.T0325
     // clang-format on
 }
 
-asio::awaitable<catl::vl::ValidatorList>
+writ::home_awaitable<catl::vl::ValidatorList>
 VlCache::co_refresh_on_strand()
 {
-    assert(strand_.running_in_this_thread());
+    WRIT_ASSERT_HOME(home_);
     if (public_entry_observer_for_test_)
         public_entry_observer_for_test_();
 
     if (phase_ != Phase::running)
         throw boost::system::system_error(asio::error::operation_aborted);
 
-    auto const generation = fetch_generation_;
     try
     {
         refresh_.cancel();
@@ -779,88 +726,27 @@ VlCache::co_refresh_on_strand()
     }
     if (!fetch_in_progress_)
         do_fetch();
+    auto signal = fetch_wait_signal_;
+    if (!signal)
+        throw std::logic_error("VL fetch admitted without a wait generation");
 
-    auto signal = std::make_shared<asio::steady_timer>(
-        strand_, asio::steady_timer::time_point::max());
     //@@authority transition=prv.T0336 status=provisional scope=statement
-    // bind=expression_statement@8818951d16c44ec7
+    // bind=declaration@2d2229d14f66b9dc
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-    // touches=prv.S0140,prv.S0141
+    // touches=prv.S0140
     // writ_roles=retained_signal.subscribe
-    // label=register_refresh_wake_waiter_with_pre_admission_revision_sample
-    waiters_.push_back(signal);  //@@authority-target ids=prv.T0336
+    // label=wait_for_retained_refresh_terminal_or_stop_generation
+    // clang-format off
+    //@@writ attachment=catl.ann.A0524
+    auto const outcome = co_await signal->wait_until(
+        asio::steady_timer::time_point::max()); //@@authority-target ids=prv.T0336
+    // clang-format on
+    consume_fetch_wait_outcome(outcome);
+    if (public_resume_observer_for_test_)
+        public_resume_observer_for_test_();
 
-    struct WaiterCleanup
-    {
-        VlCache* owner = nullptr;
-        asio::strand<asio::io_context::executor_type> strand;
-        std::weak_ptr<VlCache> self;
-        std::shared_ptr<asio::steady_timer> signal;
-
-        void
-        clean_now()
-        {
-            if (!signal)
-                return;
-            std::erase(owner->waiters_, signal);
-            signal.reset();
-        }
-
-        ~WaiterCleanup()
-        {
-            if (!signal)
-                return;
-            try
-            {
-                asio::post(
-                    strand,
-                    [self = std::move(self),
-                     signal = std::move(signal)]() mutable {
-                        if (auto locked = self.lock())
-                            std::erase(locked->waiters_, signal);
-                    });
-            }
-            catch (...)
-            {
-            }
-        }
-    } cleanup{this, strand_, weak_from_this(), signal};
-
-    while (true)
-    {
-        // As in co_get_on_strand, synchronous completion can precede waiter
-        // registration. Consume the retained revision before suspending.
-        //@@authority transition=prv.T0338 status=provisional scope=statement
-        // bind=declaration@e4b58695589de607
-        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-        // touches=prv.S0141
-        // writ_roles=retained_signal.revalidate
-        // label=revalidate_retained_refresh_completion_before_suspension
-        // clang-format off
-        auto const retained_completion = fetch_generation_ != generation; //@@authority-target ids=prv.T0338
-        // clang-format on
-        if (retained_completion)
-            break;
-
-        signal->expires_at(asio::steady_timer::time_point::max());
-        boost::system::error_code ec;
-        co_await signal->async_wait(
-            asio::redirect_error(asio::use_awaitable, ec));
-
-        auto const cancel_state = co_await asio::this_coro::cancellation_state;
-        if (cancel_state.cancelled() != asio::cancellation_type::none)
-            throw boost::system::system_error(asio::error::operation_aborted);
-        if (public_resume_observer_for_test_)
-            public_resume_observer_for_test_();
-
-        if (phase_ != Phase::running)
-        {
-            cleanup.clean_now();
-            throw boost::system::system_error(asio::error::operation_aborted);
-        }
-    }
-
-    cleanup.clean_now();
+    if (phase_ != Phase::running)
+        throw boost::system::system_error(asio::error::operation_aborted);
 
     if (!last_fetch_ok_ || !vl_ || !is_active(*vl_))
     {
@@ -878,24 +764,24 @@ VlCache::co_is_loaded()
 {
     auto self = shared_from_this();
     // clang-format off
-    //@@authority transition=prv.T0326 status=provisional scope=statement bind=co_return_statement@77f6cfb99078e27f
+    //@@authority transition=prv.T0326 status=provisional scope=statement bind=co_return_statement@ee62d1deac2237a9
     // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
     // execution_home=vl_cache.strand birth=co_spawn executor_expr=strand_
     // drives=co_is_loaded_on_strand continuation=birth_executor
     // label=establish_validator_list_status_owner_birth
     co_return co_await asio::co_spawn(
         strand_,
-        [self]() -> asio::awaitable<bool> {
+        [self]() -> writ::home_awaitable<bool> {
             co_return co_await self->co_is_loaded_on_strand();
         },
         asio::use_awaitable); //@@authority-target ids=prv.T0326
     // clang-format on
 }
 
-asio::awaitable<bool>
+writ::home_awaitable<bool>
 VlCache::co_is_loaded_on_strand()
 {
-    assert(strand_.running_in_this_thread());
+    WRIT_ASSERT_HOME(home_);
     if (public_entry_observer_for_test_)
         public_entry_observer_for_test_();
     co_return vl_.has_value() && is_active(*vl_);

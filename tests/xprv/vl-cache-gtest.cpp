@@ -54,6 +54,7 @@ public:
         std::size_t refresh_wait_outstanding = 0;
         std::chrono::steady_clock::time_point refresh_expiry;
         catl::vl::VlFetchOperationPtr active_fetch;
+        std::shared_ptr<writ::retained_signal> fetch_wait_signal;
     };
 
     static void
@@ -80,6 +81,7 @@ public:
                 .refresh_wait_outstanding = cache->refresh_wait_outstanding_,
                 .refresh_expiry = cache->refresh_.expiry(),
                 .active_fetch = cache->active_fetch_,
+                .fetch_wait_signal = cache->fetch_wait_signal_,
             });
         });
         return future;
@@ -829,7 +831,7 @@ TEST(VlCacheShutdown, OrdinaryWaiterTerminatesWhenStopIsRequested)
     EXPECT_NO_THROW(stopped.get());
 }
 
-// The three tests below back the corrected VlCache retained-signal role
+// The tests below back the corrected VlCache retained-signal role
 // claims (writ.core/retained-signal/v1, motif anchored at prv.S0140) with
 // runtime behavior the demand graph does not itself claim. Green here is
 // behavioral evidence for the named roles, NOT schema conformance.
@@ -880,14 +882,14 @@ TEST(VlCacheRetainedSignal, CompletionWakesArmedWaiterAndLateGetShortCircuits)
     EXPECT_EQ(fetches, 1u) << "the cache hit must not admit a second fetch";
 }
 
-// writ-claim: retained_signal.retained_fact + retained_signal.retain +
-// retained_signal.revalidate, witnesses prv.S0141, prv.T0332 and prv.T0337.
+// writ-claim: retained_signal.retained-completion, witnessed by the
+// application wait at prv.T0334 and the library's closed rule.
 // A fetch may complete synchronously during co_get admission, before its
-// waiter is registered. The retained revision must be re-observed before
-// suspension; timer cancellation alone cannot carry this wake.
+// packaged wait registers. The completion must remain observable as state;
+// timer cancellation alone cannot carry this wake.
 TEST(
     VlCacheRetainedSignal,
-    SynchronousAdmissionCompletionCannotLoseRetainedRevision)
+    SynchronousAdmissionCompletionCannotLoseRetainedWake)
 {
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
@@ -907,14 +909,14 @@ TEST(
 
     ASSERT_EQ(waiter.wait_for(0ms), std::future_status::ready)
         << "a synchronous terminal must be consumed through the retained "
-           "revision rather than lost before waiter registration";
+           "signal rather than lost before waiter registration";
     EXPECT_EQ(waiter.get().sequence, 1u);
 }
 
-// writ-claim: retained_signal.deadline_or_cancel + subscriber_registry
-// witnesses prv.T0335 (cancellation consume), prv.S0140 (per-waiter
-// registry). One waiter's terminal cancellation must consume ONLY its own
-// wait: the sibling keeps its registration and receives the publication.
+// writ-claim: retained_signal.cancellation-dominates-shared-wake and
+// subscriber isolation, consumed through the application outcome mapping.
+// One waiter's terminal cancellation must consume ONLY its own wait: the
+// sibling keeps its registration and receives the publication.
 TEST(VlCacheRetainedSignal, WaiterCancellationCannotConsumeWakeOrDisturbSibling)
 {
     catl::test::DeterministicScheduler scheduler;
@@ -956,16 +958,10 @@ TEST(VlCacheRetainedSignal, WaiterCancellationCannotConsumeWakeOrDisturbSibling)
         << "the sibling must still receive the retained publication";
 }
 
-// writ-claim: retained_signal.subscribe
-// witness prv.T0336 (the co_refresh registration, source-bound as its own
-// twin after the Codex blocker showed this test never executes T0334's
-// co_get site). co_refresh samples the revision BEFORE admitting the
-// fetch — the pre-admission sample makes the refresh path safe against
-// synchronous completion, unlike co_get (see the lost-wake control
-// above). The already-retained completion from the previous fetch must
-// not satisfy the refresh subscriber; it completes only on the next
-// advance.
-TEST(VlCacheRetainedSignal, RefreshWaiterSamplesFreshRevisionNotRetainedOne)
+// writ-claim: retained_signal.generations-rotate, witness prv.T0336. The
+// already-retained completion from the previous fetch must not satisfy the
+// refresh subscriber; a new fetch admission mints a fresh signal generation.
+TEST(VlCacheRetainedSignal, RefreshWaiterUsesFreshSignalGeneration)
 {
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
@@ -1003,13 +999,12 @@ TEST(VlCacheRetainedSignal, RefreshWaiterSamplesFreshRevisionNotRetainedOne)
            "advance, with the new list";
 }
 
-// writ-claim: retained_signal.revalidate, witness prv.T0338. The refresh path
-// samples its revision before admission, but a synchronous terminal can still
-// arrive before waiter registration. It must consume the changed revision
-// before suspending, just like co_get.
+// writ-claim: retained_signal.retained-completion, witness prv.T0336. A
+// synchronous refresh terminal can arrive before the packaged wait registers;
+// it must still consume the retained completion without suspending.
 TEST(
     VlCacheRetainedSignal,
-    SynchronousRefreshCompletionCannotLoseRetainedRevision)
+    SynchronousRefreshCompletionCannotLoseRetainedWake)
 {
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
@@ -1042,6 +1037,100 @@ TEST(
     ASSERT_EQ(refresh.wait_for(0ms), std::future_status::ready)
         << "a synchronous refresh terminal must be consumed through the "
            "retained revision";
+    EXPECT_EQ(refresh.get().sequence, 2u);
+}
+
+TEST(VlCacheRetainedSignal, CanceledGenerationCannotPoisonFreshFetchWait)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending, &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            pending = std::move(callback);
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+
+    boost::asio::cancellation_signal cancel;
+    auto canceled = boost::asio::co_spawn(
+        io,
+        cache->co_get(),
+        boost::asio::bind_cancellation_slot(
+            cancel.slot(), boost::asio::use_future));
+    scheduler.run_until_idle();
+    cancel.emit(boost::asio::cancellation_type::terminal);
+    scheduler.run_until_idle();
+    ASSERT_EQ(canceled.wait_for(0ms), std::future_status::ready);
+    EXPECT_THROW(canceled.get(), boost::system::system_error);
+
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+
+    auto fresh =
+        boost::asio::co_spawn(io, cache->co_refresh(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(fetches, 2u);
+    ASSERT_EQ(fresh.wait_for(0ms), std::future_status::timeout)
+        << "a canceled subscriber from the prior generation must not poison "
+           "the fresh generation";
+
+    auto refreshed = successful_vl_result();
+    refreshed.vl.sequence = 2;
+    pending(std::move(refreshed));
+    scheduler.run_until_idle();
+    ASSERT_EQ(fresh.wait_for(0ms), std::future_status::ready);
+    EXPECT_EQ(fresh.get().sequence, 2u);
+}
+
+TEST(VlCacheRetainedSignal, LateOldCompletionCannotWakeFreshGeneration)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending, &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            pending = std::move(callback);
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    auto first_snapshot = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    auto const old_signal = first_snapshot.get().fetch_wait_signal;
+    ASSERT_TRUE(old_signal);
+
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+
+    auto refresh =
+        boost::asio::co_spawn(io, cache->co_refresh(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(fetches, 2u);
+    auto second_snapshot = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    auto const fresh_signal = second_snapshot.get().fetch_wait_signal;
+    ASSERT_TRUE(fresh_signal);
+    ASSERT_NE(old_signal, fresh_signal);
+
+    old_signal->post_complete();
+    scheduler.run_until_idle();
+    ASSERT_EQ(refresh.wait_for(0ms), std::future_status::timeout)
+        << "a late completion of generation N-1 must not satisfy generation N";
+
+    auto refreshed = successful_vl_result();
+    refreshed.vl.sequence = 2;
+    pending(std::move(refreshed));
+    scheduler.run_until_idle();
+    ASSERT_EQ(refresh.wait_for(0ms), std::future_status::ready);
     EXPECT_EQ(refresh.get().sequence, 2u);
 }
 

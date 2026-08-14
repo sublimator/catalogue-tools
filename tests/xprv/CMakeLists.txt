@@ -12,6 +12,7 @@ target_link_libraries(
   xprv-gtest
   PRIVATE catl::xdata
           catl::crypto
+          catl::writ
           catl::peer-client
           catl::rpc-client
           protobuf::libprotobuf

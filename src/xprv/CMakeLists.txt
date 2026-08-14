@@ -131,6 +131,7 @@ target_compile_definitions(xprv PRIVATE
 target_link_libraries(
   xprv
   PRIVATE catl::peer-client
+          catl::writ
           catl::base58
           libsodium::libsodium
           protobuf::libprotobuf
