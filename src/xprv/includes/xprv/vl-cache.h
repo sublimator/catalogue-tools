@@ -147,6 +147,10 @@ private:
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
     // label=shared_validator_list_stopped_receipt_latch
     boost::asio::steady_timer stop_progress_;
+    //@@authority state=prv.S0140 status=provisional scope=field
+    // bind=xprv::VlCache::waiters_@ac8170ff62e4cdaa
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=registered_per_waiter_validator_list_fetch_wake_timers
     std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
     std::chrono::seconds initial_retry_{2};       // first retry delay
@@ -178,6 +182,10 @@ private:
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
     // label=accepted_active_fetch_cancellation_request_latch
     bool active_fetch_cancel_requested_ = false;
+    //@@authority state=prv.S0141 status=provisional scope=field
+    // bind=xprv::VlCache::fetch_generation_@d9e48c98dcaf4526
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=monotonic_validator_list_fetch_generation
     uint64_t fetch_generation_ = 0;
     bool last_fetch_ok_ = false;
     std::string last_fetch_error_;

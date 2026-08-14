@@ -368,7 +368,12 @@ VlCache::retire_fetch_on_strand(
     active_fetch_.reset();
     active_fetch_cancel_requested_ = false;
     fetch_in_progress_ = false;
-    ++fetch_generation_;
+    //@@authority transition=prv.T0332 status=provisional scope=statement
+    // bind=expression_statement@c0a327372583afbf
+    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+    // touches=prv.S0141,prv.S0067
+    // label=mint_next_validator_list_fetch_generation
+    ++fetch_generation_;  //@@authority-target ids=prv.T0332
     return true;
 }
 
@@ -576,6 +581,11 @@ VlCache::schedule_retry(std::chrono::seconds delay)
     }
 }
 
+//@@authority transition=prv.T0333 status=provisional scope=function
+// bind=xprv::wake_waiters@d8aae799c039b7ae
+// owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+// touches=prv.S0140
+// label=wake_every_registered_fetch_waiter
 void
 VlCache::wake_waiters()
 {
@@ -625,7 +635,12 @@ VlCache::co_get_on_strand()
     auto const generation = fetch_generation_;
     auto signal = std::make_shared<asio::steady_timer>(
         strand_, asio::steady_timer::time_point::max());
-    waiters_.push_back(signal);
+    //@@authority transition=prv.T0334 status=provisional scope=statement
+    // bind=expression_statement@690a732601aeff18
+    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+    // touches=prv.S0140,prv.S0141
+    // label=register_fetch_wake_waiter_after_sampling_generation
+    waiters_.push_back(signal);  //@@authority-target ids=prv.T0334
 
     struct WaiterCleanup
     {
@@ -670,7 +685,12 @@ VlCache::co_get_on_strand()
         co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
 
-        auto const cancel_state = co_await asio::this_coro::cancellation_state;
+        //@@authority transition=prv.T0335 status=provisional scope=statement
+        // bind=declaration@ebafec8af9998ea8
+        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+        // touches=prv.S0140
+        // label=consume_fetch_wait_cancellation_and_abort
+        auto const cancel_state = co_await asio::this_coro::cancellation_state; //@@authority-target ids=prv.T0335
         if (cancel_state.cancelled() != asio::cancellation_type::none)
             throw boost::system::system_error(asio::error::operation_aborted);
         if (public_resume_observer_for_test_)
