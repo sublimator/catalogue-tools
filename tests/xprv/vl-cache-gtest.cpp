@@ -834,11 +834,16 @@ TEST(VlCacheShutdown, OrdinaryWaiterTerminatesWhenStopIsRequested)
 // runtime behavior the demand graph does not itself claim. Green here is
 // behavioral evidence for the named roles, NOT schema conformance.
 
-// writ-claim: retained_signal.retained_fact + retained_signal.retain
-// witnesses prv.S0141 (completion revision), prv.T0332 (advance at exact
-// retirement). The publication must be RETAINED: a subscriber arriving
-// after the completion needs no wake and no second fetch.
-TEST(VlCacheRetainedSignal, CompletionRevisionIsRetainedForLateSubscribers)
+// writ-claim: retained_signal.publish, witness prv.T0333 (wake on
+// advance): an ARMED waiter (registered before the terminal) completes
+// when the revision advances. The late co_get half deliberately claims NO
+// retained-signal role: it returns through co_get_on_strand's immediate
+// active-cached-list path BEFORE revision sampling or registration, so it
+// witnesses the cache-hit short-circuit only (Codex blocker 2026-08-14:
+// the earlier version of this comment falsely claimed
+// retained_fact/retain here). The true retained-completion race control
+// is SynchronousAdmissionCompletion below.
+TEST(VlCacheRetainedSignal, CompletionWakesArmedWaiterAndLateGetShortCircuits)
 {
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
@@ -869,11 +874,49 @@ TEST(VlCacheRetainedSignal, CompletionRevisionIsRetainedForLateSubscribers)
         boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
     scheduler.run_until_idle();
     ASSERT_EQ(late.wait_for(0ms), std::future_status::ready)
-        << "a subscriber after completion must be satisfied by the retained "
-           "fact without waiting";
+        << "a co_get after completion returns via the active cached-list "
+           "path without registering";
     EXPECT_EQ(late.get().sequence, 1u);
-    EXPECT_EQ(fetches, 1u)
-        << "the retained completion must not admit a second fetch";
+    EXPECT_EQ(fetches, 1u) << "the cache hit must not admit a second fetch";
+}
+
+// writ-claim: NONE satisfied — this control WITNESSES THE KNOWN LOST-WAKE
+// DEFECT in co_get_on_strand (Codex blocker at 85320b4). When the fetch
+// callback completes SYNCHRONOUSLY inside do_fetch during co_get
+// admission (production equivalent: the synchronous initiation-refusal
+// path), the revision advances and wake_waiters runs BEFORE the waiter
+// samples prv.S0141 or registers in prv.S0140; the waiter then samples
+// the post-advance revision and suspends forever although vl_ is present.
+// The correct retained pattern (register, then re-check the revision
+// immediately before suspension — all state is strand-owned) would close
+// the race. THIS TEST IS GREEN WHILE THE DEFECT EXISTS: it asserts the
+// defective behavior on purpose, in the audits' strict-xfail sense. When
+// the writ::retained_signal fitting (or any repair) closes the race, the
+// final assertion MUST go red — that red is the repair announcing itself.
+// Do not "fix" this test by deleting it; rewrite it to assert completion.
+TEST(VlCacheRetainedSignal, SynchronousAdmissionCompletionLosesTheWakeToday)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            callback(successful_vl_result());  // synchronous terminal
+        });
+
+    // No start(): co_get itself admits the fetch, which completes inline.
+    auto waiter =
+        boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(fetches, 1u);
+
+    EXPECT_EQ(waiter.wait_for(0ms), std::future_status::timeout)
+        << "REPAIR DETECTED: the synchronous-admission waiter completed. "
+           "The lost-wake defect this control documents has been closed — "
+           "rewrite this test to assert ready + sequence 1, and retire the "
+           "defect note from the role-bridge record.";
 }
 
 // writ-claim: retained_signal.deadline_or_cancel + subscriber_registry
@@ -922,10 +965,14 @@ TEST(VlCacheRetainedSignal, WaiterCancellationCannotConsumeWakeOrDisturbSibling)
 }
 
 // writ-claim: retained_signal.subscribe
-// witness prv.T0334 (register after sampling the revision). A refresh
-// subscriber samples the revision FRESH at registration: the already-
-// retained completion from the previous fetch must not satisfy it, and it
-// completes only when the revision advances again.
+// witness prv.T0336 (the co_refresh registration, source-bound as its own
+// twin after the Codex blocker showed this test never executes T0334's
+// co_get site). co_refresh samples the revision BEFORE admitting the
+// fetch — the pre-admission sample makes the refresh path safe against
+// synchronous completion, unlike co_get (see the lost-wake control
+// above). The already-retained completion from the previous fetch must
+// not satisfy the refresh subscriber; it completes only on the next
+// advance.
 TEST(VlCacheRetainedSignal, RefreshWaiterSamplesFreshRevisionNotRetainedOne)
 {
     catl::test::DeterministicScheduler scheduler;

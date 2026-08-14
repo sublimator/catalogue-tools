@@ -767,7 +767,13 @@ VlCache::co_refresh_on_strand()
 
     auto signal = std::make_shared<asio::steady_timer>(
         strand_, asio::steady_timer::time_point::max());
-    waiters_.push_back(signal);
+    //@@authority transition=prv.T0336 status=provisional scope=statement
+    // bind=expression_statement@8818951d16c44ec7
+    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+    // touches=prv.S0140,prv.S0141
+    // writ_roles=retained_signal.subscribe
+    // label=register_refresh_wake_waiter_with_pre_admission_revision_sample
+    waiters_.push_back(signal);  //@@authority-target ids=prv.T0336
 
     struct WaiterCleanup
     {
