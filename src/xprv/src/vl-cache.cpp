@@ -78,6 +78,7 @@ VlCache::start()
 // bind=xprv::do_fetch@08fae73c5cc51d45
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
 // touches=prv.S0023,prv.S0025,prv.S0067,prv.S0068
+// writ_roles=census.admit
 // label=admit_validator_list_fetch_and_install_terminal_callback
 void
 VlCache::do_fetch()
@@ -380,7 +381,7 @@ VlCache::do_fetch()
 // commit=vl_cache_strand touches=prv.S0025,prv.S0067,prv.S0068
 // boundary_ref=vl_fetch.operation_terminal
 // receipt=vl_fetch.operation_terminal receipt_role=consume
-// writ_roles=exact.validate_or_consume
+// writ_roles=exact.validate_or_consume,census.retire
 // label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
 bool
 VlCache::retire_fetch_on_strand(
@@ -449,6 +450,7 @@ VlCache::co_stop()
 // bind=xprv::begin_stop_on_strand@47e9653c14d73494
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
 // touches=prv.S0023,prv.S0024,prv.S0025,prv.S0067,prv.S0068
+// writ_roles=census.seal
 // label=seal_validator_list_refresh_admission_and_request_child_cancel
 void
 VlCache::begin_stop_on_strand()
@@ -520,6 +522,7 @@ VlCache::begin_stop_on_strand()
 // bind=xprv::try_finish_stop_on_strand@bf7a4ce5d9a98cd5
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
 // touches=prv.S0023,prv.S0024,prv.S0025,prv.S0026
+// writ_roles=census.drain_publication
 // label=commit_validator_list_cache_stopped_when_children_empty
 void
 VlCache::try_finish_stop_on_strand() noexcept
@@ -547,7 +550,8 @@ VlCache::try_finish_stop_on_strand() noexcept
 //@@authority transition=prv.T0073 status=provisional scope=function
 // bind=xprv::schedule_refresh@4728af8d30731abe
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0024 label=arm_refresh_timer_obligation
+// touches=prv.S0024 writ_roles=census.admit,census.retire
+// label=arm_refresh_timer_obligation
 void
 VlCache::schedule_refresh()
 {
@@ -576,7 +580,8 @@ VlCache::schedule_refresh()
 //@@authority transition=prv.T0074 status=provisional scope=function
 // bind=xprv::schedule_retry@d94ed85885bf7cbd
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0024 label=arm_retry_timer_obligation
+// touches=prv.S0024 writ_roles=census.admit,census.retire
+// label=arm_retry_timer_obligation
 void
 VlCache::schedule_retry(std::chrono::seconds delay)
 {

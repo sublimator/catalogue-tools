@@ -168,11 +168,13 @@ private:
     //@@authority state=prv.S0024 status=provisional scope=field
     // bind=xprv::VlCache::refresh_wait_outstanding_@95b5b1bc66e67146
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // writ_roles=census.population
     // label=armed_refresh_or_retry_handler_obligation
     std::size_t refresh_wait_outstanding_ = 0;
     //@@authority state=prv.S0025 status=provisional scope=field
     // bind=xprv::VlCache::fetch_in_progress_@2e2b24112b573817
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // writ_roles=census.population
     // label=in_flight_validator_list_fetch_obligation
     bool fetch_in_progress_ = false;
     //@@authority state=prv.S0067 status=provisional scope=field

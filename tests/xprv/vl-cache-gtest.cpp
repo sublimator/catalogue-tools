@@ -157,6 +157,17 @@ public:
             result->set_value(strand.running_in_this_thread());
         };
     }
+
+    /// Reads the armed-timer obligation count with NO executor hop. Legal
+    /// only from code already running on the cache strand. snapshot() cannot
+    /// answer this question: a cancelled steady_timer handler is posted, so
+    /// it is always queued AHEAD of a posted snapshot and has already
+    /// decremented the count by the time that snapshot runs.
+    static std::size_t
+    refresh_wait_outstanding_on_strand(std::shared_ptr<VlCache> const& cache)
+    {
+        return cache->refresh_wait_outstanding_;
+    }
 };
 
 namespace {
@@ -1132,6 +1143,134 @@ TEST(VlCacheRetainedSignal, LateOldCompletionCannotWakeFreshGeneration)
     scheduler.run_until_idle();
     ASSERT_EQ(refresh.wait_for(0ms), std::future_status::ready);
     EXPECT_EQ(refresh.get().sequence, 2u);
+}
+
+// ── V2 census evidence ──────────────────────────────────────────────────
+//
+// The proposed V2 fitting keys a writ::census by a closed obligation KIND
+// {fetch, refresh_timer}. writ::census::admit refuses a duplicate LIVE key,
+// so that key type is sound only if each kind holds at most one obligation
+// at a time. prv.S0025 (fetch_in_progress_) is a bool and structurally
+// holds one. prv.S0024 (refresh_wait_outstanding_) is a size_t, and this
+// witness is why it must be: asio delivers a cancelled timer handler
+// THROUGH the executor, so arming a successor while the predecessor's
+// handler is still queued leaves two unreceipted obligations of one kind.
+TEST(VlCacheCensus, SuccessorRetryIsArmedWhilePredecessorHandlerIsUnreceipted)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+
+    catl::vl::VlCallback pending;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending](catl::vl::VlCallback callback) {
+            pending = std::move(callback);
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+
+    // A failed terminal arms the predecessor retry: exactly one obligation.
+    catl::vl::VlResult failed;
+    failed.error = "arm predecessor retry";
+    pending(std::move(failed));
+    scheduler.run_until_idle();
+
+    auto armed = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    ASSERT_EQ(armed.get().refresh_wait_outstanding, 1u)
+        << "the predecessor retry handler must be outstanding";
+
+    // The next fetch terminates SYNCHRONOUSLY on the owner strand — the shape
+    // production reaches through publish_start_refusal (prv.T0216) when
+    // VlClient construction, prepare_fetch, or operation->start throws. That
+    // terminal arms a successor retry whose expires_after cancels the
+    // predecessor. Cancellation is a request, not a receipt.
+    std::size_t at_successor_admission = 0;
+    bool successor_armed = false;
+    VlCacheTestAccess::set_fetcher(
+        cache,
+        [weak = std::weak_ptr<VlCache>(cache),
+         &at_successor_admission,
+         &successor_armed](catl::vl::VlCallback callback) {
+            catl::vl::VlResult sync_failed;
+            sync_failed.error = "synchronous successor terminal";
+            callback(std::move(sync_failed));
+            // Still inside the same strand turn: nothing posted during that
+            // terminal — the cancelled predecessor handler included — has run.
+            auto const owner = weak.lock();
+            ASSERT_TRUE(owner);
+            at_successor_admission =
+                VlCacheTestAccess::refresh_wait_outstanding_on_strand(owner);
+            successor_armed = true;
+        });
+
+    auto get =
+        boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_TRUE(successor_armed);
+    EXPECT_THROW(get.get(), std::runtime_error);
+
+    EXPECT_EQ(at_successor_admission, 2u)
+        << "prv.S0024 is not a single-obligation latch: at the instant the "
+           "successor retry is admitted the cancelled predecessor handler is "
+           "still owed, so a census keyed by obligation KIND alone would have "
+           "to refuse a legitimate live re-admission";
+
+    // Both obligations are receipted independently; only the second receipt
+    // can commit stopped.
+    auto stopped =
+        boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+
+    auto terminal = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    auto const drained = terminal.get();
+    EXPECT_TRUE(drained.stopped);
+    EXPECT_EQ(drained.refresh_wait_outstanding, 0u);
+}
+
+// Negative control for the witness above. Identical probe, identical
+// synchronous terminal — but with NO predecessor handler armed. It must read
+// one, not two, or the reading of two proves nothing about the predecessor.
+TEST(VlCacheCensus, SynchronousTerminalWithoutPredecessorOwesOneTimerObligation)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+
+    std::size_t at_first_admission = 0;
+    bool armed = false;
+    VlCacheTestAccess::set_fetcher(
+        cache,
+        [weak = std::weak_ptr<VlCache>(cache), &at_first_admission, &armed](
+            catl::vl::VlCallback callback) {
+            catl::vl::VlResult sync_failed;
+            sync_failed.error = "synchronous first terminal";
+            callback(std::move(sync_failed));
+            auto const owner = weak.lock();
+            ASSERT_TRUE(owner);
+            at_first_admission =
+                VlCacheTestAccess::refresh_wait_outstanding_on_strand(owner);
+            armed = true;
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+
+    ASSERT_TRUE(armed);
+    EXPECT_EQ(at_first_admission, 1u)
+        << "with no predecessor owed, the same probe at the same point in the "
+           "same strand turn must read exactly one";
+
+    auto stopped =
+        boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
 }
 
 }  // namespace
