@@ -1233,6 +1233,85 @@ TEST(VlCacheCensus, SuccessorRetryIsArmedWhilePredecessorHandlerIsUnreceipted)
     EXPECT_EQ(drained.refresh_wait_outstanding, 0u);
 }
 
+// Cardinality is multiplicity-many, not two: each concurrently queued
+// public entrant can cancel the currently armed wait (leaving its handler
+// queued and owed) and admit a fetch whose synchronous terminal arms a
+// successor. Two back-to-back co_refresh entrants therefore stack THREE
+// owed obligations under the one refresh_timer kind. Any census contract
+// claiming a small closed maximum for this kind is falsified here; the
+// honest declaration is multiplicity-many, bounded only by concurrent
+// entrants + 1.
+TEST(VlCacheCensus, ConcurrentRefreshEntrantsStackThreeTimerObligations)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+
+    catl::vl::VlCallback pending;
+    std::vector<std::size_t> at_admission;
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache,
+        [weak = std::weak_ptr<VlCache>(cache),
+         &pending,
+         &at_admission,
+         &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            if (fetches == 1)
+            {
+                pending = std::move(callback);
+                return;
+            }
+            catl::vl::VlResult sync_failed;
+            sync_failed.error = "synchronous refusal";
+            callback(std::move(sync_failed));
+            auto const owner = weak.lock();
+            ASSERT_TRUE(owner);
+            at_admission.push_back(
+                VlCacheTestAccess::refresh_wait_outstanding_on_strand(owner));
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+
+    // Failed first fetch arms the predecessor retry: one owed obligation.
+    catl::vl::VlResult failed;
+    failed.error = "arm predecessor retry";
+    pending(std::move(failed));
+    scheduler.run_until_idle();
+
+    // Two refresh entrants queued back-to-back. Entrant A cancels the armed
+    // retry (its handler now queued and owed) and its synchronous terminal
+    // arms a successor: 2 at admission. Entrant B runs BEFORE either queued
+    // abort delivers, cancels A's successor, and arms a third: 3.
+    auto a =
+        boost::asio::co_spawn(io, cache->co_refresh(), boost::asio::use_future);
+    auto b =
+        boost::asio::co_spawn(io, cache->co_refresh(), boost::asio::use_future);
+    scheduler.run_until_idle();
+
+    ASSERT_EQ(fetches, 3u);
+    ASSERT_EQ(at_admission.size(), 2u);
+    EXPECT_EQ(at_admission[0], 2u);
+    EXPECT_EQ(at_admission[1], 3u)
+        << "two queued entrants must stack a third owed obligation; a census "
+           "contract pinning refresh_timer at <=2 is falsified";
+
+    EXPECT_THROW(a.get(), std::runtime_error);
+    EXPECT_THROW(b.get(), std::runtime_error);
+
+    // Every stacked obligation is receipted independently; stop drains.
+    auto stopped =
+        boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    auto terminal = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    EXPECT_EQ(terminal.get().refresh_wait_outstanding, 0u);
+}
+
 // Negative control for the witness above. Identical probe, identical
 // synchronous terminal — but with NO predecessor handler armed. It must read
 // one, not two, or the reading of two proves nothing about the predecessor.
