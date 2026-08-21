@@ -63,3 +63,33 @@ target_link_libraries(
           GTest::gtest_main)
 
 gtest_discover_tests(nudb_bulk_duplicates_gtest DISCOVERY_TIMEOUT 30)
+
+# Issue 0078 witness suite: pipeline drain transient-zero / tail loss.
+# Compiles the pipeline sources directly (same pattern as
+# nudb_bulk_duplicates_gtest above) — tests-only, no production targets
+# changed.
+add_executable(
+  catl1_nudb_pipeline_drain_gtest
+  catl1-nudb-pipeline-drain-gtest.cpp
+  ../../src/utils-v1/src/nudb/catl1-to-nudb-pipeline.cpp
+  ../../src/utils-v1/src/nudb/nudb-bulk-writer.cpp)
+
+target_include_directories(catl1_nudb_pipeline_drain_gtest
+                           PRIVATE ../../src/utils-v1/includes)
+
+target_link_libraries(
+  catl1_nudb_pipeline_drain_gtest
+  PRIVATE catl::catalogue_v1
+          catl::xdata
+          catl::nodestore
+          catl::core
+          catl::cuckoofilter
+          NuDB
+          RocksDB::rocksdb
+          LZ4::lz4_static
+          Boost::filesystem
+          Boost::json
+          OpenSSL::SSL
+          GTest::gtest_main)
+
+gtest_discover_tests(catl1_nudb_pipeline_drain_gtest DISCOVERY_TIMEOUT 30)
