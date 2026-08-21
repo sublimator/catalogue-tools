@@ -6,6 +6,7 @@
 #include "../test-support/deterministic-scheduler.h"
 #include "../test-support/io-context-runners.h"
 #include "http-child-completion.h"
+#include "proof-engine-test-access.h"
 #include "service-lifecycle.h"
 
 #include <boost/asio/bind_cancellation_slot.hpp>
@@ -93,72 +94,8 @@ public:
     }
 };
 
-class ProofEngineTestAccess
-{
-public:
-    static ProofEngine::DrainReceipt
-    mint_drain_receipt(std::shared_ptr<ProofEngine> const& engine)
-    {
-        return ProofEngine::DrainReceipt{engine};
-    }
-
-    static detail::EngineDrainOperation
-    make_engine_drain_operation(
-        std::shared_ptr<ProofEngine> const& engine,
-        std::function<boost::asio::awaitable<ProofEngine::DrainReceipt>(
-            RequestDrainReceipt const&)> stop)
-    {
-        return detail::EngineDrainOperation{engine, std::move(stop)};
-    }
-
-    static void
-    set_validation_quorum_tracker(
-        ProofEngine& engine,
-        std::shared_ptr<ValidationQuorumTracker> validation_quorum_tracker)
-    {
-        engine.quorum_tracker_ = std::move(validation_quorum_tracker);
-    }
-
-    static void
-    set_node_cache(
-        ProofEngine& engine,
-        std::shared_ptr<catl::peer_client::NodeCache> node_cache)
-    {
-        engine.node_cache_ = std::move(node_cache);
-    }
-
-    static void
-    set_ledger_fetch_coordinator(
-        ProofEngine& engine,
-        std::shared_ptr<catl::peer_client::LedgerFetchCoordinator> coordinator)
-    {
-        engine.ledger_fetch_coordinator_ = std::move(coordinator);
-    }
-
-    static void
-    set_peer_set(
-        ProofEngine& engine,
-        std::shared_ptr<catl::peer_client::PeerSet> peers)
-    {
-        engine.peers_ = std::move(peers);
-    }
-
-    static void
-    set_before_drain_receipt_publish(
-        ProofEngine& engine,
-        std::function<void()> hook)
-    {
-        engine.before_drain_receipt_publish_for_test_ = std::move(hook);
-    }
-
-    static void
-    set_before_engine_draining_log(
-        ProofEngine& engine,
-        std::function<void()> hook)
-    {
-        engine.before_engine_draining_log_for_test_ = std::move(hook);
-    }
-};
+// ProofEngineTestAccess moved to proof-engine-test-access.h so other
+// test TUs in this binary can share it (issue 0074 witnesses).
 
 class HttpServerTestAccess
 {
