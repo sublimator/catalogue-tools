@@ -56,14 +56,14 @@ VlCache::VlCache(asio::io_context& io, std::string vl_host, uint16_t vl_port)
     , vl_host_(std::move(vl_host))
     , vl_port_(vl_port)
     , refresh_(strand_)
-    , stop_progress_(strand_, asio::steady_timer::time_point::max())
+    , stop_roster_(home_)
 {
 }
 
 //@@authority transition=prv.T0068 status=provisional scope=function
 // bind=xprv::start@ff4c4534e3a56929
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0025 label=start_validator_list_fetch_lifecycle
+// touches=prv.S0023,prv.S0141 label=start_validator_list_fetch_lifecycle
 void
 VlCache::start()
 {
@@ -77,14 +77,14 @@ VlCache::start()
 //@@authority transition=prv.T0069 status=provisional scope=function
 // bind=xprv::do_fetch@08fae73c5cc51d45
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0025,prv.S0067,prv.S0068
-// writ_roles=census.admit
+// touches=prv.S0023,prv.S0141,prv.S0067,prv.S0068
+// writ_roles=roster.admit
 // label=admit_validator_list_fetch_and_install_terminal_callback
 void
 VlCache::do_fetch()
 {
     WRIT_ASSERT_HOME(home_);
-    if (phase_ != Phase::running || fetch_in_progress_)
+    if (phase_ != Phase::running || fetch_obligation_)
         return;
 
     auto self = shared_from_this();
@@ -106,7 +106,9 @@ VlCache::do_fetch()
     // generation.
     //@@writ attachment=catl.ann.A0520
     fetch_wait_signal_ = std::make_shared<writ::retained_signal>(home_);
-    fetch_in_progress_ = true;
+    fetch_obligation_ = stop_roster_.admit(StopObligation::fetch);
+    if (!fetch_obligation_)
+        return;  // sealed or identity-exhausted: no fetch is admitted
 
     struct FetchAdmissionRollback
     {
@@ -115,7 +117,7 @@ VlCache::do_fetch()
 
         ~FetchAdmissionRollback() noexcept
         {
-            if (terminal_producer_committed || !owner.fetch_in_progress_)
+            if (terminal_producer_committed || !owner.fetch_obligation_)
                 return;
             auto const operation = owner.active_fetch_;
             owner.retire_fetch_on_strand(operation);
@@ -378,10 +380,10 @@ VlCache::do_fetch()
 //@@authority transition=prv.T0075 status=provisional scope=function
 // bind=xprv::retire_fetch_on_strand@58f2ee55d206538a
 // owner=unresolved owner_hypothesis=vl_cache
-// commit=vl_cache_strand touches=prv.S0025,prv.S0067,prv.S0068
+// commit=vl_cache_strand touches=prv.S0141,prv.S0067,prv.S0068
 // boundary_ref=vl_fetch.operation_terminal
 // receipt=vl_fetch.operation_terminal receipt_role=consume
-// writ_roles=exact.validate_or_consume,census.retire
+// writ_roles=exact.validate_or_consume,roster.retire
 // label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
 bool
 VlCache::retire_fetch_on_strand(
@@ -395,7 +397,9 @@ VlCache::retire_fetch_on_strand(
     }
     active_fetch_.reset();
     active_fetch_cancel_requested_ = false;
-    fetch_in_progress_ = false;
+    if (fetch_obligation_)
+        (void)stop_roster_.retire(std::move(*fetch_obligation_));
+    fetch_obligation_.reset();
     return true;
 }
 
@@ -409,7 +413,7 @@ VlCache::stop()
 //@@authority transition=prv.T0070 status=provisional scope=function
 // bind=xprv::co_stop@fb06248bb1a1b4d5
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0026
+// touches=prv.S0023,prv.S0141
 // label=join_validator_list_timer_and_fetch_obligations
 asio::awaitable<void>
 VlCache::co_stop()
@@ -417,23 +421,25 @@ VlCache::co_stop()
     auto self = shared_from_this();
     co_await asio::co_spawn(
         strand_,
-        [self]() -> asio::awaitable<void> {
+        [self]() -> writ::home_awaitable<void> {
+            WRIT_ASSERT_HOME(self->home_);
             if (self->stop_entry_observer_for_test_)
                 self->stop_entry_observer_for_test_();
 
             self->begin_stop_on_strand();
-            if (self->phase_ == Phase::stopped)
-                co_return;
 
-            // Keep the state check and waiter installation on the owner
-            // strand. A post(strand_, use_awaitable) only fences that
-            // executor; it resumes the caller on the caller's executor. With
-            // multiple runners the refresh terminal could therefore publish
-            // stopped and cancel stop_progress_ between this check and the
-            // async_wait, losing the one-shot wakeup forever.
-            boost::system::error_code ec;
-            co_await self->stop_progress_.async_wait(
-                asio::redirect_error(asio::use_awaitable, ec));
+            // The drained wake is RETAINED: a joiner arriving after the
+            // commit observes the same fact, so there is no already-stopped
+            // special case and no lost-wake window between a state check
+            // and a waiter installation.
+            auto const outcome =
+                co_await self->stop_roster_.drained_signal()->wait_until(
+                    asio::steady_timer::time_point::max());
+            if (outcome == writ::wait_outcome::canceled)
+            {
+                throw boost::system::system_error(
+                    asio::error::operation_aborted);
+            }
 
             auto const cancel_state =
                 co_await asio::this_coro::cancellation_state;
@@ -449,8 +455,8 @@ VlCache::co_stop()
 //@@authority transition=prv.T0071 status=provisional scope=function
 // bind=xprv::begin_stop_on_strand@47e9653c14d73494
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0067,prv.S0068
-// writ_roles=census.seal
+// touches=prv.S0023,prv.S0141,prv.S0067,prv.S0068
+// writ_roles=roster.seal
 // label=seal_validator_list_refresh_admission_and_request_child_cancel
 void
 VlCache::begin_stop_on_strand()
@@ -464,9 +470,9 @@ VlCache::begin_stop_on_strand()
         PLOGI(
             log_,
             "VL cache stop entered: refresh_handlers=",
-            refresh_wait_outstanding_,
+            stop_roster_.live_with(StopObligation::refresh_timer),
             " fetch_in_progress=",
-            fetch_in_progress_,
+            fetch_obligation_.has_value(),
             " cancellation_disposition=",
             active_fetch_ ? static_cast<unsigned>(
                                 active_fetch_->cancellation_disposition())
@@ -475,7 +481,7 @@ VlCache::begin_stop_on_strand()
     catch (...)
     {
     }
-    if (fetch_in_progress_ && !active_fetch_cancel_requested_)
+    if (fetch_obligation_ && !active_fetch_cancel_requested_)
     {
         bool requested = false;
         if (active_fetch_)
@@ -515,20 +521,25 @@ VlCache::begin_stop_on_strand()
     {
     }
     publish_fetch_wait_change();
+    stop_roster_.seal();
     try_finish_stop_on_strand();
 }
 
 //@@authority transition=prv.T0072 status=provisional scope=function
 // bind=xprv::try_finish_stop_on_strand@bf7a4ce5d9a98cd5
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0026
-// writ_roles=census.drain_publication
+// touches=prv.S0023,prv.S0141
+// writ_roles=roster.drain_publication
 // label=commit_validator_list_cache_stopped_when_children_empty
 void
 VlCache::try_finish_stop_on_strand() noexcept
 {
-    if (phase_ != Phase::stopping || refresh_wait_outstanding_ != 0 ||
-        fetch_in_progress_)
+    // The drain is a conjunction the roster owns: sealed AND zero live AND
+    // zero leaked. A dropped obligation wedges drained() false forever —
+    // visibly (WRIT-ROSTER-LEAK on stderr, sticky counter) instead of the
+    // former silent hang. The stopped commit publishes through the
+    // roster's retained drained wake; no cancellation-edge latch remains.
+    if (phase_ != Phase::stopping || !stop_roster_.drained())
         return;
     phase_ = Phase::stopped;
     try
@@ -538,33 +549,35 @@ VlCache::try_finish_stop_on_strand() noexcept
     catch (...)
     {
     }
-    try
-    {
-        stop_progress_.cancel();
-    }
-    catch (...)
-    {
-    }
 }
 
 //@@authority transition=prv.T0073 status=provisional scope=function
 // bind=xprv::schedule_refresh@4728af8d30731abe
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0024 writ_roles=census.admit,census.retire
+// touches=prv.S0141 writ_roles=roster.admit,roster.retire
 // label=arm_refresh_timer_obligation
 void
 VlCache::schedule_refresh()
 {
     if (phase_ != Phase::running)
         return;
+    auto admitted = stop_roster_.admit(StopObligation::refresh_timer);
+    if (!admitted)
+        return;  // sealed or identity-exhausted: nothing may be armed
     auto self = shared_from_this();
     refresh_.expires_after(refresh_interval_);
-    ++refresh_wait_outstanding_;
+    // The obligation token rides the handler closure — the handler IS the
+    // obligation. The shared_ptr exists for exactly one window: if
+    // async_wait's initiation throws AFTER consuming (and destroying) its
+    // copy of the closure, the local reference below still reaches the
+    // token, so initiation failure RETIRES the obligation instead of
+    // leak-wedging it. A stale double retirement is a typed refused no-op.
+    auto obligation =
+        std::make_shared<StopRoster::member>(std::move(*admitted));
     try
     {
-        refresh_.async_wait([self](boost::system::error_code ec) {
-            if (self->refresh_wait_outstanding_ != 0)
-                --self->refresh_wait_outstanding_;
+        refresh_.async_wait([self, obligation](boost::system::error_code ec) {
+            (void)self->stop_roster_.retire(std::move(*obligation));
             if (!ec && self->phase_ == Phase::running)
                 self->do_fetch();
             self->try_finish_stop_on_strand();
@@ -572,7 +585,7 @@ VlCache::schedule_refresh()
     }
     catch (...)
     {
-        --refresh_wait_outstanding_;
+        (void)stop_roster_.retire(std::move(*obligation));
         throw;
     }
 }
@@ -580,21 +593,25 @@ VlCache::schedule_refresh()
 //@@authority transition=prv.T0074 status=provisional scope=function
 // bind=xprv::schedule_retry@d94ed85885bf7cbd
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0024 writ_roles=census.admit,census.retire
+// touches=prv.S0141 writ_roles=roster.admit,roster.retire
 // label=arm_retry_timer_obligation
 void
 VlCache::schedule_retry(std::chrono::seconds delay)
 {
     if (phase_ != Phase::running)
         return;
+    auto admitted = stop_roster_.admit(StopObligation::refresh_timer);
+    if (!admitted)
+        return;  // sealed or identity-exhausted: nothing may be armed
     auto self = shared_from_this();
     refresh_.expires_after(delay);
-    ++refresh_wait_outstanding_;
+    // Same initiation-failure bridge as schedule_refresh.
+    auto obligation =
+        std::make_shared<StopRoster::member>(std::move(*admitted));
     try
     {
-        refresh_.async_wait([self](boost::system::error_code ec) {
-            if (self->refresh_wait_outstanding_ != 0)
-                --self->refresh_wait_outstanding_;
+        refresh_.async_wait([self, obligation](boost::system::error_code ec) {
+            (void)self->stop_roster_.retire(std::move(*obligation));
             if (!ec && self->phase_ == Phase::running)
                 self->do_fetch();
             self->try_finish_stop_on_strand();
@@ -602,7 +619,7 @@ VlCache::schedule_retry(std::chrono::seconds delay)
     }
     catch (...)
     {
-        --refresh_wait_outstanding_;
+        (void)stop_roster_.retire(std::move(*obligation));
         throw;
     }
 }
@@ -658,7 +675,7 @@ VlCache::co_get_on_strand()
         co_return *vl_;
     }
 
-    if (!fetch_in_progress_)
+    if (!fetch_obligation_)
         do_fetch();
     auto signal = fetch_wait_signal_;
     if (!signal)
@@ -729,7 +746,7 @@ VlCache::co_refresh_on_strand()
     catch (...)
     {
     }
-    if (!fetch_in_progress_)
+    if (!fetch_obligation_)
         do_fetch();
     auto signal = fetch_wait_signal_;
     if (!signal)

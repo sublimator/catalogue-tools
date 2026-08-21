@@ -77,8 +77,9 @@ public:
                 .running = cache->phase_ == VlCache::Phase::running,
                 .stopping = cache->phase_ == VlCache::Phase::stopping,
                 .stopped = cache->phase_ == VlCache::Phase::stopped,
-                .fetch_in_progress = cache->fetch_in_progress_,
-                .refresh_wait_outstanding = cache->refresh_wait_outstanding_,
+                .fetch_in_progress = cache->fetch_obligation_.has_value(),
+                .refresh_wait_outstanding = cache->stop_roster_.live_with(
+                    VlCache::StopObligation::refresh_timer),
                 .refresh_expiry = cache->refresh_.expiry(),
                 .active_fetch = cache->active_fetch_,
                 .fetch_wait_signal = cache->fetch_wait_signal_,
@@ -162,11 +163,12 @@ public:
     /// only from code already running on the cache strand. snapshot() cannot
     /// answer this question: a cancelled steady_timer handler is posted, so
     /// it is always queued AHEAD of a posted snapshot and has already
-    /// decremented the count by the time that snapshot runs.
+    /// retired its obligation by the time that snapshot runs.
     static std::size_t
     refresh_wait_outstanding_on_strand(std::shared_ptr<VlCache> const& cache)
     {
-        return cache->refresh_wait_outstanding_;
+        return cache->stop_roster_.live_with(
+            VlCache::StopObligation::refresh_timer);
     }
 };
 

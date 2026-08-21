@@ -16,6 +16,7 @@
 #include <catl/vl-client/vl-client.h>
 #include <writ/home.hpp>
 #include <writ/retained-signal.hpp>
+#include <writ/roster.hpp>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
@@ -144,11 +145,18 @@ private:
     // Strand-owned state:
     std::optional<catl::vl::ValidatorList> vl_;
     boost::asio::steady_timer refresh_;  // periodic refresh
-    //@@authority state=prv.S0026 status=provisional scope=field
-    // bind=xprv::VlCache::stop_progress_@b7a23fd626ede29a
+
+    /// The closed classification of stop obligations. A label, never an
+    /// identity: the roster resolves retirement by its minted member id.
+    enum class StopObligation : std::uint8_t { fetch, refresh_timer };
+    using StopRoster = writ::roster<StopObligation>;
+
+    //@@authority state=prv.S0141 status=provisional scope=field
+    // bind=xprv::VlCache::stop_roster_@897bb06fb0f45d0f
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
-    // label=shared_validator_list_stopped_receipt_latch
-    boost::asio::steady_timer stop_progress_;
+    // writ_roles=roster.instance,roster.population
+    // label=admitted_stop_obligation_roster
+    StopRoster stop_roster_;
     //@@authority state=prv.S0140 status=provisional scope=field
     // bind=xprv::VlCache::fetch_wait_signal_@7d5b64d47245244c
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
@@ -165,18 +173,11 @@ private:
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
     // label=validator_list_cache_lifecycle
     Phase phase_ = Phase::running;
-    //@@authority state=prv.S0024 status=provisional scope=field
-    // bind=xprv::VlCache::refresh_wait_outstanding_@95b5b1bc66e67146
-    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
-    // writ_roles=census.population
-    // label=armed_refresh_or_retry_handler_obligation
-    std::size_t refresh_wait_outstanding_ = 0;
-    //@@authority state=prv.S0025 status=provisional scope=field
-    // bind=xprv::VlCache::fetch_in_progress_@2e2b24112b573817
-    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
-    // writ_roles=census.population
-    // label=in_flight_validator_list_fetch_obligation
-    bool fetch_in_progress_ = false;
+    // The in-flight fetch's obligation token: storage only — the roster
+    // (prv.S0141) owns the population and the admission/retirement laws.
+    // has_value() is the old fetch_in_progress_ fact. Each armed
+    // refresh/retry handler owns its own token inside its closure.
+    std::optional<StopRoster::member> fetch_obligation_;
     //@@authority state=prv.S0067 status=provisional scope=field
     // bind=xprv::VlCache::active_fetch_@4f2904e878920aea
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
