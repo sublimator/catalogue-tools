@@ -1,0 +1,91 @@
+id = "writ.core/roster/v1"
+machine = "roster"
+status = "provisional"
+binds = "src/writ/includes/writ/roster.hpp"
+imports = ["writ.core/home/v1", "writ.core/retained-signal/v1", "writ.core/exact/v1"]
+shares_engine_with = "writ.core/census/v1"
+
+[[events]]
+name = "admit"
+claim = "registration is the ONLY way into the population; happens BEFORE the fallible launch; a live label admits AGAIN — the population is a multiset"
+
+[[events]]
+name = "seal"
+claim = "fences every later admission; a roster is judged only against a closed population"
+
+[[events]]
+name = "retire"
+claim = "one retirement attempt with a closed typed outcome, resolved by the token's minted id alone — never the label"
+
+[[events]]
+name = "leak"
+claim = "a member dropped without retirement; commits on the dropping thread"
+
+[dispositions]
+admit = ["member", "refused"]
+admit_refusal_causes = ["sealed", "identity-exhaustion"]
+retire = ["refused", "retired", "drained"]
+drained = ["sealed AND zero-live AND zero-leaked"]
+
+[[rules]]
+id = "multiset-admission"
+law = "admitting a label already live succeeds; admission refusal comes only from seal or identity exhaustion, never from a duplicate label — under cancellation-is-a-request, rearm-before-receipt patterns hold multiple simultaneous obligations of one kind with no honest dedup identity"
+control = "WritRoster.DuplicateLiveLabelAdmissionSucceeds"
+
+[[rules]]
+id = "label-is-not-identity"
+law = "the label participates in NO admission refusal and NO retirement lookup; retirement resolves by member id alone; the label is diagnostic attribution only"
+control = "WritRoster.SameLabelMembersRetireByTokenNotByLabel"
+note = "public observables are permutation-invariant over same-label rows, so this control witnesses the exact-id law through test-only friend access (roster_test_access)"
+
+[[rules]]
+id = "never-started-still-retires"
+law = "a synchronously refused launch still holds its member and retires it; never-started is a caller disposition, not an excuse to vanish"
+control = "WritRoster.NeverStartedStillRetiresThroughTheRoster"
+
+[[rules]]
+id = "sealed-admission"
+law = "seal fences every later admit"
+control = "WritRoster.SealFencesLateAdmission"
+
+[[rules]]
+id = "zero-is-a-photograph"
+law = "an empty population before seal is not quiescence"
+control = "WritRoster.ZeroBeforeSealIsNotDrained"
+
+[[rules]]
+id = "drain-is-received-not-inferred"
+law = "quiescence arrives through the owner's retained wake, retained for late joiners"
+control = "WritRoster.AdmitSealRetireDrainsAndCompletesTheWake"
+late_joiner_control = "WritRoster.LateJoinerObservesRetainedDrainFact"
+
+[[rules]]
+id = "leak-wedges-visibly"
+law = "a leak is reported, counted sticky, and wedges drained() forever"
+control = "WritRoster.LeakedMemberWedgesTheDrainVisibly"
+
+[[rules]]
+id = "leak-survives-teardown"
+law = "the leak fact commits on the dropping thread before any executor is involved; the posted bookkeeping captures the shared state strongly, so teardown loses tidiness, never the wedge"
+control = "WritRoster.LeakCommitsEvenWhenTheExecutorNeverRunsAgain"
+subprocess_control = "WritRosterDeathTest.FailFastAbortsOnALeakedMember"
+
+[[rules]]
+id = "refusal-preserves-obligation"
+law = "a refused retirement does not consume the member token"
+control = "WritRoster.ForeignRetireRefusesWithoutConsumingTheObligation"
+
+[[rules]]
+id = "label-observation-only"
+law = "live_with(label) is a diagnostic count; it is the only operation that evaluates Label equality and is therefore not noexcept"
+control = "WritRoster.LiveWithCountsTrackAdmissionsMinusRetirements"
+
+[[rules]]
+id = "member-identity-is-minted"
+law = "member ids come from a writ::mint, so identity exhaustion is a sticky admission refusal, never a wrap through zero"
+evidence = "roster::admit refuses when mint::next refuses"
+
+[[rules]]
+id = "one-engine-no-copied-wedge"
+law = "roster and census share ONE seal/leak/drain/wake engine (detail::obligation_state + detail::abandon_obligation); the row stores are private per-face; census/v1 remains behaviorally stationary over the shared engine"
+evidence = "src/writ/includes/writ/detail/obligation-lifecycle.hpp; the complete pre-refit census conformance suite passes unchanged"
