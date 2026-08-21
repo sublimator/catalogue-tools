@@ -46,6 +46,14 @@ using namespace std::chrono_literals;
 
 namespace {
 
+#if defined(__has_feature)
+constexpr bool kThreadSanitizerEnabled = __has_feature(thread_sanitizer);
+#elif defined(__SANITIZE_THREAD__)
+constexpr bool kThreadSanitizerEnabled = true;
+#else
+constexpr bool kThreadSanitizerEnabled = false;
+#endif
+
 RpcResult
 marked_result(std::uint64_t marker)
 {
@@ -201,9 +209,13 @@ TEST(RpcCallbackBridge0077, ForeignCompletionRacesCallerCancellation)
 // toolchain catches this defect class in this exact release shape, so a
 // quiet TSan run of ForeignCompletionRacesCallerCancellation would be
 // an admissible DID-NOT-FIRE rather than a null probe. (In non-TSan
-// builds this is benign test-local state.)
+// builds the control is skipped: an intentional data race is still undefined
+// behavior even when it is test-local.
 TEST(RpcCallbackBridge0077, TsanDominationControlSeededPair)
 {
+    if (!kThreadSanitizerEnabled)
+        GTEST_SKIP() << "domination control requires a TSan build";
+
     static std::uint64_t seeded_cell = 0;
     std::uint64_t sink = 0;
 

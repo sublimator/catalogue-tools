@@ -69,6 +69,14 @@ using namespace std::chrono_literals;
 
 namespace {
 
+#if defined(__has_feature)
+constexpr bool kThreadSanitizerEnabled = __has_feature(thread_sanitizer);
+#elif defined(__SANITIZE_THREAD__)
+constexpr bool kThreadSanitizerEnabled = true;
+#else
+constexpr bool kThreadSanitizerEnabled = false;
+#endif
+
 catl::xdata::Protocol
 test_protocol()
 {
@@ -447,9 +455,13 @@ TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignReadersVsIngress)
 // topology MUST be caught by a TSan build. Proves the runner
 // configuration detects this defect class, making a quiet TSan run of
 // the workloads above an admissible DID-NOT-FIRE rather than a null
-// probe. (In non-TSan builds this is benign-by-luck test-local state.)
+// probe. In non-TSan builds the control is skipped: an intentional data race
+// is still undefined behavior even when it is test-local.
 TEST(ValidationQuorumTrackerPostHop0076, TsanDominationControlSeededPair)
 {
+    if (!kThreadSanitizerEnabled)
+        GTEST_SKIP() << "domination control requires a TSan build";
+
     asio::io_context io;
     auto work = asio::make_work_guard(io);
     auto strand = asio::make_strand(io);

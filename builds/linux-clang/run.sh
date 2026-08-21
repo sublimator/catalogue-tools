@@ -135,6 +135,10 @@ case "$MODE" in
             --gtest_brief=1
         race_rc=$?
         set -e
+        if [[ "$race_rc" -ne 0 && "$race_rc" -ne 66 ]]; then
+            echo "rpc-tsan: race cell failed outside the evidence protocol (rc=$race_rc)" >&2
+            exit "$race_rc"
+        fi
         echo "rpc-tsan: race cell exit=$race_rc (66=FIRED, 0=quiet)"
         ;;
     vqt-tsan)
