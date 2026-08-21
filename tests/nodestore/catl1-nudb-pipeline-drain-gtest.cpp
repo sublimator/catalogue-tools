@@ -14,7 +14,7 @@
 //      exactly the tool's stats-disabled composition:
 //      catl1-to-nudb.cpp builder_thread.join -> close_database)
 //   Cell 2: ParallelDedupeBacklogLossExceedsInFlightBound
-//   Cell 3: FiveCounterPhotographBreaksInsideWindow
+//   Cell 3: FiveCounterProtocolReplicaBreaksInsideWindow
 //     (faithful in-process replica of the tool's stats-enabled outer
 //      drain poll, catl1-to-nudb.cpp:889-891: break on one simultaneous
 //      zero of all five public depth getters)
@@ -175,8 +175,7 @@ struct LedgerChainFixture
         auto collect = [&](const boost::intrusive_ptr<SHAMapTreeNode>& node) {
             if (node->is_inner())
             {
-                auto inner =
-                    boost::static_pointer_cast<SHAMapInnerNode>(node);
+                auto inner = boost::static_pointer_cast<SHAMapInnerNode>(node);
                 if (inner->get_branch_count() == 0)
                     return true;
                 out.expected_keys.insert(inner->get_node_source_hash());
@@ -198,7 +197,11 @@ struct LedgerChainFixture
         info.hash = out.header_key;
 
         out.snapshot = LedgerSnapshot{
-            info, pipeline_working, pipeline_tx, state_ops, tx_ops,
+            info,
+            pipeline_working,
+            pipeline_tx,
+            state_ops,
+            tx_ops,
             processing_version};
 
         // Chain both sides for the next ledger (tool builder:
@@ -219,25 +222,59 @@ struct PipelineCloser
     bool
     close()
     {
+        bool result = pipeline.close_database();
         closed = true;
-        return pipeline.close_database();
+        return result;
     }
-    ~PipelineCloser()
+    ~PipelineCloser() noexcept
     {
         if (!closed)
-            pipeline.close_database();
+        {
+            try
+            {
+                pipeline.close_database();
+            }
+            catch (...)
+            {
+                // The original assertion/exception remains the test result.
+                // Cleanup must never terminate the test process.
+            }
+        }
     }
 };
 
-fs::path
-fresh_dir(const std::string& name)
+class TempDir
 {
-    fs::path dir = fs::temp_directory_path() / name;
-    if (fs::exists(dir))
-        fs::remove_all(dir);
-    fs::create_directories(dir);
-    return dir;
-}
+    fs::path path_;
+
+public:
+    explicit TempDir(const std::string& name)
+        : path_(
+              fs::temp_directory_path() /
+              fs::unique_path(name + "-%%%%-%%%%-%%%%"))
+    {
+        // Debug/Release and CTest shards may execute this witness concurrently.
+        // A fixed basename lets one process remove another process's live
+        // store, manufacturing oracle failures unrelated to the pipeline.
+        fs::create_directories(path_);
+    }
+
+    TempDir(const TempDir&) = delete;
+    TempDir&
+    operator=(const TempDir&) = delete;
+
+    ~TempDir() noexcept
+    {
+        boost::system::error_code ec;
+        fs::remove_all(path_, ec);
+    }
+
+    const fs::path&
+    path() const noexcept
+    {
+        return path_;
+    }
+};
 
 // Count how many of `keys` are PRESENT in the finished store.
 size_t
@@ -278,13 +315,14 @@ union_of(const std::vector<BuiltLedger>& ledgers)
     return all;
 }
 
-// Poll the five public depth getters until all report zero AND the
-// written-node totals are stable across consecutive polls; the totals
-// check closes the dequeue-vs-completion gap the depth counters alone
-// cannot see (that gap is the defect under test — an external waiter has
-// to compensate for it explicitly).
+// Validity-control settlement, not the production drain protocol. Requiring
+// the exact expected header count proves that every admitted ledger has
+// reached the terminal writer. The writer increments that count inside its
+// active frame; close_database() joins that frame, so any remaining nodes in
+// its batch are completion-covered. The five public queue depths alone cannot
+// establish this fact — their transient zeros are the defect under test.
 void
-settle(CatlNudbPipeline& pipeline)
+settle(CatlNudbPipeline& pipeline, size_t expected_ledger_headers)
 {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
     uint64_t last_totals = ~0ULL;
@@ -301,7 +339,9 @@ settle(CatlNudbPipeline& pipeline)
         uint64_t totals = pipeline.get_total_inner_nodes() +
             pipeline.get_total_leaf_nodes() +
             pipeline.get_total_ledger_headers();
-        if (queues_zero && totals == last_totals && totals > 0)
+        bool all_ledgers_reached_writer =
+            pipeline.get_total_ledger_headers() == expected_ledger_headers;
+        if (all_ledgers_reached_writer && queues_zero && totals == last_totals)
             stable_polls++;
         else
             stable_polls = 0;
@@ -334,7 +374,8 @@ make_pipeline(
 // ── Validity control (sequential): settled drain -> complete store ──────
 TEST(CatlNudbPipelineDrain, DrainSettledSequentialDeliversCompleteStore)
 {
-    fs::path dir = fresh_dir("catl1_nudb_0078_settled_seq");
+    TempDir temp("catl1_nudb_0078_settled_seq");
+    const auto& dir = temp.path();
     LedgerChainFixture chain;
     auto pipeline = make_pipeline(chain.opts, dir, false, 2);
     PipelineCloser closer{*pipeline};
@@ -346,7 +387,7 @@ TEST(CatlNudbPipelineDrain, DrainSettledSequentialDeliversCompleteStore)
     for (auto& ledger : ledgers)
         pipeline->enqueue_to_hasher(ledger.snapshot);
 
-    settle(*pipeline);
+    settle(*pipeline, ledgers.size());
     ASSERT_TRUE(closer.close());
 
     KeySet all = union_of(ledgers);
@@ -359,7 +400,8 @@ TEST(CatlNudbPipelineDrain, DrainSettledSequentialDeliversCompleteStore)
 // ── Validity control (parallel dedupe): settled drain -> complete store ─
 TEST(CatlNudbPipelineDrain, DrainSettledParallelDedupeDeliversCompleteStore)
 {
-    fs::path dir = fresh_dir("catl1_nudb_0078_settled_par");
+    TempDir temp("catl1_nudb_0078_settled_par");
+    const auto& dir = temp.path();
     LedgerChainFixture chain;
     auto pipeline = make_pipeline(chain.opts, dir, true, 2);
     PipelineCloser closer{*pipeline};
@@ -370,7 +412,7 @@ TEST(CatlNudbPipelineDrain, DrainSettledParallelDedupeDeliversCompleteStore)
     for (auto& ledger : ledgers)
         pipeline->enqueue_to_hasher(ledger.snapshot);
 
-    settle(*pipeline);
+    settle(*pipeline, ledgers.size());
     ASSERT_TRUE(closer.close());
 
     KeySet all = union_of(ledgers);
@@ -389,7 +431,8 @@ TEST(CatlNudbPipelineDrain, DrainSettledParallelDedupeDeliversCompleteStore)
 // shutdown_ lands before the ledger's output reaches any downstream queue.
 TEST(CatlNudbPipelineDrain, SequentialImmediateCloseLosesTailLedger)
 {
-    fs::path dir = fresh_dir("catl1_nudb_0078_cell1");
+    TempDir temp("catl1_nudb_0078_cell1");
+    const auto& dir = temp.path();
     LedgerChainFixture chain;
     auto pipeline = make_pipeline(chain.opts, dir, false, 2);
     PipelineCloser closer{*pipeline};
@@ -426,11 +469,14 @@ TEST(CatlNudbPipelineDrain, SequentialImmediateCloseLosesTailLedger)
 // stop waits only hasher/compression/write — never dedupe_queue_ nor
 // writer_assembly_map_ (:1146-1203) — and the writer exits on shutdown
 // even with complete, writable rows in the assembly station (:1762-1772).
-// Loss must therefore EXCEED the in-flight bound (1 hasher + 2 compression
-// workers + 1 writer = 4), which distinguishes defect 2 from defect 1.
+// Loss must therefore EXCEED the lossy in-flight bound (1 hasher + 2
+// compression workers + 1 dedupe worker = 4), which distinguishes defect 2
+// from defect 1. An active writer is deliberately excluded: stop joins its
+// frame, so a batch already owned by the writer completes rather than vanishes.
 TEST(CatlNudbPipelineDrain, ParallelDedupeBacklogLossExceedsInFlightBound)
 {
-    fs::path dir = fresh_dir("catl1_nudb_0078_cell2");
+    TempDir temp("catl1_nudb_0078_cell2");
+    const auto& dir = temp.path();
     LedgerChainFixture chain;
     auto pipeline = make_pipeline(chain.opts, dir, true, 2);
     PipelineCloser closer{*pipeline};
@@ -473,9 +519,10 @@ TEST(CatlNudbPipelineDrain, ParallelDedupeBacklogLossExceedsInFlightBound)
 // tool, recorded: poll interval 5ms instead of 100ms (interval affects
 // only the chance of landing inside the window, not the protocol), no
 // dashboard sink.
-TEST(CatlNudbPipelineDrain, FiveCounterPhotographBreaksInsideWindow)
+TEST(CatlNudbPipelineDrain, FiveCounterProtocolReplicaBreaksInsideWindow)
 {
-    fs::path dir = fresh_dir("catl1_nudb_0078_cell3");
+    TempDir temp("catl1_nudb_0078_cell3");
+    const auto& dir = temp.path();
     LedgerChainFixture chain;
     auto pipeline = make_pipeline(chain.opts, dir, false, 2);
     PipelineCloser closer{*pipeline};
@@ -484,7 +531,7 @@ TEST(CatlNudbPipelineDrain, FiveCounterPhotographBreaksInsideWindow)
     // trivially the never-started state.
     BuiltLedger small = chain.build(100, kSmallLedgerItems);
     pipeline->enqueue_to_hasher(small.snapshot);
-    settle(*pipeline);
+    settle(*pipeline, 1);
 
     BuiltLedger big = chain.build(101, kBigLedgerItems);
     pipeline->enqueue_to_hasher(big.snapshot);
@@ -501,8 +548,8 @@ TEST(CatlNudbPipelineDrain, FiveCounterPhotographBreaksInsideWindow)
         size_t dedupe_depth = pipeline->get_dedupe_queue_depth();
         size_t assembly_depth = pipeline->get_assembly_station_depth();
         size_t write_depth = pipeline->get_write_queue_depth();
-        if (hasher_depth == 0 && compression_depth == 0 &&
-            dedupe_depth == 0 && assembly_depth == 0 && write_depth == 0)
+        if (hasher_depth == 0 && compression_depth == 0 && dedupe_depth == 0 &&
+            assembly_depth == 0 && write_depth == 0)
             break;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -510,7 +557,8 @@ TEST(CatlNudbPipelineDrain, FiveCounterPhotographBreaksInsideWindow)
 
     // The small ledger settled before the photograph; only the big
     // ledger's fate witnesses the defect.
-    EXPECT_EQ(count_present(dir, small.expected_keys), small.expected_keys.size())
+    EXPECT_EQ(
+        count_present(dir, small.expected_keys), small.expected_keys.size())
         << "settled ledger must be complete (harness validity)";
     EXPECT_EQ(count_present(dir, {big.header_key}), 0u)
         << "photograph broke inside the big ledger's window, so its header "
