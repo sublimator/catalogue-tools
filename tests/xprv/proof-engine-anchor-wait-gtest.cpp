@@ -6,7 +6,7 @@
 // discards `ec`), and classifies the outcome solely from `entry.present`
 // (:1237), throwing one generic "anchor bundle fetch failed" (:1245) for
 // every not-present wake. These witnesses prove the misclassification:
-// three DISTINCT truthful terminals — waiter deadline expiry, cache
+// three DISTINCT truthful terminals — shared operation deadline expiry, cache
 // invalidation, and builder failure — produce byte-identical generic
 // failures, and the deadline case is a FALSE failure: the in-flight build
 // is still legitimately live and can succeed moments later.
@@ -40,11 +40,13 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -96,8 +98,7 @@ struct AnchorWaitHarness
     {
         return asio::co_spawn(
             io,
-            ProofEngineTestAccess::join_anchor_wait(
-                engine, kSeq, hash, kVlSeq),
+            ProofEngineTestAccess::join_anchor_wait(engine, kSeq, hash, kVlSeq),
             asio::use_future);
     }
 
@@ -118,11 +119,61 @@ struct AnchorWaitHarness
             asio::detached);
     }
 
-    // Run until all scheduled work completes, with a wall-clock guard.
+    // A real test-side builder servant: its coroutine frame remains live
+    // across the shared timer's expiry, then publishes through the exact
+    // production-success transition reproduced by TestAccess.
+    std::future<void>
+    spawn_builder_success(
+        std::shared_ptr<asio::steady_timer> release,
+        std::atomic_bool& running)
+    {
+        return asio::co_spawn(
+            io,
+            [this,
+             release = std::move(release),
+             &running]() -> asio::awaitable<void> {
+                running.store(true, std::memory_order_release);
+                boost::system::error_code error;
+                co_await release->async_wait(
+                    asio::redirect_error(asio::use_awaitable, error));
+                if (error != asio::error::operation_aborted)
+                    throw std::runtime_error(
+                        "builder release gate completed unexpectedly");
+                ProofEngineTestAccess::complete_anchor_build(
+                    *engine, kSeq, hash, kVlSeq);
+                running.store(false, std::memory_order_release);
+            },
+            asio::use_future);
+    }
+
+    template <typename T>
+    void
+    run_until(std::future<T>& target)
+    {
+        if (io.stopped())
+            io.restart();
+        while (target.wait_for(0ms) != std::future_status::ready)
+        {
+            if (io.run_one() == 0)
+                throw std::runtime_error(
+                    "io_context exhausted before target future completed");
+        }
+    }
+
+    std::size_t
+    poll()
+    {
+        if (io.stopped())
+            io.restart();
+        return io.poll();
+    }
+
+    // Run until all scheduled work completes.
     void
     run()
     {
-        io.restart();
+        if (io.stopped())
+            io.restart();
         io.run();
     }
 };
@@ -169,8 +220,8 @@ TEST(ProofEngineAnchorWait0074, CompletionWakeReturnsBundle)
 }
 
 // ── Witness 1: deadline expiry becomes a generic FETCH FAILURE ─────────
-// The truthful outcome is "this waiter's deadline elapsed while the build
-// is still legitimately in flight". The reported outcome is the same
+// The truthful outcome is "the shared operation deadline elapsed while the
+// build is still legitimately in flight". The reported outcome is the same
 // generic error used for a failed build — and the entry is STILL
 // in-flight after the throw, proving no builder terminal was received.
 TEST(ProofEngineAnchorWait0074, DeadlineExpiryReportsGenericFetchFailure)
@@ -229,7 +280,7 @@ TEST(ProofEngineAnchorWait0074, BuilderFailureIndistinguishableFromDeadline)
 }
 
 // ── Witness 4: the composed false-failure counterexample ───────────────
-// The issue's headline trace, end to end: (a) a waiter deadlines and
+// The issue's headline trace, end to end: (a) the shared deadline fires and
 // false-fails while the build is live; (b) every LATE joiner then fails
 // INSTANTLY — the shared timer is already expired, so its wait completes
 // immediately with present=false (the cache amplifies the false failure);
@@ -240,27 +291,39 @@ TEST(ProofEngineAnchorWait0074, LateBuilderSuccessProvesFailuresWereFalse)
 {
     AnchorWaitHarness harness;
     harness.create_in_flight(50ms);
+    std::atomic_bool builder_running{false};
+    auto builder_release = std::make_shared<asio::steady_timer>(
+        harness.io, asio::steady_timer::time_point::max());
+    auto builder =
+        harness.spawn_builder_success(builder_release, builder_running);
 
-    // (a) first waiter deadlines
+    // (a) the shared deadline fires while an actual builder servant remains
+    // suspended and owns a future publication.
     auto first = harness.spawn_waiter();
-    harness.run();
+    harness.run_until(first);
     EXPECT_EQ(failure_message(first), kGenericFailure);
+    ASSERT_TRUE(builder_running.load(std::memory_order_acquire))
+        << "the builder coroutine must still own its live frame";
     ASSERT_TRUE(harness.in_flight()) << "build still legitimately live";
 
-    // (b) a late joiner false-fails instantly on the already-expired timer
-    auto t0 = std::chrono::steady_clock::now();
+    // (b) a late joiner false-fails without a blocking run: poll() may drive
+    // only handlers already ready, proving the expired shared timer is the
+    // amplifier rather than another elapsed wall-clock deadline.
     auto second = harness.spawn_waiter();
-    harness.run();
-    auto second_wait = std::chrono::steady_clock::now() - t0;
+    EXPECT_GT(harness.poll(), 0u);
+    ASSERT_EQ(second.wait_for(0ms), std::future_status::ready)
+        << "the expired shared timer must make the late joiner immediately "
+           "ready";
     EXPECT_EQ(failure_message(second), kGenericFailure);
-    EXPECT_LT(second_wait, 5s)
-        << "the joiner failed without waiting its own 30s deadline — the "
-           "expired shared timer short-circuits every later waiter";
     EXPECT_TRUE(harness.in_flight());
+    EXPECT_TRUE(builder_running.load(std::memory_order_acquire));
 
-    // (c) the builder succeeds moments later (production success shape)
-    ProofEngineTestAccess::complete_anchor_build(
-        *harness.engine, kSeq, harness.hash, kVlSeq);
+    // (c) the still-live builder succeeds moments later (production success
+    // shape) and its coroutine frame is joined through the future.
+    builder_release->cancel();
+    harness.run();
+    builder.get();
+    EXPECT_FALSE(builder_running.load(std::memory_order_acquire));
 
     // (d) the next caller gets a HIT on the bundle both waiters were told
     // had failed
