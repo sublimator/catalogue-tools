@@ -20,13 +20,13 @@
 // - PostHopContinuationEscapesOwnerStrand asserts the CURRENT defect
 //   (the escape is observed); after an owner-born-children repair this
 //   test FAILS and inverts into the permanent regression control.
-// - The two TsanWorkload_* tests are GREEN as tests in any build; under
-//   a -fsanitize=thread build they are EXPECTED to produce data-race
-//   reports while 0076 is unrepaired — the TSan report is the witness
-//   artifact, captured from the run log (admissible evidence: Linux
-//   clang-20 TSan per the ratified Wave-2 boundary; the clang-16
-//   miscompile report invalidated older toolchains for strand claims).
-// - TsanDominationControl_SeededUnsynchronizedPair seeds a plain
+// - The two TsanWorkload_* tests are GREEN as tests in any build. Under
+//   -fsanitize=thread they attempt to expose the source-pinned race; a
+//   report is FIRED evidence, while a quiet run is only an admissible
+//   DID-NOT-FIRE when the domination control below reports first.
+//   (Ratified Wave-2 boundary: Linux clang-20; the clang-16 miscompile
+//   report invalidated older toolchains for strand claims.)
+// - TsanDominationControlSeededPair seeds a plain
 //   unsynchronized read/write pair in the SAME runner topology; a TSan
 //   build MUST flag it. It proves the environment catches this defect
 //   class, so a quiet TSan run of the workloads would be an admissible
@@ -303,8 +303,8 @@ TEST(ValidationQuorumTrackerPostHop0076, PostHopContinuationEscapesOwnerStrand)
 }
 
 // ── Witness 2 (TSan workload): foreign co_stats vs strand-side insert ──
-// Green as a test. Under -fsanitize=thread this workload is EXPECTED to
-// report a data race on collector_.by_ledger while 0076 is unrepaired:
+// Green as a test. Under -fsanitize=thread this workload attempts to expose
+// a data race on collector_.by_ledger while 0076 is unrepaired:
 // the escaped co_stats body iterates by_ledger on this thread's runner
 // with NO mutex (:1723-1725) while co_insert_validation_for_test
 // mutates it on the strand under publication_mutex_ (:1761-1762) — a
@@ -358,16 +358,21 @@ TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignStatsVsStrandInsert)
     std::this_thread::sleep_for(300ms);
     keep_running.store(false, std::memory_order_release);
 
-    EXPECT_EQ(writer_future.wait_for(5s), std::future_status::ready);
-    EXPECT_EQ(reader_future.wait_for(5s), std::future_status::ready);
-    writer_future.get();
-    (void)reader_future.get();
+    auto const writer_status = writer_future.wait_for(5s);
+    auto const reader_status = reader_future.wait_for(5s);
+    if (writer_status == std::future_status::ready)
+        writer_future.get();
+    if (reader_status == std::future_status::ready)
+        (void)reader_future.get();
 
     buffer->stop();
     work.reset();
     io.stop();
     runner_a.join();
     runner_b.join();
+
+    EXPECT_EQ(writer_status, std::future_status::ready);
+    EXPECT_EQ(reader_status, std::future_status::ready);
 }
 
 // ── Witness 3 (TSan workload): real ingress vs foreign readers ─────────
@@ -425,14 +430,17 @@ TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignReadersVsIngress)
     }
     keep_running.store(false, std::memory_order_release);
 
-    EXPECT_EQ(reader_future.wait_for(5s), std::future_status::ready);
-    (void)reader_future.get();
+    auto const reader_status = reader_future.wait_for(5s);
+    if (reader_status == std::future_status::ready)
+        (void)reader_future.get();
 
     buffer->stop();
     work.reset();
     io.stop();
     runner_a.join();
     runner_b.join();
+
+    EXPECT_EQ(reader_status, std::future_status::ready);
 }
 
 // ── Domination control: a seeded unsynchronized pair in the same
