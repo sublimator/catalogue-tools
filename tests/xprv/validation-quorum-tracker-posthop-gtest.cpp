@@ -218,6 +218,8 @@ TEST(ValidationQuorumTrackerPostHop0076, PostHopContinuationEscapesOwnerStrand)
     std::thread runner_b([&io] { io.run(); });
 
     bool escape_observed = false;
+    bool harness_completed = true;
+    std::string harness_failure;
     int rounds_used = 0;
 
     for (int round = 1; round <= 50 && !escape_observed; ++round)
@@ -262,29 +264,42 @@ TEST(ValidationQuorumTrackerPostHop0076, PostHopContinuationEscapesOwnerStrand)
 
         gate_b1.release();
 
-        auto const status = stats_future.wait_for(2s);
-        ASSERT_EQ(status, std::future_status::ready)
-            << "co_stats never completed; round " << round;
+        auto status = stats_future.wait_for(100ms);
         // The strand is serialized: if the continuation needed the
         // strand it could not finish while B2 is parked there.
-        escape_observed = b2_parked.load(std::memory_order_acquire);
-        (void)stats_future.get();
+        escape_observed = status == std::future_status::ready &&
+            b2_parked.load(std::memory_order_acquire);
 
         gate_b2.release();
-        ASSERT_EQ(b2_done.wait_for(2s), std::future_status::ready);
-    }
+        auto const b2_status = b2_done.wait_for(2s);
+        if (status != std::future_status::ready)
+            status = stats_future.wait_for(2s);
+        if (status == std::future_status::ready)
+            (void)stats_future.get();
 
-    RecordProperty("rounds_used", rounds_used);
-    EXPECT_TRUE(escape_observed)
-        << "co_stats' post-hop continuation completed only after the "
-           "strand drained — no escape observed in 50 rounds; the "
-           "owner-strand claim held (witness DID NOT FIRE)";
+        if (b2_status != std::future_status::ready ||
+            status != std::future_status::ready)
+        {
+            harness_completed = false;
+            harness_failure =
+                "co_stats or blocker B2 failed to drain in round " +
+                std::to_string(round);
+            break;
+        }
+    }
 
     buffer->stop();
     work.reset();
     io.stop();
     runner_a.join();
     runner_b.join();
+
+    RecordProperty("rounds_used", rounds_used);
+    ASSERT_TRUE(harness_completed) << harness_failure;
+    EXPECT_TRUE(escape_observed)
+        << "co_stats' post-hop continuation completed only after the "
+           "strand drained — no escape observed in 50 rounds; the "
+           "owner-strand claim held (witness DID NOT FIRE)";
 }
 
 // ── Witness 2 (TSan workload): foreign co_stats vs strand-side insert ──
