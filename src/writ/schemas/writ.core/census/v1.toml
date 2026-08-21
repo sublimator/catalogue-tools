@@ -46,6 +46,11 @@ law = "quiescence arrives through the owner's retained wake, retained for late j
 control = "WritCensus.AdmitSealRetireDrainsAndCompletesTheWake"
 
 [[rules]]
+id = "policy-terminal-does-not-counterfeit-drain"
+law = "an application policy may decide a forced outcome and request cancellation before physical drain, but executor release remains unauthorized until every admitted child retires through its real completion and the retained drain wake fires"
+control = "WritCensus.ForcedPolicyDecisionPrecedesButDoesNotCounterfeitDrain"
+
+[[rules]]
 id = "leak-wedges-visibly"
 law = "a leak is reported, counted sticky, and wedges drained() forever, instead of the fossil's silent hang on an unaccounted obligation"
 control = "WritCensus.LeakedMemberWedgesTheDrainVisibly"
