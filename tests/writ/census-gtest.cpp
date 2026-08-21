@@ -197,6 +197,69 @@ TEST(WritCensus, NeverStartedStillRetiresThroughTheCensus)
     drain_io(io);
 }
 
+// A policy deadline and physical drain are two facts. The deadline may decide
+// that the application outcome is "forced" and request cancellation, but it
+// must not counterfeit retirement or stop the executor while the child's
+// exact completion is still owed. A cooperative child returns through its
+// real handler, retires the member, and only the retained drain wake may
+// authorize executor release.
+TEST(WritCensus, ForcedPolicyDecisionPrecedesButDoesNotCounterfeitDrain)
+{
+    asio::io_context io;
+    writ::home h(io);
+    string_census c(h);
+    auto child = h.timer(asio::steady_timer::time_point::max());
+    std::optional<string_census::member> child_obligation;
+    bool forced_policy_decided = false;
+    bool child_receipt_consumed = false;
+    bool executor_release_authorized = false;
+
+    asio::post(h.executor(), [&]() {
+        auto admitted = c.admit("child");
+        ASSERT_TRUE(admitted && *admitted);
+        child_obligation.emplace(std::move(*admitted));
+        child->async_wait([&](boost::system::error_code error) {
+            EXPECT_EQ(error, asio::error::operation_aborted);
+            ASSERT_TRUE(child_obligation && *child_obligation);
+            EXPECT_EQ(
+                c.retire(std::move(*child_obligation)),
+                retire_outcome::drained);
+            child_obligation.reset();
+            child_receipt_consumed = true;
+        });
+        c.seal();
+
+        forced_policy_decided = true;
+        EXPECT_FALSE(c.drained());
+        EXPECT_FALSE(executor_release_authorized);
+        child->cancel();
+    });
+
+    auto drained = asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            EXPECT_EQ(
+                co_await c.drained_signal()->co_wait_until(in(5s)),
+                wait_outcome::signaled);
+            executor_release_authorized = true;
+        },
+        asio::use_future);
+
+    while (!forced_policy_decided)
+    {
+        ASSERT_NE(io.run_one(), 0u);
+        io.restart();
+    }
+    EXPECT_FALSE(child_receipt_consumed);
+    EXPECT_FALSE(executor_release_authorized)
+        << "forced policy is not physical drain";
+
+    EXPECT_NO_THROW(await(io, drained));
+    EXPECT_TRUE(child_receipt_consumed);
+    EXPECT_TRUE(executor_release_authorized);
+    EXPECT_EQ(c.leaked(), 0u);
+}
+
 // The wedge is the feature: a member dropped without retirement is recorded,
 // and the census refuses to drain forever — visibly, instead of a shutdown
 // that silently hangs on an unaccounted obligation.
