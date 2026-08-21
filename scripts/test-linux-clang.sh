@@ -16,7 +16,10 @@ ARCH="${PLATFORM#linux/}"
 MODE="${LINUX_CLANG_MODE:-focused}"
 REPEAT="${LINUX_CLANG_REPEAT:-100}"
 BUILD_CORES="${BUILD_CORES:-$(sysctl -n hw.physicalcpu 2>/dev/null || nproc)}"
-CONAN_VOLUME="catalogue-tools-linux-clang20-${ARCH}-conan"
+# The first Clang-20 ARM experiment populated the old volume with Boost bytes
+# built under temporary component exclusions while retaining a full-surface
+# package identity. Never let that cache certify the corrected profile.
+CONAN_VOLUME="catalogue-tools-linux-clang20-${ARCH}-conan-full"
 BUILD_VARIANT=""
 if [[ "$MODE" == *-tsan ]]; then
     BUILD_VARIANT="-tsan"
