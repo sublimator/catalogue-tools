@@ -17,7 +17,11 @@ MODE="${LINUX_CLANG_MODE:-focused}"
 REPEAT="${LINUX_CLANG_REPEAT:-100}"
 BUILD_CORES="${BUILD_CORES:-$(sysctl -n hw.physicalcpu 2>/dev/null || nproc)}"
 CONAN_VOLUME="catalogue-tools-linux-clang20-${ARCH}-conan"
-BUILD_VOLUME="catalogue-tools-linux-clang20-${ARCH}-build"
+BUILD_VARIANT=""
+if [[ "$MODE" == *-tsan ]]; then
+    BUILD_VARIANT="-tsan"
+fi
+BUILD_VOLUME="catalogue-tools-linux-clang20-${ARCH}-build${BUILD_VARIANT}"
 
 docker build \
     --platform "$PLATFORM" \

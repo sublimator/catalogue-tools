@@ -9,7 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
         clang-20 \
+        libclang-rt-20-dev \
         cmake \
+        g++-14 \
+        gcc-14 \
         git \
         libc++-dev \
         libc++abi-dev \
