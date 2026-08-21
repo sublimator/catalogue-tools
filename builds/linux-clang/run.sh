@@ -100,13 +100,42 @@ case "$MODE" in
             --gtest_brief=1
         ;;
     rpc-tsan)
+        # Issue 0077 witness protocol (three steps, mirrors vqt-tsan —
+        # restructured in claude's adversarial review: the previous
+        # halt_on_error=1 form made a FIRED witness kill the gate under
+        # set -e, and a quiet run had no domination control, so it could
+        # not distinguish "no race" from a null probe).
         cmake --build "$BUILD_DIR" --target rpc-client-gtest -j "$BUILD_CORES"
-        TSAN_OPTIONS="halt_on_error=1" \
-            "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
-            --gtest_filter='RpcCallbackBridge0077.ForeignCompletionRacesCallerCancellation' \
+        # 1) The deterministic cells must PASS.
+        "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
+            --gtest_filter='RpcCallbackBridge0077.CompletionReturnsPublishedResult:RpcCallbackBridge0077.CallerCancellationReturnsEmptyRpcResult:RpcCallbackBridge0077.DetachedRequestDiscardsCallbackException' \
             --gtest_repeat="$REPEAT" \
             --gtest_break_on_failure \
             --gtest_brief=1
+        # 2) The seeded domination control MUST make TSan report (exit
+        #    66); a quiet control is a null probe and refuses the run.
+        set +e
+        TSAN_OPTIONS="halt_on_error=0 exitcode=66" \
+            "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
+            --gtest_filter='RpcCallbackBridge0077.TsanDominationControlSeededPair' \
+            --gtest_brief=1
+        control_rc=$?
+        set -e
+        if [[ "$control_rc" -ne 66 ]]; then
+            echo "rpc-tsan: domination control did not report (rc=$control_rc) — null probe, refusing"
+            exit 1
+        fi
+        # 3) The race cell: exit 66 = FIRED (data-race reports in the
+        #    log); exit 0 = quiet, admissible DID-NOT-FIRE given step 2.
+        set +e
+        TSAN_OPTIONS="halt_on_error=0 exitcode=66" \
+            "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
+            --gtest_filter='RpcCallbackBridge0077.ForeignCompletionRacesCallerCancellation' \
+            --gtest_repeat="$REPEAT" \
+            --gtest_brief=1
+        race_rc=$?
+        set -e
+        echo "rpc-tsan: race cell exit=$race_rc (66=FIRED, 0=quiet)"
         ;;
     vqt-tsan)
         # Issue 0076 witness protocol (three steps, see

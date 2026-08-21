@@ -194,6 +194,40 @@ TEST(RpcCallbackBridge0077, ForeignCompletionRacesCallerCancellation)
     }
 }
 
+// Domination control for the TSan cell above (added in claude's
+// adversarial review): a plain unsynchronized read/write pair released
+// from two raw threads through the same std::barrier topology the race
+// cell uses. A -fsanitize=thread build MUST report it; that proves the
+// toolchain catches this defect class in this exact release shape, so a
+// quiet TSan run of ForeignCompletionRacesCallerCancellation would be
+// an admissible DID-NOT-FIRE rather than a null probe. (In non-TSan
+// builds this is benign test-local state.)
+TEST(RpcCallbackBridge0077, TsanDominationControlSeededPair)
+{
+    static std::uint64_t seeded_cell = 0;
+    std::uint64_t sink = 0;
+
+    for (int round = 0; round < 32; ++round)
+    {
+        std::barrier release(3);
+        std::thread writer([&] {
+            release.arrive_and_wait();
+            for (int i = 0; i < 1000; ++i)
+                seeded_cell = seeded_cell + 1;
+        });
+        std::thread reader([&] {
+            release.arrive_and_wait();
+            for (int i = 0; i < 1000; ++i)
+                sink += seeded_cell;
+        });
+        release.arrive_and_wait();
+        writer.join();
+        reader.join();
+    }
+    RecordProperty("seeded_sink", static_cast<int>(sink % 1024));
+    SUCCEED();
+}
+
 // FIRED: RpcClient invokes the user callback after its catch block, while the
 // request coroutine is owned by asio::detached. A thrown callback therefore
 // reaches the detached completion handler and disappears: io_context::run()
