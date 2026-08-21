@@ -205,6 +205,7 @@ private:
     std::function<void()> public_entry_observer_for_test_;
     std::function<void()> public_resume_observer_for_test_;
     std::size_t fail_fetch_operation_starts_for_test_ = 0;
+    std::size_t fail_timer_arms_for_test_ = 0;
 
     static LogPartition log_;
 };

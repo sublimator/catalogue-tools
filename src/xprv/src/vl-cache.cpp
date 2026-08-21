@@ -108,7 +108,15 @@ VlCache::do_fetch()
     fetch_wait_signal_ = std::make_shared<writ::retained_signal>(home_);
     fetch_obligation_ = stop_roster_.admit(StopObligation::fetch);
     if (!fetch_obligation_)
-        return;  // sealed or identity-exhausted: no fetch is admitted
+    {
+        // Refusal is a disposition, not a vanishing: the generation minted
+        // above must not strand its waiters, so the refusal publishes a
+        // truthful terminal through it before returning.
+        last_fetch_ok_ = false;
+        last_fetch_error_ = "VL fetch admission refused";
+        publish_fetch_wait_change();
+        return;
+    }
 
     struct FetchAdmissionRollback
     {
@@ -561,23 +569,30 @@ VlCache::schedule_refresh()
 {
     if (phase_ != Phase::running)
         return;
+    // EVERY fallible step is placed relative to admission so that no throw
+    // can destroy an armed member (a destroyed member commits the leak
+    // wedge, permanently wedging stop): the self pointer and the shared
+    // holder ALLOCATE BEFORE admission; the member moves into the holder
+    // with a noexcept move; expires_after and async_wait sit inside ONE
+    // catch that retires the exact holder. The handler and the catch are
+    // mutually exclusive consumers; a defused token retires as a typed
+    // refused no-op.
+    auto self = shared_from_this();
+    auto holder = std::make_shared<std::optional<StopRoster::member>>();
     auto admitted = stop_roster_.admit(StopObligation::refresh_timer);
     if (!admitted)
         return;  // sealed or identity-exhausted: nothing may be armed
-    auto self = shared_from_this();
-    refresh_.expires_after(refresh_interval_);
-    // The obligation token rides the handler closure — the handler IS the
-    // obligation. The shared_ptr exists for exactly one window: if
-    // async_wait's initiation throws AFTER consuming (and destroying) its
-    // copy of the closure, the local reference below still reaches the
-    // token, so initiation failure RETIRES the obligation instead of
-    // leak-wedging it. A stale double retirement is a typed refused no-op.
-    auto obligation =
-        std::make_shared<StopRoster::member>(std::move(*admitted));
+    holder->emplace(std::move(*admitted));
     try
     {
-        refresh_.async_wait([self, obligation](boost::system::error_code ec) {
-            (void)self->stop_roster_.retire(std::move(*obligation));
+        refresh_.expires_after(refresh_interval_);
+        if (fail_timer_arms_for_test_ != 0)
+        {
+            --fail_timer_arms_for_test_;
+            throw std::runtime_error("VL timer arm failpoint");
+        }
+        refresh_.async_wait([self, holder](boost::system::error_code ec) {
+            (void)self->stop_roster_.retire(std::move(**holder));
             if (!ec && self->phase_ == Phase::running)
                 self->do_fetch();
             self->try_finish_stop_on_strand();
@@ -585,7 +600,7 @@ VlCache::schedule_refresh()
     }
     catch (...)
     {
-        (void)stop_roster_.retire(std::move(*obligation));
+        (void)stop_roster_.retire(std::move(**holder));
         throw;
     }
 }
@@ -600,18 +615,24 @@ VlCache::schedule_retry(std::chrono::seconds delay)
 {
     if (phase_ != Phase::running)
         return;
+    // Same fallible-step placement as schedule_refresh: allocate before
+    // admission, one catch over the whole arming window.
+    auto self = shared_from_this();
+    auto holder = std::make_shared<std::optional<StopRoster::member>>();
     auto admitted = stop_roster_.admit(StopObligation::refresh_timer);
     if (!admitted)
         return;  // sealed or identity-exhausted: nothing may be armed
-    auto self = shared_from_this();
-    refresh_.expires_after(delay);
-    // Same initiation-failure bridge as schedule_refresh.
-    auto obligation =
-        std::make_shared<StopRoster::member>(std::move(*admitted));
+    holder->emplace(std::move(*admitted));
     try
     {
-        refresh_.async_wait([self, obligation](boost::system::error_code ec) {
-            (void)self->stop_roster_.retire(std::move(*obligation));
+        refresh_.expires_after(delay);
+        if (fail_timer_arms_for_test_ != 0)
+        {
+            --fail_timer_arms_for_test_;
+            throw std::runtime_error("VL timer arm failpoint");
+        }
+        refresh_.async_wait([self, holder](boost::system::error_code ec) {
+            (void)self->stop_roster_.retire(std::move(**holder));
             if (!ec && self->phase_ == Phase::running)
                 self->do_fetch();
             self->try_finish_stop_on_strand();
@@ -619,7 +640,7 @@ VlCache::schedule_retry(std::chrono::seconds delay)
     }
     catch (...)
     {
-        (void)stop_roster_.retire(std::move(*obligation));
+        (void)stop_roster_.retire(std::move(**holder));
         throw;
     }
 }

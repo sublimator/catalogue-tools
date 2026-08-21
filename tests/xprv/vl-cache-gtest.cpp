@@ -119,6 +119,42 @@ public:
     }
 
     static void
+    fail_next_timer_arm(std::shared_ptr<VlCache> const& cache)
+    {
+        cache->fail_timer_arms_for_test_ = 1;
+    }
+
+    /// Seal the stop roster directly, without begin_stop: forces the
+    /// admission-refusal path while phase_ stays running.
+    static std::future<void>
+    seal_stop_roster(std::shared_ptr<VlCache> const& cache)
+    {
+        auto sealed = std::make_shared<std::promise<void>>();
+        auto future = sealed->get_future();
+        boost::asio::post(cache->strand_, [cache, sealed] {
+            cache->stop_roster_.seal();
+            sealed->set_value();
+        });
+        return future;
+    }
+
+    /// Drive the production retirement funnel for the CURRENT active fetch
+    /// operation, exactly as its own terminal would — identity-checked
+    /// consumption, never a bookkeeping bypass.
+    static std::future<bool>
+    retire_active_fetch(std::shared_ptr<VlCache> const& cache)
+    {
+        auto retired = std::make_shared<std::promise<bool>>();
+        auto future = retired->get_future();
+        boost::asio::post(cache->strand_, [cache, retired] {
+            retired->set_value(
+                cache->retire_fetch_on_strand(cache->active_fetch_));
+            cache->try_finish_stop_on_strand();
+        });
+        return future;
+    }
+
+    static void
     set_initiation_failure_diagnostic(
         std::shared_ptr<VlCache> const& cache,
         std::function<void()> hook)
@@ -188,6 +224,24 @@ successful_vl_result()
     result.vl.has_expiration = true;
     result.vl.has_validators = true;
     return result;
+}
+
+/// Settle a cache's stop roster before teardown: every admitted obligation
+/// must be receipted, or the roster records a leak at destruction (the
+/// wedge is correct — an unsettled test would be abandoning obligations)
+/// and the suite is not clean under WRIT_HOME_FAIL_FAST.
+void
+settle_stopped(
+    catl::test::DeterministicScheduler& scheduler,
+    std::shared_ptr<VlCache> const& cache)
+{
+    auto stopped = boost::asio::co_spawn(
+        scheduler.io(), cache->co_stop(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready)
+        << "settlement stop must drain promptly (a hang here means an "
+           "obligation was dropped or never receipted)";
+    EXPECT_NO_THROW(stopped.get());
 }
 
 class ThrowingLogBuffer final : public std::streambuf
@@ -610,6 +664,21 @@ TEST(VlCacheShutdown, StalePhysicalTerminalCannotRetireReplacementOperation)
         << "an exact terminal may retire only the operation incarnation it "
            "identifies";
 
+    // Truthful cleanup for the test-only replacement, which was installed
+    // but never launched and so can never produce its own terminal: drive
+    // the production retirement funnel with the replacement's exact
+    // identity, then settle through co_stop. The claim above is already
+    // proven; leaving the obligation to leak at teardown would be
+    // abandoning it, not evidence.
+    auto retired = VlCacheTestAccess::retire_active_fetch(cache);
+    ASSERT_EQ(retired.wait_for(5s), std::future_status::ready);
+    EXPECT_TRUE(retired.get())
+        << "the exact replacement identity must retire through the funnel";
+    auto stopped =
+        boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
+    ASSERT_EQ(stopped.wait_for(5s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+
     boost::system::error_code ignored;
     accepted->close(ignored);
     acceptor->close(ignored);
@@ -893,6 +962,8 @@ TEST(VlCacheRetainedSignal, CompletionWakesArmedWaiterAndLateGetShortCircuits)
            "path without registering";
     EXPECT_EQ(late.get().sequence, 1u);
     EXPECT_EQ(fetches, 1u) << "the cache hit must not admit a second fetch";
+
+    settle_stopped(scheduler, cache);
 }
 
 // writ-claim: retained_signal.retained-completion, witnessed by the
@@ -924,6 +995,8 @@ TEST(
         << "a synchronous terminal must be consumed through the retained "
            "signal rather than lost before waiter registration";
     EXPECT_EQ(waiter.get().sequence, 1u);
+
+    settle_stopped(scheduler, cache);
 }
 
 // writ-claim: retained_signal.cancellation-dominates-shared-wake and
@@ -969,6 +1042,8 @@ TEST(VlCacheRetainedSignal, WaiterCancellationCannotConsumeWakeOrDisturbSibling)
     ASSERT_EQ(waiter_b.wait_for(0ms), std::future_status::ready);
     EXPECT_EQ(waiter_b.get().sequence, 1u)
         << "the sibling must still receive the retained publication";
+
+    settle_stopped(scheduler, cache);
 }
 
 // writ-claim: retained_signal.generations-rotate, witness prv.T0336. The
@@ -1010,6 +1085,8 @@ TEST(VlCacheRetainedSignal, RefreshWaiterUsesFreshSignalGeneration)
     EXPECT_EQ(refresh.get().sequence, 2u)
         << "the refresh subscriber completes only on the next revision "
            "advance, with the new list";
+
+    settle_stopped(scheduler, cache);
 }
 
 // writ-claim: retained_signal.retained-completion, witness prv.T0336. A
@@ -1051,6 +1128,8 @@ TEST(
         << "a synchronous refresh terminal must be consumed through the "
            "retained revision";
     EXPECT_EQ(refresh.get().sequence, 2u);
+
+    settle_stopped(scheduler, cache);
 }
 
 TEST(VlCacheRetainedSignal, CanceledGenerationCannotPoisonFreshFetchWait)
@@ -1099,6 +1178,8 @@ TEST(VlCacheRetainedSignal, CanceledGenerationCannotPoisonFreshFetchWait)
     scheduler.run_until_idle();
     ASSERT_EQ(fresh.wait_for(0ms), std::future_status::ready);
     EXPECT_EQ(fresh.get().sequence, 2u);
+
+    settle_stopped(scheduler, cache);
 }
 
 TEST(VlCacheRetainedSignal, LateOldCompletionCannotWakeFreshGeneration)
@@ -1145,6 +1226,8 @@ TEST(VlCacheRetainedSignal, LateOldCompletionCannotWakeFreshGeneration)
     scheduler.run_until_idle();
     ASSERT_EQ(refresh.wait_for(0ms), std::future_status::ready);
     EXPECT_EQ(refresh.get().sequence, 2u);
+
+    settle_stopped(scheduler, cache);
 }
 
 // ── V2 census evidence ──────────────────────────────────────────────────
@@ -1312,6 +1395,75 @@ TEST(VlCacheCensus, ConcurrentRefreshEntrantsStackThreeTimerObligations)
     auto terminal = VlCacheTestAccess::snapshot(cache);
     scheduler.run_until_idle();
     EXPECT_EQ(terminal.get().refresh_wait_outstanding, 0u);
+}
+
+// B1 control: a throw inside the timer-arming window (after admission,
+// covering expires_after and async_wait initiation) must RETIRE the
+// admitted obligation, never leak-wedge it. Every fallible arming step is
+// placed relative to admission for exactly this control: the settlement
+// stop draining promptly IS the zero-leak witness — a leaked member would
+// wedge drained() false forever and hang the settlement.
+TEST(VlCacheCensus, TimerArmFailureRetiresObligationWithoutLeakOrWedge)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending](catl::vl::VlCallback callback) {
+            pending = std::move(callback);
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+
+    // The failed terminal reaches schedule_retry, whose arming window
+    // throws at the failpoint after the obligation was admitted.
+    VlCacheTestAccess::fail_next_timer_arm(cache);
+    catl::vl::VlResult failed;
+    failed.error = "drive into the failing arm window";
+    pending(std::move(failed));
+    scheduler.run_until_idle();
+
+    auto after = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    auto const snap = after.get();
+    EXPECT_EQ(snap.refresh_wait_outstanding, 0u)
+        << "the arming-window failure must have retired the obligation";
+    EXPECT_FALSE(snap.fetch_in_progress);
+
+    settle_stopped(scheduler, cache);
+}
+
+// B2 control: an admission REFUSAL is a disposition, not a vanishing. With
+// the roster force-sealed while the phase is still running, do_fetch mints
+// a fresh signal generation and then cannot admit; the refusal must
+// publish a truthful terminal through that generation so waiters get a
+// prompt error instead of suspending forever on work never admitted.
+TEST(VlCacheCensus, SealedAdmissionRefusalPublishesTerminalInsteadOfHanging)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&fetches](catl::vl::VlCallback) { ++fetches; });
+
+    auto sealed = VlCacheTestAccess::seal_stop_roster(cache);
+    scheduler.run_until_idle();
+    ASSERT_EQ(sealed.wait_for(0ms), std::future_status::ready);
+
+    auto get =
+        boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(get.wait_for(0ms), std::future_status::ready)
+        << "a refused admission must terminate the waiter promptly, not "
+           "strand it on a generation whose work was never admitted";
+    EXPECT_THROW(get.get(), std::runtime_error);
+    EXPECT_EQ(fetches, 0u) << "nothing may launch behind a refusal";
+
+    settle_stopped(scheduler, cache);
 }
 
 // Negative control for the witness above. Identical probe, identical
