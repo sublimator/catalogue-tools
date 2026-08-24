@@ -1,3 +1,9 @@
+# peer-endpoint-cache-gtest includes sqlite3.h directly. catl::peer-client
+# keeps SQLite::SQLite3 PRIVATE, so the imported target is not a usage
+# requirement. Find the same package here; do not add a global include path
+# or make SQLite public on peer-client.
+find_package(SQLite3 REQUIRED)
+
 add_executable(peer-client-gtest peer-client-gtest.cpp)
 target_link_libraries(peer-client-gtest PRIVATE catl::peer-client
                                                 GTest::gtest_main)
@@ -8,7 +14,8 @@ target_link_libraries(peer-crawl-client-gtest
 
 add_executable(peer-endpoint-cache-gtest peer-endpoint-cache-gtest.cpp)
 target_link_libraries(peer-endpoint-cache-gtest
-                      PRIVATE catl::peer-client GTest::gtest_main)
+                      PRIVATE catl::peer-client SQLite::SQLite3
+                              GTest::gtest_main)
 
 add_executable(tree-walk-state-gtest tree-walk-state-gtest.cpp)
 target_link_libraries(tree-walk-state-gtest
