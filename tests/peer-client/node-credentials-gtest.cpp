@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sys/stat.h>
+#include <system_error>
 
 namespace catl::peer_client::test {
 
@@ -59,13 +60,15 @@ TEST_F(NodeCredentialsTest, WritesFileWhenMissing)
     // additional owner bits are dropped (e.g. 0400 after stricter
     // umask), and that's still safe. The invariant we care about is
     // "no one but the owner can read or write the secret".
-    struct stat st{};
+    struct stat st
+    {
+    };
     ASSERT_EQ(::stat(path.c_str(), &st), 0);
     auto mode = st.st_mode & 0777;
     EXPECT_EQ(mode & 0077, 0)
         << "expected group/other bits clear, got 0" << std::oct << mode;
-    EXPECT_NE(mode & 0400, 0) << "expected owner-read bit, got 0" << std::oct
-                              << mode;
+    EXPECT_NE(mode & 0400, 0)
+        << "expected owner-read bit, got 0" << std::oct << mode;
 
     fs::remove(path);
 }
@@ -108,18 +111,37 @@ TEST_F(NodeCredentialsTest, Base58SeedRoundTripsThroughNodeKeysFromPrivate)
     fs::remove(path);
 }
 
-TEST_F(NodeCredentialsTest, ReadOnlyParentDoesNotCrash)
+TEST_F(NodeCredentialsTest, UncreatableParentDoesNotCrash)
 {
-    // Pointing at a directory that doesn't exist and can't be created
-    // should return ephemeral keys without throwing.
-    fs::path bad = "/this/path/must/not/be/writable/node.seed";
+    // Use a regular file as the parent so persistence is impossible even when
+    // the test runs as root (as it does in the Linux Clang container).
+    auto const non_directory = unique_tmp_path("non-directory-parent");
+    struct RemoveFile
+    {
+        fs::path path;
+        ~RemoveFile()
+        {
+            std::error_code ec;
+            fs::remove(path, ec);
+        }
+    } cleanup{non_directory};
+    {
+        std::ofstream marker(non_directory);
+        ASSERT_TRUE(marker.good());
+    }
+    ASSERT_TRUE(fs::is_regular_file(non_directory));
+    auto const marker_size = fs::file_size(non_directory);
+    auto const bad = non_directory / "node.seed";
 
     crypto_utils crypto;
     crypto_utils::node_key_origin origin{};
     auto keys = crypto.load_or_generate_node_keys(bad.string(), &origin);
     EXPECT_FALSE(keys.public_key_b58.empty());
     EXPECT_EQ(origin, crypto_utils::node_key_origin::generated_ephemeral);
-    EXPECT_FALSE(fs::exists(bad));
+    EXPECT_FALSE(fs::exists(bad)) << "no child identity file may be persisted";
+    EXPECT_TRUE(fs::is_regular_file(non_directory));
+    EXPECT_EQ(fs::file_size(non_directory), marker_size)
+        << "the file-as-parent marker must not be rewritten as a key store";
 }
 
 TEST_F(NodeCredentialsTest, ProcessGlobalSeedAndPathRoundtrip)
@@ -131,7 +153,8 @@ TEST_F(NodeCredentialsTest, ProcessGlobalSeedAndPathRoundtrip)
     EXPECT_EQ(node_identity::seed_b58().value_or(""), "pnxyz");
 
     node_identity::set_keys_path(std::string{"/var/lib/xprv/node.seed"});
-    EXPECT_EQ(node_identity::keys_path().value_or(""), "/var/lib/xprv/node.seed");
+    EXPECT_EQ(
+        node_identity::keys_path().value_or(""), "/var/lib/xprv/node.seed");
 
     node_identity::set_seed_b58(std::nullopt);
     node_identity::set_keys_path(std::nullopt);
