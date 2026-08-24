@@ -16,6 +16,7 @@ and refuses receipts for frame-local work (the proportionality gate).
 | `writ::exact` (`generation`, `mint`, `incarnation<T>`, `exact_ref<T>`) | `PeerGeneration` / `reserve_connection_generation` / pins / `peer_set_instance_id_` | stale incarnation aliasing; scope-first uniform refusal (no presence leak); counter honesty (exhaustion is sticky refusal, never wrap); unforgeable owner identity (generation carries the mint's process-unique epoch, so foreign owners and restored owners refuse) |
 | `writ::census<Key>` | `in_flight_` / `crawl_in_flight_` / `shutdown_drained_on_strand` / co_stop drains | admit-before-launch; sealed admission; drain is a conjunction, received (never inferred) via a composed retained_signal; leaks wedge visibly AND commit on the dropping thread, surviving executor teardown; refusals never counterfeit consumption; member ids minted, never wrapped |
 | `writ::receipt<Tag>` + `receipt_slot` | drain receipts / `PeerUseReceiptState` | Tag-constructibility as the mint capability, with move-only Tags so possession never grants the mint; closed disposition domain; latched first fact (refusal preserves the loser); exchange-with-empty consumption |
+| `writ::roster<Label>` | VlCache stop obligations | census-shaped sealed multiset where duplicate diagnostic labels are legal and never identity; retirement resolves only by the internally minted member id; leaks and drain share the census lifecycle engine |
 
 Each future primitive enters only with: a real counterexample, a forced-order
 reproduction, and a negative control that can go red. One negative control per
@@ -23,7 +24,7 @@ primitive; no mutation cathedral before the source is stationary.
 
 ## Schemas
 
-`schemas/writ.core/{home,retained-signal,exact,census,receipt}/v1.toml`
+`schemas/writ.core/{home,retained-signal,exact,census,receipt,roster}/v1.toml`
 publish each primitive's closed event/disposition populations and bind every
 rule to the named control that keeps it honest; `schemas/README.md` defines
 the namespace grammar and the `//@@writ` annotation rules. `writ.core` is
