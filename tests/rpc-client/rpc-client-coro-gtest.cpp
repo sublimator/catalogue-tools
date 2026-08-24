@@ -143,6 +143,85 @@ TEST(RpcCallbackBridge0077, CallerCancellationRaisesOperationAborted)
     EXPECT_NO_THROW(io.run());
 }
 
+// Same-turn publication: the initiator invokes the callback before wait()
+// arms. The retained terminal must still reach the waiter.
+TEST(RpcCallbackBridge0077, SynchronousCallbackBeforeWaitIsRetained)
+{
+    asio::io_context io;
+    auto waiter = asio::co_spawn(
+        io,
+        catl::rpc::detail::callback_to_awaitable(
+            [](RpcCallback cb) { cb(marked_result(11)); }),
+        asio::use_future);
+    io.run();
+
+    ASSERT_TRUE(is_ready(waiter));
+    auto result = waiter.get();
+    ASSERT_TRUE(result.success);
+    ASSERT_TRUE(result.result.is_uint64());
+    EXPECT_EQ(result.result.as_uint64(), 11u);
+}
+
+// A second callback after a committed terminal is inert. The first result
+// remains the exact consumed value.
+TEST(RpcCallbackBridge0077, SecondCallbackCannotReplaceCommittedTerminal)
+{
+    asio::io_context io;
+    std::optional<RpcCallback> callback;
+    auto waiter = asio::co_spawn(
+        io,
+        catl::rpc::detail::callback_to_awaitable(
+            [&callback](RpcCallback cb) { callback.emplace(std::move(cb)); }),
+        asio::use_future);
+
+    ASSERT_GT(io.poll(), 0u);
+    ASSERT_TRUE(callback);
+    (*callback)(marked_result(1));
+    (*callback)(marked_result(2));
+    io.restart();
+    io.run();
+
+    ASSERT_TRUE(is_ready(waiter));
+    auto result = waiter.get();
+    ASSERT_TRUE(result.success);
+    ASSERT_TRUE(result.result.is_uint64());
+    EXPECT_EQ(result.result.as_uint64(), 1u);
+}
+
+// Realizable initial-sample cancellation: the slot is bound before the
+// initiator runs, then emit(all) happens after RpcAwaitState exists and
+// before wait() samples cancellation_state. asio::cancellation_signal is
+// edge-triggered, so emit-before-bind is not this fact.
+TEST(RpcCallbackBridge0077, CancellationBeforeWaitSampleRaisesOperationAborted)
+{
+    asio::io_context io;
+    asio::cancellation_signal cancellation;
+    std::optional<RpcCallback> callback;
+    auto waiter = asio::co_spawn(
+        io,
+        catl::rpc::detail::callback_to_awaitable([&](RpcCallback cb) {
+            callback.emplace(std::move(cb));
+            cancellation.emit(asio::cancellation_type::all);
+        }),
+        asio::bind_cancellation_slot(cancellation.slot(), asio::use_future));
+    io.run();
+
+    ASSERT_TRUE(is_ready(waiter));
+    try
+    {
+        (void)waiter.get();
+        FAIL() << "pre-wait cancellation returned a counterfeit RpcResult";
+    }
+    catch (boost::system::system_error const& error)
+    {
+        EXPECT_EQ(error.code(), asio::error::operation_aborted);
+    }
+    ASSERT_TRUE(callback);
+    (*callback)(marked_result(12));
+    io.restart();
+    EXPECT_NO_THROW(io.run());
+}
+
 // TSan inversion cell: the waiter is born on a strand, then caller
 // cancellation and callback completion are released simultaneously from two
 // foreign threads. Both candidates enter the operation strand before touching

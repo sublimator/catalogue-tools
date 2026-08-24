@@ -105,7 +105,7 @@ case "$MODE" in
         cmake --build "$BUILD_DIR" --target rpc-client-gtest -j "$BUILD_CORES"
         # 1) The deterministic cells must PASS.
         "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
-            --gtest_filter='RpcCallbackBridge0077.CompletionReturnsPublishedResult:RpcCallbackBridge0077.CallerCancellationRaisesOperationAborted:RpcCallbackBridge0077.PublicationFaultReachesExactWaiter:RpcCallbackBridge0077.RequestSurfacesCallbackException:RpcCallbackBridge0077.PublicCoroutineWrappersUseTerminalFunnel' \
+            --gtest_filter='RpcCallbackBridge0077.CompletionReturnsPublishedResult:RpcCallbackBridge0077.CallerCancellationRaisesOperationAborted:RpcCallbackBridge0077.SynchronousCallbackBeforeWaitIsRetained:RpcCallbackBridge0077.SecondCallbackCannotReplaceCommittedTerminal:RpcCallbackBridge0077.CancellationBeforeWaitSampleRaisesOperationAborted:RpcCallbackBridge0077.PublicationFaultReachesExactWaiter:RpcCallbackBridge0077.RequestSurfacesCallbackException:RpcCallbackBridge0077.PublicCoroutineWrappersUseTerminalFunnel' \
             --gtest_repeat="$REPEAT" \
             --gtest_break_on_failure \
             --gtest_brief=1
@@ -122,8 +122,9 @@ case "$MODE" in
             echo "rpc-tsan: domination control did not report (rc=$control_rc) — null probe, refusing"
             exit 1
         fi
-        # 3) The race cell: exit 66 = FIRED (data-race reports in the
-        #    log); exit 0 = quiet, admissible DID-NOT-FIRE given step 2.
+        # 3) The repaired race cell must be quiet. Exit 66 is a FIRED
+        #    data-race regression, not admissible DID-NOT-FIRE: 0077 is a
+        #    repair, unlike the 0076 witness protocol.
         set +e
         TSAN_OPTIONS="halt_on_error=0 exitcode=66" \
             "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
@@ -132,11 +133,15 @@ case "$MODE" in
             --gtest_brief=1
         race_rc=$?
         set -e
-        if [[ "$race_rc" -ne 0 && "$race_rc" -ne 66 ]]; then
+        if [[ "$race_rc" -eq 66 ]]; then
+            echo "rpc-tsan: race cell FIRED (rc=66) — repair regression" >&2
+            exit 66
+        fi
+        if [[ "$race_rc" -ne 0 ]]; then
             echo "rpc-tsan: race cell failed outside the evidence protocol (rc=$race_rc)" >&2
             exit "$race_rc"
         fi
-        echo "rpc-tsan: race cell exit=$race_rc (66=FIRED, 0=quiet)"
+        echo "rpc-tsan: race cell quiet (exit=0)"
         ;;
     vqt-tsan)
         # Issue 0076 witness protocol (three steps, see
