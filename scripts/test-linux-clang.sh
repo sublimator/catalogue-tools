@@ -16,15 +16,27 @@ ARCH="${PLATFORM#linux/}"
 MODE="${LINUX_CLANG_MODE:-focused}"
 REPEAT="${LINUX_CLANG_REPEAT:-100}"
 BUILD_CORES="${BUILD_CORES:-$(sysctl -n hw.physicalcpu 2>/dev/null || nproc)}"
+# Unset → default full. An explicitly empty or invalid token is refused so
+# it cannot silently become a second cache identity.
+if [ "${LINUX_CLANG_CACHE_GENERATION+x}" = "x" ]; then
+    CACHE_GENERATION="$LINUX_CLANG_CACHE_GENERATION"
+else
+    CACHE_GENERATION="full"
+fi
+if [[ ! "$CACHE_GENERATION" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    echo "invalid LINUX_CLANG_CACHE_GENERATION=$CACHE_GENERATION" >&2
+    exit 2
+fi
 # The first Clang-20 ARM experiment populated the old volume with Boost bytes
 # built under temporary component exclusions while retaining a full-surface
 # package identity. Never let that cache certify the corrected profile.
-CONAN_VOLUME="catalogue-tools-linux-clang20-${ARCH}-conan-full"
+VOLUME_PREFIX="catalogue-tools-linux-clang20-${ARCH}"
+CONAN_VOLUME="${VOLUME_PREFIX}-conan-${CACHE_GENERATION}"
 BUILD_VARIANT=""
 if [[ "$MODE" == *-tsan ]]; then
     BUILD_VARIANT="-tsan"
 fi
-BUILD_VOLUME="catalogue-tools-linux-clang20-${ARCH}-build${BUILD_VARIANT}"
+BUILD_VOLUME="${VOLUME_PREFIX}-build-${CACHE_GENERATION}${BUILD_VARIANT}"
 
 docker build \
     --platform "$PLATFORM" \
