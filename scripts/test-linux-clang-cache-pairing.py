@@ -21,6 +21,7 @@ class LinuxClangCachePairingTests(unittest.TestCase):
         platform: str = "linux/aarch64",
         mode: str = "full",
         generation: str | None = None,
+        repeat: str | None = "1",
     ) -> tuple[subprocess.CompletedProcess[str], str]:
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
@@ -43,10 +44,12 @@ class LinuxClangCachePairingTests(unittest.TestCase):
                     "FAKE_DOCKER_LOG": str(log),
                     "LINUX_CLANG_PLATFORM": platform,
                     "LINUX_CLANG_MODE": mode,
-                    "LINUX_CLANG_REPEAT": "1",
                     "BUILD_CORES": "1",
                 }
             )
+            environment.pop("LINUX_CLANG_REPEAT", None)
+            if repeat is not None:
+                environment["LINUX_CLANG_REPEAT"] = repeat
             if generation is not None:
                 environment["LINUX_CLANG_CACHE_GENERATION"] = generation
 
@@ -102,6 +105,22 @@ class LinuxClangCachePairingTests(unittest.TestCase):
         self.assertIn("amd64-build-full,target=/build", amd_log)
         self.assert_only_build_and_run(arm_log)
         self.assert_only_build_and_run(amd_log)
+
+    def test_vqt_tsan_defaults_to_one_repeat_and_honors_override(self) -> None:
+        default_completed, default_log = self.run_gate(
+            mode="vqt-tsan", repeat=None
+        )
+        explicit_completed, explicit_log = self.run_gate(
+            mode="vqt-tsan", repeat="7"
+        )
+        self.assertEqual(default_completed.returncode, 0, default_completed.stderr)
+        self.assertEqual(
+            explicit_completed.returncode, 0, explicit_completed.stderr
+        )
+        self.assertIn("--env\tLINUX_CLANG_REPEAT=1", default_log)
+        self.assertIn("--env\tLINUX_CLANG_REPEAT=7", explicit_log)
+        self.assert_only_build_and_run(default_log)
+        self.assert_only_build_and_run(explicit_log)
 
     def test_invalid_generation_refuses_before_docker(self) -> None:
         for generation in ("../predecessor", "", " ", "foo/bar"):

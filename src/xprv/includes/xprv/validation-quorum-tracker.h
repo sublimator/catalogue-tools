@@ -344,10 +344,39 @@ private:
     std::optional<QuorumEntry>
     latest_quorum_locked(ValidationCollector::QuorumMode mode) const;
 
+    boost::asio::awaitable<bool>
+    co_sync_unl_on_strand(
+        std::shared_ptr<std::vector<catl::vl::Manifest>> validators,
+        uint32_t vl_sequence);
+
+    boost::asio::awaitable<std::optional<QuorumEntry>>
+    co_latest_quorum_on_strand();
+
+    boost::asio::awaitable<std::optional<QuorumEntry>>
+    co_latest_quorum_at_or_before_on_strand(
+        uint32_t max_ledger_sequence,
+        std::optional<uint32_t> expected_vl_sequence);
+
+    boost::asio::awaitable<std::optional<QuorumEntry>>
+    co_last_full_quorum_on_strand(
+        std::chrono::seconds max_age,
+        std::optional<uint32_t> expected_vl_sequence);
+
     boost::asio::awaitable<QuorumCollectResult>
     co_wait_best_quorum_on_strand(
         std::chrono::seconds timeout,
         std::optional<uint32_t> expected_vl_sequence);
+
+    boost::asio::awaitable<bool>
+    co_has_live_only_quorum_on_strand();
+
+    boost::asio::awaitable<Stats>
+    co_stats_on_strand();
+
+#ifdef XPRV_TESTING
+    boost::asio::awaitable<bool>
+    co_insert_validation_for_test_on_strand(ValidationCollector::Entry entry);
+#endif
 
     bool
     has_newer_ledger_locked(

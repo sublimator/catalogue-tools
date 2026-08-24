@@ -1,36 +1,33 @@
-// Witness suite for issue 0076: ValidationQuorumTracker post-hop
-// resumption may escape the owner strand.
+// Regression suite for issue 0076: ValidationQuorumTracker gateways must
+// birth their complete state-touching children on the owner strand.
 //
-// Seven awaitable entry points establish their "on the owner strand"
-// claim via `co_await asio::post(strand_, use_awaitable)`
-// (validation-quorum-tracker.cpp:894, :1303, :1318, :1360, :1704,
-// :1721, :1760). By Boost source ruling, work_dispatcher re-dispatches
-// the completion through the awaiting frame's associated executor — an
-// activity edge, not an executor-resumption receipt. If the
-// continuation escapes, `co_stats` iterates `collector_.by_ledger`
-// (:1723-1725) with NO publication mutex, unsynchronized against
-// strand-side collector_ mutation (drain write :419 outside the mutex;
-// test-seam insert :1762 under it — one-sided either way).
+// Seven public awaitable entry points now co_spawn distinct complete
+// children on the tracker strand. By Boost source ruling, a one-time
+// `co_await post(strand_, use_awaitable)` would instead re-dispatch the
+// parent through its associated executor; an activity edge is not an
+// executor-resumption receipt.
 //
 // TESTS-ONLY, existing seams only: the public entry points,
 // owner_strand_for_test(), co_insert_validation_for_test, set_unl,
 // on_packet, and the checked-in proof.json validation fixture.
 //
-// Witness polarity (recorded here and in the receipt):
-// - PostHopContinuationEscapesOwnerStrand asserts the CURRENT defect
-//   (the escape is observed); after an owner-born-children repair this
-//   test FAILS and inverts into the permanent regression control.
-// - The two TsanWorkload_* tests are GREEN as tests in any build. Under
-//   -fsanitize=thread they attempt to expose the source-pinned race; a
-//   report is FIRED evidence, while a quiet run is only an admissible
-//   DID-NOT-FIRE when the domination control below reports first.
+// Control polarity (recorded here and in the repair ledger):
+// - OwnerBornGatewayRetainsStrandWhilePublicationBlocked asserts the
+//   repaired law. The old post-hop implementation lets B2 enter while
+//   the gateway parent blocks on publication_mutex_ from a foreign
+//   executor; an owner-born complete child keeps ownership of the
+//   strand while blocked on that same mutex.
+// - The two TsanWorkload_* tests retain the exact formerly source-pinned
+//   race cells. Under -fsanitize=thread they must now remain quiet; a
+//   report is repair-regression evidence once the domination control
+//   below has proved that the sanitizer can report this race class.
 //   (Ratified Wave-2 boundary: Linux clang-20; the clang-16 miscompile
 //   report invalidated older toolchains for strand claims.)
 // - TsanDominationControlSeededPair seeds a plain
 //   unsynchronized read/write pair in the SAME runner topology; a TSan
 //   build MUST flag it. It proves the environment catches this defect
-//   class, so a quiet TSan run of the workloads would be an admissible
-//   DID-NOT-FIRE, never a null probe.
+//   class, so a quiet TSan run of the repaired workloads is meaningful
+//   evidence rather than a null probe.
 
 #include "xprv/proof-chain-json.h"
 #include "xprv/validation-collector.h"
@@ -54,6 +51,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <map>
@@ -200,22 +198,23 @@ make_entry(
 
 }  // namespace
 
-// ── Witness 1: the post-hop continuation provably leaves the strand ────
-// Gate choreography, no timing thresholds:
-//   1. Blocker B1 occupies the owner strand and parks on a gate.
-//   2. A caller coroutine on the PLAIN io executor invokes co_stats();
-//      its internal `co_await post(strand_)` hop queues behind B1.
-//   3. B1's last act enqueues blocker B2 on the strand, then exits, so
-//      the strand runs [hop, B2]: the hop re-dispatches the co_stats
-//      continuation to the CALLER's executor and B2 then parks the
-//      strand on a second gate.
-//   4. The co_stats body (the "on the owner strand" section) completes
-//      on the second runner thread WHILE B2 provably still occupies the
-//      strand. The strand serializes: completion-while-B2-parked is
-//      only possible if the continuation ran OFF the strand.
-// One round can be inconclusive only if B2 enqueued before the hop
-// (caller thread was slow); the round then drains and retries.
-TEST(ValidationQuorumTrackerPostHop0076, PostHopContinuationEscapesOwnerStrand)
+// ── Control 1: the complete gateway child retains strand ownership ─────
+// Gate choreography:
+//   1. set_unl() enters its existing admission hook while holding
+//      publication_mutex_.
+//   2. B1 occupies the owner strand. A separate caller io_context is
+//      polled until co_latest_quorum() suspends, so its hop/child is
+//      definitely queued behind B1.
+//   3. B1 enqueues B2 after that gateway and exits.
+//   4. OLD: the hop re-dispatches the parent to caller_io, freeing the
+//      strand and allowing B2 to enter while publication_mutex_ remains
+//      held. REPAIRED: the complete owner child blocks on the mutex while
+//      still owning the strand, so B2 cannot enter before release.
+// Bounded waits create scheduling opportunity and liveness limits; the
+// classification is the B2-before-publication-release ownership relation.
+TEST(
+    ValidationQuorumTrackerPostHop0076,
+    OwnerBornGatewayRetainsStrandWhilePublicationBlocked)
 {
     asio::io_context io;
     auto work = asio::make_work_guard(io);
@@ -225,76 +224,89 @@ TEST(ValidationQuorumTrackerPostHop0076, PostHopContinuationEscapesOwnerStrand)
     std::thread runner_a([&io] { io.run(); });
     std::thread runner_b([&io] { io.run(); });
 
-    bool escape_observed = false;
-    bool harness_completed = true;
-    std::string harness_failure;
-    int rounds_used = 0;
+    std::binary_semaphore publication_release{0};
+    std::binary_semaphore publication_entered{0};
+    buffer->set_unl_admission_hook_for_test([&] {
+        publication_entered.release();
+        publication_release.acquire();
+    });
+    std::thread unl_thread([&] { buffer->set_unl(synthetic_manifests(1), 1); });
+    publication_entered.acquire();
 
-    for (int round = 1; round <= 50 && !escape_observed; ++round)
-    {
-        rounds_used = round;
+    std::binary_semaphore gate_b1{0};
+    std::binary_semaphore gate_b2{0};
+    std::binary_semaphore b1_running{0};
+    std::promise<void> b2_entered_promise;
+    auto b2_entered = b2_entered_promise.get_future();
+    std::promise<void> b2_done_promise;
+    auto b2_done = b2_done_promise.get_future();
 
-        std::binary_semaphore gate_b1{0};
-        std::binary_semaphore gate_b2{0};
-        std::binary_semaphore b1_running{0};
-        std::atomic<bool> b2_parked{false};
-        std::promise<void> b2_done_promise;
-        auto b2_done = b2_done_promise.get_future();
-
+    asio::post(strand, [&] {
+        b1_running.release();
+        gate_b1.acquire();
         asio::post(strand, [&] {
-            b1_running.release();
-            gate_b1.acquire();
-            // Enqueue B2 behind whatever is already queued (the hop).
-            asio::post(strand, [&] {
-                b2_parked.store(true, std::memory_order_release);
-                gate_b2.acquire();
-                b2_parked.store(false, std::memory_order_release);
-                b2_done_promise.set_value();
-            });
+            b2_entered_promise.set_value();
+            gate_b2.acquire();
+            b2_done_promise.set_value();
         });
-        b1_running.acquire();
+    });
+    b1_running.acquire();
 
-        std::binary_semaphore caller_started{0};
-        auto stats_future = asio::co_spawn(
-            io,
-            [&, buffer]()
-                -> asio::awaitable<xprv::ValidationQuorumTracker::Stats> {
-                caller_started.release();
-                co_return co_await buffer->co_stats();
-            },
-            asio::use_future);
-        caller_started.acquire();
-        // Dominate the enqueue window: the caller signals immediately
-        // before calling co_stats; its internal post is a few
-        // instructions later. 20ms >> that gap, and an inconclusive
-        // round is retried rather than misread.
-        std::this_thread::sleep_for(20ms);
+    asio::io_context caller_io;
+    auto caller_work = asio::make_work_guard(caller_io);
+    auto latest_future = asio::co_spawn(
+        caller_io,
+        [buffer]() -> asio::awaitable<std::optional<xprv::QuorumEntry>> {
+            co_return co_await buffer->co_latest_quorum();
+        },
+        asio::use_future);
 
-        gate_b1.release();
+    // Drive the caller synchronously until the gateway suspends. B1 owns
+    // the target strand, so returning from poll() proves the child/hop is
+    // already queued ahead of the B2 that B1 is about to enqueue.
+    auto const initial_caller_handlers = caller_io.poll();
+    std::thread caller_runner([&caller_io] { caller_io.run(); });
+    gate_b1.release();
 
-        auto status = stats_future.wait_for(100ms);
-        // The strand is serialized: if the continuation needed the
-        // strand it could not finish while B2 is parked there.
-        escape_observed = status == std::future_status::ready &&
-            b2_parked.load(std::memory_order_acquire);
+    auto const b2_before_publication_release =
+        b2_entered.wait_for(100ms) == std::future_status::ready;
 
-        gate_b2.release();
-        auto const b2_status = b2_done.wait_for(2s);
-        if (status != std::future_status::ready)
-            status = stats_future.wait_for(2s);
-        if (status == std::future_status::ready)
-            (void)stats_future.get();
+    // Cleanup precedes every assertion. Releasing publication lets the
+    // repaired owner child finish; B2 must then enter and drain.
+    publication_release.release();
+    unl_thread.join();
+    buffer->set_unl_admission_hook_for_test({});
 
-        if (b2_status != std::future_status::ready ||
-            status != std::future_status::ready)
+    std::promise<void> strand_drained_promise;
+    auto strand_drained = strand_drained_promise.get_future();
+    asio::post(strand, [&strand_drained_promise] {
+        strand_drained_promise.set_value();
+    });
+
+    auto const b2_after_publication_release =
+        b2_entered.wait_for(2s) == std::future_status::ready;
+    gate_b2.release();
+    auto const b2_drained = b2_done.wait_for(2s) == std::future_status::ready;
+    auto const strand_fully_drained =
+        strand_drained.wait_for(2s) == std::future_status::ready;
+    auto const latest_completed =
+        latest_future.wait_for(2s) == std::future_status::ready;
+    std::exception_ptr latest_failure;
+    if (latest_completed)
+    {
+        try
         {
-            harness_completed = false;
-            harness_failure =
-                "co_stats or blocker B2 failed to drain in round " +
-                std::to_string(round);
-            break;
+            (void)latest_future.get();
+        }
+        catch (...)
+        {
+            latest_failure = std::current_exception();
         }
     }
+
+    caller_work.reset();
+    caller_io.stop();
+    caller_runner.join();
 
     buffer->stop();
     work.reset();
@@ -302,21 +314,23 @@ TEST(ValidationQuorumTrackerPostHop0076, PostHopContinuationEscapesOwnerStrand)
     runner_a.join();
     runner_b.join();
 
-    RecordProperty("rounds_used", rounds_used);
-    ASSERT_TRUE(harness_completed) << harness_failure;
-    EXPECT_TRUE(escape_observed)
-        << "co_stats' post-hop continuation completed only after the "
-           "strand drained — no escape observed in 50 rounds; the "
-           "owner-strand claim held (witness DID NOT FIRE)";
+    EXPECT_GT(initial_caller_handlers, 0u);
+    EXPECT_FALSE(b2_before_publication_release)
+        << "B2 entered while publication_mutex_ was held: the gateway body "
+           "released the owner strand before its state access";
+    EXPECT_TRUE(b2_after_publication_release);
+    EXPECT_TRUE(b2_drained);
+    EXPECT_TRUE(strand_fully_drained);
+    EXPECT_TRUE(latest_completed);
+    EXPECT_FALSE(static_cast<bool>(latest_failure));
 }
 
-// ── Witness 2 (TSan workload): foreign co_stats vs strand-side insert ──
-// Green as a test. Under -fsanitize=thread this workload attempts to expose
-// a data race on collector_.by_ledger while 0076 is unrepaired:
-// the escaped co_stats body iterates by_ledger on this thread's runner
-// with NO mutex (:1723-1725) while co_insert_validation_for_test
-// mutates it on the strand under publication_mutex_ (:1761-1762) — a
-// one-sided mutex provides no synchronization edge.
+// ── Control 2 (TSan workload): foreign co_stats vs strand-side insert ──
+// This retains the former collector_.by_ledger race cell: co_stats reads
+// while co_insert_validation_for_test writes. The owner-born repair must
+// serialize both complete bodies on the strand. Under -fsanitize=thread
+// this workload must therefore stay quiet after the domination control
+// proves that the sanitizer is live.
 TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignStatsVsStrandInsert)
 {
     asio::io_context io;
@@ -383,13 +397,12 @@ TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignStatsVsStrandInsert)
     EXPECT_EQ(reader_status, std::future_status::ready);
 }
 
-// ── Witness 3 (TSan workload): real ingress vs foreign readers ─────────
+// ── Control 3 (TSan workload): real ingress vs gateway readers ─────────
 // The production-shaped pair: on_packet ingress drains on the strand and
-// writes collector_ via collector_.on_packet WITHOUT the publication
-// mutex (:415-426), while foreign-executor readers run co_latest_quorum
-// (mutex-holding, :1303-1310) and co_stats (mutex-free). set_unl bumps
-// the trust admission generation each round so identical fixture packets
-// re-admit instead of deduplicating.
+// writes collector_ via collector_.on_packet, while gateway callers run
+// co_latest_quorum and co_stats. Their complete read bodies are now born
+// on that same strand. set_unl bumps the trust admission generation each
+// round so identical fixture packets re-admit instead of deduplicating.
 TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignReadersVsIngress)
 {
     constexpr uint16_t kValidationType =
@@ -454,9 +467,9 @@ TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignReadersVsIngress)
 // ── Domination control: a seeded unsynchronized pair in the same
 // topology MUST be caught by a TSan build. Proves the runner
 // configuration detects this defect class, making a quiet TSan run of
-// the workloads above an admissible DID-NOT-FIRE rather than a null
-// probe. In non-TSan builds the control is skipped: an intentional data race
-// is still undefined behavior even when it is test-local.
+// the repaired workloads above meaningful evidence rather than a null
+// probe. In non-TSan builds the control is skipped: an intentional data
+// race is still undefined behavior even when it is test-local.
 TEST(ValidationQuorumTrackerPostHop0076, TsanDominationControlSeededPair)
 {
     if (!kThreadSanitizerEnabled)

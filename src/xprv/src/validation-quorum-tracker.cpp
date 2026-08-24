@@ -891,7 +891,34 @@ ValidationQuorumTracker::co_sync_unl(
     uint32_t vl_sequence)
 {
     auto owned = std::make_shared<std::vector<catl::vl::Manifest>>(validators);
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0353 status=provisional scope=statement bind=co_return_statement@bc5c759eae17a6c5
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand
+    // execution_home=validation_quorum_tracker.strand birth=co_spawn
+    // executor_expr=strand_ carries=self,owned,vl_sequence
+    // drives=co_sync_unl_on_strand continuation=birth_executor
+    // writ_roles=home.birth label=birth_sync_unl_on_owner_strand
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self = std::move(self),
+         owned = std::move(owned),
+         vl_sequence]() mutable -> asio::awaitable<bool> {
+            co_return co_await self->co_sync_unl_on_strand(
+                std::move(owned), vl_sequence);
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0353
+    // clang-format on
+}
+
+asio::awaitable<bool>
+ValidationQuorumTracker::co_sync_unl_on_strand(
+    std::shared_ptr<std::vector<catl::vl::Manifest>> validators,
+    uint32_t vl_sequence)
+{
+    if (!strand_.running_in_this_thread())
+        throw std::logic_error("UNL sync entered off owner strand");
 
     std::lock_guard publication_lock(publication_mutex_);
     {
@@ -907,7 +934,7 @@ ValidationQuorumTracker::co_sync_unl(
             std::lock_guard admission_lock(admission_mutex_);
             ++trust_admission_generation_;
         }
-        apply_unl_locked(*owned, vl_sequence, true);
+        apply_unl_locked(*validators, vl_sequence, true);
     }
     co_return true;
 }
@@ -1300,7 +1327,33 @@ ValidationQuorumTracker::prune_old_entries()
 asio::awaitable<std::optional<QuorumEntry>>
 ValidationQuorumTracker::co_latest_quorum()
 {
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0354 status=provisional scope=statement bind=co_return_statement@990e28c395d93b17
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand
+    // execution_home=validation_quorum_tracker.strand birth=co_spawn
+    // executor_expr=strand_ carries=self drives=co_latest_quorum_on_strand
+    // continuation=birth_executor writ_roles=home.birth
+    // label=birth_latest_quorum_read_on_owner_strand
+    //@@mutation-site vqt-latest-quorum-requires-owner-born-child
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self = std::move(self)]()
+            -> asio::awaitable<std::optional<QuorumEntry>> {
+            co_return co_await self->co_latest_quorum_on_strand();
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0354
+    //@@mutation-end vqt-latest-quorum-requires-owner-born-child
+    // clang-format on
+}
+
+asio::awaitable<std::optional<QuorumEntry>>
+ValidationQuorumTracker::co_latest_quorum_on_strand()
+{
+    if (!strand_.running_in_this_thread())
+        throw std::logic_error("latest quorum read entered off owner strand");
+
     std::lock_guard publication_lock(publication_mutex_);
     {
         std::lock_guard admission_lock(admission_mutex_);
@@ -1315,7 +1368,40 @@ ValidationQuorumTracker::co_latest_quorum_at_or_before(
     uint32_t max_ledger_sequence,
     std::optional<uint32_t> expected_vl_sequence)
 {
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0355 status=provisional scope=statement bind=co_return_statement@d95f95f250265653
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand
+    // execution_home=validation_quorum_tracker.strand birth=co_spawn
+    // executor_expr=strand_ carries=self,max_ledger_sequence,expected_vl_sequence
+    // drives=co_latest_quorum_at_or_before_on_strand
+    // continuation=birth_executor writ_roles=home.birth
+    // label=birth_bounded_quorum_read_on_owner_strand
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self = std::move(self),
+         max_ledger_sequence,
+         expected_vl_sequence]()
+            -> asio::awaitable<std::optional<QuorumEntry>> {
+            co_return co_await
+                self->co_latest_quorum_at_or_before_on_strand(
+                    max_ledger_sequence, expected_vl_sequence);
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0355
+    // clang-format on
+}
+
+asio::awaitable<std::optional<QuorumEntry>>
+ValidationQuorumTracker::co_latest_quorum_at_or_before_on_strand(
+    uint32_t max_ledger_sequence,
+    std::optional<uint32_t> expected_vl_sequence)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        throw std::logic_error("bounded quorum read entered off owner strand");
+    }
+
     std::lock_guard publication_lock(publication_mutex_);
     {
         std::lock_guard admission_lock(admission_mutex_);
@@ -1357,7 +1443,37 @@ ValidationQuorumTracker::co_last_full_quorum(
     std::chrono::seconds max_age,
     std::optional<uint32_t> expected_vl_sequence)
 {
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0356 status=provisional scope=statement bind=co_return_statement@567dec482e8aae9a
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand
+    // execution_home=validation_quorum_tracker.strand birth=co_spawn
+    // executor_expr=strand_ carries=self,max_age,expected_vl_sequence
+    // drives=co_last_full_quorum_on_strand continuation=birth_executor
+    // writ_roles=home.birth label=birth_last_full_quorum_read_on_owner_strand
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self = std::move(self), max_age, expected_vl_sequence]()
+            -> asio::awaitable<std::optional<QuorumEntry>> {
+            co_return co_await self->co_last_full_quorum_on_strand(
+                max_age, expected_vl_sequence);
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0356
+    // clang-format on
+}
+
+asio::awaitable<std::optional<QuorumEntry>>
+ValidationQuorumTracker::co_last_full_quorum_on_strand(
+    std::chrono::seconds max_age,
+    std::optional<uint32_t> expected_vl_sequence)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        throw std::logic_error(
+            "last full quorum read entered off owner strand");
+    }
+
     std::lock_guard publication_lock(publication_mutex_);
     {
         std::lock_guard admission_lock(admission_mutex_);
@@ -1701,7 +1817,33 @@ ValidationQuorumTracker::has_newer_ledger_locked(
 asio::awaitable<bool>
 ValidationQuorumTracker::co_has_live_only_quorum()
 {
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0357 status=provisional scope=statement bind=co_return_statement@4d728c7a71b2595d
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand
+    // execution_home=validation_quorum_tracker.strand birth=co_spawn
+    // executor_expr=strand_ carries=self drives=co_has_live_only_quorum_on_strand
+    // continuation=birth_executor writ_roles=home.birth
+    // label=birth_live_only_quorum_read_on_owner_strand
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self = std::move(self)]() -> asio::awaitable<bool> {
+            co_return co_await self->co_has_live_only_quorum_on_strand();
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0357
+    // clang-format on
+}
+
+asio::awaitable<bool>
+ValidationQuorumTracker::co_has_live_only_quorum_on_strand()
+{
+    if (!strand_.running_in_this_thread())
+    {
+        throw std::logic_error(
+            "live-only quorum read entered off owner strand");
+    }
+
     std::lock_guard publication_lock(publication_mutex_);
     {
         std::lock_guard admission_lock(admission_mutex_);
@@ -1718,7 +1860,29 @@ ValidationQuorumTracker::co_has_live_only_quorum()
 asio::awaitable<ValidationQuorumTracker::Stats>
 ValidationQuorumTracker::co_stats()
 {
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0358 status=provisional scope=statement bind=co_return_statement@f98492f5206eafe4
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand
+    // execution_home=validation_quorum_tracker.strand birth=co_spawn
+    // executor_expr=strand_ carries=self drives=co_stats_on_strand
+    // continuation=birth_executor writ_roles=home.birth
+    // label=birth_stats_read_on_owner_strand
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self = std::move(self)]() -> asio::awaitable<Stats> {
+            co_return co_await self->co_stats_on_strand();
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0358
+    // clang-format on
+}
+
+asio::awaitable<ValidationQuorumTracker::Stats>
+ValidationQuorumTracker::co_stats_on_strand()
+{
+    if (!strand_.running_in_this_thread())
+        throw std::logic_error("stats read entered off owner strand");
 
     size_t collector_validations = 0;
     for (auto const& [_, entries] : collector_.by_ledger)
@@ -1757,7 +1921,38 @@ asio::awaitable<bool>
 ValidationQuorumTracker::co_insert_validation_for_test(
     ValidationCollector::Entry entry)
 {
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    // clang-format off
+    //@@authority transition=prv.T0359 status=provisional scope=statement bind=co_return_statement@9dfc54b84791385a
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand
+    // execution_home=validation_quorum_tracker.strand birth=co_spawn
+    // executor_expr=strand_ carries=self,entry
+    // drives=co_insert_validation_for_test_on_strand
+    // continuation=birth_executor writ_roles=home.birth
+    // label=birth_test_validation_insert_on_owner_strand
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self = std::move(self), entry = std::move(entry)]() mutable
+            -> asio::awaitable<bool> {
+            co_return co_await
+                self->co_insert_validation_for_test_on_strand(
+                    std::move(entry));
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0359
+    // clang-format on
+}
+
+asio::awaitable<bool>
+ValidationQuorumTracker::co_insert_validation_for_test_on_strand(
+    ValidationCollector::Entry entry)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        throw std::logic_error(
+            "test validation insert entered off owner strand");
+    }
+
     std::lock_guard publication_lock(publication_mutex_);
     auto const inserted = collector_.insert_entry_for_test(std::move(entry));
     if (inserted)

@@ -14,7 +14,13 @@ IMAGE="${LINUX_CLANG_IMAGE:-catalogue-tools-linux-clang-20}"
 PLATFORM="${LINUX_CLANG_PLATFORM:-linux/$(docker info --format '{{.Architecture}}')}"
 ARCH="${PLATFORM#linux/}"
 MODE="${LINUX_CLANG_MODE:-focused}"
-REPEAT="${LINUX_CLANG_REPEAT:-100}"
+if [ "${LINUX_CLANG_REPEAT+x}" = "x" ]; then
+    REPEAT="$LINUX_CLANG_REPEAT"
+elif [ "$MODE" = "vqt-tsan" ]; then
+    REPEAT=1
+else
+    REPEAT=100
+fi
 BUILD_CORES="${BUILD_CORES:-$(sysctl -n hw.physicalcpu 2>/dev/null || nproc)}"
 # Unset → default full. An explicitly empty or invalid token is refused so
 # it cannot silently become a second cache identity.

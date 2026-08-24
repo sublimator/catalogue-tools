@@ -144,13 +144,17 @@ case "$MODE" in
         echo "rpc-tsan: race cell quiet (exit=0)"
         ;;
     vqt-tsan)
-        # Issue 0076 witness protocol (three steps, see
+        # Issue 0076 repair protocol (three steps, see
         # tests/xprv/validation-quorum-tracker-posthop-gtest.cpp):
+        # The ownership control is deterministic and each TSan workload
+        # already creates its own bounded overlap window. Do not inherit the
+        # generic stress-repeat default for this evidence protocol.
+        vqt_repeat="${LINUX_CLANG_REPEAT:-1}"
         cmake --build "$BUILD_DIR" --target xprv-gtest -j "$BUILD_CORES"
-        # 1) The deterministic post-hop escape witness must PASS.
+        # 1) The deterministic owner-birth regression control must PASS.
         "$BUILD_DIR/tests/xprv/xprv-gtest" \
-            --gtest_filter='ValidationQuorumTrackerPostHop0076.PostHopContinuationEscapesOwnerStrand' \
-            --gtest_repeat="$REPEAT" \
+            --gtest_filter='ValidationQuorumTrackerPostHop0076.OwnerBornGatewayRetainsStrandWhilePublicationBlocked' \
+            --gtest_repeat="$vqt_repeat" \
             --gtest_break_on_failure \
             --gtest_brief=1
         # 2) The seeded domination control MUST make TSan report (exit
@@ -166,21 +170,25 @@ case "$MODE" in
             echo "vqt-tsan: domination control did not report (rc=$control_rc) — null probe, refusing"
             exit 1
         fi
-        # 3) The workloads: exit 66 = FIRED (data-race reports in the
-        #    log); exit 0 = quiet, admissible DID-NOT-FIRE given step 2.
+        # 3) The repaired workloads must remain quiet. The domination
+        #    result makes exit 0 admissible; exit 66 is now a regression.
         set +e
         TSAN_OPTIONS="halt_on_error=0 exitcode=66" \
             "$BUILD_DIR/tests/xprv/xprv-gtest" \
             --gtest_filter='ValidationQuorumTrackerPostHop0076.TsanWorkload*' \
-            --gtest_repeat="$REPEAT" \
+            --gtest_repeat="$vqt_repeat" \
             --gtest_brief=1
         workload_rc=$?
         set -e
-        if [[ "$workload_rc" -ne 0 && "$workload_rc" -ne 66 ]]; then
+        if [[ "$workload_rc" -eq 66 ]]; then
+            echo "vqt-tsan: repaired workload FIRED (rc=66) — repair regression" >&2
+            exit 66
+        fi
+        if [[ "$workload_rc" -ne 0 ]]; then
             echo "vqt-tsan: workload failed outside the evidence protocol (rc=$workload_rc)" >&2
             exit "$workload_rc"
         fi
-        echo "vqt-tsan: workload exit=$workload_rc (66=FIRED, 0=quiet)"
+        echo "vqt-tsan: repaired workloads quiet (exit=0)"
         ;;
     full)
         cmake --build "$BUILD_DIR" -j "$BUILD_CORES"
