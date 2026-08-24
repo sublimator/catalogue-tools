@@ -91,12 +91,9 @@ case "$MODE" in
     rpc)
         cmake --build "$BUILD_DIR" --target rpc-client-gtest -j "$BUILD_CORES"
         "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
-            --gtest_filter='RpcCallbackBridge0077.CompletionReturnsPublishedResult:RpcCallbackBridge0077.CallerCancellationReturnsEmptyRpcResult:RpcCallbackBridge0077.ForeignCompletionRacesCallerCancellation' \
+            --gtest_filter='RpcCallbackBridge0077.*-RpcCallbackBridge0077.TsanDominationControlSeededPair' \
             --gtest_repeat="$REPEAT" \
             --gtest_break_on_failure \
-            --gtest_brief=1
-        "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
-            --gtest_filter='RpcCallbackBridge0077.DetachedRequestDiscardsCallbackException' \
             --gtest_brief=1
         ;;
     rpc-tsan)
@@ -108,7 +105,7 @@ case "$MODE" in
         cmake --build "$BUILD_DIR" --target rpc-client-gtest -j "$BUILD_CORES"
         # 1) The deterministic cells must PASS.
         "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
-            --gtest_filter='RpcCallbackBridge0077.CompletionReturnsPublishedResult:RpcCallbackBridge0077.CallerCancellationReturnsEmptyRpcResult:RpcCallbackBridge0077.DetachedRequestDiscardsCallbackException' \
+            --gtest_filter='RpcCallbackBridge0077.CompletionReturnsPublishedResult:RpcCallbackBridge0077.CallerCancellationRaisesOperationAborted:RpcCallbackBridge0077.PublicationFaultReachesExactWaiter:RpcCallbackBridge0077.RequestSurfacesCallbackException:RpcCallbackBridge0077.PublicCoroutineWrappersUseTerminalFunnel' \
             --gtest_repeat="$REPEAT" \
             --gtest_break_on_failure \
             --gtest_brief=1

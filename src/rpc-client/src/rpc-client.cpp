@@ -1,17 +1,23 @@
-#include <catl/rpc-client/rpc-client.h>
+#include <catl/rpc-client/rpc-client-coro.h>
 
+#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/connect.hpp>
-#include <boost/asio/detached.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <exception>
+#include <optional>
 #include <stdexcept>
 
 namespace catl::rpc {
@@ -22,6 +28,197 @@ namespace ssl = asio::ssl;
 using tcp = asio::ip::tcp;
 
 LogPartition RpcClient::log_("rpc-client", LogLevel::INHERIT);
+
+namespace detail {
+
+/// One callback adapter operation. All fields below are confined to the
+/// operation-local strand supplied at construction. Foreign callback threads
+/// can only post a candidate terminal; caller cancellation is classified by
+/// the strand-born waiter. The first terminal task to commit wins.
+class RpcAwaitState : public std::enable_shared_from_this<RpcAwaitState>
+{
+public:
+    RpcAwaitState(
+        asio::any_io_executor executor,
+        RpcPublicationHook before_terminal_commit)
+        : executor_(std::move(executor))
+        , signal_(executor_, asio::steady_timer::time_point::max())
+        , before_terminal_commit_(std::move(before_terminal_commit))
+    {
+    }
+
+    /// Foreign-thread gateway. Failure to enqueue cannot be converted into a
+    /// strand-owned terminal without violating the serialization contract, so
+    /// refuse a silent immortal waiter by terminating.
+    void
+    post_result(RpcResult result) noexcept
+    {
+        try
+        {
+            asio::post(
+                executor_,
+                [self = shared_from_this(),
+                 result = std::move(result)]() mutable noexcept {
+                    self->commit_result(std::move(result));
+                });
+        }
+        catch (...)
+        {
+            std::terminate();
+        }
+    }
+
+    //@@authority transition=prv.T0351 status=provisional scope=function
+    // bind=catl::rpc::detail::RpcAwaitState::wait@0333537ac9dbf7b4
+    // owner=unresolved owner_hypothesis=rpc_callback_adapter
+    // commit=rpc_callback_operation_strand touches=prv.S0143
+    // writ_roles=retained_signal.subscribe,retained_signal.revalidate,retained_signal.deadline_or_cancel
+    // label=consume_exact_rpc_terminal_or_caller_cancellation
+    asio::awaitable<RpcResult>
+    wait()
+    {
+        auto cancellation = co_await asio::this_coro::cancellation_state;
+        if (cancellation.cancelled() != asio::cancellation_type::none)
+            commit_canceled();
+
+        if (terminal_ == Terminal::pending)
+        {
+            boost::system::error_code error;
+            co_await signal_.async_wait(
+                asio::redirect_error(asio::use_awaitable, error));
+
+            cancellation = co_await asio::this_coro::cancellation_state;
+            if (terminal_ == Terminal::pending &&
+                cancellation.cancelled() != asio::cancellation_type::none)
+            {
+                commit_canceled();
+            }
+            else if (terminal_ == Terminal::pending)
+            {
+                failure_ =
+                    std::make_exception_ptr(boost::system::system_error(error));
+                terminal_ = Terminal::failed;
+            }
+        }
+
+        switch (terminal_)
+        {
+            case Terminal::completed:
+                co_return std::move(*result_);
+            case Terminal::failed:
+                std::rethrow_exception(failure_);
+            case Terminal::canceled:
+                throw boost::system::system_error(
+                    asio::error::operation_aborted);
+            case Terminal::pending:
+                break;
+        }
+        std::terminate();
+    }
+
+private:
+    enum class Terminal : std::uint8_t {
+        pending,
+        completed,
+        failed,
+        canceled,
+    };
+
+    //@@authority transition=prv.T0350 status=provisional scope=function
+    // bind=catl::rpc::detail::RpcAwaitState::commit_result@f87abd680b8fa033
+    // owner=unresolved owner_hypothesis=rpc_callback_adapter
+    // commit=rpc_callback_operation_strand touches=prv.S0143
+    // writ_roles=home.serialized_commit,retained_signal.retain,retained_signal.publish
+    // label=retain_rpc_result_or_publication_failure_before_wake
+    void
+    commit_result(RpcResult result) noexcept
+    {
+        if (terminal_ != Terminal::pending)
+            return;
+
+        try
+        {
+            result_.emplace(std::move(result));
+            if (before_terminal_commit_)
+                before_terminal_commit_();
+            terminal_ = Terminal::completed;
+        }
+        catch (...)
+        {
+            result_.reset();
+            failure_ = std::current_exception();
+            terminal_ = Terminal::failed;
+        }
+        wake_waiter();
+    }
+
+    void
+    commit_canceled() noexcept
+    {
+        if (terminal_ == Terminal::pending)
+            terminal_ = Terminal::canceled;
+    }
+
+    void
+    wake_waiter() noexcept
+    {
+        try
+        {
+            signal_.cancel();
+        }
+        catch (...)
+        {
+            std::terminate();
+        }
+    }
+
+    asio::any_io_executor executor_;
+    asio::steady_timer signal_;
+    RpcPublicationHook before_terminal_commit_;
+    std::optional<RpcResult> result_;
+    std::exception_ptr failure_;
+    //@@authority state=prv.S0143 status=provisional scope=field
+    // bind=catl::rpc::detail::RpcAwaitState::terminal_@e5190587b98e4970
+    // owner=unresolved owner_hypothesis=rpc_callback_adapter
+    // observed_home=rpc_callback_operation_strand
+    // label=retained_rpc_callback_operation_terminal
+    Terminal terminal_ = Terminal::pending;
+};
+
+asio::awaitable<RpcResult>
+callback_to_awaitable(
+    std::function<void(RpcCallback)> initiator,
+    RpcPublicationHook before_terminal_commit)
+{
+    auto caller_executor = co_await asio::this_coro::executor;
+    auto operation_home = asio::make_strand(caller_executor);
+
+    // clang-format off
+    //@@authority transition=prv.T0349 status=provisional scope=statement bind=co_return_statement@ab24edaf1f4b1a6e
+    // owner=unresolved owner_hypothesis=rpc_callback_adapter
+    // commit=rpc_callback_operation_strand touches=prv.S0143
+    // execution_home=rpc_callback.operation_strand birth=co_spawn
+    // executor_expr=operation_home drives=wait
+    // continuation=birth_executor writ_roles=home.birth
+    // label=establish_rpc_callback_operation_owner_birth
+    co_return co_await asio::co_spawn(
+        operation_home,
+        [initiator = std::move(initiator),
+         before_terminal_commit = std::move(
+             before_terminal_commit)]() mutable -> asio::awaitable<RpcResult> {
+            auto executor = co_await asio::this_coro::executor;
+            auto state = std::make_shared<RpcAwaitState>(
+                executor, std::move(before_terminal_commit));
+            initiator([state](RpcResult result) noexcept {
+                state->post_result(std::move(result));
+            });
+            co_return co_await state->wait();
+        },
+        asio::use_awaitable); //@@authority-target ids=prv.T0349
+    // clang-format on
+}
+
+}  // namespace detail
 
 detail::RpcConcurrencyGate::RpcConcurrencyGate(
     asio::any_io_executor executor,
@@ -75,6 +272,11 @@ RpcClient::RpcClient(
 {
 }
 
+//@@authority transition=prv.T0352 status=provisional scope=function
+// bind=catl::rpc::call@25401f75a8cb0bda
+// owner=unresolved owner_hypothesis=rpc_client
+// commit=rpc_request_completion_handler
+// label=publish_request_frame_terminal_through_observable_completion
 void
 RpcClient::call(
     std::string const& method,
@@ -101,8 +303,8 @@ RpcClient::call(
         [host,
          port,
          concurrency_gate = std::move(concurrency_gate),
-         body_str = std::move(body_str),
-         callback = std::move(callback)]() mutable -> asio::awaitable<void> {
+         body_str =
+             std::move(body_str)]() mutable -> asio::awaitable<RpcResult> {
             RpcResult rpc_result;
             struct PermitReceipt
             {
@@ -234,10 +436,28 @@ RpcClient::call(
             }
 
             permit.release();
-
-            callback(std::move(rpc_result));
+            co_return rpc_result;
         },
-        asio::detached);
+        [callback = std::move(callback)](
+            std::exception_ptr failure, RpcResult result) mutable {
+            if (failure)
+            {
+                result.success = false;
+                try
+                {
+                    std::rethrow_exception(failure);
+                }
+                catch (std::exception const& error)
+                {
+                    result.error = error.what();
+                }
+                catch (...)
+                {
+                    result.error = "unknown RPC request failure";
+                }
+            }
+            callback(std::move(result));
+        });
 }
 
 void

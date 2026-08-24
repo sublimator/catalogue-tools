@@ -6,45 +6,23 @@
 #include "rpc-client.h"
 
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/redirect_error.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_awaitable.hpp>
 #include <stdexcept>
 
 namespace catl::rpc {
 
 namespace detail {
 
-inline asio::awaitable<RpcResult>
-callback_to_awaitable(std::function<void(RpcCallback)> initiator)
-{
-    auto executor = co_await asio::this_coro::executor;
+using RpcPublicationHook = std::function<void()>;
 
-    // Signal and result are shared_ptr so they survive coroutine
-    // destruction if cancellation fires while the callback is in-flight.
-    auto signal = std::make_shared<asio::steady_timer>(
-        executor, asio::steady_timer::time_point::max());
-    auto rpc_result = std::make_shared<RpcResult>();
-
-    initiator([signal, rpc_result](RpcResult r) {
-        *rpc_result = std::move(r);
-        signal->cancel();
-    });
-
-    boost::system::error_code ec;
-    co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
-
-    co_return std::move(*rpc_result);
-}
+asio::awaitable<RpcResult>
+callback_to_awaitable(
+    std::function<void(RpcCallback)> initiator,
+    RpcPublicationHook before_terminal_commit = {});
 
 }  // namespace detail
 
 inline asio::awaitable<RpcResult>
-co_call(
-    RpcClient& client,
-    std::string const& method,
-    boost::json::object params = {})
+co_call(RpcClient& client, std::string method, boost::json::object params = {})
 {
     co_return co_await detail::callback_to_awaitable(
         [&](RpcCallback cb) { client.call(method, params, std::move(cb)); });
@@ -61,7 +39,7 @@ co_server_definitions(RpcClient& client)
 }
 
 inline asio::awaitable<boost::json::value>
-co_tx(RpcClient& client, std::string const& tx_hash)
+co_tx(RpcClient& client, std::string tx_hash)
 {
     auto result = co_await detail::callback_to_awaitable(
         [&](RpcCallback cb) { client.tx(tx_hash, std::move(cb)); });
