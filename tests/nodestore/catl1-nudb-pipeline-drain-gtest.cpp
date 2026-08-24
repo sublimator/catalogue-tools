@@ -1,32 +1,33 @@
-// Witness suite for issue 0078: catl1-to-nudb pipeline drain observes
-// transient zeros; tail ledgers can be silently lost.
+// Regression suite for issue 0078: catl1-to-nudb pipeline drain must retain
+// ownership until every admitted ledger reaches its terminal store writes.
 //
-// TESTS-ONLY. Drives CatlNudbPipeline through its PUBLIC surface (no new
-// production seams). Each witness cell from the issue's pre-registered
-// matrix asserts loss (or completeness, for the validity controls) against
-// an expected key set computed from an independent "twin" ledger chain —
+// Drives CatlNudbPipeline through its PUBLIC surface (no new production
+// seams). Each cell from the issue's pre-registered matrix asserts
+// completeness against an expected key set computed from an independent
+// "twin" ledger chain —
 // the pipeline's own maps are never pre-hashed by the test, so the
 // hasher's work window is never shortened by the harness.
 //
-// Cell mapping (issue 0078 witness matrix):
-//   Cell 1 + Cell 4: SequentialImmediateCloseLosesTailLedger
-//     (close_database() immediately after the last enqueue_to_hasher is
-//      exactly the tool's stats-disabled composition:
-//      catl1-to-nudb.cpp builder_thread.join -> close_database)
-//   Cell 2: ParallelDedupeBacklogLossExceedsInFlightBound
-//   Cell 3: FiveCounterProtocolReplicaBreaksInsideWindow
+// Cell mapping (issue 0078 repair matrix):
+//   Cell 1: SequentialImmediateCloseDeliversCompleteStore
+//   Cell 2: ParallelDedupeImmediateCloseDrainsWholeBacklog
+//   Cell 3: FiveCounterProtocolReplicaCannotShortCircuitClose
 //     (faithful in-process replica of the tool's stats-enabled outer
 //      drain poll, catl1-to-nudb.cpp:889-891: break on one simultaneous
 //      zero of all five public depth getters)
-//   Cell 5: no test here — publication-ordering interleave has no
-//     existing seam; dispositioned BLOCKED-ON-SEAM in the receipt.
+//   Cell 4: StatsDisabledImmediateCloseDeliversCompleteStore
+//     (close_database() immediately after the last enqueue_to_hasher is
+//      exactly the tool's stats-disabled composition:
+//      catl1-to-nudb.cpp builder_thread.join -> close_database)
+//   Cell 5: no deterministic test here — publication-ordering interleave
+//     has no existing seam; dispositioned BLOCKED-ON-SEAM in the receipt.
 //
 // Validity controls (probe-domination for the completeness direction):
 //   DrainSettledSequentialDeliversCompleteStore
 //   DrainSettledParallelDedupeDeliversCompleteStore
 // prove the identical fixture, allowed to settle before close, produces a
-// store containing EVERY expected key — so a missing key in a witness
-// cell is genuine loss, not harness blindness.
+// store containing EVERY expected key. They remain as probe-domination
+// controls for the immediate-close matrix.
 
 #include "catl/core/types.h"
 #include "catl/shamap/shamap-innernode.h"
@@ -319,8 +320,8 @@ union_of(const std::vector<BuiltLedger>& ledgers)
 // the exact expected header count proves that every admitted ledger has
 // reached the terminal writer. The writer increments that count inside its
 // active frame; close_database() joins that frame, so any remaining nodes in
-// its batch are completion-covered. The five public queue depths alone cannot
-// establish this fact — their transient zeros are the defect under test.
+// its batch are completion-covered. The five public counters now represent
+// outstanding stage ownership rather than queue occupancy.
 void
 settle(CatlNudbPipeline& pipeline, size_t expected_ledger_headers)
 {
@@ -422,14 +423,8 @@ TEST(CatlNudbPipelineDrain, DrainSettledParallelDedupeDeliversCompleteStore)
     EXPECT_EQ(pipeline->get_total_ledger_headers(), ledgers.size());
 }
 
-// ── Cells 1 + 4: sequential mode, close immediately after last enqueue ──
-// The tool's stats-disabled composition IS this call sequence
-// (catl1-to-nudb.cpp:783 builder_thread.join -> :966 close_database).
-// stop_compression_pipeline's hasher wait releases at DEQUEUE
-// (catl1-to-nudb-pipeline.cpp:1263 depth-- at pop, :1156 wait for zero),
-// so the drain checks pass while hash_and_verify is still running and
-// shutdown_ lands before the ledger's output reaches any downstream queue.
-TEST(CatlNudbPipelineDrain, SequentialImmediateCloseLosesTailLedger)
+// ── Cell 1: sequential mode, close immediately after last enqueue ──────
+TEST(CatlNudbPipelineDrain, SequentialImmediateCloseDeliversCompleteStore)
 {
     TempDir temp("catl1_nudb_0078_cell1");
     const auto& dir = temp.path();
@@ -442,38 +437,22 @@ TEST(CatlNudbPipelineDrain, SequentialImmediateCloseLosesTailLedger)
         "twin_hash_cost_ms", static_cast<int>(big.twin_hash_cost.count()));
 
     pipeline->enqueue_to_hasher(big.snapshot);
-    ASSERT_TRUE(closer.close()) << "close reported failure — the witness "
-                                   "requires a GREEN exit with loss";
+    ASSERT_TRUE(closer.close());
 
-    // The ledger's job strands in an intermediate stage: either still in
-    // the compression queue (hasher completed the push before exiting) or
-    // never pushed at all. Written totals expose the loss either way.
-    RecordProperty(
-        "stranded_compression_depth",
-        static_cast<int>(pipeline->get_compression_queue_depth()));
     size_t present = count_present(dir, big.expected_keys);
-    EXPECT_LT(present, big.expected_keys.size())
-        << "expected tail-ledger loss after green close; store is complete "
-           "— witness DID NOT FIRE";
-    EXPECT_EQ(pipeline->get_total_ledger_headers(), 0u)
-        << "the tail ledger's header must never have reached the writer";
-    EXPECT_EQ(count_present(dir, {big.header_key}), 0u)
-        << "tail ledger header key must be absent from the store";
+    EXPECT_EQ(present, big.expected_keys.size())
+        << "immediate close must deliver the whole admitted ledger";
+    EXPECT_EQ(pipeline->get_total_ledger_headers(), 1u);
+    EXPECT_EQ(count_present(dir, {big.header_key}), 1u);
 }
 
-// ── Cell 2: parallel dedupe, in-order assembly backlog dropped wholesale ─
+// ── Cell 2: parallel dedupe drains the in-order assembly backlog ───────
 // An early BIG ledger wedges one compression worker; later small ledgers
 // complete (compression + dedupe) but cannot be written because the writer
 // is strictly in-order behind the big ledger
-// (catl1-to-nudb-pipeline.cpp:1765-1779 next_ledger_to_write_).
-// stop waits only hasher/compression/write — never dedupe_queue_ nor
-// writer_assembly_map_ (:1146-1203) — and the writer exits on shutdown
-// even with complete, writable rows in the assembly station (:1762-1772).
-// Loss must therefore EXCEED the lossy in-flight bound (1 hasher + 2
-// compression workers + 1 dedupe worker = 4), which distinguishes defect 2
-// from defect 1. An active writer is deliberately excluded: stop joins its
-// frame, so a batch already owned by the writer completes rather than vanishes.
-TEST(CatlNudbPipelineDrain, ParallelDedupeBacklogLossExceedsInFlightBound)
+// behind it. close_database() must retain both branch ownership populations
+// and the assembly row until the whole backlog reaches the store.
+TEST(CatlNudbPipelineDrain, ParallelDedupeImmediateCloseDrainsWholeBacklog)
 {
     TempDir temp("catl1_nudb_0078_cell2");
     const auto& dir = temp.path();
@@ -488,38 +467,25 @@ TEST(CatlNudbPipelineDrain, ParallelDedupeBacklogLossExceedsInFlightBound)
 
     for (auto& ledger : ledgers)
         pipeline->enqueue_to_hasher(ledger.snapshot);
-    ASSERT_TRUE(closer.close()) << "close reported failure — the witness "
-                                   "requires a GREEN exit with loss";
+    ASSERT_TRUE(closer.close());
 
-    size_t headers_written = 0;
-    for (const auto& ledger : ledgers)
-        headers_written += count_present(dir, {ledger.header_key});
-    size_t lost = ledgers.size() - headers_written;
-    RecordProperty("ledgers_lost", static_cast<int>(lost));
-    RecordProperty(
-        "stranded_assembly_depth",
-        static_cast<int>(pipeline->get_assembly_station_depth()));
-    RecordProperty(
-        "stranded_dedupe_depth",
-        static_cast<int>(pipeline->get_dedupe_queue_depth()));
-
-    constexpr size_t kInFlightBound = 4;
-    EXPECT_GT(lost, kInFlightBound)
-        << "defect 2 witness requires loss beyond the in-flight bound "
-           "(whole dedupe/assembly backlog dropped); lost="
-        << lost;
+    KeySet all = union_of(ledgers);
+    EXPECT_EQ(count_present(dir, all), all.size())
+        << "parallel close must drain every admitted ledger";
+    EXPECT_EQ(pipeline->get_total_ledger_headers(), ledgers.size());
+    EXPECT_EQ(pipeline->get_dedupe_queue_depth(), 0u);
+    EXPECT_EQ(pipeline->get_assembly_station_depth(), 0u);
 }
 
 // ── Cell 3: the tool's stats-enabled five-counter photograph ────────────
 // Faithful in-process replica of catl1-to-nudb.cpp:805-899: poll the five
 // public depth getters, break on ONE simultaneous-zero photograph, then
-// close_database. The photograph is satisfiable while the hasher holds a
-// popped ledger mid-hash (all five counters release at dequeue), so the
-// outer drain hands a live pipeline to close. Replica deltas from the
+// close_database. The photograph is only a dashboard observation;
+// close_database remains the authoritative drain. Replica deltas from the
 // tool, recorded: poll interval 5ms instead of 100ms (interval affects
 // only the chance of landing inside the window, not the protocol), no
 // dashboard sink.
-TEST(CatlNudbPipelineDrain, FiveCounterProtocolReplicaBreaksInsideWindow)
+TEST(CatlNudbPipelineDrain, FiveCounterProtocolReplicaCannotShortCircuitClose)
 {
     TempDir temp("catl1_nudb_0078_cell3");
     const auto& dir = temp.path();
@@ -555,12 +521,39 @@ TEST(CatlNudbPipelineDrain, FiveCounterProtocolReplicaBreaksInsideWindow)
     }
     ASSERT_TRUE(closer.close());
 
-    // The small ledger settled before the photograph; only the big
-    // ledger's fate witnesses the defect.
+    // The outer protocol is allowed to observe an idle projection, but it
+    // cannot shorten close_database's ownership drain.
     EXPECT_EQ(
         count_present(dir, small.expected_keys), small.expected_keys.size())
         << "settled ledger must be complete (harness validity)";
-    EXPECT_EQ(count_present(dir, {big.header_key}), 0u)
-        << "photograph broke inside the big ledger's window, so its header "
-           "must be absent — if present, the witness DID NOT FIRE";
+    EXPECT_EQ(count_present(dir, big.expected_keys), big.expected_keys.size())
+        << "authoritative close must deliver the big ledger after the poll";
+    EXPECT_EQ(count_present(dir, {big.header_key}), 1u);
+}
+
+// ── Cell 4: the stats-disabled tool composition closes immediately ─────
+// This is the direct catl1-to-nudb composition after builder_thread.join:
+// several ledgers have been admitted, no external stats loop waits, and
+// close_database alone must establish the terminal store state.
+TEST(CatlNudbPipelineDrain, StatsDisabledImmediateCloseDeliversCompleteStore)
+{
+    TempDir temp("catl1_nudb_0078_cell4");
+    const auto& dir = temp.path();
+    LedgerChainFixture chain;
+    auto pipeline = make_pipeline(chain.opts, dir, false, 2);
+    PipelineCloser closer{*pipeline};
+
+    std::vector<BuiltLedger> ledgers;
+    ledgers.push_back(chain.build(100, kSmallLedgerItems));
+    ledgers.push_back(chain.build(101, kSmallLedgerItems));
+    ledgers.push_back(chain.build(102, kBigLedgerItems));
+    for (auto& ledger : ledgers)
+        pipeline->enqueue_to_hasher(ledger.snapshot);
+
+    ASSERT_TRUE(closer.close());
+
+    KeySet all = union_of(ledgers);
+    EXPECT_EQ(count_present(dir, all), all.size())
+        << "stats-disabled composition must drain every admitted ledger";
+    EXPECT_EQ(pipeline->get_total_ledger_headers(), ledgers.size());
 }

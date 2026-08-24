@@ -106,7 +106,7 @@ constexpr DedupeSkipMask SKIP_TX_ALL =
     (1 << 1) | (1 << 3);  // Skip TxInner + TxLeaf (default)
 constexpr DedupeSkipMask SKIP_LEDGER_HEADER =
     (1 << 4);  // Skip LedgerHeader (always set)
-};             // namespace DedupePatterns
+};  // namespace DedupePatterns
 
 /**
  * Convert dedupe skip mask to human-readable string
@@ -475,7 +475,7 @@ public:
     get_duplicate_state_leaf_count() const;
 
     /**
-     * Get hasher queue depth (ledgers waiting to be hashed)
+     * Get outstanding hasher work (queued or in flight)
      */
     size_t
     get_hasher_queue_depth() const
@@ -484,7 +484,7 @@ public:
     }
 
     /**
-     * Get compression queue depth (ledgers waiting to be compressed)
+     * Get outstanding compression work (queued or in flight)
      */
     size_t
     get_compression_queue_depth() const
@@ -493,7 +493,7 @@ public:
     }
 
     /**
-     * Get write queue depth (compressed nodes waiting to be written)
+     * Get outstanding write nodes (queued or in flight)
      */
     size_t
     get_write_queue_depth() const
@@ -502,7 +502,7 @@ public:
     }
 
     /**
-     * Get write queue bytes (total compressed bytes waiting to be written)
+     * Get outstanding write bytes (queued or in flight)
      */
     uint64_t
     get_write_queue_bytes() const
@@ -511,7 +511,7 @@ public:
     }
 
     /**
-     * Get dedupe queue depth (ledgers waiting for deduplication)
+     * Get outstanding dedupe work (queued or in flight)
      * Only meaningful when use_dedupe_thread_ is true
      */
     size_t
@@ -525,7 +525,7 @@ public:
     }
 
     /**
-     * Get assembly station depth (ledgers waiting at writer assembly)
+     * Get outstanding assembly rows (assembling or owned by the writer)
      * Only meaningful when use_dedupe_thread_ is true
      */
     size_t
@@ -678,11 +678,12 @@ private:
     std::atomic<bool> shutdown_{false};
     std::atomic<bool> pipeline_stopped_{false};
 
-    // Track write queue size for stats and backpressure
-    std::atomic<uint64_t> write_queue_bytes_{0};  // Total compressed bytes
-    std::atomic<uint64_t> write_queue_nodes_{0};  // Total node count
-
-    // Atomic queue depth counters (for lock-free stats reading)
+    // Outstanding ownership counters. A worker retains its row after dequeue
+    // until downstream handoff or terminal storage, so zero is a drain fact
+    // rather than a queue-only photograph. They also remain available for
+    // lock-free stats and backpressure reads.
+    std::atomic<uint64_t> write_queue_bytes_{0};
+    std::atomic<uint64_t> write_queue_nodes_{0};
     std::atomic<size_t> hasher_queue_depth_{0};
     std::atomic<size_t> compression_queue_depth_{0};
     std::atomic<size_t> dedupe_queue_depth_{0};

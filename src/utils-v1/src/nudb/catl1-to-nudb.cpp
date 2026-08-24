@@ -796,8 +796,10 @@ public:
                 end_ledger);
             LOGI("========================================");
 
-            // Wait for pipeline to drain, updating dashboard and checking for
-            // early quit
+            // Dashboard observation only. These values now include in-flight
+            // ownership, but the authoritative terminal remains
+            // close_database() below; this loop cannot manufacture drain or
+            // bypass the worker joins.
             bool user_quit_early = false;
             if (stats_sink)
             {
@@ -885,12 +887,15 @@ public:
                         std::raise(SIGINT);
                     }
 
-                    // Check if all queues drained
+                    // Stop refreshing when the outstanding-work projection is
+                    // idle. close_database() still consumes the real drain.
                     if (hasher_depth == 0 && compression_depth == 0 &&
                         dedupe_depth == 0 && assembly_depth == 0 &&
                         write_depth == 0)
                     {
-                        LOGI("All pipeline queues drained");
+                        LOGI(
+                            "Pipeline work projection idle; closing through "
+                            "the authoritative drain");
                         break;
                     }
 

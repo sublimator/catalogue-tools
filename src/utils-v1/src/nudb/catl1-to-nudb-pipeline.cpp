@@ -1142,67 +1142,92 @@ CatlNudbPipeline::stop_compression_pipeline()
 
     LOGI("Stopping compression pipeline");
 
-    // Wait for hasher queue to drain (stops new work entering the fork)
-    size_t hasher_depth = hasher_queue_depth_.load();
-    if (hasher_depth > 0)
+    // The builder has stopped admitting work before close_database() enters
+    // here. Each outstanding count includes queued and in-flight ownership;
+    // a predecessor releases only after its successor has accepted the work.
+    // Waiting in pipeline order therefore closes every future publication
+    // source before inspecting the next stage.
     {
-        LOGI(
-            "Waiting for hasher queue to drain (",
-            hasher_depth,
-            " ledgers remaining)...");
-
         std::unique_lock<std::mutex> lock(hasher_queue_cv_mutex_);
+        if (hasher_queue_depth_.load() > 0)
+        {
+            LOGI(
+                "Waiting for hasher work to drain (",
+                hasher_queue_depth_.load(),
+                " ledgers remaining)...");
+        }
         hasher_queue_cv_.wait(
             lock, [this]() { return hasher_queue_depth_.load() == 0; });
-
-        LOGI("Hasher queue drained");
     }
 
-    // Wait for BOTH parallel branches to complete:
-    // Pipeline draining order:
-    // 1. Compression: nodes → compressed batches
-    // 2. Writer: compressed batches → NuDB
-
-    // Wait for compression queue to drain
+    // Wait for compression work, including the job held by each worker, to
+    // reach the write queue or assembly station.
     {
         std::unique_lock<std::mutex> lock(compression_queue_mutex_);
-        size_t queue_depth = compression_queue_.size();
-
-        if (queue_depth > 0)
+        if (compression_queue_depth_.load() > 0)
         {
             LOGI(
-                "Waiting for compression queue to drain (",
-                queue_depth,
+                "Waiting for compression work to drain (",
+                compression_queue_depth_.load(),
                 " ledgers remaining)...");
-
-            compression_queue_cv_.wait(
-                lock, [this]() { return compression_queue_.empty(); });
-
-            LOGI("Compression queue drained");
         }
+        compression_queue_cv_.wait(
+            lock, [this]() { return compression_queue_depth_.load() == 0; });
     }
 
-    // Wait for write queue to drain
-    if (mock_mode_.empty() || mock_mode_ == "disk")
+    if (use_dedupe_thread_)
     {
-        size_t write_depth = write_queue_nodes_.load();
-
-        if (write_depth > 0)
+        // The hasher can no longer publish dedupe work. Wait for the optional
+        // branch to commit every duplicate set to the assembly station.
         {
-            LOGI(
-                "Waiting for write queue to drain (",
-                write_depth,
-                " nodes in batches remaining)...");
+            std::unique_lock<std::mutex> lock(dedupe_queue_cv_mutex_);
+            if (dedupe_queue_depth_.load() > 0)
+            {
+                LOGI(
+                    "Waiting for dedupe work to drain (",
+                    dedupe_queue_depth_.load(),
+                    " ledgers remaining)...");
+            }
+            dedupe_queue_cv_.wait(
+                lock, [this]() { return dedupe_queue_depth_.load() == 0; });
+        }
 
+        // An assembly row remains outstanding while the writer owns it. Zero
+        // therefore acknowledges both branch rendezvous and terminal writes.
+        {
+            std::unique_lock<std::mutex> lock(writer_assembly_mutex_);
+            if (assembly_station_depth_.load() > 0)
+            {
+                LOGI(
+                    "Waiting for writer assembly to drain (",
+                    assembly_station_depth_.load(),
+                    " ledgers remaining)...");
+            }
+            writer_assembly_cv_.wait(
+                lock, [this]() { return assembly_station_depth_.load() == 0; });
+        }
+    }
+    else
+    {
+        // A write row remains outstanding until insertion and batch
+        // destruction finish, including in mock modes where memory still
+        // needs truthful retirement.
+        {
             std::unique_lock<std::mutex> lock(write_queue_cv_mutex_);
+            if (write_queue_nodes_.load() > 0)
+            {
+                LOGI(
+                    "Waiting for write work to drain (",
+                    write_queue_nodes_.load(),
+                    " nodes outstanding)...");
+            }
             write_queue_cv_.wait(
                 lock, [this]() { return write_queue_nodes_.load() == 0; });
-
-            LOGI("Write queue drained");
         }
     }
 
-    // NOW signal shutdown
+    // Every admitted row has reached terminal storage. Shutdown may now make
+    // idle workers exit without racing a late upstream publication.
     shutdown_.store(true);
 
     // Wake up all threads so they see the shutdown signal
@@ -1249,7 +1274,9 @@ CatlNudbPipeline::stop_compression_pipeline()
 void
 CatlNudbPipeline::hasher_worker()
 {
-    while (!shutdown_.load())
+    // Drain remaining queued/in-flight ownership even after shutdown is
+    // published. Shutdown is not permission to drop admitted hasher work.
+    for (;;)
     {
         LedgerSnapshot snapshot;
 
@@ -1260,13 +1287,11 @@ CatlNudbPipeline::hasher_worker()
             // Try to pop from lock-free queue
             if (hasher_queue_.pop(snapshot))
             {
-                hasher_queue_depth_--;
                 got_snapshot = true;
                 break;
             }
 
-            // Queue empty, wait for notification
-            if (shutdown_.load())
+            if (shutdown_.load() && hasher_queue_depth_.load() == 0)
             {
                 break;
             }
@@ -1278,13 +1303,10 @@ CatlNudbPipeline::hasher_worker()
                 });
         }
 
-        if (shutdown_.load() && !got_snapshot)
-        {
-            break;
-        }
-
         if (!got_snapshot)
         {
+            if (shutdown_.load())
+                break;
             continue;
         }
 
@@ -1412,12 +1434,28 @@ CatlNudbPipeline::hasher_worker()
                 }
             }
 
-            // Lock-free push (spin if full)
-            while (!dedupe_queue_.push(dedupe_work))
+            // Reserve ownership before publishing to the lock-free queue.
+            // If construction/copy throws, roll the never-published row back.
             {
-                std::this_thread::yield();
+                std::lock_guard<std::mutex> lock(dedupe_queue_cv_mutex_);
+                dedupe_queue_depth_++;
             }
-            dedupe_queue_depth_++;
+            try
+            {
+                while (!dedupe_queue_.push(dedupe_work))
+                {
+                    std::this_thread::yield();
+                }
+            }
+            catch (...)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(dedupe_queue_cv_mutex_);
+                    dedupe_queue_depth_--;
+                }
+                dedupe_queue_cv_.notify_all();
+                throw;
+            }
 
             // Wake up dedupe worker
             {
@@ -1463,17 +1501,38 @@ CatlNudbPipeline::hasher_worker()
                 }
             }
 
-            compression_queue_.push(std::move(hashed));
+            // Reserve before the priority-queue entry becomes visible even
+            // to lock-free stats readers. Roll back if publication fails.
             compression_queue_depth_++;
+            try
+            {
+                compression_queue_.push(std::move(hashed));
+            }
+            catch (...)
+            {
+                compression_queue_depth_--;
+                throw;
+            }
         }
         compression_queue_cv_.notify_all();
+
+        // Both successors now own their exact rows. Retire the hasher row only
+        // after those publications are committed.
+        {
+            std::lock_guard<std::mutex> lock(hasher_queue_cv_mutex_);
+            hasher_queue_depth_--;
+        }
+        hasher_queue_cv_.notify_all();
     }
 }
 
 void
 CatlNudbPipeline::compression_worker()
 {
-    while (!shutdown_.load())
+    // The outer shutdown flag must not drop queued compression jobs. Stop
+    // publishes shutdown only after outstanding work is zero; this loop is
+    // the remaining law-4 defense if that order is ever violated.
+    for (;;)
     {
         HashedLedger job;
 
@@ -1484,20 +1543,16 @@ CatlNudbPipeline::compression_worker()
                 return !compression_queue_.empty() || shutdown_.load();
             });
 
-            if (shutdown_.load() && compression_queue_.empty())
-            {
-                break;
-            }
-
             if (compression_queue_.empty())
             {
+                if (shutdown_.load())
+                    break;
                 continue;
             }
 
             job =
                 std::move(const_cast<HashedLedger&>(compression_queue_.top()));
             compression_queue_.pop();
-            compression_queue_depth_--;
         }
 
         // Notify that we made space in the queue (for backpressure)
@@ -1724,14 +1779,25 @@ CatlNudbPipeline::compression_worker()
             // NOTE: Dedupe worker is processing the SAME ledger in parallel!
             {
                 std::lock_guard<std::mutex> lock(writer_assembly_mutex_);
-                auto [it, inserted] =
-                    writer_assembly_map_.try_emplace(job.info.seq);
+                auto it = writer_assembly_map_.find(job.info.seq);
+                if (it == writer_assembly_map_.end())
+                {
+                    // Stats readers do not take this mutex, so reserve before
+                    // the row itself becomes visible.
+                    assembly_station_depth_++;
+                    try
+                    {
+                        it = writer_assembly_map_.try_emplace(job.info.seq)
+                                 .first;
+                    }
+                    catch (...)
+                    {
+                        assembly_station_depth_--;
+                        throw;
+                    }
+                }
                 it->second.compressed_batch = std::move(batch);
                 it->second.compression_done = true;
-                if (inserted)
-                {
-                    assembly_station_depth_++;
-                }
             }
             writer_assembly_cv_.notify_one();  // Wake up writer
         }
@@ -1741,6 +1807,14 @@ CatlNudbPipeline::compression_worker()
             enqueue_compressed_batch(std::move(batch));
         }
 
+        // The assembly station or write queue now owns the result. Retire the
+        // compression row only after that handoff.
+        {
+            std::lock_guard<std::mutex> lock(compression_queue_mutex_);
+            compression_queue_depth_--;
+        }
+        compression_queue_cv_.notify_all();
+
         // job goes out of scope → maps destruct → nodes cleanup
     }
 }
@@ -1748,7 +1822,7 @@ CatlNudbPipeline::compression_worker()
 void
 CatlNudbPipeline::writer_worker()
 {
-    while (!shutdown_.load())
+    for (;;)
     {
         WriterJob current_job;
 
@@ -1756,28 +1830,37 @@ CatlNudbPipeline::writer_worker()
         {
             // PARALLEL MODE: Wait for assembly station
             // Wait for BOTH compression AND dedupe to complete for the next
-            // ledger
+            // ledger. A ready row wins over shutdown; dropping it was the
+            // original loss.
+            bool took_job = false;
             {
                 std::unique_lock<std::mutex> lock(writer_assembly_mutex_);
                 writer_assembly_cv_.wait(lock, [this]() {
-                    if (shutdown_.load())
-                        return true;
                     auto it = writer_assembly_map_.find(next_ledger_to_write_);
-                    // Wait if job not found, or if it's not fully done
-                    return it != writer_assembly_map_.end() &&
-                        it->second.compression_done && it->second.dedupe_done;
+                    if (it != writer_assembly_map_.end() &&
+                        it->second.compression_done && it->second.dedupe_done)
+                    {
+                        return true;
+                    }
+                    return shutdown_.load();
                 });
 
-                if (shutdown_.load())
+                auto it = writer_assembly_map_.find(next_ledger_to_write_);
+                if (it != writer_assembly_map_.end() &&
+                    it->second.compression_done && it->second.dedupe_done)
+                {
+                    current_job = std::move(it->second);
+                    writer_assembly_map_.erase(it);
+                    next_ledger_to_write_++;
+                    took_job = true;
+                }
+                else if (shutdown_.load())
+                {
                     break;
-
-                // We have the complete job for the next ledger, pull it
-                current_job =
-                    std::move(writer_assembly_map_[next_ledger_to_write_]);
-                writer_assembly_map_.erase(next_ledger_to_write_);
-                assembly_station_depth_--;
-                next_ledger_to_write_++;
+                }
             }  // Lock released
+            if (!took_job)
+                continue;
 
             // Process the job (NO RocksDB I/O - dedupe already done!)
             for (auto& node : current_job.compressed_batch)
@@ -1854,6 +1937,14 @@ CatlNudbPipeline::writer_worker()
                     }
                 }
             }
+
+            // The row remains outstanding while the writer owns it. Release
+            // only after every accepted node has reached terminal insertion.
+            {
+                std::lock_guard<std::mutex> lock(writer_assembly_mutex_);
+                assembly_station_depth_--;
+            }
+            writer_assembly_cv_.notify_all();
         }
         else
         {
@@ -1871,8 +1962,7 @@ CatlNudbPipeline::writer_worker()
                     break;
                 }
 
-                // Queue empty, wait for notification
-                if (shutdown_.load())
+                if (shutdown_.load() && write_queue_nodes_.load() == 0)
                 {
                     break;
                 }
@@ -1885,30 +1975,21 @@ CatlNudbPipeline::writer_worker()
                     });
             }
 
-            if (shutdown_.load() && !got_batch)
-            {
-                break;
-            }
-
             if (!got_batch)
             {
+                if (shutdown_.load())
+                    break;
                 continue;
             }
 
-            // Decrement counters for entire batch
+            // Compute the retained row's accounting. It remains outstanding
+            // until terminal insertion and batch destruction complete.
             uint64_t batch_bytes = 0;
             for (const auto& node : *batch_ptr)
             {
                 batch_bytes += node.blob.size();
             }
-            write_queue_bytes_ -= batch_bytes;
-            write_queue_nodes_ -= batch_ptr->size();
-
-            // Notify that we made space
-            {
-                std::lock_guard<std::mutex> lock(write_queue_cv_mutex_);
-            }
-            write_queue_cv_.notify_all();
+            size_t const batch_size = batch_ptr->size();
 
             // Process batch WITHOUT holding lock
             for (auto& node : *batch_ptr)
@@ -2005,8 +2086,15 @@ CatlNudbPipeline::writer_worker()
 
             // Delete the batch (allocated in enqueue_compressed_batch)
             delete batch_ptr;
+
+            {
+                std::lock_guard<std::mutex> lock(write_queue_cv_mutex_);
+                write_queue_bytes_ -= batch_bytes;
+                write_queue_nodes_ -= batch_size;
+            }
+            write_queue_cv_.notify_all();
         }  // End sequential mode
-    }      // End while loop
+    }  // End while loop
 }
 
 void
@@ -2017,7 +2105,7 @@ CatlNudbPipeline::dedupe_worker()
     uint64_t ledgers_processed = 0;
     uint64_t total_hashes_checked = 0;
 
-    while (!shutdown_.load())
+    for (;;)
     {
         DedupeWork work;
 
@@ -2028,13 +2116,11 @@ CatlNudbPipeline::dedupe_worker()
             // Try to pop from lock-free queue
             if (dedupe_queue_.pop(work))
             {
-                dedupe_queue_depth_--;
                 got_work = true;
                 break;
             }
 
-            // Queue empty, wait for notification
-            if (shutdown_.load())
+            if (shutdown_.load() && dedupe_queue_depth_.load() == 0)
             {
                 break;
             }
@@ -2046,13 +2132,10 @@ CatlNudbPipeline::dedupe_worker()
                 });
         }
 
-        if (shutdown_.load() && !got_work)
-        {
-            break;
-        }
-
         if (!got_work)
         {
+            if (shutdown_.load())
+                break;
             continue;
         }
 
@@ -2115,16 +2198,32 @@ CatlNudbPipeline::dedupe_worker()
         // 7. Deliver the result to the "assembly station"
         {
             std::lock_guard<std::mutex> lock(writer_assembly_mutex_);
-            auto [it, inserted] =
-                writer_assembly_map_.try_emplace(work.ledger_seq);
-            it->second.duplicate_set = std::move(duplicates_for_this_ledger);
-            it->second.dedupe_done = true;
-            if (inserted)
+            auto it = writer_assembly_map_.find(work.ledger_seq);
+            if (it == writer_assembly_map_.end())
             {
                 assembly_station_depth_++;
+                try
+                {
+                    it =
+                        writer_assembly_map_.try_emplace(work.ledger_seq).first;
+                }
+                catch (...)
+                {
+                    assembly_station_depth_--;
+                    throw;
+                }
             }
+            it->second.duplicate_set = std::move(duplicates_for_this_ledger);
+            it->second.dedupe_done = true;
             writer_assembly_cv_.notify_one();  // Wake up the writer
         }
+
+        // The assembly station now owns the duplicate-set result.
+        {
+            std::lock_guard<std::mutex> lock(dedupe_queue_cv_mutex_);
+            dedupe_queue_depth_--;
+        }
+        dedupe_queue_cv_.notify_all();
     }
 
     LOGI("Dedupe worker thread stopped");
@@ -2178,14 +2277,31 @@ CatlNudbPipeline::enqueue_compressed_batch(std::vector<CompressedNode>&& batch)
     size_t batch_size = batch.size();
     auto* batch_ptr = new std::vector<CompressedNode>(std::move(batch));
 
-    // Lock-free push (spin if full)
-    while (!write_queue_.push(batch_ptr))
+    // Reserve ownership before publishing the pointer. Roll back both the
+    // accounting and allocation if publication throws.
     {
-        std::this_thread::yield();
+        std::lock_guard<std::mutex> lock(write_queue_cv_mutex_);
+        write_queue_bytes_ += batch_bytes;
+        write_queue_nodes_ += batch_size;
     }
-
-    write_queue_bytes_ += batch_bytes;
-    write_queue_nodes_ += batch_size;
+    try
+    {
+        while (!write_queue_.push(batch_ptr))
+        {
+            std::this_thread::yield();
+        }
+    }
+    catch (...)
+    {
+        {
+            std::lock_guard<std::mutex> lock(write_queue_cv_mutex_);
+            write_queue_bytes_ -= batch_bytes;
+            write_queue_nodes_ -= batch_size;
+        }
+        delete batch_ptr;
+        write_queue_cv_.notify_all();
+        throw;
+    }
 
     // Wake up writer
     {
@@ -2237,13 +2353,28 @@ CatlNudbPipeline::enqueue_to_hasher(LedgerSnapshot snapshot)
         }
     }
 
-    // Lock-free push (spin if full, which should be rare with backpressure)
-    while (!hasher_queue_.push(snapshot))
+    // Reserve the exact row before publishing to the lock-free queue.
     {
-        // Queue full, yield and retry
-        std::this_thread::yield();
+        std::lock_guard<std::mutex> lock(hasher_queue_cv_mutex_);
+        hasher_queue_depth_++;
     }
-    hasher_queue_depth_++;
+    try
+    {
+        while (!hasher_queue_.push(snapshot))
+        {
+            // Queue full, yield and retry
+            std::this_thread::yield();
+        }
+    }
+    catch (...)
+    {
+        {
+            std::lock_guard<std::mutex> lock(hasher_queue_cv_mutex_);
+            hasher_queue_depth_--;
+        }
+        hasher_queue_cv_.notify_all();
+        throw;
+    }
 
     // Wake up hasher thread
     {
