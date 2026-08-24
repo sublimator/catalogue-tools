@@ -17,18 +17,21 @@
 #include "validation-quorum-tracker.h"
 #include "vl-cache.h"
 
+#include <catl/core/request-scope.h>
 #include <catl/peer-client/ledger-fetch-coordinator.h>
 #include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
-#include <catl/core/request-scope.h>
 #include <catl/rpc-client/rpc-client.h>
 #include <catl/xdata/protocol.h>
+#include <writ/retained-signal.hpp>
 
 #include <atomic>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <chrono>
+#include <exception>
 #include <list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -392,6 +395,9 @@ private:
         std::shared_ptr<RequestDrainAuthority const> authority);
 
     boost::asio::io_context& io_;
+    // retained_signal owns only its subscriber registry on this home. Anchor
+    // operation state remains serialized by cache_mutex_.
+    writ::home anchor_wait_home_;
     NetworkConfig config_;
     std::string net_label_;
     catl::xdata::Protocol protocol_;
@@ -479,15 +485,30 @@ private:
         std::chrono::steady_clock::time_point built_at;
     };
 
-    struct AnchorEntry
+    enum class AnchorTerminal : std::uint8_t {
+        in_flight,
+        completed,
+        failed,
+        invalidated
+    };
+
+    struct AnchorOperation
     {
-        AnchorBundle bundle;
-        std::shared_ptr<boost::asio::steady_timer> signal;
-        bool present = false;
+        std::shared_ptr<writ::retained_signal> signal;
+        std::optional<AnchorBundle> bundle;
+        std::exception_ptr failure;
+        AnchorTerminal terminal = AnchorTerminal::in_flight;
     };
 
     using AnchorCacheKey = std::tuple<uint32_t, uint32_t, Hash256>;
-    std::map<AnchorCacheKey, AnchorEntry> anchor_cache_;
+    using AnchorOperationPtr = std::shared_ptr<AnchorOperation>;
+    //@@authority state=prv.S0142 status=provisional scope=field
+    // bind=xprv::ProofEngine::anchor_cache_@41ca54a23c8a0c3a
+    // owner=unresolved owner_hypothesis=proof_engine
+    // observed_home=proof_engine.cache_mutex
+    // writ_roles=retained_signal.instance
+    // label=exact_anchor_shared_operation_and_retained_terminal_by_cache_key
+    std::map<AnchorCacheKey, AnchorOperationPtr> anchor_cache_;
     // Uses cache_mutex_ (same lock as proof cache)
 
     // The most recently built anchor — reused when fresh enough.
@@ -517,8 +538,15 @@ private:
     void
     invalidate_anchor_cache();
 
+    // Mutex-held invalidation commit. Callers that already hold
+    // cache_mutex_ must publish retained_signal wakes only after releasing
+    // it; the unlocked wrapper is the production path.
     void
     invalidate_anchor_cache_locked();
+
+    // Test-only observation point after an exact in-flight operation has been
+    // selected but before its retained wait registers on anchor_wait_home_.
+    std::function<void()> before_anchor_wait_subscribe_for_test_;
 };
 
 }  // namespace xprv

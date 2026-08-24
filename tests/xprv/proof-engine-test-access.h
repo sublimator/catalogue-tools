@@ -92,28 +92,29 @@ public:
     // The waiter path under test is the PRODUCTION get_anchor_bundle
     // Action::wait branch, entered through join_anchor_wait below. The
     // builder-side helpers reproduce the exact cache transitions the
-    // production fetch arm performs — entry creation
-    // (proof-engine.cpp:1204-1206), success publication (:1283-1307),
-    // failure cleanup (:1322-1334) — with a test-scaled deadline in
-    // place of the hard-coded 30 s. This mirrors the established
+    // production fetch arm performs — exact operation installation, retained
+    // terminal publication, and exact-row failure cleanup — with a
+    // test-owned RequestScope deadline. This mirrors the established
     // NodeCacheTestAccess::create_in_flight idiom.
 
     using AnchorBundle = ProofEngine::AnchorBundle;
+    using AnchorOperationPtr = ProofEngine::AnchorOperationPtr;
 
-    static void
+    static AnchorOperationPtr
     create_in_flight_anchor(
         ProofEngine& engine,
         uint32_t anchor_seq,
         Hash256 const& anchor_hash,
-        uint32_t vl_sequence,
-        std::chrono::milliseconds deadline)
+        uint32_t vl_sequence)
     {
+        auto operation = std::make_shared<ProofEngine::AnchorOperation>();
+        operation->signal =
+            std::make_shared<writ::retained_signal>(engine.anchor_wait_home_);
         std::lock_guard lock(engine.cache_mutex_);
-        auto& entry = engine.anchor_cache_[ProofEngine::AnchorCacheKey{
-            vl_sequence, anchor_seq, anchor_hash}];
-        entry.signal =
-            std::make_shared<boost::asio::steady_timer>(engine.io_, deadline);
-        entry.present = false;
+        engine.anchor_cache_.insert_or_assign(
+            ProofEngine::AnchorCacheKey{vl_sequence, anchor_seq, anchor_hash},
+            operation);
+        return operation;
     }
 
     static bool
@@ -126,8 +127,8 @@ public:
         std::lock_guard lock(engine.cache_mutex_);
         auto it = engine.anchor_cache_.find(
             ProofEngine::AnchorCacheKey{vl_sequence, anchor_seq, anchor_hash});
-        return it != engine.anchor_cache_.end() && it->second.signal &&
-            !it->second.present;
+        return it != engine.anchor_cache_.end() && it->second &&
+            it->second->terminal == ProofEngine::AnchorTerminal::in_flight;
     }
 
     /// The production waiter/hit coroutine. vl_effective/vl_expiration
@@ -135,6 +136,30 @@ public:
     /// enter (an in-flight or present entry always exists first).
     static boost::asio::awaitable<AnchorBundle>
     join_anchor_wait(
+        std::shared_ptr<ProofEngine> engine,
+        uint32_t anchor_seq,
+        Hash256 anchor_hash,
+        uint32_t vl_sequence,
+        std::chrono::milliseconds timeout)
+    {
+        auto request_scope = catl::core::RequestScope::create(
+            catl::core::RequestScope::Clock::now() + timeout);
+        if (!request_scope)
+            throw std::runtime_error("test request scope unavailable");
+        co_return co_await engine->get_anchor_bundle(
+            anchor_seq,
+            anchor_hash,
+            vl_sequence,
+            0,
+            std::numeric_limits<uint32_t>::max(),
+            {},
+            std::move(request_scope));
+    }
+
+    /// Production waiter path with no RequestScope: the 30-second join
+    /// policy in get_anchor_bundle, not a test-scaled deadline.
+    static boost::asio::awaitable<AnchorBundle>
+    join_anchor_wait_without_request_scope(
         std::shared_ptr<ProofEngine> engine,
         uint32_t anchor_seq,
         Hash256 anchor_hash,
@@ -150,15 +175,23 @@ public:
             nullptr);
     }
 
-    /// Mirrors the fetch arm's SUCCESS transition verbatim
-    /// (proof-engine.cpp:1283-1307): publish bundle, drop the signal
-    /// from the entry, cancel it outside the lock.
     static void
+    set_before_anchor_wait_subscribe(
+        ProofEngine& engine,
+        std::function<void()> hook)
+    {
+        engine.before_anchor_wait_subscribe_for_test_ = std::move(hook);
+    }
+
+    /// Mirrors the fetch arm's SUCCESS transition: accept only the exact
+    /// installed operation, retain its bundle terminal, then publish its wake.
+    static bool
     complete_anchor_build(
         ProofEngine& engine,
         uint32_t anchor_seq,
         Hash256 const& anchor_hash,
-        uint32_t vl_sequence)
+        uint32_t vl_sequence,
+        AnchorOperationPtr const& operation)
     {
         AnchorBundle bundle;
         bundle.anchor_hash = anchor_hash;
@@ -166,47 +199,59 @@ public:
         bundle.vl_sequence = vl_sequence;
         bundle.built_at = std::chrono::steady_clock::now();
 
-        std::shared_ptr<boost::asio::steady_timer> sig;
+        bool publish = false;
         {
             std::lock_guard lock(engine.cache_mutex_);
-            auto& entry = engine.anchor_cache_[ProofEngine::AnchorCacheKey{
-                vl_sequence, anchor_seq, anchor_hash}];
-            sig = entry.signal;
-            entry.bundle = bundle;
-            entry.present = true;
-            entry.signal = nullptr;
-            engine.current_anchor_ = bundle;
+            auto const it =
+                engine.anchor_cache_.find(ProofEngine::AnchorCacheKey{
+                    vl_sequence, anchor_seq, anchor_hash});
+            if (it != engine.anchor_cache_.end() && it->second == operation &&
+                operation->terminal == ProofEngine::AnchorTerminal::in_flight)
+            {
+                operation->bundle = bundle;
+                operation->failure = nullptr;
+                operation->terminal = ProofEngine::AnchorTerminal::completed;
+                engine.current_anchor_ = bundle;
+                publish = true;
+            }
         }
-        if (sig)
-            sig->cancel();
+        if (publish)
+            operation->signal->post_complete();
+        return publish;
     }
 
-    /// Mirrors the fetch arm's FAILURE transition verbatim
-    /// (proof-engine.cpp:1322-1334): erase the entry, cancel outside
-    /// the lock.
-    static void
+    /// Mirrors the fetch arm's FAILURE transition: retain the original
+    /// exception in the exact operation, remove only its row, then wake.
+    static bool
     fail_anchor_build(
         ProofEngine& engine,
         uint32_t anchor_seq,
         Hash256 const& anchor_hash,
-        uint32_t vl_sequence)
+        uint32_t vl_sequence,
+        AnchorOperationPtr const& operation,
+        std::string message)
     {
-        std::shared_ptr<boost::asio::steady_timer> sig;
+        bool publish = false;
         {
             std::lock_guard lock(engine.cache_mutex_);
             auto it = engine.anchor_cache_.find(ProofEngine::AnchorCacheKey{
                 vl_sequence, anchor_seq, anchor_hash});
-            if (it != engine.anchor_cache_.end())
+            if (it != engine.anchor_cache_.end() && it->second == operation &&
+                operation->terminal == ProofEngine::AnchorTerminal::in_flight)
             {
-                sig = it->second.signal;
+                operation->failure = std::make_exception_ptr(
+                    std::runtime_error(std::move(message)));
+                operation->terminal = ProofEngine::AnchorTerminal::failed;
                 engine.anchor_cache_.erase(it);
+                publish = true;
             }
         }
-        if (sig)
-            sig->cancel();
+        if (publish)
+            operation->signal->post_complete();
+        return publish;
     }
 
-    /// The real production invalidation (proof-engine.cpp:1156-1161).
+    /// The real production invalidation.
     static void
     invalidate_anchor_cache(ProofEngine& engine)
     {

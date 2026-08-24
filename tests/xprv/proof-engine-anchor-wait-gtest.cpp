@@ -1,42 +1,18 @@
-// Witness suite for issue 0074: the anchor-bundle wait conflates
-// timeout and completion.
+// Permanent inversion controls for issue 0074.
 //
-// ProofEngine::get_anchor_bundle's waiter arm awaits the shared
-// steady_timer, IGNORES the wake's error code (proof-engine.cpp:1231-1233
-// discards `ec`), and classifies the outcome solely from `entry.present`
-// (:1237), throwing one generic "anchor bundle fetch failed" (:1245) for
-// every not-present wake. These witnesses prove the misclassification:
-// three DISTINCT truthful terminals — shared operation deadline expiry, cache
-// invalidation, and builder failure — produce byte-identical generic
-// failures, and the deadline case is a FALSE failure: the in-flight build
-// is still legitimately live and can succeed moments later.
-//
-// TESTS-ONLY. The waiter under test is the PRODUCTION coroutine (the
-// Action::wait branch entered through the real get_anchor_bundle).
-// Builder-side cache transitions are reproduced through the existing
-// ProofEngineTestAccess friend seam exactly as the production fetch arm
-// performs them (creation :1204-1206, success :1283-1307, failure
-// :1322-1334) — the same idiom NodeCacheTestAccess::create_in_flight
-// established. Recorded delta from production: the in-flight deadline is
-// test-scaled (50 ms) in place of the hard-coded 30 s at :1204-1205; the
-// timer object, the wait, the wake and the classification site are
-// otherwise untouched.
-//
-// Typed-outcome map (goal requirement):
-//   completion  -> CompletionWakeReturnsBundle (correctly classified;
-//                  this is the probe-validity control)
-//   deadline    -> DeadlineExpiryReportsGenericFetchFailure (misclassified)
-//   cancellation/invalidation -> InvalidationWakeIndistinguishable...
-//                  (misclassified, identical to deadline)
-//   builder failure -> BuilderFailureIndistinguishable... (identical again)
-//   shutdown    -> not witnessed here; stop-time interaction with the
-//                  anchor cache is a separate lane (non-claim).
+// One anchor key owns one shared operation object. The operation publishes a
+// typed terminal under ProofEngine::cache_mutex_ before waking subscribers
+// through writ::retained_signal. A subscriber deadline/cancellation retires
+// only that subscriber; invalidation and builder failure remain shared
+// terminals, and a stale builder cannot publish into a successor row.
 
 #include <xprv/network-config.h>
 #include <xprv/proof-engine.h>
 
 #include "proof-engine-test-access.h"
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
@@ -46,20 +22,24 @@
 #include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
 namespace asio = boost::asio;
+using catl::peer_client::Error;
+using catl::peer_client::PeerClientException;
 using xprv::ProofEngineTestAccess;
 using namespace std::chrono_literals;
 
 namespace {
 
-constexpr char const* kGenericFailure = "anchor bundle fetch failed";
+constexpr char const* kBuilderFailure = "0074 exact builder failure";
 constexpr uint32_t kSeq = 5000;
 constexpr uint32_t kVlSeq = 7;
 
@@ -72,18 +52,49 @@ test_anchor_hash()
     return Hash256(bytes);
 }
 
+struct Failure
+{
+    std::optional<Error> error;
+    std::string detail;
+    std::string message;
+};
+
+Failure
+failure_of(std::future<ProofEngineTestAccess::AnchorBundle>& waiter)
+{
+    try
+    {
+        (void)waiter.get();
+    }
+    catch (PeerClientException const& failure)
+    {
+        return Failure{failure.error, failure.detail, failure.what()};
+    }
+    catch (std::runtime_error const& failure)
+    {
+        return Failure{std::nullopt, {}, failure.what()};
+    }
+    catch (...)
+    {
+        return Failure{std::nullopt, {}, "(non-runtime_error exception)"};
+    }
+    return Failure{std::nullopt, {}, "(no exception)"};
+}
+
 struct AnchorWaitHarness
 {
     asio::io_context io;
     std::shared_ptr<xprv::ProofEngine> engine =
         xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
     Hash256 hash = test_anchor_hash();
+    ProofEngineTestAccess::AnchorOperationPtr operation;
 
-    void
-    create_in_flight(std::chrono::milliseconds deadline)
+    ProofEngineTestAccess::AnchorOperationPtr
+    create_in_flight()
     {
-        ProofEngineTestAccess::create_in_flight_anchor(
-            *engine, kSeq, hash, kVlSeq, deadline);
+        operation = ProofEngineTestAccess::create_in_flight_anchor(
+            *engine, kSeq, hash, kVlSeq);
+        return operation;
     }
 
     bool
@@ -94,17 +105,28 @@ struct AnchorWaitHarness
     }
 
     std::future<ProofEngineTestAccess::AnchorBundle>
-    spawn_waiter()
+    spawn_waiter(std::chrono::milliseconds timeout)
     {
         return asio::co_spawn(
             io,
-            ProofEngineTestAccess::join_anchor_wait(engine, kSeq, hash, kVlSeq),
+            ProofEngineTestAccess::join_anchor_wait(
+                engine, kSeq, hash, kVlSeq, timeout),
             asio::use_future);
     }
 
-    // Schedule a builder-side transition ON the io_context (production
-    // serializes cache transitions and timer cancels the same way: the
-    // builder coroutine runs on io_).
+    std::future<ProofEngineTestAccess::AnchorBundle>
+    spawn_cancellable_waiter(
+        std::chrono::milliseconds timeout,
+        asio::cancellation_signal& cancellation)
+    {
+        return asio::co_spawn(
+            io,
+            ProofEngineTestAccess::join_anchor_wait(
+                engine, kSeq, hash, kVlSeq, timeout),
+            asio::bind_cancellation_slot(
+                cancellation.slot(), asio::use_future));
+    }
+
     template <typename Fn>
     void
     schedule(std::chrono::milliseconds after, Fn fn)
@@ -112,24 +134,26 @@ struct AnchorWaitHarness
         asio::co_spawn(
             io,
             [this, after, fn = std::move(fn)]() -> asio::awaitable<void> {
-                asio::steady_timer t(io, after);
-                co_await t.async_wait(asio::use_awaitable);
+                asio::steady_timer timer(io, after);
+                co_await timer.async_wait(asio::use_awaitable);
                 fn();
             },
             asio::detached);
     }
 
-    // A real test-side builder servant: its coroutine frame remains live
-    // across the shared timer's expiry, then publishes through the exact
-    // production-success transition reproduced by TestAccess.
+    // A real builder servant whose frame remains live across a subscriber's
+    // deadline, then publishes through the exact operation object it retained
+    // at admission.
     std::future<void>
     spawn_builder_success(
         std::shared_ptr<asio::steady_timer> release,
         std::atomic_bool& running)
     {
+        auto admitted = operation;
         return asio::co_spawn(
             io,
             [this,
+             admitted = std::move(admitted),
              release = std::move(release),
              &running]() -> asio::awaitable<void> {
                 running.store(true, std::memory_order_release);
@@ -139,8 +163,12 @@ struct AnchorWaitHarness
                 if (error != asio::error::operation_aborted)
                     throw std::runtime_error(
                         "builder release gate completed unexpectedly");
-                ProofEngineTestAccess::complete_anchor_build(
-                    *engine, kSeq, hash, kVlSeq);
+                if (!ProofEngineTestAccess::complete_anchor_build(
+                        *engine, kSeq, hash, kVlSeq, admitted))
+                {
+                    throw std::runtime_error(
+                        "exact builder publication was refused");
+                }
                 running.store(false, std::memory_order_release);
             },
             asio::use_future);
@@ -168,7 +196,6 @@ struct AnchorWaitHarness
         return io.poll();
     }
 
-    // Run until all scheduled work completes.
     void
     run()
     {
@@ -178,39 +205,16 @@ struct AnchorWaitHarness
     }
 };
 
-std::string
-failure_message(std::future<ProofEngineTestAccess::AnchorBundle>& waiter)
-{
-    try
-    {
-        (void)waiter.get();
-    }
-    catch (std::runtime_error const& error)
-    {
-        return error.what();
-    }
-    catch (...)
-    {
-        return "(non-runtime_error exception)";
-    }
-    return "(no exception)";
-}
-
 }  // namespace
 
-// ── Probe-validity control: a completion wake is classified correctly ──
-// The waiter distinguishes exactly ONE outcome (present=true). This
-// control proves the harness's production waiter returns the bundle on a
-// genuine completion wake — so the identical generic failures in the
-// witnesses below are the code's classification, not harness blindness.
 TEST(ProofEngineAnchorWait0074, CompletionWakeReturnsBundle)
 {
     AnchorWaitHarness harness;
-    harness.create_in_flight(10s);  // deadline never reached
-    auto waiter = harness.spawn_waiter();
-    harness.schedule(10ms, [&harness] {
-        ProofEngineTestAccess::complete_anchor_build(
-            *harness.engine, kSeq, harness.hash, kVlSeq);
+    auto operation = harness.create_in_flight();
+    auto waiter = harness.spawn_waiter(10s);
+    harness.schedule(10ms, [&harness, operation] {
+        EXPECT_TRUE(ProofEngineTestAccess::complete_anchor_build(
+            *harness.engine, kSeq, harness.hash, kVlSeq, operation));
     });
     harness.run();
 
@@ -219,116 +223,203 @@ TEST(ProofEngineAnchorWait0074, CompletionWakeReturnsBundle)
     EXPECT_EQ(bundle.vl_sequence, kVlSeq);
 }
 
-// ── Witness 1: deadline expiry becomes a generic FETCH FAILURE ─────────
-// The truthful outcome is "the shared operation deadline elapsed while the
-// build is still legitimately in flight". The reported outcome is the same
-// generic error used for a failed build — and the entry is STILL
-// in-flight after the throw, proving no builder terminal was received.
-TEST(ProofEngineAnchorWait0074, DeadlineExpiryReportsGenericFetchFailure)
+TEST(ProofEngineAnchorWait0074, WaiterDeadlineIsLocalWhileBuilderRemainsLive)
 {
     AnchorWaitHarness harness;
-    harness.create_in_flight(50ms);
-    auto waiter = harness.spawn_waiter();
-    harness.run();  // no builder transition: the 50ms deadline wins
+    harness.create_in_flight();
+    auto waiter = harness.spawn_waiter(50ms);
+    harness.run_until(waiter);
 
-    EXPECT_EQ(failure_message(waiter), kGenericFailure)
-        << "deadline expiry must currently surface as the generic fetch "
-           "failure (the conflation under witness)";
+    auto const failure = failure_of(waiter);
+    ASSERT_EQ(failure.error, Error::Timeout);
+    EXPECT_EQ(failure.detail, "anchor bundle waiter deadline elapsed");
     EXPECT_TRUE(harness.in_flight())
-        << "the build must still be in flight after the waiter's false "
-           "failure — no builder terminal existed";
+        << "a subscriber deadline must not terminalize the builder";
 }
 
-// ── Witness 2: invalidation wake is indistinguishable from deadline ────
-// invalidate_anchor_cache() (the real production function,
-// proof-engine.cpp:1144-1161) cancels the signal and erases the entry —
-// a cancellation-class terminal. The waiter reports the SAME generic
-// failure byte-for-byte as deadline expiry.
-TEST(ProofEngineAnchorWait0074, InvalidationWakeIndistinguishableFromDeadline)
+TEST(ProofEngineAnchorWait0074, InvalidationIsTypedCancellation)
 {
     AnchorWaitHarness harness;
-    harness.create_in_flight(10s);
-    auto waiter = harness.spawn_waiter();
+    harness.create_in_flight();
+    auto waiter = harness.spawn_waiter(10s);
     harness.schedule(10ms, [&harness] {
         ProofEngineTestAccess::invalidate_anchor_cache(*harness.engine);
     });
     harness.run();
 
-    EXPECT_EQ(failure_message(waiter), kGenericFailure)
-        << "an invalidation cancel must currently surface as the same "
-           "generic failure — indistinguishable from a deadline";
+    auto const failure = failure_of(waiter);
+    ASSERT_EQ(failure.error, Error::Cancelled);
+    EXPECT_EQ(failure.detail, "anchor bundle operation was invalidated");
 }
 
-// ── Witness 3: builder failure is indistinguishable from both ──────────
-// The fetch arm's failure cleanup (erase + cancel, :1322-1334) produces
-// the identical generic message: the original builder error is never
-// carried to joiners.
-TEST(ProofEngineAnchorWait0074, BuilderFailureIndistinguishableFromDeadline)
+TEST(ProofEngineAnchorWait0074, BuilderFailureIsRetainedExactly)
 {
     AnchorWaitHarness harness;
-    harness.create_in_flight(10s);
-    auto waiter = harness.spawn_waiter();
-    harness.schedule(10ms, [&harness] {
-        ProofEngineTestAccess::fail_anchor_build(
-            *harness.engine, kSeq, harness.hash, kVlSeq);
+    auto operation = harness.create_in_flight();
+    auto waiter = harness.spawn_waiter(10s);
+    harness.schedule(10ms, [&harness, operation] {
+        EXPECT_TRUE(ProofEngineTestAccess::fail_anchor_build(
+            *harness.engine,
+            kSeq,
+            harness.hash,
+            kVlSeq,
+            operation,
+            kBuilderFailure));
     });
     harness.run();
 
-    EXPECT_EQ(failure_message(waiter), kGenericFailure)
-        << "builder failure must currently surface as the same generic "
-           "failure — the builder's own error is erased";
+    auto const failure = failure_of(waiter);
+    EXPECT_FALSE(failure.error);
+    EXPECT_EQ(failure.message, kBuilderFailure);
 }
 
-// ── Witness 4: the composed false-failure counterexample ───────────────
-// The issue's headline trace, end to end: (a) the shared deadline fires and
-// false-fails while the build is live; (b) every LATE joiner then fails
-// INSTANTLY — the shared timer is already expired, so its wait completes
-// immediately with present=false (the cache amplifies the false failure);
-// (c) the build then succeeds and publishes; (d) the next caller receives
-// a cache HIT on the very bundle whose earlier absence was reported as a
-// fetch failure. The failures in (a) and (b) were therefore FALSE.
-TEST(ProofEngineAnchorWait0074, LateBuilderSuccessProvesFailuresWereFalse)
+TEST(ProofEngineAnchorWait0074, SiblingDeadlineDoesNotPoisonLiveWaiter)
 {
     AnchorWaitHarness harness;
-    harness.create_in_flight(50ms);
+    auto operation = harness.create_in_flight();
+    auto short_waiter = harness.spawn_waiter(50ms);
+    auto long_waiter = harness.spawn_waiter(10s);
+    harness.run_until(short_waiter);
+
+    auto const failure = failure_of(short_waiter);
+    ASSERT_EQ(failure.error, Error::Timeout);
+    EXPECT_TRUE(harness.in_flight());
+    EXPECT_NE(long_waiter.wait_for(0ms), std::future_status::ready)
+        << "one subscriber deadline must not ready a live sibling";
+
+    EXPECT_TRUE(ProofEngineTestAccess::complete_anchor_build(
+        *harness.engine, kSeq, harness.hash, kVlSeq, operation));
+    harness.run();
+    EXPECT_EQ(long_waiter.get().seq, kSeq);
+}
+
+TEST(ProofEngineAnchorWait0074, LocalTimeoutDoesNotAmplifyToLateJoiners)
+{
+    AnchorWaitHarness harness;
+    harness.create_in_flight();
     std::atomic_bool builder_running{false};
     auto builder_release = std::make_shared<asio::steady_timer>(
         harness.io, asio::steady_timer::time_point::max());
     auto builder =
         harness.spawn_builder_success(builder_release, builder_running);
 
-    // (a) the shared deadline fires while an actual builder servant remains
-    // suspended and owns a future publication.
-    auto first = harness.spawn_waiter();
+    auto first = harness.spawn_waiter(50ms);
     harness.run_until(first);
-    EXPECT_EQ(failure_message(first), kGenericFailure);
-    ASSERT_TRUE(builder_running.load(std::memory_order_acquire))
-        << "the builder coroutine must still own its live frame";
-    ASSERT_TRUE(harness.in_flight()) << "build still legitimately live";
+    auto const first_failure = failure_of(first);
+    ASSERT_EQ(first_failure.error, Error::Timeout);
+    ASSERT_TRUE(builder_running.load(std::memory_order_acquire));
+    ASSERT_TRUE(harness.in_flight());
 
-    // (b) a late joiner false-fails without a blocking run: poll() may drive
-    // only handlers already ready, proving the expired shared timer is the
-    // amplifier rather than another elapsed wall-clock deadline.
-    auto second = harness.spawn_waiter();
+    // A later subscriber owns a fresh deadline. Nonblocking poll may start its
+    // retained wait, but cannot make it ready while the shared builder lives.
+    auto second = harness.spawn_waiter(10s);
     EXPECT_GT(harness.poll(), 0u);
-    ASSERT_EQ(second.wait_for(0ms), std::future_status::ready)
-        << "the expired shared timer must make the late joiner immediately "
-           "ready";
-    EXPECT_EQ(failure_message(second), kGenericFailure);
+    EXPECT_NE(second.wait_for(0ms), std::future_status::ready);
     EXPECT_TRUE(harness.in_flight());
     EXPECT_TRUE(builder_running.load(std::memory_order_acquire));
 
-    // (c) the still-live builder succeeds moments later (production success
-    // shape) and its coroutine frame is joined through the future.
     builder_release->cancel();
     harness.run();
     builder.get();
     EXPECT_FALSE(builder_running.load(std::memory_order_acquire));
 
-    // (d) the next caller gets a HIT on the bundle both waiters were told
-    // had failed
-    auto third = harness.spawn_waiter();
+    auto second_bundle = second.get();
+    EXPECT_EQ(second_bundle.seq, kSeq);
+
+    auto third = harness.spawn_waiter(10s);
     harness.run();
-    auto bundle = third.get();
+    EXPECT_EQ(third.get().seq, kSeq) << "success remains a cache hit";
+}
+
+TEST(ProofEngineAnchorWait0074, CompletionBeforeRegistrationIsRetained)
+{
+    AnchorWaitHarness harness;
+    auto operation = harness.create_in_flight();
+    bool published = false;
+    ProofEngineTestAccess::set_before_anchor_wait_subscribe(
+        *harness.engine, [&harness, operation, &published] {
+            published = ProofEngineTestAccess::complete_anchor_build(
+                *harness.engine, kSeq, harness.hash, kVlSeq, operation);
+        });
+
+    auto waiter = harness.spawn_waiter(10s);
+    harness.run();
+
+    EXPECT_TRUE(published);
+    EXPECT_EQ(waiter.get().seq, kSeq);
+}
+
+TEST(ProofEngineAnchorWait0074, StaleBuilderCannotPublishAfterInvalidation)
+{
+    AnchorWaitHarness harness;
+    auto stale = harness.create_in_flight();
+    ProofEngineTestAccess::AnchorOperationPtr successor;
+    ProofEngineTestAccess::set_before_anchor_wait_subscribe(
+        *harness.engine, [&harness, &successor] {
+            ProofEngineTestAccess::invalidate_anchor_cache(*harness.engine);
+            successor = harness.create_in_flight();
+        });
+
+    auto invalidated = harness.spawn_waiter(10s);
+    harness.run_until(invalidated);
+    auto const failure = failure_of(invalidated);
+    ProofEngineTestAccess::set_before_anchor_wait_subscribe(
+        *harness.engine, {});
+    ASSERT_EQ(failure.error, Error::Cancelled);
+    ASSERT_TRUE(successor);
+    ASSERT_TRUE(harness.in_flight());
+
+    EXPECT_FALSE(ProofEngineTestAccess::complete_anchor_build(
+        *harness.engine, kSeq, harness.hash, kVlSeq, stale));
+    EXPECT_FALSE(ProofEngineTestAccess::fail_anchor_build(
+        *harness.engine, kSeq, harness.hash, kVlSeq, stale, kBuilderFailure));
+    EXPECT_TRUE(harness.in_flight())
+        << "stale publication must not overwrite the successor";
+
+    EXPECT_TRUE(ProofEngineTestAccess::complete_anchor_build(
+        *harness.engine, kSeq, harness.hash, kVlSeq, successor));
+    auto current = harness.spawn_waiter(10s);
+    harness.run();
+    EXPECT_EQ(current.get().seq, kSeq);
+}
+
+TEST(ProofEngineAnchorWait0074, CompletionWithoutRequestScopeReturnsBundle)
+{
+    AnchorWaitHarness harness;
+    auto operation = harness.create_in_flight();
+    auto waiter = asio::co_spawn(
+        harness.io,
+        ProofEngineTestAccess::join_anchor_wait_without_request_scope(
+            harness.engine, kSeq, harness.hash, kVlSeq),
+        asio::use_future);
+    harness.schedule(10ms, [&harness, operation] {
+        EXPECT_TRUE(ProofEngineTestAccess::complete_anchor_build(
+            *harness.engine, kSeq, harness.hash, kVlSeq, operation));
+    });
+    harness.run();
+
+    auto bundle = waiter.get();
     EXPECT_EQ(bundle.seq, kSeq);
+    EXPECT_EQ(bundle.vl_sequence, kVlSeq);
+}
+
+TEST(ProofEngineAnchorWait0074, ParentCancellationIsLocal)
+{
+    AnchorWaitHarness harness;
+    harness.create_in_flight();
+    asio::cancellation_signal cancellation;
+    auto waiter = harness.spawn_cancellable_waiter(10s, cancellation);
+    harness.schedule(10ms, [&cancellation] {
+        // HTTP session stop emits `all` (http-server.cpp). That mask includes
+        // `terminal`, which is what asio::awaitable's default filter
+        // propagates. `total` alone does not.
+        cancellation.emit(asio::cancellation_type::all);
+    });
+    harness.run_until(waiter);
+
+    auto const failure = failure_of(waiter);
+    ASSERT_EQ(failure.error, Error::Cancelled);
+    EXPECT_EQ(failure.detail, "anchor bundle waiter was cancelled");
+    EXPECT_TRUE(harness.in_flight())
+        << "one canceled subscriber must not poison the shared operation";
 }

@@ -19,6 +19,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <utility>
+#include <vector>
 
 namespace xprv {
 
@@ -46,6 +47,7 @@ engine_trace_noexcept(Args&&... args) noexcept
 
 ProofEngine::ProofEngine(asio::io_context& io, NetworkConfig config)
     : io_(io)
+    , anchor_wait_home_(io)
     , config_(std::move(config))
     , net_label_(network_label(config_.network_id))
     , protocol_(config_.load_protocol())
@@ -94,7 +96,8 @@ ProofEngine::start()
     vl_cache_->start();
 
     // Validation quorum tracker
-    quorum_tracker_ = ValidationQuorumTracker::create(io_, protocol_, config_.network_id);
+    quorum_tracker_ =
+        ValidationQuorumTracker::create(io_, protocol_, config_.network_id);
 
     // Wire VL → quorum tracker: when VL loads, push UNL keys
     // We do this via a one-shot fetch, then the refresh will re-push.
@@ -645,8 +648,8 @@ ProofEngine::prove(
                     " behind min_seq=",
                     min_seq,
                     " — fetching fresh");
-                bundle = co_await self->get_or_reuse_anchor(
-                    vl, 0, request_scope);
+                bundle =
+                    co_await self->get_or_reuse_anchor(vl, 0, request_scope);
             }
             co_return BuildServices::AnchorData{
                 .hdr = bundle.header_result,
@@ -1003,7 +1006,8 @@ ProofEngine::get_or_reuse_anchor(
     }
     if (reusable)
     {
-        if (!co_await quorum_tracker_->co_sync_unl(vl->validators, vl->sequence))
+        if (!co_await quorum_tracker_->co_sync_unl(
+                vl->validators, vl->sequence))
         {
             throw std::runtime_error(
                 "validator list changed while reusing proof anchor");
@@ -1141,23 +1145,51 @@ ProofEngine::get_or_reuse_anchor(
     co_return anchor;
 }
 
+//@@authority transition=prv.T0339 status=provisional scope=function bind=xprv::invalidate_anchor_cache_locked@0fafaa9e26da1d91
+// owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
+// touches=prv.S0142
+// label=retain_anchor_invalidation_terminal_before_wake
 void
 ProofEngine::invalidate_anchor_cache_locked()
 {
+    // Mutex-held terminal commit only. Publication is the unlocked wrapper's
+    // job: post_complete is an advisory wake and must not run as a substitute
+    // serialization step while cache_mutex_ is held.
     current_anchor_.reset();
-    for (auto& [_, entry] : anchor_cache_)
+    for (auto& [_, operation] : anchor_cache_)
     {
-        if (entry.signal)
-            entry.signal->cancel();
+        if (!operation || operation->terminal != AnchorTerminal::in_flight)
+            continue;
+        operation->terminal = AnchorTerminal::invalidated;
+        operation->failure = nullptr;
+        operation->bundle.reset();
     }
     anchor_cache_.clear();
 }
 
+//@@authority transition=prv.T0340 status=provisional scope=function bind=xprv::invalidate_anchor_cache@50050b274f60b885
+// owner=unresolved owner_hypothesis=proof_engine
+// commit=cache_mutex_then_signal_home touches=prv.S0142
+// writ_roles=retained_signal.publish
+// label=publish_retained_anchor_invalidation_after_terminal_commit
 void
 ProofEngine::invalidate_anchor_cache()
 {
-    std::lock_guard lock(cache_mutex_);
-    invalidate_anchor_cache_locked();
+    std::vector<AnchorOperationPtr> to_wake;
+    {
+        std::lock_guard lock(cache_mutex_);
+        for (auto const& [_, operation] : anchor_cache_)
+        {
+            if (operation && operation->terminal == AnchorTerminal::in_flight)
+                to_wake.push_back(operation);
+        }
+        invalidate_anchor_cache_locked();
+    }
+    for (auto const& operation : to_wake)
+    {
+        if (operation && operation->signal)
+            operation->signal->post_complete();
+    }
 }
 
 asio::awaitable<ProofEngine::AnchorBundle>
@@ -1172,25 +1204,34 @@ ProofEngine::get_anchor_bundle(
 {
     enum class Action { hit, wait, fetch };
     Action action;
-    std::shared_ptr<asio::steady_timer> signal;
+    AnchorOperationPtr operation;
     AnchorBundle hit_bundle;
     AnchorCacheKey const cache_key{vl_sequence, anchor_seq, anchor_hash};
 
     {
         std::lock_guard lock(cache_mutex_);
-        auto [it, inserted] = anchor_cache_.try_emplace(cache_key);
-
-        if (!inserted && it->second.present)
+        auto it = anchor_cache_.find(cache_key);
+        //@@authority transition=prv.T0341 status=provisional scope=statement bind=if_statement@51558c5c99082fbf
+        // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
+        // touches=prv.S0142
+        // label=select_hit_join_or_install_exact_anchor_shared_operation
+        if (it != anchor_cache_.end() && it->second &&
+            it->second->terminal == AnchorTerminal::completed)
         {
+            if (!it->second->bundle)
+                throw std::logic_error(
+                    "completed anchor operation has no retained bundle");
             action = Action::hit;
-            hit_bundle = it->second.bundle;
+            hit_bundle = *it->second->bundle;
             PLOGI(
                 log_, "[", net_label_, "] anchor_bundle: HIT seq=", anchor_seq);
         }
-        else if (!inserted && it->second.signal)
+        else if (
+            it != anchor_cache_.end() && it->second &&
+            it->second->terminal == AnchorTerminal::in_flight)
         {
             action = Action::wait;
-            signal = it->second.signal;
+            operation = it->second;
             PLOGI(
                 log_,
                 "[",
@@ -1201,9 +1242,10 @@ ProofEngine::get_anchor_bundle(
         }
         else
         {
-            it->second.signal = std::make_shared<asio::steady_timer>(
-                io_, std::chrono::seconds(30));
-            it->second.present = false;
+            operation = std::make_shared<AnchorOperation>();
+            operation->signal =
+                std::make_shared<writ::retained_signal>(anchor_wait_home_);
+            anchor_cache_.insert_or_assign(cache_key, operation);
             action = Action::fetch;
             PLOGI(
                 log_,
@@ -1212,7 +1254,7 @@ ProofEngine::get_anchor_bundle(
                 "] anchor_bundle: FETCH seq=",
                 anchor_seq,
                 " — building");
-        }
+        } //@@authority-target ids=prv.T0341
     }
 
     if (action == Action::hit)
@@ -1228,21 +1270,103 @@ ProofEngine::get_anchor_bundle(
             "anchor header: waiting for in-flight build seq=" +
             std::to_string(anchor_seq));
 
-        boost::system::error_code ec;
-        co_await signal->async_wait(
-            asio::redirect_error(asio::use_awaitable, ec));
+        auto throw_request_terminal =
+            [](catl::core::RequestScopeTerminal terminal) {
+                if (terminal ==
+                    catl::core::RequestScopeTerminal::deadline_elapsed)
+                {
+                    throw PeerClientException(
+                        Error::Timeout,
+                        "anchor bundle waiter deadline elapsed");
+                }
+                throw PeerClientException(
+                    Error::Cancelled, "anchor bundle waiter was cancelled");
+            };
 
-        std::lock_guard lock(cache_mutex_);
-        auto it = anchor_cache_.find(cache_key);
-        if (it != anchor_cache_.end() && it->second.present)
+        auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        if (request_scope)
         {
+            auto const request = request_scope->snapshot();
+            if (request.terminal)
+                throw_request_terminal(*request.terminal);
+            deadline = request.absolute_deadline;
+        }
+
+        if (auto hook = before_anchor_wait_subscribe_for_test_)
+            hook();
+
+        //@@authority transition=prv.T0342 status=provisional scope=statement bind=declaration@cde7028a5cfff710
+        // owner=unresolved owner_hypothesis=proof_engine
+        // commit=anchor_wait_home touches=prv.S0142
+        // writ_roles=retained_signal.subscribe
+        // label=subscribe_to_exact_anchor_shared_operation_terminal
+        auto const outcome = co_await operation->signal->co_wait_until(
+            deadline); //@@authority-target ids=prv.T0342
+
+        AnchorTerminal terminal;
+        std::optional<AnchorBundle> completed;
+        std::exception_ptr failure;
+        {
+            std::lock_guard lock(cache_mutex_);
+            //@@authority transition=prv.T0343 status=provisional bind=expression_statement@06158e4bec728d5c
+            //scope=statement
+            // owner=unresolved owner_hypothesis=proof_engine
+            // commit=cache_mutex touches=prv.S0142
+            // writ_roles=retained_signal.revalidate
+            // label=revalidate_exact_anchor_terminal_after_wait
+            terminal = operation->terminal; //@@authority-target ids=prv.T0343
+            completed = operation->bundle;
+            failure = operation->failure;
+        }
+
+        if (terminal == AnchorTerminal::completed)
+        {
+            if (!completed)
+                throw std::logic_error(
+                    "completed anchor operation lost its retained bundle");
             catl::core::emit_status(
                 "anchor header: in-flight build completed seq=" +
                 std::to_string(anchor_seq));
-            co_return it->second.bundle;
+            co_return *completed;
+        }
+        if (terminal == AnchorTerminal::failed)
+        {
+            if (!failure)
+                throw std::logic_error(
+                    "failed anchor operation lost its retained exception");
+            std::rethrow_exception(failure);
+        }
+        if (terminal == AnchorTerminal::invalidated)
+        {
+            throw PeerClientException(
+                Error::Cancelled, "anchor bundle operation was invalidated");
         }
 
-        throw std::runtime_error("anchor bundle fetch failed");
+        if (request_scope)
+        {
+            auto const request = request_scope->snapshot();
+            if (request.terminal)
+                throw_request_terminal(*request.terminal);
+        }
+
+        //@@authority transition=prv.T0344 status=provisional scope=statement bind=switch_statement@f567139c00543cc7
+        // owner=unresolved owner_hypothesis=proof_engine commit=waiter_frame
+        // touches=prv.S0142 writ_roles=retained_signal.deadline_or_cancel
+        // label=map_waiter_local_deadline_or_cancellation_without_shared_terminal
+        switch (outcome)
+        {
+            case writ::wait_outcome::deadline_elapsed:
+                throw PeerClientException(
+                    Error::Timeout, "anchor bundle waiter deadline elapsed");
+            case writ::wait_outcome::canceled:
+                throw PeerClientException(
+                    Error::Cancelled, "anchor bundle waiter was cancelled");
+            case writ::wait_outcome::signaled:
+                throw std::logic_error(
+                    "anchor bundle wake had no retained terminal");
+        } //@@authority-target ids=prv.T0344
+        throw std::logic_error("unknown anchor bundle wait outcome");
     }
 
     // Build: fetch the anchor header
@@ -1250,6 +1374,7 @@ ProofEngine::get_anchor_bundle(
     // get_header owns header fan-out, retry rounds, and per-ledger peer
     // exclusions. Callers propagate its final result instead of layering a
     // second retry loop around the shared in-flight fetch.
+    AnchorBundle bundle;
     try
     {
         catl::core::emit_status(
@@ -1269,7 +1394,6 @@ ProofEngine::get_anchor_bundle(
                 "anchor is outside validator list validity interval");
         }
 
-        AnchorBundle bundle;
         bundle.header_result = hdr;
         bundle.anchor_hash = anchor_hash;
         bundle.account_hash = hdr.header().account_hash();
@@ -1277,62 +1401,108 @@ ProofEngine::get_anchor_bundle(
         bundle.vl_sequence = vl_sequence;
         bundle.validations = std::move(validations);
         bundle.built_at = std::chrono::steady_clock::now();
-
-        // Populate cache and wake waiters
-        std::shared_ptr<asio::steady_timer> sig;
-        {
-            std::lock_guard lock(cache_mutex_);
-            auto& entry = anchor_cache_[cache_key];
-            sig = entry.signal;
-            entry.bundle = bundle;
-            entry.present = true;
-            entry.signal = nullptr;
-
-            // Update current anchor for reuse
-            current_anchor_ = bundle;
-
-            // Prune old anchors — keep at most 10
-            static constexpr size_t kMaxAnchorCache = 10;
-            while (anchor_cache_.size() > kMaxAnchorCache)
-            {
-                // The map is ordered by list and ledger sequence.
-                auto oldest = anchor_cache_.begin();
-                // Don't evict entries with in-flight waiters
-                if (oldest->second.signal)
-                    break;
-                anchor_cache_.erase(oldest);
-            }
-        }
-        if (sig)
-            sig->cancel();
-
-        PLOGI(
-            log_,
-            "[",
-            net_label_,
-            "] anchor_bundle: built seq=",
-            anchor_seq,
-            " hash=",
-            anchor_hash.hex().substr(0, 16));
-        co_return bundle;
     }
     catch (...)
     {
-        // Clean up and wake waiters
-        std::shared_ptr<asio::steady_timer> sig;
+        auto const failure = std::current_exception();
+        bool publish = false;
         {
             std::lock_guard lock(cache_mutex_);
             auto it = anchor_cache_.find(cache_key);
-            if (it != anchor_cache_.end())
+            //@@authority transition=prv.T0345 status=provisional bind=if_statement@329a89cb890f819b
+            //scope=statement
+            // owner=unresolved owner_hypothesis=proof_engine
+            // commit=cache_mutex touches=prv.S0142
+            // label=retain_exact_anchor_builder_failure_or_stale_invalidation
+            if (operation->terminal == AnchorTerminal::in_flight)
             {
-                sig = it->second.signal;
-                anchor_cache_.erase(it);
+                if (it != anchor_cache_.end() && it->second == operation)
+                {
+                    operation->failure = failure;
+                    operation->terminal = AnchorTerminal::failed;
+                    anchor_cache_.erase(it);
+                }
+                else
+                {
+                    operation->terminal = AnchorTerminal::invalidated;
+                }
+                publish = true;
+            } //@@authority-target ids=prv.T0345
+        }
+        //@@authority transition=prv.T0346 status=provisional scope=statement bind=if_statement@98850c5477c7c2a3
+        // owner=unresolved owner_hypothesis=proof_engine
+        // commit=anchor_wait_home touches=prv.S0142
+        // writ_roles=retained_signal.publish
+        // label=publish_exact_anchor_builder_failure_after_terminal_commit
+        if (publish)
+            operation->signal
+                ->post_complete(); //@@authority-target ids=prv.T0346
+        std::rethrow_exception(failure);
+    }
+
+    bool publish_success = false;
+    bool publish_invalidation = false;
+    {
+        std::lock_guard lock(cache_mutex_);
+        auto it = anchor_cache_.find(cache_key);
+        //@@authority transition=prv.T0347 status=provisional scope=statement bind=if_statement@39f5735b57f032e1
+        // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
+        // touches=prv.S0142
+        // label=retain_exact_anchor_success_or_refuse_stale_publication
+        if (it != anchor_cache_.end() && it->second == operation &&
+            operation->terminal == AnchorTerminal::in_flight)
+        {
+            operation->bundle = bundle;
+            operation->failure = nullptr;
+            operation->terminal = AnchorTerminal::completed;
+            current_anchor_ = bundle;
+            publish_success = true;
+
+            // Prune old anchors — keep at most 10. A live operation remains a
+            // hard predecessor; completed operation objects may be erased
+            // because existing waiters retain their exact shared object.
+            static constexpr size_t kMaxAnchorCache = 10;
+            while (anchor_cache_.size() > kMaxAnchorCache)
+            {
+                auto oldest = anchor_cache_.begin();
+                if (oldest->second &&
+                    oldest->second->terminal == AnchorTerminal::in_flight)
+                {
+                    break;
+                }
+                anchor_cache_.erase(oldest);
             }
         }
-        if (sig)
-            sig->cancel();
-        throw;
+        else if (operation->terminal == AnchorTerminal::in_flight)
+        {
+            operation->terminal = AnchorTerminal::invalidated;
+            publish_invalidation = true;
+        } //@@authority-target ids=prv.T0347
     }
+
+    //@@authority transition=prv.T0348 status=provisional scope=statement bind=if_statement@307320d59ddefb36
+    // owner=unresolved owner_hypothesis=proof_engine
+    // commit=anchor_wait_home touches=prv.S0142
+    // writ_roles=retained_signal.publish
+    // label=publish_exact_anchor_success_or_invalidation_after_terminal_commit
+    if (publish_success || publish_invalidation)
+        operation->signal->post_complete(); //@@authority-target ids=prv.T0348
+    if (!publish_success)
+    {
+        throw PeerClientException(
+            Error::Cancelled,
+            "anchor bundle operation was invalidated before publication");
+    }
+
+    PLOGI(
+        log_,
+        "[",
+        net_label_,
+        "] anchor_bundle: built seq=",
+        anchor_seq,
+        " hash=",
+        anchor_hash.hex().substr(0, 16));
+    co_return bundle;
 }
 
 }  // namespace xprv
