@@ -2962,6 +2962,9 @@ TEST(HttpServerLaunchRefusal, HookInstallationRefusesAfterStart)
     EXPECT_THROW(
         xprv::HttpServerTestAccess::set_child_hooks(*server, {}, {}),
         std::logic_error);
+    EXPECT_THROW(
+        xprv::HttpServerTestAccess::set_regular_path_hooks(*server, {}, {}),
+        std::logic_error);
 
     auto stopped = boost::asio::co_spawn(
         io,
