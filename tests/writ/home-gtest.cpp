@@ -6,6 +6,8 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 
@@ -106,6 +108,71 @@ TEST(WritHome, ChildBirthDoesNotRelocateTheParentContinuation)
     EXPECT_TRUE(child_ran_on_home);
     EXPECT_TRUE(parent_resumed_on_caller)
         << "the parent must re-enter through its own executor's boundary";
+}
+
+// Converting a concrete io_context strand into home's erased executor must
+// preserve the exact strand implementation. The two homes are the same
+// serialized boundary, not merely executors that happen to share a context.
+TEST(WritHome, ConcreteAndErasedRepresentationsPreserveHomeIdentity)
+{
+    asio::io_context io;
+    auto concrete_executor = asio::make_strand(io);
+    writ::home concrete_home(concrete_executor);
+    writ::home erased_home{writ::home::executor_type(concrete_executor)};
+
+    EXPECT_EQ(concrete_home, erased_home);
+
+    bool concrete_observed_erased_boundary = false;
+    bool erased_observed_concrete_boundary = false;
+    auto result = asio::co_spawn(
+        erased_home.executor(),
+        [&]() -> writ::home_awaitable<void> {
+            auto timer =
+                concrete_home.timer(std::chrono::steady_clock::now() + 1ms);
+            co_await timer->async_wait(
+                asio::use_awaitable_t<writ::home::executor_type>{});
+            concrete_observed_erased_boundary = concrete_home.running_here();
+            erased_observed_concrete_boundary = erased_home.running_here();
+        },
+        asio::use_future);
+    await(io, result);
+
+    EXPECT_TRUE(concrete_observed_erased_boundary);
+    EXPECT_TRUE(erased_observed_concrete_boundary);
+}
+
+// The RPC-shaped construction starts with the caller coroutine's erased
+// executor. A home created from that executor must birth the complete child,
+// retain its boundary across suspension, and return the parent to its own
+// caller home.
+TEST(WritHome, CallerDerivedExecutorBirthsCompleteChild)
+{
+    asio::io_context io;
+    writ::home caller(io);
+    bool child_entered_home = false;
+    bool child_resumed_home = false;
+    bool parent_resumed_caller = false;
+
+    auto parent = [&]() -> asio::awaitable<void> {
+        auto caller_executor = co_await asio::this_coro::executor;
+        writ::home operation_home(asio::make_strand(caller_executor));
+        co_await operation_home.spawn([&]() -> writ::home_awaitable<void> {
+            child_entered_home = operation_home.running_here();
+            auto timer =
+                operation_home.timer(std::chrono::steady_clock::now() + 1ms);
+            co_await timer->async_wait(
+                asio::use_awaitable_t<writ::home::executor_type>{});
+            child_resumed_home = operation_home.running_here();
+        });
+        parent_resumed_caller = caller.running_here();
+    };
+
+    auto result = asio::co_spawn(caller.executor(), parent(), asio::use_future);
+    await(io, result);
+
+    EXPECT_TRUE(child_entered_home);
+    EXPECT_TRUE(child_resumed_home);
+    EXPECT_TRUE(parent_resumed_caller);
 }
 
 // The witness stays armed, and the negative control demonstrably trips:

@@ -1,5 +1,7 @@
 #include <catl/rpc-client/rpc-client-coro.h>
 
+#include <writ/home.hpp>
+
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/connect.hpp>
@@ -38,11 +40,9 @@ namespace detail {
 class RpcAwaitState : public std::enable_shared_from_this<RpcAwaitState>
 {
 public:
-    RpcAwaitState(
-        asio::any_io_executor executor,
-        RpcPublicationHook before_terminal_commit)
-        : executor_(std::move(executor))
-        , signal_(executor_, asio::steady_timer::time_point::max())
+    RpcAwaitState(writ::home home, RpcPublicationHook before_terminal_commit)
+        : home_(std::move(home))
+        , signal_(home_.executor(), asio::steady_timer::time_point::max())
         , before_terminal_commit_(std::move(before_terminal_commit))
     {
     }
@@ -56,7 +56,7 @@ public:
         try
         {
             asio::post(
-                executor_,
+                home_.executor(),
                 [self = shared_from_this(),
                  result = std::move(result)]() mutable noexcept {
                     self->commit_result(std::move(result));
@@ -69,14 +69,15 @@ public:
     }
 
     //@@authority transition=prv.T0351 status=provisional scope=function
-    // bind=catl::rpc::detail::RpcAwaitState::wait@0333537ac9dbf7b4
+    // bind=catl::rpc::detail::RpcAwaitState::wait@490ca1d8d4f81aae
     // owner=unresolved owner_hypothesis=rpc_callback_adapter
     // commit=rpc_callback_operation_strand touches=prv.S0143
     // writ_roles=retained_signal.subscribe,retained_signal.revalidate,retained_signal.deadline_or_cancel
     // label=consume_exact_rpc_terminal_or_caller_cancellation
-    asio::awaitable<RpcResult>
+    writ::home_awaitable<RpcResult>
     wait()
     {
+        WRIT_ASSERT_HOME(home_);
         auto cancellation = co_await asio::this_coro::cancellation_state;
         if (cancellation.cancelled() != asio::cancellation_type::none)
             commit_canceled();
@@ -84,8 +85,9 @@ public:
         if (terminal_ == Terminal::pending)
         {
             boost::system::error_code error;
-            co_await signal_.async_wait(
-                asio::redirect_error(asio::use_awaitable, error));
+            co_await signal_.async_wait(asio::redirect_error(
+                asio::use_awaitable_t<writ::home::executor_type>{}, error));
+            WRIT_ASSERT_HOME(home_);
 
             cancellation = co_await asio::this_coro::cancellation_state;
             if (terminal_ == Terminal::pending &&
@@ -133,6 +135,7 @@ private:
     void
     commit_result(RpcResult result) noexcept
     {
+        WRIT_ASSERT_HOME(home_);
         if (terminal_ != Terminal::pending)
             return;
 
@@ -155,6 +158,7 @@ private:
     void
     commit_canceled() noexcept
     {
+        WRIT_ASSERT_HOME(home_);
         if (terminal_ == Terminal::pending)
             terminal_ = Terminal::canceled;
     }
@@ -162,6 +166,7 @@ private:
     void
     wake_waiter() noexcept
     {
+        WRIT_ASSERT_HOME(home_);
         try
         {
             signal_.cancel();
@@ -172,7 +177,7 @@ private:
         }
     }
 
-    asio::any_io_executor executor_;
+    writ::home home_;
     asio::steady_timer signal_;
     RpcPublicationHook before_terminal_commit_;
     std::optional<RpcResult> result_;
@@ -191,30 +196,28 @@ callback_to_awaitable(
     RpcPublicationHook before_terminal_commit)
 {
     auto caller_executor = co_await asio::this_coro::executor;
-    auto operation_home = asio::make_strand(caller_executor);
+    writ::home operation_home(asio::make_strand(caller_executor));
 
     // clang-format off
-    //@@authority transition=prv.T0349 status=provisional scope=statement bind=co_return_statement@ab24edaf1f4b1a6e
+    //@@authority transition=prv.T0349 status=provisional scope=statement calls=spawn bind=spawn@5baf1e803a05960d
     // owner=unresolved owner_hypothesis=rpc_callback_adapter
     // commit=rpc_callback_operation_strand touches=prv.S0143
-    // execution_home=rpc_callback.operation_strand birth=co_spawn
-    // executor_expr=operation_home drives=wait
-    // continuation=birth_executor writ_roles=home.birth
+    // writ_roles=home.birth
     // label=establish_rpc_callback_operation_owner_birth
-    co_return co_await asio::co_spawn(
-        operation_home,
-        [initiator = std::move(initiator),
+    co_return co_await operation_home.spawn(
+        [operation_home,
+         initiator = std::move(initiator),
          before_terminal_commit = std::move(
-             before_terminal_commit)]() mutable -> asio::awaitable<RpcResult> {
-            auto executor = co_await asio::this_coro::executor;
+             before_terminal_commit)]() mutable
+            -> writ::home_awaitable<RpcResult> {
+            WRIT_ASSERT_HOME(operation_home);
             auto state = std::make_shared<RpcAwaitState>(
-                executor, std::move(before_terminal_commit));
+                operation_home, std::move(before_terminal_commit));
             initiator([state](RpcResult result) noexcept {
                 state->post_result(std::move(result));
             });
             co_return co_await state->wait();
-        },
-        asio::use_awaitable); //@@authority-target ids=prv.T0349
+        }); //@@authority-target ids=prv.T0349
     // clang-format on
 }
 

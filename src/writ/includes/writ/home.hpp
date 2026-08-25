@@ -29,6 +29,7 @@
 // The probe running_here() is a diagnostic tripwire, NOT the proof.
 // Correctness comes from structural birth/association above.
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -44,8 +45,7 @@ namespace writ {
 class home
 {
 public:
-    using executor_type =
-        boost::asio::strand<boost::asio::io_context::executor_type>;
+    using executor_type = boost::asio::strand<boost::asio::any_io_executor>;
 
     explicit home(boost::asio::io_context& io)
         : executor_(boost::asio::make_strand(io))

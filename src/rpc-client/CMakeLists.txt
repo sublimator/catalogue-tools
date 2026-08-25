@@ -13,6 +13,7 @@ target_link_libraries(
   PUBLIC Boost::boost
          OpenSSL::SSL
          OpenSSL::Crypto
-         catl::core)
+         catl::core
+  PRIVATE catl::writ)
 
 add_library(catl::rpc-client ALIAS catl_rpc_client)
