@@ -1346,6 +1346,99 @@ TEST(HttpChildCompletion, ParentCancellationCannotCounterfeitJoinReceipt)
     EXPECT_FALSE(failure);
 }
 
+TEST(HttpChildCompletion, BodyLocalDestructionPrecedesReceiptPublication)
+{
+    namespace asio = boost::asio;
+
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto receipt = std::make_shared<xprv::detail::HttpChildCompletionChannel>(
+        io.get_executor(), 1);
+    bool body_local_destroyed = false;
+    bool completion_observed_destruction = false;
+    bool joined = false;
+
+    asio::co_spawn(
+        io,
+        [&body_local_destroyed]() -> asio::awaitable<void> {
+            struct BodyLocalProbe
+            {
+                bool& destroyed;
+
+                ~BodyLocalProbe()
+                {
+                    destroyed = true;
+                }
+            } probe{body_local_destroyed};
+
+            co_return;
+        },
+        [receipt,
+         &body_local_destroyed,
+         &completion_observed_destruction](std::exception_ptr failure) {
+            // This observation is deliberately inside the completion token
+            // and before publication. A parent-only assertion after join
+            // would not detect a receipt moved ahead of body-frame teardown.
+            completion_observed_destruction = body_local_destroyed;
+            xprv::detail::HttpChildCompletion{receipt}(std::move(failure));
+        });
+    asio::co_spawn(
+        io,
+        [receipt, &joined]() -> asio::awaitable<void> {
+            co_await xprv::detail::join_http_child(receipt);
+            joined = true;
+        },
+        asio::detached);
+
+    scheduler.run_until_idle();
+
+    EXPECT_TRUE(body_local_destroyed);
+    EXPECT_TRUE(completion_observed_destruction);
+    EXPECT_TRUE(joined);
+}
+
+TEST(
+    HttpChildCompletionCounterexample,
+    CopiedPublisherCanPublishAgainAfterFirstReceiptIsConsumed)
+{
+    namespace asio = boost::asio;
+
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto receipt = std::make_shared<xprv::detail::HttpChildCompletionChannel>(
+        io.get_executor(), 1);
+    xprv::detail::HttpChildCompletion first_publisher{receipt};
+    auto copied_publisher = first_publisher;
+    bool first_joined = false;
+    bool second_joined = false;
+
+    first_publisher({});
+    asio::co_spawn(
+        io,
+        [receipt, &first_joined]() -> asio::awaitable<void> {
+            co_await xprv::detail::join_http_child(receipt);
+            first_joined = true;
+        },
+        asio::detached);
+    scheduler.run_until_idle();
+    ASSERT_TRUE(first_joined);
+
+    // Rejected behavior evidence: capacity one is not one-publisher
+    // authority. Once the first receipt is consumed, the copied publisher
+    // can successfully fill the same channel again.
+    copied_publisher({});
+    asio::co_spawn(
+        io,
+        [receipt, &second_joined]() -> asio::awaitable<void> {
+            co_await xprv::detail::join_http_child(receipt);
+            second_joined = true;
+        },
+        asio::detached);
+    scheduler.run_until_idle();
+
+    EXPECT_TRUE(second_joined);
+}
+
 TEST(HttpTransportWatcher, ReadHalfCloseDoesNotCancelResponseWork)
 {
     namespace asio = boost::asio;
