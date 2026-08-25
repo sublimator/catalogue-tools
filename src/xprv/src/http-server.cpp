@@ -1245,7 +1245,7 @@ HttpServer::test_session_count() const noexcept
 // ═══════════════════════════════════════════════════════════════════════
 
 //@@authority transition=prv.T0083 status=provisional scope=function
-// bind=xprv::handle_session@d325a77423727e44
+// bind=xprv::handle_session@bfcccfc627a9ba37
 // owner=unresolved owner_hypothesis=http_session commit=http_session_strand
 // touches=prv.S0027,prv.S0028,prv.S0029
 // label=own_request_and_sse_child_frames_until_session_terminal
@@ -2105,7 +2105,7 @@ HttpServer::handle_session(
                             try
                             {
                                 //@@authority transition=prv.T0035
-                                // bind=prove@45d197729a40e4e4
+                                // bind=prove@69afa5a27a4f1b27
                                 // status=provisional scope=statement
                                 // owner=unresolved
                                 // owner_hypothesis=request_session
@@ -2314,13 +2314,6 @@ HttpServer::handle_session(
                             test_at_http_child_checkpoint_;
                         auto ex = co_await asio::this_coro::executor;
                         // clang-format off
-                        //@@authority transition=prv.T0129
-                        // bind=expression_statement@a95e51eede414092
-                        // status=provisional scope=statement owner=unresolved
-                        // owner_hypothesis=http_session
-                        // commit=connection_executor touches=prv.S0044
-                        // mutation_class=running_guarded
-                        // label=launch_regular_http_transport_failure_borrower
                         //@@mutation-site http-regular-watcher-handoff-precedes-spawn
                         if (test_before_http_child_handoff_)
                         {
@@ -2328,6 +2321,13 @@ HttpServer::handle_session(
                                 TestHttpChildSite::regular_watcher, 0);
                         }
                         //@@mutation-end http-regular-watcher-handoff-precedes-spawn
+                        //@@authority transition=prv.T0129
+                        // bind=expression_statement@790d6ae4dd07a4c3
+                        // status=provisional scope=statement owner=unresolved
+                        // owner_hypothesis=http_session
+                        // commit=connection_executor touches=prv.S0044
+                        // mutation_class=running_guarded
+                        // label=launch_regular_http_transport_failure_borrower
                         co_spawn(
                             stream.get_executor(),
                             [&stream,
@@ -2443,7 +2443,7 @@ HttpServer::handle_session(
                         beast::get_lowest_layer(stream).socket().cancel(
                             watcher_cancel_ec);
                         //@@authority transition=prv.T0130
-                        // bind=join_http_child@a266c62b3fdc921a
+                        // bind=join_http_child@b0bd67761a10998a
                         // status=provisional scope=statement owner=unresolved
                         // owner_hypothesis=http_session
                         // commit=uncancellable_join touches=prv.S0044
@@ -2451,7 +2451,7 @@ HttpServer::handle_session(
                         // calls=join_http_child
                         // label=join_regular_http_transport_watcher_before_exit
                         co_await detail::join_http_child(
-                            watcher_join);  //@@authority-target ids=prv.T0130
+                            watcher_join); //@@authority-target ids=prv.T0130
 
                         if (race_failure)
                             std::rethrow_exception(race_failure);
