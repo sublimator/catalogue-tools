@@ -940,6 +940,7 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
             auto cancellation = std::make_shared<asio::cancellation_signal>();
             child_cancellations.push_back(cancellation);
             auto const child_ordinal = launched;
+            auto checkpoint = test_at_http_child_checkpoint_;
             //@@mutation-site http-lookup-handoff-precedes-spawn
             if (test_before_http_child_handoff_)
             {
@@ -947,7 +948,6 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
                     TestHttpChildSite::lookup_tx, child_ordinal);
             }
             //@@mutation-end http-lookup-handoff-precedes-spawn
-            auto checkpoint = test_at_http_child_checkpoint_;
             asio::co_spawn(
                 ex,
                 [engine,
@@ -1819,6 +1819,7 @@ HttpServer::handle_session(
                         std::exception_ptr child_spawn_failure;
                         try
                         {
+                            auto checkpoint = test_at_http_child_checkpoint_;
                             //@@mutation-site sse-wr-handoff-before-spawn
                             if (test_before_http_child_handoff_)
                             {
@@ -1826,7 +1827,6 @@ HttpServer::handle_session(
                                     TestHttpChildSite::sse_writer, 0);
                             }
                             //@@mutation-end sse-wr-handoff-before-spawn
-                            auto checkpoint = test_at_http_child_checkpoint_;
                             asio::co_spawn(
                                 sse_executor,
                                 [&stream,
@@ -1919,6 +1919,7 @@ HttpServer::handle_session(
                         // its request side while still consuming this stream.
                         try
                         {
+                            auto checkpoint = test_at_http_child_checkpoint_;
                             //@@mutation-site sse-wa-handoff-before-spawn
                             if (test_before_http_child_handoff_)
                             {
@@ -1926,7 +1927,6 @@ HttpServer::handle_session(
                                     TestHttpChildSite::sse_watcher, 0);
                             }
                             //@@mutation-end sse-wa-handoff-before-spawn
-                            auto checkpoint = test_at_http_child_checkpoint_;
                             asio::co_spawn(
                                 sse_executor,
                                 [&stream,
@@ -1999,6 +1999,7 @@ HttpServer::handle_session(
 
                         try
                         {
+                            auto checkpoint = test_at_http_child_checkpoint_;
                             //@@mutation-site sse-st-handoff-before-spawn
                             if (test_before_http_child_handoff_)
                             {
@@ -2006,7 +2007,6 @@ HttpServer::handle_session(
                                     TestHttpChildSite::sse_status, 0);
                             }
                             //@@mutation-end sse-st-handoff-before-spawn
-                            auto checkpoint = test_at_http_child_checkpoint_;
                             asio::co_spawn(
                                 sse_executor,
                                 [stop_status,
