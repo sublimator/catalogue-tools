@@ -64,6 +64,15 @@ public:
     }
 
     static void
+    seed_tx_ledger(
+        ProofEngine& engine,
+        std::string const& tx_hash,
+        uint32_t seq)
+    {
+        engine.tx_ledger_put(tx_hash, seq);
+    }
+
+    static void
     set_peer_set(
         ProofEngine& engine,
         std::shared_ptr<catl::peer_client::PeerSet> peers)

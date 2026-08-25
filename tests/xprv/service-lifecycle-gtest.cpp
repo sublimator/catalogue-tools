@@ -24,6 +24,7 @@
 #include <boost/beast/http.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -35,6 +36,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -100,6 +102,11 @@ public:
 class HttpServerTestAccess
 {
 public:
+    using ChildSite = HttpServer::TestHttpChildSite;
+    using ChildCheckpoint = HttpServer::TestHttpChildCheckpoint;
+    using BeforeChildHandoff = HttpServer::TestBeforeHttpChildHandoff;
+    using AtChildCheckpoint = HttpServer::TestAtHttpChildCheckpoint;
+
     static std::uint16_t
     port(HttpServer const& server)
     {
@@ -112,9 +119,48 @@ public:
         std::function<void()> before_race,
         std::function<boost::asio::awaitable<void>()> before_watcher_receipt)
     {
+        std::lock_guard lock(server.lifecycle_entry_mutex_);
+        if (server.start_claimed_)
+            throw std::logic_error(
+                "HTTP test hooks must be installed before start");
         server.test_before_regular_race_ = std::move(before_race);
-        server.test_before_regular_watcher_receipt_ =
-            std::move(before_watcher_receipt);
+        server.test_at_http_child_checkpoint_ =
+            [hook = std::move(before_watcher_receipt)](
+                ChildSite site,
+                std::size_t,
+                ChildCheckpoint checkpoint) -> boost::asio::awaitable<void> {
+            if (hook && site == ChildSite::regular_watcher &&
+                checkpoint == ChildCheckpoint::before_receipt)
+            {
+                co_await hook();
+            }
+        };
+    }
+
+    static void
+    set_child_hooks(
+        HttpServer& server,
+        BeforeChildHandoff before_handoff,
+        AtChildCheckpoint at_checkpoint)
+    {
+        std::lock_guard lock(server.lifecycle_entry_mutex_);
+        if (server.start_claimed_)
+            throw std::logic_error(
+                "HTTP test hooks must be installed before start");
+        server.test_before_http_child_handoff_ = std::move(before_handoff);
+        server.test_at_http_child_checkpoint_ = std::move(at_checkpoint);
+    }
+
+    static boost::asio::awaitable<std::pair<uint32_t, uint32_t>>
+    lookup_tx_all(std::shared_ptr<HttpServer> server, std::string tx_hash)
+    {
+        co_return co_await server->lookup_tx_all(tx_hash);
+    }
+
+    static std::size_t
+    session_count(HttpServer const& server)
+    {
+        return server.test_session_count();
     }
 
     static boost::asio::awaitable<bool>
@@ -157,6 +203,94 @@ pump_until(
 
     watchdog.cancel();
     return predicate();
+}
+
+using HttpChildSite = xprv::HttpServerTestAccess::ChildSite;
+using HttpChildCheckpoint = xprv::HttpServerTestAccess::ChildCheckpoint;
+
+enum class HttpChildEventKind : std::uint8_t {
+    handoff,
+    entry,
+    before_receipt,
+};
+
+struct HttpChildEvent
+{
+    HttpChildEventKind kind;
+    HttpChildSite site;
+    std::size_t ordinal;
+
+    friend bool
+    operator==(HttpChildEvent const&, HttpChildEvent const&) = default;
+};
+
+class HttpChildLaunchRefusal : public std::runtime_error
+{
+public:
+    HttpChildLaunchRefusal() : std::runtime_error("HTTP child launch refusal")
+    {
+    }
+};
+
+constexpr std::string_view kTestTxHash =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+boost::asio::awaitable<void>
+send_http_probe(
+    std::shared_ptr<boost::asio::ip::tcp::socket> socket,
+    std::uint16_t port,
+    bool sse)
+{
+    namespace asio = boost::asio;
+    namespace http = boost::beast::http;
+    using tcp = asio::ip::tcp;
+
+    co_await socket->async_connect(
+        tcp::endpoint{asio::ip::make_address("127.0.0.1"), port},
+        asio::use_awaitable);
+    http::request<http::empty_body> request{
+        http::verb::get,
+        std::string("/prove?tx=") + std::string(kTestTxHash),
+        11};
+    request.set(http::field::host, "127.0.0.1");
+    if (sse)
+        request.set(http::field::accept, "text/event-stream");
+    request.keep_alive(false);
+    co_await http::async_write(*socket, request, asio::use_awaitable);
+}
+
+std::shared_ptr<xprv::HttpServer>
+make_test_http_server(
+    boost::asio::io_context& io,
+    std::shared_ptr<xprv::ProofEngine>& engine)
+{
+    engine = xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+    return xprv::HttpServer::create(
+        io,
+        engine,
+        xprv::HttpServerOptions{
+            .bind_address = "127.0.0.1",
+            .port = 0,
+        });
+}
+
+boost::asio::awaitable<void>
+await_test_gate(std::shared_ptr<boost::asio::steady_timer> const& gate)
+{
+    boost::system::error_code ec;
+    co_await gate->async_wait(
+        boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+}
+
+std::size_t
+find_http_child_event(
+    std::vector<HttpChildEvent> const& events,
+    HttpChildEvent expected)
+{
+    auto const found = std::find(events.begin(), events.end(), expected);
+    return found == events.end()
+        ? std::numeric_limits<std::size_t>::max()
+        : static_cast<std::size_t>(std::distance(events.begin(), found));
 }
 
 template <class Engine>
@@ -216,16 +350,16 @@ async_wait_started(
     std::promise<void>& entered,
     CompletionToken&& token)
 {
-    return boost::asio::async_initiate<
-        CompletionToken,
-        void(boost::system::error_code)>(
-        [timer = std::move(timer), &entered](auto handler) mutable {
-            timer->async_wait(std::move(handler));
-            // Publish only after async_wait initiation has returned. The test
-            // thread may then cancel without racing timer object mutation.
-            entered.set_value();
-        },
-        token);
+    return boost::asio::
+        async_initiate<CompletionToken, void(boost::system::error_code)>(
+            [timer = std::move(timer), &entered](auto handler) mutable {
+                timer->async_wait(std::move(handler));
+                // Publish only after async_wait initiation has returned. The
+                // test thread may then cancel without racing timer object
+                // mutation.
+                entered.set_value();
+            },
+            token);
 }
 
 xprv::detail::ServiceTimerControl
@@ -1373,9 +1507,8 @@ TEST(HttpChildCompletion, BodyLocalDestructionPrecedesReceiptPublication)
 
             co_return;
         },
-        [receipt,
-         &body_local_destroyed,
-         &completion_observed_destruction](std::exception_ptr failure) {
+        [receipt, &body_local_destroyed, &completion_observed_destruction](
+            std::exception_ptr failure) {
             // This observation is deliberately inside the completion token
             // and before publication. A parent-only assertion after join
             // would not detect a receipt moved ahead of body-frame teardown.
@@ -1718,8 +1851,8 @@ TEST(HttpServerLifecycle, EngineDrainFenceAwaitsValidationQuorumTrackerPreSeal)
         std::promise<void> release_publication;
         auto release = release_publication.get_future().share();
         std::atomic<unsigned> effects{0};
-        validation_quorum_tracker->set_inside_heartbeat_publication_hook_for_test(
-            [&]() {
+        validation_quorum_tracker
+            ->set_inside_heartbeat_publication_hook_for_test([&]() {
                 publication_entered.set_value();
                 release.wait();
             });
@@ -1963,9 +2096,8 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsBothPeerSetPinReleaseBarriers)
         for (auto const runner_count : {2u, 4u})
         {
             SCOPED_TRACE(
-                testing::Message()
-                << "held_barrier=" << held_barrier
-                << " runners=" << runner_count);
+                testing::Message() << "held_barrier=" << held_barrier
+                                   << " runners=" << runner_count);
 
             asio::io_context io;
             auto work = asio::make_work_guard(io);
@@ -1992,15 +2124,14 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsBothPeerSetPinReleaseBarriers)
             std::promise<void> release_held_barrier;
             auto release_held_barrier_future =
                 release_held_barrier.get_future().share();
-            PeerSetTestAccess::
-                set_before_generation_pin_release_barrier_return(
-                    peers, [&]() {
-                        auto const ordinal = ++barriers_seen;
-                        if (ordinal != held_barrier)
-                            return;
-                        held_barrier_entered.set_value();
-                        release_held_barrier_future.wait();
-                    });
+            PeerSetTestAccess::set_before_generation_pin_release_barrier_return(
+                peers, [&]() {
+                    auto const ordinal = ++barriers_seen;
+                    if (ordinal != held_barrier)
+                        return;
+                    held_barrier_entered.set_value();
+                    release_held_barrier_future.wait();
+                });
 
             auto drained = asio::co_spawn(
                 io,
@@ -2170,9 +2301,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsPeerSetAggregateStopReceipt)
     }
 }
 
-TEST(
-    HttpServerLifecycle,
-    ServiceTerminalAwaitsExactProofEngineDrainReceipt)
+TEST(HttpServerLifecycle, ServiceTerminalAwaitsExactProofEngineDrainReceipt)
 {
     namespace asio = boost::asio;
     using namespace std::chrono_literals;
@@ -2293,6 +2422,589 @@ TEST(HttpServerLifecycle, FailedStartCannotMintOrRetryLifecycle)
         asio::use_future);
     io.run();
     EXPECT_THROW(stopped.get(), std::logic_error);
+}
+
+TEST(HttpServerLaunchRefusal, OuterSessionRefusalRollsBackExactAdmittedRow)
+{
+    namespace asio = boost::asio;
+
+    asio::io_context io;
+    std::shared_ptr<xprv::ProofEngine> engine;
+    auto server = make_test_http_server(io, engine);
+    std::vector<HttpChildEvent> events;
+    std::size_t admitted_count = 0;
+    xprv::HttpServerTestAccess::set_child_hooks(
+        *server,
+        [&events, &admitted_count, server_ptr = server.get()](
+            HttpChildSite site, std::size_t ordinal) {
+            if (site != HttpChildSite::outer_session)
+                return;
+            admitted_count =
+                xprv::HttpServerTestAccess::session_count(*server_ptr);
+            events.push_back({HttpChildEventKind::handoff, site, ordinal});
+            throw HttpChildLaunchRefusal{};
+        },
+        [&events](
+            HttpChildSite site,
+            std::size_t ordinal,
+            HttpChildCheckpoint checkpoint) -> asio::awaitable<void> {
+            if (site == HttpChildSite::outer_session)
+            {
+                events.push_back(
+                    {checkpoint == HttpChildCheckpoint::entry
+                         ? HttpChildEventKind::entry
+                         : HttpChildEventKind::before_receipt,
+                     site,
+                     ordinal});
+            }
+            co_return;
+        });
+
+    server->start();
+    auto socket = std::make_shared<asio::ip::tcp::socket>(io);
+    auto connected = asio::co_spawn(
+        io,
+        [socket, port = xprv::HttpServerTestAccess::port(*server)]()
+            -> asio::awaitable<void> {
+            co_await socket->async_connect(
+                asio::ip::tcp::endpoint{
+                    asio::ip::make_address("127.0.0.1"), port},
+                asio::use_awaitable);
+        },
+        asio::use_future);
+
+    ASSERT_TRUE(pump_until(io, [&] { return !events.empty(); }));
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events.front().kind, HttpChildEventKind::handoff);
+    EXPECT_EQ(events.front().site, HttpChildSite::outer_session);
+    EXPECT_NE(events.front().ordinal, 0u);
+    EXPECT_EQ(admitted_count, 1u)
+        << "the refusal seam must observe the already-admitted exact row";
+    ASSERT_EQ(
+        connected.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_NO_THROW(connected.get());
+
+    auto stopped = asio::co_spawn(
+        io,
+        [server]() -> asio::awaitable<void> {
+            (void)co_await server->co_stop();
+        },
+        asio::use_future);
+    ASSERT_TRUE(pump_until(io, [&] {
+        return stopped.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready;
+    }));
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(xprv::HttpServerTestAccess::session_count(*server), 0u);
+    EXPECT_EQ(events.size(), 1u)
+        << "the refused outer child body must never enter";
+}
+
+TEST(HttpServerLaunchRefusal, SseWriterRefusalAwaitsNoSyntheticChild)
+{
+    namespace asio = boost::asio;
+
+    asio::io_context io;
+    std::shared_ptr<xprv::ProofEngine> engine;
+    auto server = make_test_http_server(io, engine);
+    std::vector<HttpChildEvent> events;
+    xprv::HttpServerTestAccess::set_child_hooks(
+        *server,
+        [&events](HttpChildSite site, std::size_t ordinal) {
+            if (site != HttpChildSite::sse_writer &&
+                site != HttpChildSite::sse_watcher &&
+                site != HttpChildSite::sse_status)
+            {
+                return;
+            }
+            events.push_back({HttpChildEventKind::handoff, site, ordinal});
+            if (site == HttpChildSite::sse_writer)
+                throw HttpChildLaunchRefusal{};
+        },
+        [&events](
+            HttpChildSite site,
+            std::size_t ordinal,
+            HttpChildCheckpoint checkpoint) -> asio::awaitable<void> {
+            if (site == HttpChildSite::sse_writer ||
+                site == HttpChildSite::sse_watcher ||
+                site == HttpChildSite::sse_status)
+            {
+                events.push_back(
+                    {checkpoint == HttpChildCheckpoint::entry
+                         ? HttpChildEventKind::entry
+                         : HttpChildEventKind::before_receipt,
+                     site,
+                     ordinal});
+            }
+            co_return;
+        });
+
+    server->start();
+    auto socket = std::make_shared<asio::ip::tcp::socket>(io);
+    auto sent = asio::co_spawn(
+        io,
+        send_http_probe(
+            socket, xprv::HttpServerTestAccess::port(*server), true),
+        asio::use_future);
+    ASSERT_TRUE(pump_until(io, [&] { return !events.empty(); }));
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events.front().kind, HttpChildEventKind::handoff);
+
+    auto stopped = asio::co_spawn(
+        io,
+        [server]() -> asio::awaitable<void> {
+            (void)co_await server->co_stop();
+        },
+        asio::use_future);
+    ASSERT_TRUE(pump_until(io, [&] {
+        return stopped.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready;
+    }));
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(events.size(), 1u)
+        << "a refused writer has no body or synthetic receipt checkpoint";
+    if (sent.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        EXPECT_NO_THROW(sent.get());
+}
+
+TEST(HttpServerLaunchRefusal, SseWatcherRefusalJoinsOnlyStartedWriter)
+{
+    namespace asio = boost::asio;
+
+    asio::io_context io;
+    std::shared_ptr<xprv::ProofEngine> engine;
+    auto server = make_test_http_server(io, engine);
+    std::vector<HttpChildEvent> events;
+    auto writer_gate = std::make_shared<asio::steady_timer>(
+        io, asio::steady_timer::time_point::max());
+    xprv::HttpServerTestAccess::set_child_hooks(
+        *server,
+        [&events](HttpChildSite site, std::size_t ordinal) {
+            if (site != HttpChildSite::sse_writer &&
+                site != HttpChildSite::sse_watcher &&
+                site != HttpChildSite::sse_status)
+            {
+                return;
+            }
+            events.push_back({HttpChildEventKind::handoff, site, ordinal});
+            if (site == HttpChildSite::sse_watcher)
+                throw HttpChildLaunchRefusal{};
+        },
+        [&events, writer_gate](
+            HttpChildSite site,
+            std::size_t ordinal,
+            HttpChildCheckpoint checkpoint) -> asio::awaitable<void> {
+            if (site != HttpChildSite::sse_writer &&
+                site != HttpChildSite::sse_watcher &&
+                site != HttpChildSite::sse_status)
+            {
+                co_return;
+            }
+            auto const kind = checkpoint == HttpChildCheckpoint::entry
+                ? HttpChildEventKind::entry
+                : HttpChildEventKind::before_receipt;
+            events.push_back({kind, site, ordinal});
+            if (site == HttpChildSite::sse_writer &&
+                checkpoint == HttpChildCheckpoint::before_receipt)
+            {
+                co_await await_test_gate(writer_gate);
+            }
+        });
+
+    server->start();
+    auto socket = std::make_shared<asio::ip::tcp::socket>(io);
+    auto sent = asio::co_spawn(
+        io,
+        send_http_probe(
+            socket, xprv::HttpServerTestAccess::port(*server), true),
+        asio::use_future);
+    auto const writer_tail = HttpChildEvent{
+        HttpChildEventKind::before_receipt, HttpChildSite::sse_writer, 0};
+    ASSERT_TRUE(pump_until(io, [&] {
+        return find_http_child_event(events, writer_tail) !=
+            std::numeric_limits<std::size_t>::max();
+    }));
+    ASSERT_EQ(events.size(), 4u);
+    EXPECT_EQ(
+        events[0],
+        (HttpChildEvent{
+            HttpChildEventKind::handoff, HttpChildSite::sse_writer, 0}));
+    EXPECT_EQ(
+        events[1],
+        (HttpChildEvent{
+            HttpChildEventKind::entry, HttpChildSite::sse_writer, 0}));
+    EXPECT_EQ(
+        events[2],
+        (HttpChildEvent{
+            HttpChildEventKind::handoff, HttpChildSite::sse_watcher, 0}));
+    EXPECT_EQ(events[3], writer_tail);
+
+    auto stopped = asio::co_spawn(
+        io,
+        [server]() -> asio::awaitable<void> {
+            (void)co_await server->co_stop();
+        },
+        asio::use_future);
+    io.restart();
+    io.poll();
+    EXPECT_EQ(
+        stopped.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    writer_gate->cancel();
+    ASSERT_TRUE(pump_until(io, [&] {
+        return stopped.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready;
+    }));
+    EXPECT_NO_THROW(stopped.get());
+    if (sent.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        EXPECT_NO_THROW(sent.get());
+}
+
+TEST(HttpServerLaunchRefusal, SseStatusRefusalJoinsWatcherThenWriter)
+{
+    namespace asio = boost::asio;
+
+    asio::io_context io;
+    std::shared_ptr<xprv::ProofEngine> engine;
+    auto server = make_test_http_server(io, engine);
+    std::vector<HttpChildEvent> events;
+    auto watcher_gate = std::make_shared<asio::steady_timer>(
+        io, asio::steady_timer::time_point::max());
+    auto writer_gate = std::make_shared<asio::steady_timer>(
+        io, asio::steady_timer::time_point::max());
+    xprv::HttpServerTestAccess::set_child_hooks(
+        *server,
+        [&events](HttpChildSite site, std::size_t ordinal) {
+            if (site != HttpChildSite::sse_writer &&
+                site != HttpChildSite::sse_watcher &&
+                site != HttpChildSite::sse_status)
+            {
+                return;
+            }
+            events.push_back({HttpChildEventKind::handoff, site, ordinal});
+            if (site == HttpChildSite::sse_status)
+                throw HttpChildLaunchRefusal{};
+        },
+        [&events, watcher_gate, writer_gate](
+            HttpChildSite site,
+            std::size_t ordinal,
+            HttpChildCheckpoint checkpoint) -> asio::awaitable<void> {
+            if (site != HttpChildSite::sse_writer &&
+                site != HttpChildSite::sse_watcher &&
+                site != HttpChildSite::sse_status)
+            {
+                co_return;
+            }
+            auto const kind = checkpoint == HttpChildCheckpoint::entry
+                ? HttpChildEventKind::entry
+                : HttpChildEventKind::before_receipt;
+            events.push_back({kind, site, ordinal});
+            if (checkpoint != HttpChildCheckpoint::before_receipt)
+                co_return;
+            if (site == HttpChildSite::sse_watcher)
+                co_await await_test_gate(watcher_gate);
+            else if (site == HttpChildSite::sse_writer)
+                co_await await_test_gate(writer_gate);
+        });
+
+    server->start();
+    auto socket = std::make_shared<asio::ip::tcp::socket>(io);
+    auto sent = asio::co_spawn(
+        io,
+        send_http_probe(
+            socket, xprv::HttpServerTestAccess::port(*server), true),
+        asio::use_future);
+    auto const watcher_tail = HttpChildEvent{
+        HttpChildEventKind::before_receipt, HttpChildSite::sse_watcher, 0};
+    ASSERT_TRUE(pump_until(io, [&] {
+        return find_http_child_event(events, watcher_tail) !=
+            std::numeric_limits<std::size_t>::max();
+    }));
+    ASSERT_EQ(events.size(), 6u);
+    EXPECT_EQ(
+        events[0],
+        (HttpChildEvent{
+            HttpChildEventKind::handoff, HttpChildSite::sse_writer, 0}));
+    EXPECT_EQ(
+        events[1],
+        (HttpChildEvent{
+            HttpChildEventKind::entry, HttpChildSite::sse_writer, 0}));
+    EXPECT_EQ(
+        events[2],
+        (HttpChildEvent{
+            HttpChildEventKind::handoff, HttpChildSite::sse_watcher, 0}));
+    EXPECT_EQ(
+        events[3],
+        (HttpChildEvent{
+            HttpChildEventKind::entry, HttpChildSite::sse_watcher, 0}));
+    EXPECT_EQ(
+        events[4],
+        (HttpChildEvent{
+            HttpChildEventKind::handoff, HttpChildSite::sse_status, 0}));
+    EXPECT_EQ(events[5], watcher_tail);
+    EXPECT_EQ(
+        find_http_child_event(
+            events,
+            {HttpChildEventKind::before_receipt, HttpChildSite::sse_writer, 0}),
+        std::numeric_limits<std::size_t>::max())
+        << "writer cleanup cannot overtake the watcher join";
+
+    auto stopped = asio::co_spawn(
+        io,
+        [server]() -> asio::awaitable<void> {
+            (void)co_await server->co_stop();
+        },
+        asio::use_future);
+    io.restart();
+    io.poll();
+    EXPECT_EQ(
+        stopped.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    watcher_gate->cancel();
+    auto const writer_tail = HttpChildEvent{
+        HttpChildEventKind::before_receipt, HttpChildSite::sse_writer, 0};
+    ASSERT_TRUE(pump_until(io, [&] {
+        return find_http_child_event(events, writer_tail) !=
+            std::numeric_limits<std::size_t>::max();
+    }));
+    ASSERT_EQ(events.size(), 7u);
+    EXPECT_EQ(events.back(), writer_tail);
+    EXPECT_EQ(
+        stopped.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    writer_gate->cancel();
+    ASSERT_TRUE(pump_until(io, [&] {
+        return stopped.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready;
+    }));
+    EXPECT_NO_THROW(stopped.get());
+    if (sent.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        EXPECT_NO_THROW(sent.get());
+}
+
+TEST(HttpServerLaunchRefusal, RegularWatcherRefusalAwaitsNoSyntheticChild)
+{
+    namespace asio = boost::asio;
+
+    asio::io_context io;
+    std::shared_ptr<xprv::ProofEngine> engine;
+    auto server = make_test_http_server(io, engine);
+    std::vector<HttpChildEvent> events;
+    xprv::HttpServerTestAccess::set_child_hooks(
+        *server,
+        [&events](HttpChildSite site, std::size_t ordinal) {
+            if (site != HttpChildSite::regular_watcher)
+                return;
+            events.push_back({HttpChildEventKind::handoff, site, ordinal});
+            throw HttpChildLaunchRefusal{};
+        },
+        [&events](
+            HttpChildSite site,
+            std::size_t ordinal,
+            HttpChildCheckpoint checkpoint) -> asio::awaitable<void> {
+            if (site == HttpChildSite::regular_watcher)
+            {
+                events.push_back(
+                    {checkpoint == HttpChildCheckpoint::entry
+                         ? HttpChildEventKind::entry
+                         : HttpChildEventKind::before_receipt,
+                     site,
+                     ordinal});
+            }
+            co_return;
+        });
+
+    server->start();
+    auto socket = std::make_shared<asio::ip::tcp::socket>(io);
+    auto sent = asio::co_spawn(
+        io,
+        send_http_probe(
+            socket, xprv::HttpServerTestAccess::port(*server), false),
+        asio::use_future);
+    ASSERT_TRUE(pump_until(io, [&] { return !events.empty(); }));
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events.front().kind, HttpChildEventKind::handoff);
+
+    auto stopped = asio::co_spawn(
+        io,
+        [server]() -> asio::awaitable<void> {
+            (void)co_await server->co_stop();
+        },
+        asio::use_future);
+    ASSERT_TRUE(pump_until(io, [&] {
+        return stopped.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready;
+    }));
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(events.size(), 1u)
+        << "a refused regular watcher has no body or synthetic receipt";
+    if (sent.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        EXPECT_NO_THROW(sent.get());
+}
+
+TEST(HttpServerLaunchRefusal, LookupMiddleRefusalReceivesExactlyEarlierLaunches)
+{
+    namespace asio = boost::asio;
+
+    asio::io_context io;
+    std::map<uint32_t, std::shared_ptr<xprv::ProofEngine>> engines;
+    for (uint32_t network_id = 1; network_id <= 4; ++network_id)
+    {
+        auto engine = xprv::ProofEngine::create(
+            io, xprv::NetworkConfig::for_network(network_id));
+        xprv::ProofEngineTestAccess::seed_tx_ledger(
+            *engine, std::string(kTestTxHash), 1000 + network_id);
+        engines.emplace(network_id, std::move(engine));
+    }
+    auto server = xprv::HttpServer::create(
+        io,
+        engines,
+        1,
+        xprv::HttpServerOptions{
+            .bind_address = "127.0.0.1",
+            .port = 0,
+        });
+    std::vector<HttpChildEvent> events;
+    std::array<std::shared_ptr<asio::steady_timer>, 2> tail_gates{
+        std::make_shared<asio::steady_timer>(
+            io, asio::steady_timer::time_point::max()),
+        std::make_shared<asio::steady_timer>(
+            io, asio::steady_timer::time_point::max())};
+    xprv::HttpServerTestAccess::set_child_hooks(
+        *server,
+        [&events](HttpChildSite site, std::size_t ordinal) {
+            if (site != HttpChildSite::lookup_tx)
+                return;
+            events.push_back({HttpChildEventKind::handoff, site, ordinal});
+            if (ordinal == 2)
+                throw HttpChildLaunchRefusal{};
+        },
+        [&events, tail_gates](
+            HttpChildSite site,
+            std::size_t ordinal,
+            HttpChildCheckpoint checkpoint) -> asio::awaitable<void> {
+            if (site != HttpChildSite::lookup_tx)
+                co_return;
+            auto const kind = checkpoint == HttpChildCheckpoint::entry
+                ? HttpChildEventKind::entry
+                : HttpChildEventKind::before_receipt;
+            events.push_back({kind, site, ordinal});
+            if (checkpoint == HttpChildCheckpoint::before_receipt &&
+                ordinal < 2)
+                co_await await_test_gate(tail_gates[ordinal]);
+        });
+
+    auto result = asio::co_spawn(
+        io,
+        xprv::HttpServerTestAccess::lookup_tx_all(
+            server, std::string(kTestTxHash)),
+        asio::use_future);
+    ASSERT_TRUE(pump_until(io, [&] {
+        return find_http_child_event(
+                   events,
+                   {HttpChildEventKind::before_receipt,
+                    HttpChildSite::lookup_tx,
+                    0}) != std::numeric_limits<std::size_t>::max() &&
+            find_http_child_event(
+                events,
+                {HttpChildEventKind::before_receipt,
+                 HttpChildSite::lookup_tx,
+                 1}) != std::numeric_limits<std::size_t>::max();
+    }));
+
+    auto const h0 = find_http_child_event(
+        events, {HttpChildEventKind::handoff, HttpChildSite::lookup_tx, 0});
+    auto const e0 = find_http_child_event(
+        events, {HttpChildEventKind::entry, HttpChildSite::lookup_tx, 0});
+    auto const h1 = find_http_child_event(
+        events, {HttpChildEventKind::handoff, HttpChildSite::lookup_tx, 1});
+    auto const e1 = find_http_child_event(
+        events, {HttpChildEventKind::entry, HttpChildSite::lookup_tx, 1});
+    auto const h2 = find_http_child_event(
+        events, {HttpChildEventKind::handoff, HttpChildSite::lookup_tx, 2});
+    ASSERT_LT(h0, e0);
+    ASSERT_LT(e0, h1);
+    ASSERT_LT(h1, e1);
+    ASSERT_LT(e1, h2);
+    EXPECT_EQ(
+        find_http_child_event(
+            events, {HttpChildEventKind::entry, HttpChildSite::lookup_tx, 2}),
+        std::numeric_limits<std::size_t>::max());
+    EXPECT_EQ(
+        find_http_child_event(
+            events, {HttpChildEventKind::handoff, HttpChildSite::lookup_tx, 3}),
+        std::numeric_limits<std::size_t>::max());
+    EXPECT_EQ(
+        result.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    tail_gates[0]->cancel();
+    io.restart();
+    io.poll();
+    EXPECT_EQ(
+        result.wait_for(std::chrono::seconds(0)), std::future_status::timeout)
+        << "one predecessor receipt cannot satisfy a two-child join";
+
+    tail_gates[1]->cancel();
+    ASSERT_TRUE(pump_until(io, [&] {
+        return result.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready;
+    }));
+    EXPECT_THROW(result.get(), HttpChildLaunchRefusal);
+}
+
+TEST(HttpServerLaunchRefusal, HookInstallationRefusesAfterStart)
+{
+    boost::asio::io_context io;
+    std::shared_ptr<xprv::ProofEngine> engine;
+    auto server = make_test_http_server(io, engine);
+    server->start();
+
+    EXPECT_THROW(
+        xprv::HttpServerTestAccess::set_child_hooks(*server, {}, {}),
+        std::logic_error);
+
+    auto stopped = boost::asio::co_spawn(
+        io,
+        [server]() -> boost::asio::awaitable<void> {
+            (void)co_await server->co_stop();
+        },
+        boost::asio::use_future);
+    io.run();
+    EXPECT_NO_THROW(stopped.get());
+}
+
+TEST(
+    HttpServerLaunchRefusalCounterexample,
+    CancellationEnabledTailGateCanReleaseWithoutTestRelease)
+{
+    namespace asio = boost::asio;
+
+    asio::io_context io;
+    asio::cancellation_signal cancellation;
+    auto gate = std::make_shared<asio::steady_timer>(
+        io, asio::steady_timer::time_point::max());
+    bool entered = false;
+    bool escaped = false;
+    std::exception_ptr failure;
+    asio::co_spawn(
+        io,
+        [gate, &entered, &escaped]() -> asio::awaitable<void> {
+            entered = true;
+            boost::system::error_code ec;
+            co_await gate->async_wait(
+                asio::redirect_error(asio::use_awaitable, ec));
+            escaped = true;
+        },
+        asio::bind_cancellation_slot(
+            cancellation.slot(), [&failure](std::exception_ptr result) {
+                failure = std::move(result);
+            }));
+
+    ASSERT_TRUE(pump_until(io, [&] { return entered; }));
+    ASSERT_FALSE(escaped);
+    cancellation.emit(asio::cancellation_type::all);
+    ASSERT_TRUE(pump_until(io, [&] { return escaped; }));
+    EXPECT_FALSE(failure);
 }
 
 }  // namespace

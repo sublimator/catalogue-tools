@@ -939,10 +939,47 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
         {
             auto cancellation = std::make_shared<asio::cancellation_signal>();
             child_cancellations.push_back(cancellation);
+            auto const child_ordinal = launched;
+            //@@mutation-site http-lookup-handoff-precedes-spawn
+            if (test_before_http_child_handoff_)
+            {
+                test_before_http_child_handoff_(
+                    TestHttpChildSite::lookup_tx, child_ordinal);
+            }
+            //@@mutation-end http-lookup-handoff-precedes-spawn
+            auto checkpoint = test_at_http_child_checkpoint_;
             asio::co_spawn(
                 ex,
-                [engine, tx_hash]() -> asio::awaitable<uint32_t> {
-                    co_return co_await engine->lookup_tx(tx_hash);
+                [engine,
+                 tx_hash,
+                 child_ordinal,
+                 checkpoint =
+                     std::move(checkpoint)]() -> asio::awaitable<uint32_t> {
+                    if (checkpoint)
+                    {
+                        co_await checkpoint(
+                            TestHttpChildSite::lookup_tx,
+                            child_ordinal,
+                            TestHttpChildCheckpoint::entry);
+                    }
+                    auto const ledger_seq = co_await engine->lookup_tx(tx_hash);
+                    if (checkpoint)
+                    {
+                        // A launch-failure cancellation must not counterfeit a
+                        // released test gate before the child frame is actually
+                        // ready to publish its completion receipt.
+                        //@@mutation-site http-lookup-tail-disables-cancellation
+                        co_await asio::this_coro::reset_cancellation_state(
+                            asio::disable_cancellation());
+                        //@@mutation-end http-lookup-tail-disables-cancellation
+                        //@@mutation-site http-lookup-tail-precedes-receipt
+                        co_await checkpoint(
+                            TestHttpChildSite::lookup_tx,
+                            child_ordinal,
+                            TestHttpChildCheckpoint::before_receipt);
+                        //@@mutation-end http-lookup-tail-precedes-receipt
+                    }
+                    co_return ledger_seq;
                 },
                 asio::bind_cancellation_slot(
                     cancellation->slot(),
@@ -955,7 +992,9 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
                                 .ledger_seq = ledger_seq,
                                 .failure = std::move(failure)});
                     }));
+            //@@mutation-site http-lookup-counts-only-successful-handoffs
             ++launched;
+            //@@mutation-end http-lookup-counts-only-successful-handoffs
         }
         catch (...)
         {
@@ -975,6 +1014,7 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
     uint32_t result_seq = 0;
     std::exception_ptr child_failure;
     std::size_t received = 0;
+    //@@mutation-site http-lookup-receives-only-launched-children
     while (received < launched)
     {
         boost::system::error_code receive_ec;
@@ -1002,6 +1042,7 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
             result_seq = result.ledger_seq;
         }
     }
+    //@@mutation-end http-lookup-receives-only-launched-children
 
     PLOGD(
         log_,
@@ -1012,8 +1053,10 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
         " children=",
         received);
 
+    //@@mutation-site http-lookup-rethrows-only-after-launched-receipts
     if (launch_failure)
         std::rethrow_exception(launch_failure);
+    //@@mutation-end http-lookup-rethrows-only-after-launched-receipts
     if (canceled)
         throw boost::system::system_error(asio::error::operation_aborted);
     if (result_seq == 0 && child_failure)
@@ -1098,11 +1141,18 @@ HttpServer::accept_loop()
             std::exception_ptr spawn_failure;
             try
             {
+                //@@mutation-site http-outer-handoff-precedes-spawn
+                if (test_before_http_child_handoff_)
+                {
+                    test_before_http_child_handoff_(
+                        TestHttpChildSite::outer_session, session_id);
+                }
+                //@@mutation-end http-outer-handoff-precedes-spawn
                 asio::co_spawn(
                     ctx_ex,
-                    [self, session, req_ctx]() mutable {
+                    [self, session, req_ctx, session_id]() mutable {
                         return self->handle_session(
-                            std::move(session), std::move(req_ctx));
+                            std::move(session), std::move(req_ctx), session_id);
                     },
                     asio::bind_cancellation_slot(
                         session->cancellation.slot(),
@@ -1184,6 +1234,12 @@ HttpServer::complete_accept_loop(std::exception_ptr failure) noexcept
     }
 }
 
+std::size_t
+HttpServer::test_session_count() const noexcept
+{
+    return lifecycle_->sessions.size();
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Session handler
 // ═══════════════════════════════════════════════════════════════════════
@@ -1196,8 +1252,16 @@ HttpServer::complete_accept_loop(std::exception_ptr failure) noexcept
 asio::awaitable<void>
 HttpServer::handle_session(
     std::shared_ptr<SessionControl> session,
-    std::shared_ptr<catl::core::RequestContext> req_ctx)
+    std::shared_ptr<catl::core::RequestContext> req_ctx,
+    std::uint64_t session_id)
 {
+    if (test_at_http_child_checkpoint_)
+    {
+        co_await test_at_http_child_checkpoint_(
+            TestHttpChildSite::outer_session,
+            session_id,
+            TestHttpChildCheckpoint::entry);
+    }
     auto& stream = session->stream;
     beast::flat_buffer buffer;
 
@@ -1755,14 +1819,30 @@ HttpServer::handle_session(
                         std::exception_ptr child_spawn_failure;
                         try
                         {
+                            //@@mutation-site sse-wr-handoff-before-spawn
+                            if (test_before_http_child_handoff_)
+                            {
+                                test_before_http_child_handoff_(
+                                    TestHttpChildSite::sse_writer, 0);
+                            }
+                            //@@mutation-end sse-wr-handoff-before-spawn
+                            auto checkpoint = test_at_http_child_checkpoint_;
                             asio::co_spawn(
                                 sse_executor,
                                 [&stream,
                                  frames,
                                  writer_failed,
                                  request_proof_cancel,
+                                 checkpoint = std::move(checkpoint),
                                  write_timeout = opts_.write_timeout]()
                                     -> asio::awaitable<void> {
+                                    if (checkpoint)
+                                    {
+                                        co_await checkpoint(
+                                            TestHttpChildSite::sse_writer,
+                                            0,
+                                            TestHttpChildCheckpoint::entry);
+                                    }
                                     try
                                     {
                                         for (;;)
@@ -1809,6 +1889,16 @@ HttpServer::handle_session(
                                         frames->cancel();
                                         frames->close();
                                     }
+                                    if (checkpoint)
+                                    {
+                                        //@@mutation-site sse-wr-tail
+                                        co_await checkpoint(
+                                            TestHttpChildSite::sse_writer,
+                                            0,
+                                            TestHttpChildCheckpoint::
+                                                before_receipt);
+                                        //@@mutation-end sse-wr-tail
+                                    }
                                 },
                                 detail::HttpChildCompletion{
                                     writer_done, [](std::exception_ptr const&) {
@@ -1819,25 +1909,54 @@ HttpServer::handle_session(
                         {
                             child_spawn_failure = std::current_exception();
                         }
+                        //@@mutation-site http-sse-writer-refusal-does-not-join
                         if (child_spawn_failure)
                             std::rethrow_exception(child_spawn_failure);
+                        //@@mutation-end http-sse-writer-refusal-does-not-join
 
                         // SSE dedicates the connection to this response. Any
                         // read readiness is only a hint. A proxy may half-close
                         // its request side while still consuming this stream.
                         try
                         {
+                            //@@mutation-site sse-wa-handoff-before-spawn
+                            if (test_before_http_child_handoff_)
+                            {
+                                test_before_http_child_handoff_(
+                                    TestHttpChildSite::sse_watcher, 0);
+                            }
+                            //@@mutation-end sse-wa-handoff-before-spawn
+                            auto checkpoint = test_at_http_child_checkpoint_;
                             asio::co_spawn(
                                 sse_executor,
                                 [&stream,
                                  request_proof_cancel,
-                                 stop_watcher]() -> asio::awaitable<void> {
+                                 stop_watcher,
+                                 checkpoint = std::move(
+                                     checkpoint)]() -> asio::awaitable<void> {
+                                    if (checkpoint)
+                                    {
+                                        co_await checkpoint(
+                                            TestHttpChildSite::sse_watcher,
+                                            0,
+                                            TestHttpChildCheckpoint::entry);
+                                    }
                                     auto const failed = co_await HttpServer::
                                         co_wait_for_transport_failure(
                                             beast::get_lowest_layer(stream)
                                                 .socket());
                                     if (failed && !stop_watcher->load())
                                         request_proof_cancel();
+                                    if (checkpoint)
+                                    {
+                                        //@@mutation-site sse-wa-tail
+                                        co_await checkpoint(
+                                            TestHttpChildSite::sse_watcher,
+                                            0,
+                                            TestHttpChildCheckpoint::
+                                                before_receipt);
+                                        //@@mutation-end sse-wa-tail
+                                    }
                                 },
                                 detail::HttpChildCompletion{
                                     watcher_done,
@@ -1856,7 +1975,9 @@ HttpServer::handle_session(
                             if (!frames->try_send(
                                     boost::system::error_code{}, SseFrame{}))
                                 frames->cancel();
+                            //@@mutation-site sse-wa-refusal-joins-wr
                             co_await detail::join_http_child(writer_done);
+                            //@@mutation-end sse-wa-refusal-joins-wr
                             std::rethrow_exception(child_spawn_failure);
                         }
 
@@ -1878,14 +1999,30 @@ HttpServer::handle_session(
 
                         try
                         {
+                            //@@mutation-site sse-st-handoff-before-spawn
+                            if (test_before_http_child_handoff_)
+                            {
+                                test_before_http_child_handoff_(
+                                    TestHttpChildSite::sse_status, 0);
+                            }
+                            //@@mutation-end sse-st-handoff-before-spawn
+                            auto checkpoint = test_at_http_child_checkpoint_;
                             asio::co_spawn(
                                 sse_executor,
                                 [stop_status,
                                  drain_timer,
                                  drain_ctx,
                                  enqueue_sse,
-                                 request_proof_cancel]()
-                                    -> asio::awaitable<void> {
+                                 request_proof_cancel,
+                                 checkpoint = std::move(
+                                     checkpoint)]() -> asio::awaitable<void> {
+                                    if (checkpoint)
+                                    {
+                                        co_await checkpoint(
+                                            TestHttpChildSite::sse_status,
+                                            0,
+                                            TestHttpChildCheckpoint::entry);
+                                    }
                                     try
                                     {
                                         bool queue_open = true;
@@ -1946,12 +2083,14 @@ HttpServer::handle_session(
                             boost::system::error_code cancel_ec;
                             beast::get_lowest_layer(stream).socket().cancel(
                                 cancel_ec);
+                            //@@mutation-site sse-st-refusal-joins-wa-wr
                             co_await detail::join_http_child(watcher_done);
 
                             if (!frames->try_send(
                                     boost::system::error_code{}, SseFrame{}))
                                 frames->cancel();
                             co_await detail::join_http_child(writer_done);
+                            //@@mutation-end sse-st-refusal-joins-wa-wr
                             std::rethrow_exception(child_spawn_failure);
                         }
 
@@ -2171,8 +2310,8 @@ HttpServer::handle_session(
                         // blocked on the parallel_group below.
                         auto watcher_done =
                             std::make_shared<std::atomic<bool>>(false);
-                        auto watcher_receipt_hook =
-                            test_before_regular_watcher_receipt_;
+                        auto watcher_checkpoint =
+                            test_at_http_child_checkpoint_;
                         auto ex = co_await asio::this_coro::executor;
                         // clang-format off
                         //@@authority transition=prv.T0129
@@ -2182,6 +2321,13 @@ HttpServer::handle_session(
                         // commit=connection_executor touches=prv.S0044
                         // mutation_class=running_guarded
                         // label=launch_regular_http_transport_failure_borrower
+                        //@@mutation-site http-regular-watcher-handoff-precedes-spawn
+                        if (test_before_http_child_handoff_)
+                        {
+                            test_before_http_child_handoff_(
+                                TestHttpChildSite::regular_watcher, 0);
+                        }
+                        //@@mutation-end http-regular-watcher-handoff-precedes-spawn
                         co_spawn(
                             stream.get_executor(),
                             [&stream,
@@ -2189,9 +2335,16 @@ HttpServer::handle_session(
                              cancel_token,
                              request_scope,
                              watcher_done,
-                             watcher_receipt_hook =
-                                 std::move(watcher_receipt_hook)]()
+                             watcher_checkpoint =
+                                 std::move(watcher_checkpoint)]()
                                 -> asio::awaitable<void> {
+                                if (watcher_checkpoint)
+                                {
+                                    co_await watcher_checkpoint(
+                                        TestHttpChildSite::regular_watcher,
+                                        0,
+                                        TestHttpChildCheckpoint::entry);
+                                }
                                 auto const failed = co_await
                                     HttpServer::co_wait_for_transport_failure(
                                         beast::get_lowest_layer(stream)
@@ -2207,8 +2360,15 @@ HttpServer::handle_session(
                                     // watcher receipt exactly once.
                                     cancel->cancel();
                                 }
-                                if (watcher_receipt_hook)
-                                    co_await watcher_receipt_hook();
+                                if (watcher_checkpoint)
+                                {
+                                    //@@mutation-site http-regular-watcher-tail-precedes-receipt
+                                    co_await watcher_checkpoint(
+                                        TestHttpChildSite::regular_watcher,
+                                        0,
+                                        TestHttpChildCheckpoint::before_receipt);
+                                    //@@mutation-end http-regular-watcher-tail-precedes-receipt
+                                }
                             },
                             detail::HttpChildCompletion{
                                 watcher_join}); //@@authority-target ids=prv.T0129
@@ -2291,7 +2451,7 @@ HttpServer::handle_session(
                         // calls=join_http_child
                         // label=join_regular_http_transport_watcher_before_exit
                         co_await detail::join_http_child(
-                            watcher_join); //@@authority-target ids=prv.T0130
+                            watcher_join);  //@@authority-target ids=prv.T0130
 
                         if (race_failure)
                             std::rethrow_exception(race_failure);

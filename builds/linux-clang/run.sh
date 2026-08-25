@@ -88,6 +88,14 @@ case "$MODE" in
             "$BUILD_DIR/tests/peer-client/peer-set-pruning-gtest" \
             --gtest_brief=1
         ;;
+    http-child)
+        cmake --build "$BUILD_DIR" --target xprv-gtest -j "$BUILD_CORES"
+        "$BUILD_DIR/tests/xprv/xprv-gtest" \
+            --gtest_filter='HttpServerLaunchRefusal*.*:HttpServerLifecycle.RegularProofFailureJoinsDisconnectWatcherBeforeResponse' \
+            --gtest_repeat="$REPEAT" \
+            --gtest_break_on_failure \
+            --gtest_brief=1
+        ;;
     rpc)
         cmake --build "$BUILD_DIR" --target rpc-client-gtest -j "$BUILD_CORES"
         "$BUILD_DIR/tests/rpc-client/rpc-client-gtest" \
@@ -196,7 +204,7 @@ case "$MODE" in
             ctest --test-dir "$BUILD_DIR" --verbose
         ;;
     *)
-        echo "unknown LINUX_CLANG_MODE=$MODE (expected focused, affected, rpc, rpc-tsan, vqt-tsan, or full)" >&2
+        echo "unknown LINUX_CLANG_MODE=$MODE (expected focused, affected, http-child, rpc, rpc-tsan, vqt-tsan, or full)" >&2
         exit 2
         ;;
 esac

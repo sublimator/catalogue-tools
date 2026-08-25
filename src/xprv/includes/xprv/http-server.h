@@ -96,6 +96,25 @@ private:
     struct SessionControl;
     struct LifecycleState;
 
+    enum class TestHttpChildSite : std::uint8_t {
+        outer_session,
+        sse_writer,
+        sse_watcher,
+        sse_status,
+        regular_watcher,
+        lookup_tx,
+    };
+
+    enum class TestHttpChildCheckpoint : std::uint8_t {
+        entry,
+        before_receipt,
+    };
+
+    using TestBeforeHttpChildHandoff =
+        std::function<void(TestHttpChildSite, std::size_t)>;
+    using TestAtHttpChildCheckpoint = std::function<boost::asio::awaitable<
+        void>(TestHttpChildSite, std::size_t, TestHttpChildCheckpoint)>;
+
     HttpServer(
         boost::asio::io_context& io,
         std::map<uint32_t, std::shared_ptr<ProofEngine>> engines,
@@ -108,7 +127,8 @@ private:
     boost::asio::awaitable<void>
     handle_session(
         std::shared_ptr<SessionControl> session,
-        std::shared_ptr<catl::core::RequestContext> req_ctx);
+        std::shared_ptr<catl::core::RequestContext> req_ctx,
+        std::uint64_t session_id);
 
     /// Read readiness alone is not evidence that the response consumer is
     /// gone: a proxy may half-close its request-writing side while continuing
@@ -130,6 +150,9 @@ private:
 
     void
     complete_accept_loop(std::exception_ptr failure) noexcept;
+
+    std::size_t
+    test_session_count() const noexcept;
 
     /// Add X-XPRV metadata header to any response.
     template <typename Body>
@@ -179,8 +202,8 @@ private:
     // Default-inert deterministic scheduling seams. Test access installs
     // these before start(); production code cannot mutate them.
     std::function<void()> test_before_regular_race_;
-    std::function<boost::asio::awaitable<void>()>
-        test_before_regular_watcher_receipt_;
+    TestBeforeHttpChildHandoff test_before_http_child_handoff_;
+    TestAtHttpChildCheckpoint test_at_http_child_checkpoint_;
 };
 
 }  // namespace xprv
