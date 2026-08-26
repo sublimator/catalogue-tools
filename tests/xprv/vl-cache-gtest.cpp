@@ -22,6 +22,8 @@
 #include <new>
 #include <ostream>
 #include <streambuf>
+#include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace catl::vl {
@@ -36,7 +38,33 @@ public:
     {
         operation->set_after_start_admission_for_test(std::move(hook));
     }
+
+    static void
+    set_before_start_return(
+        VlFetchOperationPtr const& operation,
+        std::function<void()> hook)
+    {
+        operation->set_before_start_return_for_test(std::move(hook));
+    }
+
+    static std::size_t
+    terminal_receipt_mint_attempts(VlFetchOperationPtr const& operation)
+    {
+        return operation->terminal_receipt_mint_attempts_for_test();
+    }
+
+    static bool
+    body_locals_destroyed(VlFetchOperationPtr const& operation)
+    {
+        return operation->body_locals_destroyed_for_test();
+    }
 };
+
+static_assert(
+    !std::is_constructible_v<VlFetchTerminalFact, VlFetchOperationPtr>);
+static_assert(!std::is_copy_constructible_v<VlFetchTerminalFact>);
+static_assert(std::is_nothrow_move_constructible_v<VlFetchTerminalFact>);
+static_assert(!std::is_copy_constructible_v<VlFetchTerminalReceipt>);
 
 }  // namespace catl::vl
 
@@ -301,7 +329,7 @@ TEST(VlClientCancellation, CancelBeforeStartIsRetainedAndEmittedOnce)
     auto fetch_future = fetch_terminal.get_future();
     operation->start(
         [&fetch_terminal](
-            catl::vl::VlFetchOperationPtr, catl::vl::VlResult result) {
+            catl::vl::VlFetchTerminalReceipt, catl::vl::VlResult result) {
             fetch_terminal.set_value(std::move(result));
         });
 
@@ -337,7 +365,7 @@ TEST(VlClientCancellation, TerminalWithoutRequestClosesCancellationAuthority)
     auto fetch_future = fetch_terminal.get_future();
     operation->start(
         [&fetch_terminal](
-            catl::vl::VlFetchOperationPtr, catl::vl::VlResult result) {
+            catl::vl::VlFetchTerminalReceipt, catl::vl::VlResult result) {
             fetch_terminal.set_value(std::move(result));
         });
 
@@ -349,6 +377,111 @@ TEST(VlClientCancellation, TerminalWithoutRequestClosesCancellationAuthority)
         catl::vl::VlFetchCancellationDisposition::closed_by_terminal);
     EXPECT_FALSE(operation->request_cancel());
 
+    io.stop();
+    runners.join();
+}
+
+TEST(VlClientReceipt, PhysicalCompletionMintsOneExactReceiptAfterStartReturns)
+{
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::acceptor acceptor(
+        io,
+        boost::asio::ip::tcp::endpoint(
+            boost::asio::ip::make_address("127.0.0.1"), 0));
+    auto const unused_port = acceptor.local_endpoint().port();
+    boost::system::error_code ignored;
+    acceptor.close(ignored);
+
+    catl::vl::VlClient client(io, "127.0.0.1", unused_port);
+    auto operation = client.prepare_fetch();
+    struct Observation
+    {
+        bool exact = false;
+        bool disposition = false;
+        bool body_locals_destroyed = false;
+        std::size_t mint_attempts = 0;
+    };
+    std::promise<Observation> observed;
+    auto future = observed.get_future();
+
+    operation->start([operation, &observed](
+                         catl::vl::VlFetchTerminalReceipt receipt,
+                         catl::vl::VlResult) mutable {
+        observed.set_value(Observation{
+            .exact = receipt.fact().operation() == operation,
+            .disposition = receipt.disposition() ==
+                catl::vl::VlFetchTerminalFact::disposition::physical_completion,
+            .body_locals_destroyed =
+                catl::vl::VlFetchOperationTestAccess::body_locals_destroyed(
+                    operation),
+            .mint_attempts = catl::vl::VlFetchOperationTestAccess::
+                terminal_receipt_mint_attempts(operation),
+        });
+    });
+
+    catl::test::IoContextRunners runners(io, 2);
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    auto const observation = future.get();
+    EXPECT_TRUE(observation.exact);
+    EXPECT_TRUE(observation.disposition);
+    EXPECT_TRUE(observation.body_locals_destroyed)
+        << "the completion receipt may publish only after body locals die";
+    EXPECT_EQ(observation.mint_attempts, 1u)
+        << "Tag non-copyability does not prove legitimate-minter totality";
+
+    io.stop();
+    runners.join();
+}
+
+TEST(VlClientReceipt, PhysicalCompletionMayPrecedeStartReturnWithoutRemint)
+{
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::acceptor acceptor(
+        io,
+        boost::asio::ip::tcp::endpoint(
+            boost::asio::ip::make_address("127.0.0.1"), 0));
+    auto const unused_port = acceptor.local_endpoint().port();
+    boost::system::error_code ignored;
+    acceptor.close(ignored);
+
+    catl::vl::VlClient client(io, "127.0.0.1", unused_port);
+    auto operation = client.prepare_fetch();
+    std::promise<void> before_return;
+    auto before_return_future = before_return.get_future();
+    std::promise<void> permit_return;
+    auto permit_return_future = permit_return.get_future().share();
+    catl::vl::VlFetchOperationTestAccess::set_before_start_return(
+        operation, [&before_return, permit_return_future] {
+            before_return.set_value();
+            permit_return_future.wait();
+        });
+
+    std::promise<std::size_t> callback_mints;
+    auto callback_future = callback_mints.get_future();
+    auto work = boost::asio::make_work_guard(io);
+    catl::test::IoContextRunners runners(io, 2);
+    std::thread starter([operation, &callback_mints] {
+        operation->start(
+            [operation, &callback_mints](
+                catl::vl::VlFetchTerminalReceipt receipt, catl::vl::VlResult) {
+                EXPECT_EQ(receipt.fact().operation(), operation);
+                callback_mints.set_value(
+                    catl::vl::VlFetchOperationTestAccess::
+                        terminal_receipt_mint_attempts(operation));
+            });
+    });
+
+    auto const before_return_status = before_return_future.wait_for(5s);
+    auto const callback_status = callback_future.wait_for(5s);
+    permit_return.set_value();
+    starter.join();
+
+    ASSERT_EQ(before_return_status, std::future_status::ready);
+    ASSERT_EQ(callback_status, std::future_status::ready)
+        << "physical completion must be able to win the start-return race";
+    EXPECT_EQ(callback_future.get(), 1u);
+
+    work.reset();
     io.stop();
     runners.join();
 }
@@ -371,7 +504,7 @@ TEST(VlClientCancellation, StartAdmissionRefusalClosesCancellationAuthority)
         std::size_t callbacks = 0;
         EXPECT_THROW(
             operation->start([&callbacks](
-                                 catl::vl::VlFetchOperationPtr,
+                                 catl::vl::VlFetchTerminalReceipt,
                                  catl::vl::VlResult) { ++callbacks; }),
             std::bad_alloc);
         EXPECT_EQ(
@@ -380,12 +513,16 @@ TEST(VlClientCancellation, StartAdmissionRefusalClosesCancellationAuthority)
         EXPECT_FALSE(operation->request_cancel());
         EXPECT_THROW(
             operation->start(
-                [](catl::vl::VlFetchOperationPtr, catl::vl::VlResult) {}),
+                [](catl::vl::VlFetchTerminalReceipt, catl::vl::VlResult) {}),
             std::logic_error);
         io.poll();
         EXPECT_EQ(callbacks, 0u)
             << "a synchronous start refusal must not counterfeit a physical "
                "terminal callback";
+        EXPECT_EQ(
+            catl::vl::VlFetchOperationTestAccess::
+                terminal_receipt_mint_attempts(operation),
+            0u);
     }
 }
 
@@ -411,7 +548,7 @@ TEST(VlClientCancellation, ExactOperationCancelsHeldTlsHandshakeOnce)
     auto operation = client.prepare_fetch();
     operation->start(
         [&fetch_terminal](
-            catl::vl::VlFetchOperationPtr, catl::vl::VlResult result) {
+            catl::vl::VlFetchTerminalReceipt, catl::vl::VlResult result) {
             fetch_terminal.set_value(std::move(result));
         });
 
@@ -744,6 +881,12 @@ TEST(VlCacheShutdown, PostInstallStartRefusalRetiresExactOperation)
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
     auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlFetchOperationPtr refused_operation;
+    VlCacheTestAccess::set_fetch_terminal_observer(
+        cache,
+        [&refused_operation](catl::vl::VlFetchOperationPtr const& operation) {
+            refused_operation = operation;
+        });
     VlCacheTestAccess::fail_next_operation_start(cache);
 
     cache->start();
@@ -754,6 +897,13 @@ TEST(VlCacheShutdown, PostInstallStartRefusalRetiresExactOperation)
     auto const after_refusal = failed_snapshot.get();
     EXPECT_FALSE(after_refusal.fetch_in_progress);
     EXPECT_FALSE(after_refusal.active_fetch);
+    ASSERT_TRUE(refused_operation);
+    EXPECT_EQ(
+        catl::vl::VlFetchOperationTestAccess::terminal_receipt_mint_attempts(
+            refused_operation),
+        0u)
+        << "a local never-started disposition cannot counterfeit a physical "
+           "receipt";
     EXPECT_EQ(after_refusal.refresh_wait_outstanding, 1u)
         << "the exact failed terminal may arm retry only after retiring the "
            "installed operation";
@@ -763,6 +913,35 @@ TEST(VlCacheShutdown, PostInstallStartRefusalRetiresExactOperation)
     scheduler.run_until_idle();
     ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
     EXPECT_NO_THROW(stopped.get());
+}
+
+TEST(VlCacheShutdown, InjectedFetcherTerminalRemainsReceiptFree)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    catl::vl::VlFetchOperationPtr observed_operation;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending](catl::vl::VlCallback callback) {
+            pending = std::move(callback);
+        });
+    VlCacheTestAccess::set_fetch_terminal_observer(
+        cache,
+        [&observed_operation](catl::vl::VlFetchOperationPtr const& operation) {
+            observed_operation = operation;
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+
+    EXPECT_FALSE(observed_operation)
+        << "the injected VlCallback has no producer operation and no physical "
+           "receipt mint";
+    settle_stopped(scheduler, cache);
 }
 
 TEST(VlCacheShutdown, InitiationDiagnosticRefusalCannotOrphanFetch)

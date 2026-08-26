@@ -134,11 +134,14 @@ VlCache::do_fetch()
     } admission_rollback{*this};
 
     auto on_fetch = [self](
+                        std::optional<catl::vl::VlFetchTerminalReceipt> receipt,
                         catl::vl::VlFetchOperationPtr operation,
                         catl::vl::VlResult result) {
         auto consume = [self,
+                        receipt = std::move(receipt),
                         operation = std::move(operation),
                         result = std::move(result)]() mutable {
+            WRIT_ASSERT_HOME(self->home_);
             try
             {
                 if (self->fetch_terminal_observer_for_test_)
@@ -148,7 +151,39 @@ VlCache::do_fetch()
             {
             }
 
-            if (!self->retire_fetch_on_strand(operation))
+            bool retired = false;
+            if (receipt)
+            {
+                switch (receipt->disposition())
+                {
+                    case catl::vl::VlFetchTerminalFact::disposition::
+                        physical_completion:
+                        break;
+                }
+
+                // The receipt stays alive through the exact owner-home
+                // validation and roster retirement it authorizes.
+                // clang-format off
+                //@@authority transition=prv.T0075 status=provisional
+                // scope=statement
+                // bind=expression_statement@c3019699f2deab2c
+                // owner=unresolved owner_hypothesis=vl_cache
+                // commit=vl_cache_strand touches=prv.S0141,prv.S0067,prv.S0068
+                // boundary_ref=vl_fetch.physical_completion
+                // receipt=vl_fetch.physical_completion receipt_role=consume
+                // writ_roles=receipt.consumer,receipt.exact_acceptance,roster.retire
+                // label=consume_exact_physical_fetch_receipt_and_retire_owner_homes
+                //@@writ attachment=catl.ann.A0526
+                retired = self->retire_fetch_on_strand(
+                    receipt->fact().operation()); //@@authority-target ids=prv.T0075
+                // clang-format on
+            }
+            else
+            {
+                retired = self->retire_fetch_on_strand(operation);
+            }
+
+            if (!retired)
             {
                 try
                 {
@@ -336,14 +371,17 @@ VlCache::do_fetch()
         {
         }
         //@@authority transition=prv.T0216 status=provisional scope=statement
-        // bind=expression_statement@04751e2fe4506cda
+        // bind=expression_statement@c59dbeee8087e5d3
         // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-        // boundary_ref=vl_fetch.operation_terminal
-        // receipt=vl_fetch.operation_terminal receipt_role=publish
-        // label=publish_synchronous_fetch_start_refusal_terminal
+        // touches=prv.S0141,prv.S0067,prv.S0068
+        // writ_roles=roster.retire
+        // label=settle_synchronous_fetch_start_refusal_locally
+        //@@mutation-site vl-fetch-start-refusal-remains-local
         on_fetch(
+            std::nullopt,
             active_fetch_,
             std::move(failed));  //@@authority-target ids=prv.T0216
+        //@@mutation-end vl-fetch-start-refusal-remains-local
     };
 
     try
@@ -351,7 +389,9 @@ VlCache::do_fetch()
         if (fetch_for_test_)
         {
             fetch_for_test_([on_fetch](catl::vl::VlResult result) mutable {
-                on_fetch({}, std::move(result));
+                //@@mutation-site vl-fetch-test-injection-remains-local
+                on_fetch(std::nullopt, {}, std::move(result));
+                //@@mutation-end vl-fetch-test-injection-remains-local
             });
             admission_rollback.terminal_producer_committed = true;
         }
@@ -371,7 +411,15 @@ VlCache::do_fetch()
                 --fail_fetch_operation_starts_for_test_;
                 throw std::runtime_error("VL fetch operation start failpoint");
             }
-            operation->start(on_fetch);
+            operation->start([on_fetch](
+                                 catl::vl::VlFetchTerminalReceipt receipt,
+                                 catl::vl::VlResult result) mutable {
+                auto operation = receipt.fact().operation();
+                on_fetch(
+                    std::move(receipt),
+                    std::move(operation),
+                    std::move(result));
+            });
             admission_rollback.terminal_producer_committed = true;
         }
     }
@@ -385,29 +433,25 @@ VlCache::do_fetch()
     }
 }
 
-//@@authority transition=prv.T0075 status=provisional scope=function
-// bind=xprv::retire_fetch_on_strand@58f2ee55d206538a
-// owner=unresolved owner_hypothesis=vl_cache
-// commit=vl_cache_strand touches=prv.S0141,prv.S0067,prv.S0068
-// boundary_ref=vl_fetch.operation_terminal
-// receipt=vl_fetch.operation_terminal receipt_role=consume
-// writ_roles=exact.validate_or_consume,roster.retire
-// label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
 bool
 VlCache::retire_fetch_on_strand(
     catl::vl::VlFetchOperationPtr const& operation) noexcept
 {
     WRIT_ASSERT_HOME(home_);
+    //@@mutation-site vl-fetch-retire-exact-operation
     if (operation ? active_fetch_ != operation
                   : static_cast<bool>(active_fetch_))
     {
         return false;
     }
+    //@@mutation-end vl-fetch-retire-exact-operation
     active_fetch_.reset();
     active_fetch_cancel_requested_ = false;
+    //@@mutation-site vl-fetch-retire-roster-member
     if (fetch_obligation_)
         (void)stop_roster_.retire(std::move(*fetch_obligation_));
     fetch_obligation_.reset();
+    //@@mutation-end vl-fetch-retire-roster-member
     return true;
 }
 

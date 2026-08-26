@@ -81,7 +81,10 @@ struct VlFetchOperation::Impl
     // label=retained_exact_fetch_cancellation_disposition
     std::atomic<VlFetchCancellationDisposition> cancellation_disposition{
         VlFetchCancellationDisposition::not_requested};
+    std::atomic<std::size_t> terminal_receipt_mint_attempts{0};
+    std::atomic_bool body_locals_destroyed{false};
     std::function<void()> after_start_admission_for_test;
+    std::function<void()> before_start_return_for_test;
 
     //@@authority transition=prv.T0212 status=provisional scope=function
     // bind=catl::vl::VlFetchOperation::Impl::dispatch_retained_cancel@76a6576f8ee07b69
@@ -224,6 +227,25 @@ void
 VlFetchOperation::set_after_start_admission_for_test(std::function<void()> hook)
 {
     impl_->after_start_admission_for_test = std::move(hook);
+}
+
+void
+VlFetchOperation::set_before_start_return_for_test(std::function<void()> hook)
+{
+    impl_->before_start_return_for_test = std::move(hook);
+}
+
+std::size_t
+VlFetchOperation::terminal_receipt_mint_attempts_for_test() const noexcept
+{
+    return impl_->terminal_receipt_mint_attempts.load(
+        std::memory_order_acquire);
+}
+
+bool
+VlFetchOperation::body_locals_destroyed_for_test() const noexcept
+{
+    return impl_->body_locals_destroyed.load(std::memory_order_acquire);
 }
 
 //------------------------------------------------------------------------------
@@ -584,7 +606,17 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
     PLOGI(VlClient::log_, "Fetching VL from ", impl->host, ":", impl->port);
     boost::asio::co_spawn(
         impl->executor,
-        [host, port]() mutable -> asio::awaitable<VlResult> {
+        [host, port, impl]() mutable -> asio::awaitable<VlResult> {
+            struct BodyLocalsLifetime
+            {
+                std::shared_ptr<Impl> impl;
+
+                ~BodyLocalsLifetime()
+                {
+                    impl->body_locals_destroyed.store(
+                        true, std::memory_order_release);
+                }
+            } body_locals_lifetime{impl};
             VlResult vl_result;
 
             try
@@ -854,18 +886,42 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                 {
                     if (callback)
                     {
-                        //@@authority transition=prv.T0215 bind=expression_statement@6d242c61b90ab506
+                        // receipt/v1 proves first-mint provenance and
+                        // single-object consumption. This producer counter
+                        // separately proves that the legitimate minter does
+                        // not publish twice.
+                        auto const prior_mints =
+                            impl->terminal_receipt_mint_attempts.fetch_add(
+                                1, std::memory_order_acq_rel);
+                        if (prior_mints != 0)
+                            return;
+
+                        //@@mutation-site vl-fetch-physical-receipt-mint
+                        auto receipt = VlFetchTerminalReceipt::mint(
+                            VlFetchTerminalFact(std::move(operation)),
+                            VlFetchTerminalFact::disposition::
+                                physical_completion);
+                        //@@mutation-end vl-fetch-physical-receipt-mint
+                        if (!receipt)
+                            return;
+
+                        // clang-format off
+                        //@@authority transition=prv.T0215
+                        // bind=expression_statement@6747a494a308ae60
                         // status=provisional scope=statement
                         // owner=unresolved
                         // owner_hypothesis=vl_fetch_operation
                         // commit=vl_fetch_executor touches=prv.S0072
-                        // boundary_ref=vl_fetch.operation_terminal
-                        // receipt=vl_fetch.operation_terminal receipt_role=publish
-                        // label=publish_exact_physical_fetch_terminal_callback
+                        // boundary_ref=vl_fetch.physical_completion
+                        // receipt=vl_fetch.physical_completion
+                        // receipt_role=publish writ_roles=receipt.publisher
+                        // label=mint_exact_physical_fetch_terminal_receipt
+                        //@@writ attachment=catl.ann.A0525
                         callback(
-                            std::move(operation),
+                            std::move(*receipt),
                             std::move(
-                                result)); //@@authority-target ids=prv.T0215
+                                result));  //@@authority-target ids=prv.T0215
+                        // clang-format on
                     }
                 }
                 catch (...)
@@ -887,6 +943,8 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
     impl->phase.compare_exchange_strong(
         expected, Impl::Phase::slot_installed, std::memory_order_acq_rel);
     Impl::dispatch_retained_cancel(impl);
+    if (impl->before_start_return_for_test)
+        impl->before_start_return_for_test();
 }
 
 VlFetchOperationPtr

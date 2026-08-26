@@ -14,6 +14,8 @@
 #include <catl/core/logger.h>
 #include <catl/core/types.h>
 
+#include <writ/receipt.hpp>
+
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/json.hpp>
@@ -22,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace catl::vl {
@@ -105,6 +108,53 @@ class VlFetchOperation;
 class VlFetchOperationTestAccess;
 using VlFetchOperationPtr = std::shared_ptr<VlFetchOperation>;
 
+/// Producer-minted proof that one accepted VL fetch reached its physical
+/// co_spawn completion handler. This fact says nothing about fetch success;
+/// VlResult continues to own that application policy.
+class VlFetchTerminalFact final
+{
+public:
+    enum class disposition : std::uint8_t {
+        physical_completion,
+    };
+
+    static constexpr bool
+    is_disposition(disposition value) noexcept
+    {
+        switch (value)
+        {
+            case disposition::physical_completion:
+                return true;
+        }
+        return false;
+    }
+
+    VlFetchTerminalFact(VlFetchTerminalFact&&) noexcept = default;
+    VlFetchTerminalFact&
+    operator=(VlFetchTerminalFact&&) noexcept = default;
+    VlFetchTerminalFact(VlFetchTerminalFact const&) = delete;
+    VlFetchTerminalFact&
+    operator=(VlFetchTerminalFact const&) = delete;
+
+    VlFetchOperationPtr const&
+    operation() const noexcept
+    {
+        return operation_;
+    }
+
+private:
+    explicit VlFetchTerminalFact(VlFetchOperationPtr operation) noexcept
+        : operation_(std::move(operation))
+    {
+    }
+
+    VlFetchOperationPtr operation_;
+
+    friend class VlFetchOperation;
+};
+
+using VlFetchTerminalReceipt = writ::receipt<VlFetchTerminalFact>;
+
 enum class VlFetchCancellationDisposition : std::uint8_t {
     not_requested,
     submitted,
@@ -116,7 +166,7 @@ enum class VlFetchCancellationDisposition : std::uint8_t {
 
 using VlFetchExecutor = asio::strand<asio::io_context::executor_type>;
 using VlFetchTerminalCallback =
-    std::function<void(VlFetchOperationPtr, VlResult)>;
+    std::function<void(VlFetchTerminalReceipt, VlResult)>;
 
 /// Owner-held cancellation capability for one exact VL fetch.
 ///
@@ -152,6 +202,15 @@ private:
 
     void
     set_after_start_admission_for_test(std::function<void()> hook);
+
+    void
+    set_before_start_return_for_test(std::function<void()> hook);
+
+    std::size_t
+    terminal_receipt_mint_attempts_for_test() const noexcept;
+
+    bool
+    body_locals_destroyed_for_test() const noexcept;
 
     std::shared_ptr<Impl> impl_;
 

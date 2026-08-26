@@ -13,6 +13,7 @@ target_link_libraries(
          OpenSSL::SSL
          OpenSSL::Crypto
          catl::core
+         catl::writ
   PRIVATE catl::crypto catl::xdata)
 
 add_library(catl::vl-client ALIAS catl_vl_client)
