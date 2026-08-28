@@ -187,4 +187,83 @@ TEST(CatlV2NodeIndex, SealsAndVerifiesHitsMissesDuplicatesAndCollisions)
     std::filesystem::remove(pack);
 }
 
+TEST(CatlV2NodeIndex, DeduplicatesEquivalentCollapsedAndExplicitInners)
+{
+    TestMmapItems collapsed_items;
+    TestMmapItems explicit_items;
+    auto collapsed_first = collapsed_items.make(
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "CAFE");
+    auto collapsed_second = collapsed_items.make(
+        "1111171111111111111111111111111111111111111111111111111111111111",
+        "BABE");
+    auto explicit_first = explicit_items.make(
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "CAFE");
+    auto explicit_second = explicit_items.make(
+        "1111171111111111111111111111111111111111111111111111111111111111",
+        "BABE");
+
+    GoldMap collapsed(catl::shamap::tnACCOUNT_STATE);
+    GoldMap explicit_inners(
+        catl::shamap::tnACCOUNT_STATE,
+        {.tree_collapse_impl = catl::shamap::TreeCollapseImpl::leafs_only});
+    ASSERT_EQ(
+        collapsed.add_item(collapsed_first), catl::shamap::SetResult::ADD);
+    ASSERT_EQ(
+        collapsed.add_item(collapsed_second), catl::shamap::SetResult::ADD);
+    ASSERT_EQ(
+        explicit_inners.add_item(explicit_first), catl::shamap::SetResult::ADD);
+    ASSERT_EQ(
+        explicit_inners.add_item(explicit_second),
+        catl::shamap::SetResult::ADD);
+    ASSERT_EQ(collapsed.get_hash(), explicit_inners.get_hash());
+
+    auto const collapsed_child = boost::static_pointer_cast<SHAMapInnerNodeS>(
+        collapsed.get_root()->get_child(1));
+    auto const explicit_child = boost::static_pointer_cast<SHAMapInnerNodeS>(
+        explicit_inners.get_root()->get_child(1));
+    ASSERT_TRUE(collapsed_child);
+    ASSERT_TRUE(explicit_child);
+    ASSERT_GT(collapsed_child->get_depth(), explicit_child->get_depth());
+
+    GoldMap tx_map(catl::shamap::tnTRANSACTION_MD);
+    auto const directory = std::filesystem::temp_directory_path();
+    auto const suffix = boost::filesystem::unique_path("%%%%-%%%%").string();
+    auto const pack = directory / ("catl2-collapsed-" + suffix + ".catl2");
+    auto const records = directory / ("catl2-collapsed-" + suffix + ".records");
+    std::vector<Observation> observations;
+    {
+        catl::v2::CatlV2Writer writer(
+            pack.string(), 0, [&](Observation const& observation) {
+                observations.push_back(observation);
+            });
+        ASSERT_TRUE(writer.write_ledger(
+            fake_ledger(1, collapsed.get_hash()), collapsed, tx_map));
+        ASSERT_TRUE(writer.write_ledger(
+            fake_ledger(2, explicit_inners.get_hash()),
+            explicit_inners,
+            tx_map));
+        ASSERT_TRUE(writer.finalize());
+    }
+    write_records(records, observations);
+
+    std::set<catl::v2::NodeHash> identities;
+    for (auto const& observation : observations)
+        identities.insert(observation.hash);
+    ASSERT_LT(identities.size(), observations.size());
+
+    auto const stats = catl::v2::seal_pthash_node_index(pack, records);
+    EXPECT_EQ(stats.duplicate_records, observations.size() - identities.size());
+    auto reader = catl::v2::CatlV2Reader::create(pack.string());
+    auto resolver = catl::v2::PthashNodeResolver::open(reader);
+    catl::v2::NodeHash root_hash{};
+    std::memcpy(
+        root_hash.data(), collapsed.get_hash().data(), root_hash.size());
+    EXPECT_TRUE(resolver.lookup(root_hash));
+
+    std::filesystem::remove(records);
+    std::filesystem::remove(pack);
+}
+
 #endif

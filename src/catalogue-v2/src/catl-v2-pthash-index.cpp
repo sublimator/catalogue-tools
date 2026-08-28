@@ -1,5 +1,9 @@
 #include "catl/v2/catl-v2-pthash-index.h"
 
+#include "catl/crypto/sha512-half-hasher.h"
+#include "catl/shamap/shamap-hashprefix.h"
+#include "catl/shamap/shamap-utils.h"
+#include "catl/v2/catl-v2-memtree.h"
 #include "catl/v2/catl-v2-node-index-records.h"
 
 #include <algorithm>
@@ -179,9 +183,101 @@ child_hash_at(CatlV2Reader const& reader, std::uint64_t offset, ChildType type)
     if (hash_offset > reader.header().ledger_index_offset ||
         NodeHash{}.size() > reader.header().ledger_index_offset - hash_offset)
         throw std::runtime_error("CATL2 child hash extends past node region");
-    NodeHash hash{};
-    std::memcpy(hash.data(), reader.data_at(hash_offset), hash.size());
-    return hash;
+    auto const* node = reader.data_at(offset);
+    Slice hash_view;
+    if (type == ChildType::INNER)
+        hash_view = MemTreeOps::get_inner_node(node).get_hash();
+    else
+        hash_view =
+            MemTreeOps::get_leaf_view(MemPtr<LeafHeader>(node)).get_hash();
+    NodeHash result{};
+    std::memcpy(result.data(), hash_view.data(), result.size());
+    return result;
+}
+
+std::array<std::uint8_t, 32>
+representative_leaf_key(CatlV2Reader const& reader, std::uint64_t offset)
+{
+    for (;;)
+    {
+        auto const boundary = reader.header().ledger_index_offset;
+        if (offset > boundary || sizeof(InnerNodeHeader) > boundary - offset)
+            throw std::runtime_error("CATL2 inner extends past node region");
+        auto const node = MemTreeOps::get_inner_node(reader.data_at(offset));
+        std::size_t sparse = 0;
+        bool descended = false;
+        for (int branch = 0; branch != 16; ++branch)
+        {
+            auto const type = node.get_child_type(branch);
+            if (type == ChildType::EMPTY)
+                continue;
+            auto const child = child_offset_at(reader, offset, sparse);
+            auto const child_header_size = type == ChildType::INNER
+                ? sizeof(InnerNodeHeader)
+                : sizeof(LeafHeader);
+            if (child > boundary || child_header_size > boundary - child)
+                throw std::runtime_error(
+                    "CATL2 child extends past node region");
+            auto const* child_ptr = reader.data_at(child);
+            if (node.get_child_ptr(branch) != child_ptr)
+                throw std::runtime_error("CATL2 child pointer disagrees");
+            if (type == ChildType::LEAF)
+            {
+                return MemTreeOps::get_leaf_view(MemPtr<LeafHeader>(child_ptr))
+                    .header_ptr->key;
+            }
+            if (type != ChildType::INNER)
+                throw std::runtime_error(
+                    "Cannot project a placeholder CATL2 child");
+            offset = child;
+            descended = true;
+            break;
+        }
+        if (!descended)
+            throw std::runtime_error(
+                "Cannot project a CATL2 inner without a leaf");
+    }
+}
+
+NodeHash
+effective_child_hash(
+    CatlV2Reader const& reader,
+    std::uint8_t parent_depth,
+    std::uint64_t child_offset,
+    ChildType type)
+{
+    auto result = child_hash_at(reader, child_offset, type);
+    if (type == ChildType::LEAF)
+        return result;
+    if (type != ChildType::INNER)
+        throw std::runtime_error("Unsupported projected CATL2 child type");
+
+    auto const child = load_at<InnerNodeHeader>(reader, child_offset);
+    auto const child_depth = child.get_depth();
+    if (child_depth <= parent_depth)
+        throw std::runtime_error("CATL2 child depth does not advance");
+    if (child_depth == parent_depth + 1)
+        return result;
+
+    auto const key_bytes = representative_leaf_key(reader, child_offset);
+    Key const key(key_bytes.data());
+    NodeHash const zero{};
+    for (int depth = static_cast<int>(child_depth) - 1; depth > parent_depth;
+         --depth)
+    {
+        catl::crypto::Sha512HalfHasher hasher;
+        auto const prefix = catl::shamap::HashPrefix::inner_node;
+        hasher.update(prefix.data(), prefix.size());
+        auto const selected = catl::shamap::select_branch(key, depth);
+        for (int branch = 0; branch != 16; ++branch)
+        {
+            auto const& branch_hash = branch == selected ? result : zero;
+            hasher.update(branch_hash.data(), branch_hash.size());
+        }
+        auto const projected = hasher.finalize();
+        std::memcpy(result.data(), projected.data(), result.size());
+    }
+    return result;
 }
 
 bool
@@ -228,8 +324,8 @@ equivalent_node_body(
             child_offset_at(reader, canonical.offset, sparse);
         auto const rhs_child =
             child_offset_at(reader, duplicate.offset, sparse);
-        if (child_hash_at(reader, lhs_child, type) !=
-            child_hash_at(reader, rhs_child, type))
+        if (effective_child_hash(reader, lhs.get_depth(), lhs_child, type) !=
+            effective_child_hash(reader, rhs.get_depth(), rhs_child, type))
             return false;
         ++sparse;
     }
