@@ -189,13 +189,17 @@ public:
             serialize_tree(state_root);
             trees_header.state_tree_size = current_offset() - state_start;
 
-            // A zero transaction hash is the canonical empty tree. It is a
-            // value implied by the ledger header, not a physical CAS node.
-            // The CATL2 index already reserves offset zero for this case.
+            // A zero transaction hash names the canonical empty tree. Keep
+            // one physical empty inner per pack so root/diff/index consumers
+            // can use the same node-shaped path as every other tree, without
+            // turning the streaming writer into a general deduplication
+            // cache. The first use emits 40 bytes; later uses contribute no
+            // new bytes and reuse the exact root offset.
             if (tx_hash == Hash256::zero())
             {
-                index_entry.tx_tree_offset = 0;
-                trees_header.tx_tree_size = 0;
+                auto const tx_start = current_offset();
+                index_entry.tx_tree_offset = write_canonical_empty_tree();
+                trees_header.tx_tree_size = current_offset() - tx_start;
             }
             else
             {
@@ -308,6 +312,46 @@ private:
     std::uint64_t last_ledger_seq_ = 0;
     CatlV2Header header_;  // Store header to preserve network_id
     PhysicalNodeObserver node_observer_;
+    abs_off_t canonical_empty_tree_offset_ = 0;
+
+    /**
+     * Return the one canonical physical empty-root node for this pack.
+     *
+     * This deliberately caches one distinguished representation. It is not
+     * arbitrary body deduplication: all ordinary nodes continue to stream,
+     * and the sealed node index remains responsible for collapsing repeated
+     * CAS identities.
+     */
+    abs_off_t
+    write_canonical_empty_tree()
+    {
+        if (canonical_empty_tree_offset_ != 0)
+            return canonical_empty_tree_offset_;
+
+        canonical_empty_tree_offset_ = current_offset();
+
+        InnerNodeHeader header{};
+        header.child_types = 0;
+        header.set_depth(0);
+        header.set_rfu(0);
+        header.overlay_mask = 0;
+        header.hash.fill(0);
+
+        output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        stats_.total_bytes_written += sizeof(header);
+        stats_.inner_bytes_written += sizeof(header);
+        stats_.inner_nodes_written++;
+
+        if (node_observer_)
+        {
+            node_observer_(PhysicalNodeObservation{
+                header.hash,
+                canonical_empty_tree_offset_,
+                PhysicalNodeKind::inner});
+        }
+
+        return canonical_empty_tree_offset_;
+    }
 
     /**
      * Write file header (placeholder - updated at end)
