@@ -287,9 +287,11 @@ SHAMapT<Traits>::visit_items(
                     current_node);
             if (inner)
             {
-                // Push children onto the stack to visit them next.
-                // Pushing 0..15 results in processing 15..0 (right-to-left DFS)
-                for (int i = 0; i < 16; ++i)
+                // The stack is LIFO. Push branches in reverse so visitation
+                // is canonical key order (branch 0 through branch 15).
+                // CATL1 is a stream format: downstream consumers must not
+                // need to materialize and sort a complete map before use.
+                for (int i = 15; i >= 0; --i)
                 {
                     boost::intrusive_ptr<const SHAMapTreeNodeT<Traits>> child =
                         inner->get_child(i);

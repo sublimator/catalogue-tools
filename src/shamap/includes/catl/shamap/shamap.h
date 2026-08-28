@@ -246,6 +246,7 @@ public:
     std::vector<uint8_t>
     trie_binary() const;
 
+    /// Visit every leaf in strict canonical key order.
     void
     visit_items(const std::function<void(const MmapItem&)>& visitor) const;
 

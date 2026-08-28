@@ -94,7 +94,7 @@ public:
     write_ledger_header(const LedgerInfo& header);
 
     /**
-     * Write a complete SHAMap to the file
+     * Write a complete SHAMap to the file in strict key order
      *
      * @param map SHAMap to write
      * @param node_type Type of nodes in the map (e.g., tnACCOUNT_STATE)
@@ -108,7 +108,8 @@ public:
      * Write the delta between two SHAMaps
      *
      * Computes and writes only the differences between previous and current
-     * maps, including item removals and additions/modifications.
+     * maps, including item removals and additions/modifications. All operation
+     * kinds share one strict key order in the resulting map section.
      *
      * @param previous Previous state of the map
      * @param current Current state of the map

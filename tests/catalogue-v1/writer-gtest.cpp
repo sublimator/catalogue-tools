@@ -4,6 +4,8 @@
 #include "catl/v1/catl-v1-mmap-reader.h"
 #include "catl/v1/catl-v1-utils.h"  // For get_compression_level
 #include "catl/v1/catl-v1-writer.h"
+#include <algorithm>
+#include <array>
 #include <boost/filesystem.hpp>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -608,4 +610,121 @@ TEST_F(WriterTest, MapDeltaWriteTest)
     const auto& readHeader = reader.header();
     EXPECT_EQ(readHeader.min_ledger, min_ledger);
     EXPECT_EQ(readHeader.max_ledger, max_ledger);
+}
+
+TEST_F(WriterTest, FullMapsAndDeltasUseStrictKeyOrder)
+{
+    auto const test_file = test_dir_ / "ordered.catl";
+    auto writer = Writer::for_file(test_file.string());
+    writer->write_header(4000, 4001);
+
+    auto state_map_1 = std::make_shared<SHAMap>(tnACCOUNT_STATE);
+    std::array<std::array<std::uint8_t, 32>, 5> base_keys{};
+    std::array<std::vector<std::uint8_t>, 5> base_data;
+    constexpr std::array<std::uint8_t, 5> first_bytes{
+        0x10, 0x30, 0x50, 0x70, 0x90};
+    for (std::size_t i = 0; i < base_keys.size(); ++i)
+    {
+        base_keys[i][0] = first_bytes[i];
+        base_data[i].assign(64, first_bytes[i]);
+        auto item = boost::intrusive_ptr(new MmapItem(
+            base_keys[i].data(), base_data[i].data(), base_data[i].size()));
+        ASSERT_NE(state_map_1->set_item(item), SetResult::FAILED);
+    }
+    SHAMap empty_tx(tnTRANSACTION_MD);
+
+    LedgerInfo header_1{};
+    header_1.sequence = 4000;
+    writer->write_ledger(header_1, *state_map_1, empty_tx);
+
+    auto state_map_2 = std::make_shared<SHAMap>(tnACCOUNT_STATE);
+    std::vector<std::uint8_t> modified_data(64, 0xCC);
+    for (std::size_t i = 0; i + 1 < base_keys.size(); ++i)
+    {
+        auto const& data = i == 2 ? modified_data : base_data[i];
+        auto item = boost::intrusive_ptr(
+            new MmapItem(base_keys[i].data(), data.data(), data.size()));
+        ASSERT_NE(state_map_2->set_item(item), SetResult::FAILED);
+    }
+
+    // This addition sorts between the existing keys 0x30 and 0x50.  The old
+    // delete/modify/add grouping emitted 0x90, 0x50, 0x40 and therefore failed
+    // the streaming CATL1 contract even though each individual set was
+    // ordered.
+    std::uint8_t added_key_bytes[32] = {0x40};
+    std::vector<std::uint8_t> added_data(64, 0xAA);
+    auto added_item = boost::intrusive_ptr(
+        new MmapItem(added_key_bytes, added_data.data(), added_data.size()));
+    EXPECT_NE(state_map_2->set_item(added_item), SetResult::FAILED);
+
+    LedgerInfo header_2{};
+    header_2.sequence = 4001;
+    writer->write_ledger_header(header_2);
+    writer->write_map_delta(*state_map_1, *state_map_2, tnACCOUNT_STATE);
+    writer->write_map(empty_tx, tnTRANSACTION_MD);
+    writer->finalize();
+    writer.reset();
+
+    struct Record
+    {
+        std::array<std::uint8_t, 32> key;
+        bool removed;
+        std::vector<std::uint8_t> data;
+    };
+    auto read_records = [](MmapReader& reader) {
+        std::vector<Record> records;
+        auto capture = [&](Slice const& key, Slice const& data) {
+            std::array<std::uint8_t, 32> copy{};
+            std::memcpy(copy.data(), key.data(), copy.size());
+            records.push_back(
+                {copy,
+                 false,
+                 std::vector<std::uint8_t>(
+                     data.data(), data.data() + data.size())});
+        };
+        auto capture_delete = [&](Slice const& key) {
+            std::array<std::uint8_t, 32> copy{};
+            std::memcpy(copy.data(), key.data(), copy.size());
+            records.push_back({copy, true, {}});
+        };
+        reader.read_map_with_callbacks(
+            tnACCOUNT_STATE, capture, capture_delete);
+        return records;
+    };
+    auto strictly_ordered = [](auto const& records) {
+        return std::adjacent_find(
+                   records.begin(),
+                   records.end(),
+                   [](auto const& left, auto const& right) {
+                       return !(left.key < right.key);
+                   }) == records.end();
+    };
+
+    MmapReader reader(test_file.string());
+    (void)reader.read_ledger_info();
+    auto const full_records = read_records(reader);
+    ASSERT_EQ(full_records.size(), first_bytes.size());
+    EXPECT_TRUE(strictly_ordered(full_records));
+    for (std::size_t i = 0; i < full_records.size(); ++i)
+    {
+        EXPECT_EQ(full_records[i].key[0], first_bytes[i]);
+        EXPECT_FALSE(full_records[i].removed);
+        EXPECT_EQ(full_records[i].data, base_data[i]);
+    }
+    (void)reader.read_map_with_callbacks(
+        tnTRANSACTION_MD, [](Slice const&, Slice const&) {});
+
+    (void)reader.read_ledger_info();
+    auto const delta_records = read_records(reader);
+    ASSERT_EQ(delta_records.size(), 3);
+    EXPECT_TRUE(strictly_ordered(delta_records));
+    EXPECT_EQ(delta_records[0].key[0], 0x40);
+    EXPECT_FALSE(delta_records[0].removed);
+    EXPECT_EQ(delta_records[0].data, added_data);
+    EXPECT_EQ(delta_records[1].key[0], 0x50);
+    EXPECT_FALSE(delta_records[1].removed);
+    EXPECT_EQ(delta_records[1].data, modified_data);
+    EXPECT_EQ(delta_records[2].key[0], 0x90);
+    EXPECT_TRUE(delta_records[2].removed);
+    EXPECT_TRUE(delta_records[2].data.empty());
 }

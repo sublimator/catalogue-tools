@@ -1,7 +1,7 @@
 #include "catl/v1/catl-v1-writer.h"
 #include "catl/core/log-macros.h"
 #include "catl/crypto/sha512-half-hasher.h"
-#include "catl/shamap/shamap-diff.h"
+#include "catl/shamap/shamap-ordered-diff.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-utils.h"
 #include <algorithm>
@@ -247,98 +247,33 @@ Writer::write_map_delta(
         throw CatlV1Error("Cannot write map delta after finalization");
     }
 
-    // Create shared_ptr wrappers for the maps to use with SHAMapDiff
-    auto prev_ptr = std::make_shared<shamap::SHAMap>(previous);
-    auto curr_ptr = std::make_shared<shamap::SHAMap>(current);
-
-    // Create a diff object and find differences
-    shamap::SHAMapDiff diff(prev_ptr, curr_ptr);
-    diff.find();
-
-    // Count of changes written
-    uint32_t changes = 0;
-
-    // Process removals
-    for (const auto& key : diff.deleted())
-    {
-        try
-        {
-            write_item(shamap::tnREMOVE, key, nullptr, 0);
-            changes++;
-        }
-        catch (const CatlV1Error& e)
-        {
-            LOGE(
-                "Failed to write removal for key: ", key.hex(), ": ", e.what());
-            throw;  // Re-throw to abort the whole operation
-        }
-    }
-
-    // Process modifications
-    for (const auto& key : diff.modified())
-    {
-        // Get the item from the current map
-        auto item_ptr = current.get_item(key);
-        if (item_ptr)
-        {
-            try
+    // CATL1 delta sections are one strict key-ordered operation stream. Walk
+    // only unequal Merkle subtrees and emit their changes directly: no copied
+    // SHAMaps and no materialized change-key sets.
+    auto const stats = shamap::visit_differences_ordered(
+        previous,
+        current,
+        [&](Key const& key,
+            shamap::OrderedDiffOp operation,
+            MmapItem const*,
+            MmapItem const* new_item) {
+            if (operation == shamap::OrderedDiffOp::deleted)
             {
-                write_item(
-                    node_type,
-                    item_ptr->key(),
-                    item_ptr->slice().data(),
-                    item_ptr->slice().size());
-                changes++;
+                write_item(shamap::tnREMOVE, key, nullptr, 0);
             }
-            catch (const CatlV1Error& e)
+            else
             {
-                LOGE(
-                    "Failed to write modified item for key: ",
-                    key.hex(),
-                    ": ",
-                    e.what());
-                throw;  // Re-throw to abort the whole operation
+                if (!new_item)
+                    throw CatlV1Error(
+                        "CATL1 ordered diff omitted current item: " +
+                        key.hex());
+                auto const data = new_item->slice();
+                write_item(node_type, key, data.data(), data.size());
             }
-        }
-        else
-        {
-            throw CatlV1Error(
-                "Modified item not found in current map: " + key.hex());
-        }
-    }
-
-    // Process additions
-    for (const auto& key : diff.added())
-    {
-        // Get the item from the current map
-        auto item_ptr = current.get_item(key);
-        if (item_ptr)
-        {
-            try
-            {
-                write_item(
-                    node_type,
-                    item_ptr->key(),
-                    item_ptr->slice().data(),
-                    item_ptr->slice().size());
-                changes++;
-            }
-            catch (const CatlV1Error& e)
-            {
-                LOGE(
-                    "Failed to write added item for key: ",
-                    key.hex(),
-                    ": ",
-                    e.what());
-                throw;  // Re-throw to abort the whole operation
-            }
-        }
-        else
-        {
-            throw CatlV1Error(
-                "Added item not found in current map: " + key.hex());
-        }
-    }
+            return true;
+        });
+    if (!stats.complete)
+        throw CatlV1Error("CATL1 ordered diff stopped before completion");
 
     // Write terminal marker
     write_terminal();
@@ -349,7 +284,7 @@ Writer::write_map_delta(
         throw CatlV1Error("Stream error after writing map delta");
     }
 
-    LOGI("Wrote map delta with ", changes, " changes");
+    LOGI("Wrote map delta with ", stats.total(), " changes");
 }
 
 void
