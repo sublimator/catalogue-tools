@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <boost/filesystem.hpp>
@@ -52,6 +53,79 @@ using namespace catl;
 using namespace catl::v2;
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
+
+namespace {
+
+#pragma pack(push, 1)
+struct NodeRecordFileHeader
+{
+    std::array<char, 8> magic = {'C', '2', 'N', 'R', 'E', 'C', '\0', '\0'};
+    std::uint32_t version = 1;
+    std::uint32_t record_size = 48;
+    std::uint64_t record_count = 0;
+};
+
+struct NodeRecord
+{
+    std::array<std::uint8_t, 32> hash;
+    std::uint64_t offset;
+    std::uint8_t kind;
+    std::array<std::uint8_t, 7> reserved{};
+};
+#pragma pack(pop)
+
+static_assert(sizeof(NodeRecordFileHeader) == 24);
+static_assert(sizeof(NodeRecord) == 48);
+
+class NodeRecordWriter
+{
+public:
+    explicit NodeRecordWriter(std::string const& filename)
+        : output_(filename, std::ios::binary | std::ios::out | std::ios::trunc)
+    {
+        if (!output_)
+            throw std::runtime_error(
+                "Failed to open node-record file: " + filename);
+        write_or_throw(&header_, sizeof(header_));
+    }
+
+    void
+    observe(CatlV2Writer::PhysicalNodeObservation const& observation)
+    {
+        NodeRecord record{
+            .hash = observation.hash,
+            .offset = observation.offset,
+            .kind = static_cast<std::uint8_t>(observation.kind)};
+        write_or_throw(&record, sizeof(record));
+        ++header_.record_count;
+    }
+
+    void
+    finalize()
+    {
+        auto const end = output_.tellp();
+        output_.seekp(0);
+        write_or_throw(&header_, sizeof(header_));
+        output_.seekp(end);
+        output_.flush();
+        if (!output_)
+            throw std::runtime_error("Failed to finalize node-record file");
+    }
+
+private:
+    void
+    write_or_throw(void const* data, std::size_t size)
+    {
+        output_.write(static_cast<char const*>(data), size);
+        if (!output_)
+            throw std::runtime_error("Failed to write node-record file");
+    }
+
+    std::ofstream output_;
+    NodeRecordFileHeader header_;
+};
+
+}  // namespace
 
 //----------------------------------------------------------
 // Main Processing Logic
@@ -367,7 +441,8 @@ process_all_ledgers(
     const std::string& input_file,
     const std::string& output_file,
     uint32_t max_ledgers,
-    bool verify)
+    bool verify,
+    std::string const& node_records_file)
 {
     v1::Reader reader(input_file);
     auto header = reader.header();
@@ -383,8 +458,21 @@ process_all_ledgers(
     serialization::SHAMapS state_map(catl::shamap::tnACCOUNT_STATE);
     state_map.snapshot();  // Enable CoW
 
-    // Create a writer for actual binary output
-    CatlV2Writer writer(output_file, header.network_id);
+    std::unique_ptr<NodeRecordWriter> node_records;
+    if (!node_records_file.empty())
+        node_records = std::make_unique<NodeRecordWriter>(node_records_file);
+
+    // Create a writer for actual binary output. The optional observer records
+    // only newly serialized physical nodes, exactly where structural sharing
+    // assigns their permanent CATL2 offsets.
+    CatlV2Writer writer(
+        output_file,
+        header.network_id,
+        node_records
+            ? CatlV2Writer::PhysicalNodeObserver([&](auto const& observation) {
+                  node_records->observe(observation);
+              })
+            : CatlV2Writer::PhysicalNodeObserver{});
 
     // Process subset if requested
     auto max_ledger = (max_ledgers > 0)
@@ -455,6 +543,8 @@ process_all_ledgers(
         LOGE("Failed to finalize file");
         return;
     }
+    if (node_records)
+        node_records->finalize();
 
     // Print final statistics
     auto final_stats = writer.stats();
@@ -541,6 +631,10 @@ main(int argc, char* argv[])
             "max-ledgers,m",
             po::value<uint32_t>()->default_value(0),
             "Maximum number of ledgers to process (0 = all)")(
+            "node-records",
+            po::value<std::string>()->default_value(""),
+            "Write physical CATL2 node hash/type/offset observations for "
+            "index experiments")(
             "verify-and-test",
             po::value<bool>()->default_value(true),
             "Verify the output file with random access tests")(
@@ -787,6 +881,8 @@ main(int argc, char* argv[])
         std::string input_file = vm["input"].as<std::string>();
         std::string output_file = vm["output"].as<std::string>();
         uint32_t max_ledgers = vm["max-ledgers"].as<uint32_t>();
+        std::string const node_records_file =
+            vm["node-records"].as<std::string>();
 
         // Check input file exists
         if (!fs::exists(input_file))
@@ -816,7 +912,8 @@ main(int argc, char* argv[])
         LOGI("Verify: ", verify ? "enabled" : "disabled");
 
         // Process the file
-        process_all_ledgers(input_file, output_file, max_ledgers, verify);
+        process_all_ledgers(
+            input_file, output_file, max_ledgers, verify, node_records_file);
 
         return 0;
     }

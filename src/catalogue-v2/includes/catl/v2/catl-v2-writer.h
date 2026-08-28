@@ -10,10 +10,12 @@
 #include <cassert>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <stack>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 #include <zstd.h>
 
@@ -90,8 +92,24 @@ build_child_types(const boost::intrusive_ptr<SHAMapInnerNodeS>& inner)
 class CatlV2Writer
 {
 public:
-    explicit CatlV2Writer(const std::string& filename, uint32_t network_id = 0)
+    enum class PhysicalNodeKind : std::uint8_t { inner = 1, leaf = 2 };
+
+    struct PhysicalNodeObservation
+    {
+        std::array<std::uint8_t, 32> hash;
+        std::uint64_t offset;
+        PhysicalNodeKind kind;
+    };
+
+    using PhysicalNodeObserver =
+        std::function<void(PhysicalNodeObservation const&)>;
+
+    explicit CatlV2Writer(
+        const std::string& filename,
+        uint32_t network_id = 0,
+        PhysicalNodeObserver node_observer = {})
         : output_(filename, std::ios::binary | std::ios::out | std::ios::trunc)
+        , node_observer_(std::move(node_observer))
     {
         if (!output_)
         {
@@ -121,7 +139,7 @@ public:
      *
      * @param ledger_info The canonical ledger header
      * @param state_map The state tree for this ledger
-     * @param tx_map Transaction tree (always present, may be empty)
+     * @param tx_map Transaction tree (logically present, may be empty)
      * @return true on success
      */
     bool
@@ -155,19 +173,13 @@ public:
             // This populates the cached hash in every node
             state_map.get_hash();  // Trigger recursive hash computation on
                                    // state tree
-            tx_map.get_hash();  // Trigger recursive hash computation on tx tree
+            auto const tx_hash = tx_map.get_hash();  // Trigger recursive hash
+                                                     // computation on tx tree
 
             auto state_root = state_map.get_root();
             if (!state_root)
             {
                 LOGE("Cannot serialize ledger with null state root");
-                return false;
-            }
-
-            auto tx_root = tx_map.get_root();
-            if (!tx_root)
-            {
-                LOGE("Cannot serialize ledger with null tx root");
                 return false;
             }
 
@@ -177,11 +189,29 @@ public:
             serialize_tree(state_root);
             trees_header.state_tree_size = current_offset() - state_start;
 
-            // Write transaction tree (now with hashes computed)
-            index_entry.tx_tree_offset = current_offset();
-            auto tx_start = current_offset();
-            serialize_tree(tx_root);
-            trees_header.tx_tree_size = current_offset() - tx_start;
+            // A zero transaction hash is the canonical empty tree. It is a
+            // value implied by the ledger header, not a physical CAS node.
+            // The CATL2 index already reserves offset zero for this case.
+            if (tx_hash == Hash256::zero())
+            {
+                index_entry.tx_tree_offset = 0;
+                trees_header.tx_tree_size = 0;
+            }
+            else
+            {
+                auto tx_root = tx_map.get_root();
+                if (!tx_root)
+                {
+                    LOGE("Cannot serialize non-empty ledger with null tx root");
+                    return false;
+                }
+
+                // Write transaction tree (now with hashes computed)
+                index_entry.tx_tree_offset = current_offset();
+                auto tx_start = current_offset();
+                serialize_tree(tx_root);
+                trees_header.tx_tree_size = current_offset() - tx_start;
+            }
 
             // Go back and write the actual tree sizes
             write_at(trees_header_offset, &trees_header, sizeof(trees_header));
@@ -277,6 +307,7 @@ private:
     std::uint64_t first_ledger_seq_ = 0;
     std::uint64_t last_ledger_seq_ = 0;
     CatlV2Header header_;  // Store header to preserve network_id
+    PhysicalNodeObserver node_observer_;
 
     /**
      * Write file header (placeholder - updated at end)
@@ -441,6 +472,11 @@ private:
         }
 
         stats_.leaf_nodes_written++;
+        if (node_observer_)
+        {
+            node_observer_(PhysicalNodeObservation{
+                header.hash, offset, PhysicalNodeKind::leaf});
+        }
         return offset;
     }
 
@@ -935,6 +971,19 @@ private:
                             offset_position,
                             rels.data(),
                             rels.size() * sizeof(rel_off_t));
+
+                        if (node_observer_)
+                        {
+                            std::array<std::uint8_t, 32> hash;
+                            auto const node_hash =
+                                entry.inner->valid_hash_or_throw();
+                            std::memcpy(
+                                hash.data(), node_hash.data(), hash.size());
+                            node_observer_(PhysicalNodeObservation{
+                                hash,
+                                entry.inner_offset,
+                                PhysicalNodeKind::inner});
+                        }
 
                         stack.pop();
 

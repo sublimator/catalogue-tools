@@ -322,6 +322,9 @@ public:
     std::optional<Slice>
     lookup_key_in_tx(const Key& key)
     {
+        if (current_trees_header_.tx_tree_size == 0)
+            return std::nullopt;
+
         // The tx tree starts after the state tree
         // current_pos_ is at the start of state tree after read_ledger_info()
         const uint8_t* tree_ptr =
@@ -435,6 +438,9 @@ public:
     size_t
     walk_tx_items(Callback&& callback)
     {
+        if (current_trees_header_.tx_tree_size == 0)
+            return 0;
+
         const uint8_t* tree_ptr =
             data_ + current_pos_ + current_trees_header_.state_tree_size;
         LOGD(
