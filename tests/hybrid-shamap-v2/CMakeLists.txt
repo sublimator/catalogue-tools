@@ -29,4 +29,11 @@ target_link_libraries(
           Boost::filesystem
           zstd::libzstd_static)
 
+if(TARGET catl_catalogue_v2_pthash)
+  target_link_libraries(hybrid_shamap_v2_tests
+                        PRIVATE catl_catalogue_v2_pthash)
+  target_compile_definitions(hybrid_shamap_v2_tests
+                             PRIVATE CATL_HAVE_PTHASH=1)
+endif()
+
 gtest_discover_tests(hybrid_shamap_v2_tests DISCOVERY_TIMEOUT 30)

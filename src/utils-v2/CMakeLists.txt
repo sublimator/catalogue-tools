@@ -37,5 +37,12 @@ target_compile_features(catl1-to-catl2 PRIVATE cxx_std_20)
 # Installation
 install(TARGETS catl1-to-catl2 RUNTIME DESTINATION bin)
 
+if(TARGET catl_catalogue_v2_pthash)
+  add_executable(catl2-node-index src/catl2-node-index.cpp)
+  target_link_libraries(catl2-node-index PRIVATE catl_catalogue_v2_pthash)
+  target_compile_features(catl2-node-index PRIVATE cxx_std_20)
+  install(TARGETS catl2-node-index RUNTIME DESTINATION bin)
+endif()
+
 # Output status message
 message(STATUS "Configured utils-v2: catl1-to-catl2")

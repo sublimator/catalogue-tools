@@ -36,6 +36,7 @@
 #include "catl/core/types.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-utils.h"
+#include "catl/v2/catl-v2-node-index-records.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
 #include "catl/v2/catl-v2-writer.h"
@@ -56,27 +57,6 @@ namespace fs = boost::filesystem;
 
 namespace {
 
-#pragma pack(push, 1)
-struct NodeRecordFileHeader
-{
-    std::array<char, 8> magic = {'C', '2', 'N', 'R', 'E', 'C', '\0', '\0'};
-    std::uint32_t version = 1;
-    std::uint32_t record_size = 48;
-    std::uint64_t record_count = 0;
-};
-
-struct NodeRecord
-{
-    std::array<std::uint8_t, 32> hash;
-    std::uint64_t offset;
-    std::uint8_t kind;
-    std::array<std::uint8_t, 7> reserved{};
-};
-#pragma pack(pop)
-
-static_assert(sizeof(NodeRecordFileHeader) == 24);
-static_assert(sizeof(NodeRecord) == 48);
-
 class NodeRecordWriter
 {
 public:
@@ -92,7 +72,7 @@ public:
     void
     observe(CatlV2Writer::PhysicalNodeObservation const& observation)
     {
-        NodeRecord record{
+        NodeIndexRecord record{
             .hash = observation.hash,
             .offset = observation.offset,
             .kind = static_cast<std::uint8_t>(observation.kind)};
@@ -122,7 +102,7 @@ private:
     }
 
     std::ofstream output_;
-    NodeRecordFileHeader header_;
+    NodeIndexRecordFileHeader header_;
 };
 
 }  // namespace

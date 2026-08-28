@@ -40,14 +40,20 @@ namespace catl::v2 {
  *   - The pack(1) + static_assert approach works well in practice
  *   - Enable safe loading (memcpy) if targeting exotic architectures
  *
- * [CatlV2Header]                    // 52 bytes
+ * [CatlV2Header]                    // 72 bytes
  *   - magic: 'CAT2'                 // 4 bytes
- *   - version: 1                    // 4 bytes
+ *   - version: 2                    // 4 bytes
  *   - network_id                    // 4 bytes (0=XRPL, 21337=Xahau)
+ *   - endianness                    // 4 bytes
  *   - ledger_count                  // 8 bytes
  *   - first_ledger_seq              // 8 bytes
  *   - last_ledger_seq               // 8 bytes
  *   - ledger_index_offset           // 8 bytes (points to index at EOF)
+ *   - node_index_offset             // 8 bytes (0 when not sealed)
+ *   - node_index_size               // 8 bytes (0 when not sealed)
+ *   - ledger_data_offset            // 8 bytes
+ *
+ * [Canonical Empty Inner]           // 40 bytes, exactly once per pack
  *
  * [Ledger 0]
  *   [LedgerInfo]                    // 118 bytes (canonical format)
@@ -106,6 +112,13 @@ namespace catl::v2 {
  *   [LedgerIndexEntry 1]
  *   ... (one per ledger)
  *
+ * [Optional Immutable Node Index]
+ *   [NodeIndexEnvelope]
+ *   [native routing-function bytes]
+ *   [dense tagged offset slots]
+ *   [collision-group directory]
+ *   [collision-group tagged offsets]
+ *
  * Key Features:
  * - Structural sharing: unchanged nodes reference existing offsets
  * - Depth-first layout: optimizes cache locality
@@ -125,6 +138,22 @@ using rel_off_t = std::int64_t;   // self-relative, signed 64-bit offsets
 
 static_assert(sizeof(abs_off_t) == 8, "abs_off_t must be 8 bytes");
 static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
+
+inline constexpr std::uint32_t CATL_V2_FORMAT_VERSION = 2;
+inline constexpr std::uint32_t CATL_V2_NODE_INDEX_VERSION = 1;
+
+enum class NodeIndexImplementation : std::uint32_t {
+    none = 0,
+    pthash_phobic_xxhash128 = 1,
+    pthash_single_xxhash128 = 2
+};
+
+inline constexpr std::uint32_t NODE_INDEX_FLAG_DENSE = 1U << 0;
+inline constexpr std::uint32_t NODE_INDEX_FLAG_MINIMAL = 1U << 1;
+inline constexpr std::uint64_t NODE_INDEX_GROUP_TAG = std::uint64_t{1} << 63;
+inline constexpr std::uint64_t NODE_INDEX_LEAF_TAG = std::uint64_t{1} << 62;
+inline constexpr std::uint64_t NODE_INDEX_PAYLOAD_MASK =
+    ~(NODE_INDEX_GROUP_TAG | NODE_INDEX_LEAF_TAG);
 
 /**
  * Child type encoding for inner nodes (2 bits per child)
@@ -251,9 +280,7 @@ static_assert(
 struct CatlV2Header
 {
     std::array<char, 4> magic = {'C', 'A', 'T', '2'};  // CATL v2
-    std::uint32_t version =
-        1;  // Currently experimental - no version handling yet
-            // Will be used for compatibility when out of experimental
+    std::uint32_t version = CATL_V2_FORMAT_VERSION;
     std::uint32_t network_id = 0;  // Network ID (0=XRPL, 21337=Xahau)
     std::uint32_t endianness =
         0x01020304;  // Endianness marker (little=0x04030201, big=0x01020304)
@@ -261,9 +288,59 @@ struct CatlV2Header
     std::uint64_t first_ledger_seq = 0;  // Sequence of first ledger
     std::uint64_t last_ledger_seq = 0;   // Sequence of last ledger
     abs_off_t ledger_index_offset = 0;   // Offset to ledger index
+    abs_off_t node_index_offset = 0;     // Optional NodeIndexEnvelope
+    std::uint64_t node_index_size = 0;   // Envelope and all index sections
+    abs_off_t ledger_data_offset = 0;    // First LedgerInfo after shared roots
 };
 #pragma pack(pop)  // Restore default alignment
-static_assert(sizeof(CatlV2Header) == 48, "CatlV2Header must be 48 bytes");
+static_assert(sizeof(CatlV2Header) == 72, "CatlV2Header must be 72 bytes");
+
+/**
+ * Versioned directory for an optional immutable node-by-hash index.
+ *
+ * Offsets are absolute file offsets. The routing function is not a membership
+ * proof: every selected physical CATL2 node must still match the complete
+ * 256-bit query hash stored in its body.
+ */
+#pragma pack(push, 1)
+struct NodeIndexEnvelope
+{
+    std::array<char, 8> magic = {'C', '2', 'N', 'I', 'D', 'X', '\0', '\0'};
+    std::uint32_t version = CATL_V2_NODE_INDEX_VERSION;
+    std::uint32_t header_size = sizeof(NodeIndexEnvelope);
+    NodeIndexImplementation implementation =
+        NodeIndexImplementation::pthash_phobic_xxhash128;
+    std::uint32_t prefix_bits = 64;
+    std::uint32_t flags = NODE_INDEX_FLAG_DENSE | NODE_INDEX_FLAG_MINIMAL;
+    std::uint32_t construction_threads = 1;
+    std::uint64_t seed = 0;
+    double lambda = 5.0;
+    double alpha = 1.0;
+    std::uint64_t identity_count = 0;
+    std::uint64_t slot_count = 0;
+    std::uint64_t collision_group_count = 0;
+    std::uint64_t collision_entry_count = 0;
+    abs_off_t mphf_offset = 0;
+    std::uint64_t mphf_size = 0;
+    abs_off_t slots_offset = 0;
+    std::uint64_t slots_size = 0;
+    abs_off_t collision_directory_offset = 0;
+    std::uint64_t collision_directory_size = 0;
+    abs_off_t collision_data_offset = 0;
+    std::uint64_t collision_data_size = 0;
+    std::array<char, 40> implementation_revision{};
+    std::array<char, 32> serializer{};
+};
+
+struct NodeIndexCollisionGroupHeader
+{
+    std::uint32_t count = 0;
+    std::uint32_t reserved = 0;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(NodeIndexEnvelope) == 224);
+static_assert(sizeof(NodeIndexCollisionGroupHeader) == 8);
 
 /**
  * Get the host system's endianness marker
@@ -459,7 +536,7 @@ static_assert(
 static_assert(
     std::is_standard_layout_v<CatlV2Header>,
     "CatlV2Header must be standard layout");
-static_assert(sizeof(CatlV2Header) == 48, "CatlV2Header must be 48 bytes");
+static_assert(sizeof(CatlV2Header) == 72, "CatlV2Header must be 72 bytes");
 static_assert(alignof(CatlV2Header) == 1, "CatlV2Header must be packed");
 static_assert(offsetof(CatlV2Header, magic) == 0, "magic at offset 0");
 static_assert(offsetof(CatlV2Header, version) == 4, "version at offset 4");
@@ -481,6 +558,19 @@ static_assert(
 static_assert(
     offsetof(CatlV2Header, ledger_index_offset) == 40,
     "ledger_index_offset at offset 40");
+static_assert(
+    offsetof(CatlV2Header, node_index_offset) == 48,
+    "node_index_offset at offset 48");
+static_assert(
+    offsetof(CatlV2Header, node_index_size) == 56,
+    "node_index_size at offset 56");
+static_assert(
+    offsetof(CatlV2Header, ledger_data_offset) == 64,
+    "ledger_data_offset at offset 64");
+
+static_assert(std::is_trivially_copyable_v<NodeIndexEnvelope>);
+static_assert(std::is_standard_layout_v<NodeIndexEnvelope>);
+static_assert(alignof(NodeIndexEnvelope) == 1);
 
 // InnerNodeHeader layout guarantees
 static_assert(

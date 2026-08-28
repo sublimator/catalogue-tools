@@ -86,8 +86,10 @@ build_child_types(const boost::intrusive_ptr<SHAMapInnerNodeS>& inner)
  *
  * File layout:
  * - CatlV2Header
+ * - One canonical empty-root inner
  * - Ledger data (headers + trees)
- * - Ledger index (at end for easy appending)
+ * - Ledger index
+ * - Optional immutable node-by-hash index (published after sealing)
  */
 class CatlV2Writer
 {
@@ -121,9 +123,16 @@ public:
 
         // Set endianness marker for the current platform
         header_.endianness = get_host_endianness();
+        header_.ledger_data_offset =
+            sizeof(CatlV2Header) + sizeof(InnerNodeHeader);
 
         // Write placeholder header
         write_file_header();
+        auto const empty_offset = write_canonical_empty_tree();
+        if (empty_offset != sizeof(CatlV2Header) ||
+            current_offset() != header_.ledger_data_offset)
+            throw std::runtime_error(
+                "Canonical empty root violated CATL2 prelude layout");
     }
 
     ~CatlV2Writer()
@@ -193,8 +202,8 @@ public:
             // one physical empty inner per pack so root/diff/index consumers
             // can use the same node-shaped path as every other tree, without
             // turning the streaming writer into a general deduplication
-            // cache. The first use emits 40 bytes; later uses contribute no
-            // new bytes and reuse the exact root offset.
+            // cache. The pack prelude already emitted the canonical root, so
+            // every empty tree contributes no ledger-local bytes.
             if (tx_hash == Hash256::zero())
             {
                 auto const tx_start = current_offset();

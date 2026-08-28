@@ -8,12 +8,15 @@
 #include "catl/v2/catl-v2-memtree.h"
 #include "catl/v2/catl-v2-structs.h"
 
+#include <algorithm>
 #include <atomic>
 #include <boost/filesystem.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <errno.h>  // TODO: use cerrno
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -65,8 +68,7 @@ class CatlV2Reader
         // Read and validate header
         read_and_validate_header();
 
-        // Start reading position after header
-        current_pos_ = sizeof(CatlV2Header);
+        current_pos_ = header_.ledger_data_offset;
     }
 
 public:
@@ -169,6 +171,18 @@ public:
     header() const
     {
         return header_;
+    }
+
+    bool
+    has_node_index() const
+    {
+        return node_index_envelope_.has_value();
+    }
+
+    std::optional<NodeIndexEnvelope> const&
+    node_index_envelope() const
+    {
+        return node_index_envelope_;
     }
 
     /**
@@ -501,6 +515,32 @@ private:
     std::uint32_t current_ledger_seq_ = 0;
     TreesHeader current_trees_header_{};
     std::optional<LedgerIndexView> ledger_index_;
+    std::optional<NodeIndexEnvelope> node_index_envelope_;
+
+    bool
+    range_is_mapped(abs_off_t offset, std::uint64_t size) const
+    {
+        return offset <= file_size_ && size <= file_size_ - offset;
+    }
+
+    static std::uint64_t
+    checked_add(std::uint64_t lhs, std::uint64_t rhs, char const* description)
+    {
+        if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs)
+            throw std::runtime_error(description);
+        return lhs + rhs;
+    }
+
+    static std::uint64_t
+    checked_multiply(
+        std::uint64_t lhs,
+        std::uint64_t rhs,
+        char const* description)
+    {
+        if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+            throw std::runtime_error(description);
+        return lhs * rhs;
+    }
 
     /**
      * Read and validate the file header
@@ -522,12 +562,12 @@ private:
             throw std::runtime_error("Invalid file magic");
         }
 
-        // Validate version (experimental - only version 1 supported)
-        if (header_.version != 1)
+        if (header_.version != CATL_V2_FORMAT_VERSION)
         {
             throw std::runtime_error(
                 "Unsupported file version: " + std::to_string(header_.version) +
-                " (experimental code only supports version 1)");
+                " (experimental code only supports version " +
+                std::to_string(CATL_V2_FORMAT_VERSION) + ")");
         }
 
         // Check endianness compatibility
@@ -544,6 +584,151 @@ private:
                 ", but host is " + host_type +
                 ". Cannot mmap files created on different endian systems.");
         }
+
+        auto const expected_ledger_data_offset =
+            sizeof(CatlV2Header) + sizeof(InnerNodeHeader);
+        if (header_.ledger_data_offset != expected_ledger_data_offset ||
+            header_.ledger_data_offset > header_.ledger_index_offset ||
+            !range_is_mapped(sizeof(CatlV2Header), sizeof(InnerNodeHeader)))
+            throw std::runtime_error("Invalid CATL2 ledger-data offset");
+        InnerNodeHeader canonical_empty{};
+        std::memcpy(
+            &canonical_empty,
+            data_ + sizeof(CatlV2Header),
+            sizeof(canonical_empty));
+        if (canonical_empty.child_types != 0 ||
+            canonical_empty.get_depth() != 0 ||
+            canonical_empty.get_rfu() != 0 ||
+            canonical_empty.overlay_mask != 0 ||
+            std::any_of(
+                canonical_empty.hash.begin(),
+                canonical_empty.hash.end(),
+                [](std::uint8_t byte) { return byte != 0; }))
+            throw std::runtime_error("Invalid CATL2 canonical empty root");
+
+        auto const ledger_index_size = checked_multiply(
+            header_.ledger_count,
+            sizeof(LedgerIndexEntry),
+            "Ledger index size overflow");
+        if (!range_is_mapped(header_.ledger_index_offset, ledger_index_size))
+            throw std::runtime_error("Invalid ledger index offset or size");
+
+        if ((header_.node_index_offset == 0) != (header_.node_index_size == 0))
+            throw std::runtime_error("Incomplete node-index section pair");
+        if (header_.node_index_offset == 0)
+            return;
+
+        auto const ledger_index_end = checked_add(
+            header_.ledger_index_offset,
+            ledger_index_size,
+            "Ledger index end overflow");
+        if (header_.node_index_offset != ledger_index_end)
+            throw std::runtime_error(
+                "Node index must immediately follow the ledger index");
+        if (!range_is_mapped(
+                header_.node_index_offset, header_.node_index_size) ||
+            header_.node_index_size < sizeof(NodeIndexEnvelope) ||
+            checked_add(
+                header_.node_index_offset,
+                header_.node_index_size,
+                "Node index end overflow") != file_size_)
+            throw std::runtime_error("Invalid node-index envelope range");
+
+        NodeIndexEnvelope envelope{};
+        std::memcpy(
+            &envelope, data_ + header_.node_index_offset, sizeof(envelope));
+        if (envelope.magic !=
+                std::array<char, 8>{'C', '2', 'N', 'I', 'D', 'X', '\0', '\0'} ||
+            envelope.version != CATL_V2_NODE_INDEX_VERSION ||
+            envelope.header_size != sizeof(NodeIndexEnvelope))
+            throw std::runtime_error("Unsupported node-index envelope");
+        if (envelope.implementation !=
+                NodeIndexImplementation::pthash_phobic_xxhash128 &&
+            envelope.implementation !=
+                NodeIndexImplementation::pthash_single_xxhash128)
+            throw std::runtime_error("Unsupported node-index implementation");
+        if (envelope.prefix_bits == 0 || envelope.prefix_bits > 64)
+            throw std::runtime_error("Invalid node-index prefix width");
+        auto constexpr required_flags =
+            NODE_INDEX_FLAG_DENSE | NODE_INDEX_FLAG_MINIMAL;
+        if (envelope.flags != required_flags ||
+            envelope.construction_threads == 0 ||
+            !std::isfinite(envelope.lambda) || envelope.lambda <= 0 ||
+            !std::isfinite(envelope.alpha) || envelope.alpha <= 0 ||
+            envelope.alpha > 1)
+            throw std::runtime_error(
+                "Invalid node-index construction metadata");
+        auto const expected_slots_size = checked_multiply(
+            envelope.slot_count,
+            sizeof(std::uint64_t),
+            "Node-index slot size overflow");
+        auto const directory_entries = checked_add(
+            envelope.collision_group_count,
+            1,
+            "Node-index collision directory population overflow");
+        auto const expected_directory_size = checked_multiply(
+            directory_entries,
+            sizeof(std::uint64_t),
+            "Node-index collision directory size overflow");
+        auto const direct_slots =
+            envelope.slot_count >= envelope.collision_group_count
+            ? envelope.slot_count - envelope.collision_group_count
+            : 0;
+        auto const expected_identities = checked_add(
+            direct_slots,
+            envelope.collision_entry_count,
+            "Node-index identity population overflow");
+        auto const minimum_collision_entries = checked_multiply(
+            envelope.collision_group_count,
+            2,
+            "Node-index minimum collision population overflow");
+        if (envelope.slot_count == 0 ||
+            envelope.identity_count < envelope.slot_count ||
+            envelope.collision_group_count > envelope.slot_count ||
+            envelope.collision_entry_count < minimum_collision_entries ||
+            expected_identities != envelope.identity_count ||
+            envelope.slots_size != expected_slots_size ||
+            envelope.collision_directory_size != expected_directory_size)
+            throw std::runtime_error("Invalid node-index population sizes");
+
+        auto const index_begin = header_.node_index_offset;
+        auto const index_end = checked_add(
+            index_begin, header_.node_index_size, "Node-index extent overflow");
+        auto const expected_mphf = checked_add(
+            index_begin,
+            sizeof(NodeIndexEnvelope),
+            "Node-index envelope end overflow");
+        auto const expected_slots = checked_add(
+            envelope.mphf_offset,
+            envelope.mphf_size,
+            "Node-index routing extent overflow");
+        auto const expected_directory = checked_add(
+            envelope.slots_offset,
+            envelope.slots_size,
+            "Node-index slots extent overflow");
+        auto const expected_collision_data = checked_add(
+            envelope.collision_directory_offset,
+            envelope.collision_directory_size,
+            "Node-index collision directory extent overflow");
+        auto const expected_index_end = checked_add(
+            envelope.collision_data_offset,
+            envelope.collision_data_size,
+            "Node-index collision-data extent overflow");
+        if (envelope.mphf_offset != expected_mphf || envelope.mphf_size == 0 ||
+            envelope.slots_offset != expected_slots ||
+            envelope.collision_directory_offset != expected_directory ||
+            envelope.collision_data_offset != expected_collision_data ||
+            expected_index_end != index_end ||
+            !range_is_mapped(envelope.mphf_offset, envelope.mphf_size) ||
+            !range_is_mapped(envelope.slots_offset, envelope.slots_size) ||
+            !range_is_mapped(
+                envelope.collision_directory_offset,
+                envelope.collision_directory_size) ||
+            !range_is_mapped(
+                envelope.collision_data_offset, envelope.collision_data_size))
+            throw std::runtime_error("Invalid node-index section layout");
+
+        node_index_envelope_ = envelope;
     }
 
     /**
@@ -552,9 +737,11 @@ private:
     void
     load_ledger_index()
     {
-        if (header_.ledger_index_offset +
-                header_.ledger_count * sizeof(LedgerIndexEntry) >
-            file_size_)
+        auto const index_size = checked_multiply(
+            header_.ledger_count,
+            sizeof(LedgerIndexEntry),
+            "Ledger index size overflow");
+        if (!range_is_mapped(header_.ledger_index_offset, index_size))
         {
             throw std::runtime_error("Invalid ledger index offset or size");
         }
