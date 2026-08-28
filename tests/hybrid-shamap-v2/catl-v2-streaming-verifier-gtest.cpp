@@ -285,6 +285,23 @@ TEST(CatlV2StreamingVerifier, VerifiesBaseAndExactOffsetSuccessor)
         streaming::TreeKind::transaction_with_metadata,
         tx_hash);
     EXPECT_EQ(verified_tx.root_hash(), tx_hash);
+
+    expect_failure(
+        [&] {
+            (void)verifier.verify_full(
+                first->state_tree_offset,
+                streaming::TreeKind::transaction_with_metadata,
+                first_hash);
+        },
+        streaming::VerificationError::cached_leaf_hash_mismatch);
+    expect_failure(
+        [&] {
+            (void)verifier.verify_full(
+                first->state_tree_offset,
+                streaming::TreeKind::account_state,
+                tx_hash);
+        },
+        streaming::VerificationError::expected_root_hash_mismatch);
 }
 
 TEST(CatlV2StreamingVerifier, RejectsCorruptLeafPayload)
