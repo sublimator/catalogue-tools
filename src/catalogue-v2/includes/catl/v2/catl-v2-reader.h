@@ -309,8 +309,6 @@ public:
     current_tx_tree_root()
     {
         auto const& entry = current_ledger_index_entry();
-        if (entry.tx_tree_offset == 0)
-            return nullptr;
         return data_at(entry.tx_tree_offset);
     }
 
@@ -523,6 +521,34 @@ public:
         return true;
     }
 
+    /**
+     * Select one exact physical ledger-index entry by ordinal.
+     *
+     * Unlike seek_to_ledger(), this does not perform a second sequence lookup.
+     * Pack verification uses it so duplicate or disordered index entries
+     * cannot redirect an iteration to a different physical header.
+     */
+    bool
+    seek_to_index(std::size_t ordinal)
+    {
+        auto const* entry = get_ledger_index().at(ordinal);
+        if (!entry)
+            return false;
+        current_pos_ = entry->header_offset;
+        current_ledger_loaded_ = false;
+        return true;
+    }
+
+    /** Return the ledger-local byte counts read with the current header. */
+    TreesHeader const&
+    current_trees_header() const
+    {
+        if (!current_ledger_loaded_)
+            throw std::runtime_error(
+                "No current CATL2 ledger; call read_ledger_info first");
+        return current_trees_header_;
+    }
+
 private:
     const uint8_t* data_ = nullptr;
     size_t file_size_ = 0;
@@ -645,15 +671,20 @@ private:
         if (!range_is_mapped(header_.ledger_index_offset, ledger_index_size))
             throw std::runtime_error("Invalid ledger index offset or size");
 
-        if ((header_.node_index_offset == 0) != (header_.node_index_size == 0))
-            throw std::runtime_error("Incomplete node-index section pair");
-        if (header_.node_index_offset == 0)
-            return;
-
         auto const ledger_index_end = checked_add(
             header_.ledger_index_offset,
             ledger_index_size,
             "Ledger index end overflow");
+
+        if ((header_.node_index_offset == 0) != (header_.node_index_size == 0))
+            throw std::runtime_error("Incomplete node-index section pair");
+        if (header_.node_index_offset == 0)
+        {
+            if (ledger_index_end != file_size_)
+                throw std::runtime_error(
+                    "Unsealed ledger index must end at file extent");
+            return;
+        }
         if (header_.node_index_offset != ledger_index_end)
             throw std::runtime_error(
                 "Node index must immediately follow the ledger index");

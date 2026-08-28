@@ -359,7 +359,7 @@ struct LedgerIndexEntry
     std::uint32_t sequence;       // Ledger sequence number
     abs_off_t header_offset;      // Offset to LedgerInfo
     abs_off_t state_tree_offset;  // Offset to state tree root
-    abs_off_t tx_tree_offset;     // Offset to tx tree root (0 if none)
+    abs_off_t tx_tree_offset;     // Offset to tx root; empty uses pack prelude
 };
 #pragma pack(pop)  // Restore default alignment
 static_assert(

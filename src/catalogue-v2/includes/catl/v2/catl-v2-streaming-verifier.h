@@ -16,6 +16,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -24,6 +25,11 @@ namespace catl::v2::streaming {
 enum class TreeKind { account_state, transaction_with_metadata };
 
 enum class VerificationError {
+    invalid_pack_header,
+    invalid_ledger_index,
+    invalid_ledger_extent,
+    invalid_ledger_chain,
+    invalid_node_region,
     out_of_bounds,
     offset_overflow,
     unsupported_overlay,
@@ -41,6 +47,57 @@ enum class VerificationError {
     expected_root_hash_mismatch,
     foreign_receipt,
 };
+
+[[nodiscard]] inline std::string_view
+to_string(VerificationError error) noexcept
+{
+    switch (error)
+    {
+        case VerificationError::invalid_pack_header:
+            return "invalid_pack_header";
+        case VerificationError::invalid_ledger_index:
+            return "invalid_ledger_index";
+        case VerificationError::invalid_ledger_extent:
+            return "invalid_ledger_extent";
+        case VerificationError::invalid_ledger_chain:
+            return "invalid_ledger_chain";
+        case VerificationError::invalid_node_region:
+            return "invalid_node_region";
+        case VerificationError::out_of_bounds:
+            return "out_of_bounds";
+        case VerificationError::offset_overflow:
+            return "offset_overflow";
+        case VerificationError::unsupported_overlay:
+            return "unsupported_overlay";
+        case VerificationError::unsupported_rfu:
+            return "unsupported_rfu";
+        case VerificationError::unsupported_placeholder:
+            return "unsupported_placeholder";
+        case VerificationError::unsupported_compression:
+            return "unsupported_compression";
+        case VerificationError::unsupported_leaf_flags:
+            return "unsupported_leaf_flags";
+        case VerificationError::invalid_root:
+            return "invalid_root";
+        case VerificationError::invalid_depth:
+            return "invalid_depth";
+        case VerificationError::invalid_child_offset:
+            return "invalid_child_offset";
+        case VerificationError::invalid_branch:
+            return "invalid_branch";
+        case VerificationError::invalid_prefix:
+            return "invalid_prefix";
+        case VerificationError::cached_leaf_hash_mismatch:
+            return "cached_leaf_hash_mismatch";
+        case VerificationError::cached_inner_hash_mismatch:
+            return "cached_inner_hash_mismatch";
+        case VerificationError::expected_root_hash_mismatch:
+            return "expected_root_hash_mismatch";
+        case VerificationError::foreign_receipt:
+            return "foreign_receipt";
+    }
+    return "unknown";
+}
 
 class VerificationFailure : public std::runtime_error
 {
@@ -93,16 +150,24 @@ class VerifiedTree;
 class ImmutableByteSource
 {
 public:
+    struct Region
+    {
+        abs_off_t begin;
+        abs_off_t end;
+    };
+
     ImmutableByteSource(
         std::shared_ptr<void const> owner,
         std::uint8_t const* data,
         std::size_t extent,
-        std::uint64_t generation = 0)
+        std::uint64_t generation = 0,
+        std::vector<Region> regions = {})
         : state_(std::make_shared<State>(
               std::move(owner),
               data,
               extent,
-              generation))
+              generation,
+              std::move(regions)))
     {
         if (extent != 0 && data == nullptr)
             throw std::invalid_argument(
@@ -110,6 +175,15 @@ public:
         if (!state_->owner)
             throw std::invalid_argument(
                 "immutable byte source requires a lifetime owner");
+        abs_off_t previous_end = 0;
+        for (auto const& region : state_->regions)
+        {
+            if (region.begin >= region.end || region.end > extent ||
+                region.begin < previous_end)
+                throw std::invalid_argument(
+                    "immutable byte source has invalid admitted regions");
+            previous_end = region.end;
+        }
     }
 
     static ImmutableByteSource
@@ -141,11 +215,13 @@ private:
             std::shared_ptr<void const> owner_,
             std::uint8_t const* data_,
             std::size_t extent_,
-            std::uint64_t generation_)
+            std::uint64_t generation_,
+            std::vector<Region> regions_)
             : owner(std::move(owner_))
             , data(data_)
             , extent(extent_)
             , generation(generation_)
+            , regions(std::move(regions_))
         {
         }
 
@@ -153,6 +229,7 @@ private:
         std::uint8_t const* data;
         std::size_t extent;
         std::uint64_t generation;
+        std::vector<Region> regions;
     };
 
     std::shared_ptr<State const> state_;
@@ -407,6 +484,28 @@ private:
                 VerificationError::out_of_bounds,
                 offset,
                 "CATL2 record extends beyond immutable byte source");
+        if (!source_.state_->regions.empty())
+        {
+            auto const& regions = source_.state_->regions;
+            auto const it = std::upper_bound(
+                regions.begin(),
+                regions.end(),
+                offset,
+                [](abs_off_t candidate, ImmutableByteSource::Region const& r) {
+                    return candidate < r.begin;
+                });
+            if (it == regions.begin())
+                fail(
+                    VerificationError::invalid_node_region,
+                    offset,
+                    "CATL2 record is outside an admitted node region");
+            auto const& region = *std::prev(it);
+            if (offset < region.begin || end > region.end)
+                fail(
+                    VerificationError::invalid_node_region,
+                    offset,
+                    "CATL2 record crosses an admitted node-region boundary");
+        }
     }
 
     template <class T>
