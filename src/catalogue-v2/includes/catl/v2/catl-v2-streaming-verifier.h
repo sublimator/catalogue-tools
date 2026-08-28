@@ -344,9 +344,11 @@ private:
 /**
  * Checked bounded-state verifier for immutable CATL2 trees.
  *
- * It deliberately does not use the trusted mmap node views or memtree diff:
- * every numeric offset is checked before pointer formation and successor reuse
- * is based only on source identity, physical offset, and key-derived position.
+ * It deliberately does not invoke the trusted mmap node views directly.
+ * Successor verification uses the memtree diff's paired-projection shape over
+ * checked numeric offsets: every offset is checked before pointer formation,
+ * and reuse requires source identity, physical offset, and the same projected
+ * key position in the verified predecessor.
  */
 class Reader
 {
@@ -429,6 +431,13 @@ private:
         std::size_t child_count = 0;
     };
 
+    struct PreviousNode
+    {
+        PhysicalKind kind = PhysicalKind::inner;
+        abs_off_t offset = 0;
+        std::optional<InnerRecord> inner;
+    };
+
     struct Frame
     {
         abs_off_t offset = 0;
@@ -440,6 +449,7 @@ private:
         KeyBytes minimum{};
         KeyBytes maximum{};
         std::optional<std::uint8_t> parent_branch;
+        std::optional<PreviousNode> previous;
     };
 
     ImmutableByteSource source_;
@@ -839,66 +849,102 @@ private:
             extreme_key(offset, false)};
     }
 
-    [[nodiscard]] bool
-    previous_contains(
-        VerifiedTree const& previous,
-        abs_off_t target,
-        PhysicalKind target_kind,
-        KeyBytes const& representative) const
+    [[nodiscard]] PreviousNode
+    previous_child(
+        PreviousNode const& parent,
+        std::uint8_t sparse_index,
+        ChildType type) const
     {
-        auto current = previous.root_offset_;
-        auto record = read_inner(current, true);
-        for (std::uint8_t physical_depth = 0; physical_depth < 64;
-             ++physical_depth)
-        {
-            auto const branch = branch_at(representative, record.depth);
-            std::uint8_t sparse_index = 0;
-            for (std::uint8_t candidate = 0; candidate < branch; ++candidate)
-                if (record.header.get_child_type(candidate) != ChildType::EMPTY)
-                    ++sparse_index;
-            auto const type = record.header.get_child_type(branch);
-            if (type == ChildType::EMPTY)
-                return false;
-            auto const child = child_offset(current, sparse_index);
-            auto const child_kind = type == ChildType::LEAF
-                ? PhysicalKind::leaf
-                : PhysicalKind::inner;
-            if (child == target)
-                return child_kind == target_kind;
-            if (child_kind == PhysicalKind::leaf)
-                return false;
-
-            auto const next = read_inner(child, false);
-            if (next.depth <= record.depth)
-                fail(
-                    VerificationError::invalid_depth,
-                    child,
-                    "verified-source path has invalid inner depth transition");
-            // The old closure's full verification already proved every
-            // skipped-prefix nibble. Candidate placement is independently
-            // checked from both extrema by accept_child().
-            current = child;
-            record = next;
-        }
-        fail(
-            VerificationError::invalid_depth,
-            previous.root_offset_,
-            "verified-source path exceeds 64 physical inner levels");
+        auto const child = child_offset(parent.offset, sparse_index);
+        if (type == ChildType::LEAF)
+            return PreviousNode{PhysicalKind::leaf, child, std::nullopt};
+        return PreviousNode{
+            PhysicalKind::inner, child, read_inner(child, false)};
     }
 
-    [[nodiscard]] std::optional<Summary>
-    try_inherit(
-        VerifiedTree const* previous,
-        abs_off_t offset,
-        PhysicalKind kind,
-        KeyBytes const& representative,
-        VerificationStats& stats) const
+    [[nodiscard]] KeyBytes
+    representative(PreviousNode const& node) const
     {
-        if (!previous ||
-            !previous_contains(*previous, offset, kind, representative))
+        if (node.kind == PhysicalKind::leaf)
+        {
+            auto const leaf = read_pod<LeafHeader>(node.offset);
+            (void)read_logical_leaf_body(node.offset, leaf);
+            return leaf.key;
+        }
+        return extreme_key(node.offset, true);
+    }
+
+    [[nodiscard]] std::optional<PreviousNode>
+    project_previous(
+        std::optional<PreviousNode> candidate,
+        std::uint8_t parent_depth,
+        std::uint8_t branch,
+        std::optional<std::uint8_t> child_depth,
+        KeyBytes const& current_representative) const
+    {
+        if (!candidate)
             return std::nullopt;
-        ++stats.subtrees_inherited;
-        return inherited_summary(offset, kind);
+
+        auto const target_depth = child_depth.value_or(64);
+        auto descend = [&](std::uint8_t selected_branch) {
+            auto const& record = *candidate->inner;
+            std::uint8_t sparse_index = 0;
+            for (std::uint8_t index = 0; index < selected_branch; ++index)
+                if (record.header.get_child_type(index) != ChildType::EMPTY)
+                    ++sparse_index;
+            auto const type = record.header.get_child_type(selected_branch);
+            if (type == ChildType::EMPTY)
+            {
+                candidate.reset();
+                return;
+            }
+            candidate = previous_child(*candidate, sparse_index, type);
+        };
+
+        // First align the previously verified tree to the current parent's
+        // logical depth, then project the requested branch. A collapsed prior
+        // node may already be deeper and therefore projects into exactly one
+        // branch at this depth.
+        for (std::uint8_t steps = 0; steps < 64 && candidate; ++steps)
+        {
+            if (candidate->kind == PhysicalKind::leaf)
+                break;
+            auto const depth = candidate->inner->depth;
+            if (depth < parent_depth)
+            {
+                descend(branch_at(current_representative, depth));
+                continue;
+            }
+            if (depth == parent_depth)
+                descend(branch);
+            else if (
+                branch_at(representative(*candidate), parent_depth) != branch)
+                candidate.reset();
+            break;
+        }
+        if (!candidate)
+            return std::nullopt;
+
+        // Advance only as far as the current child's physical depth. This is
+        // the checked-offset equivalent of the memtree diff's projection:
+        // the resulting node is the prior subtree occupying this exact
+        // logical prefix, even when either side collapsed more inner levels.
+        for (std::uint8_t steps = 0; steps < 64 && candidate; ++steps)
+        {
+            if (candidate->kind == PhysicalKind::leaf ||
+                candidate->inner->depth >= target_depth)
+                break;
+            descend(branch_at(current_representative, candidate->inner->depth));
+        }
+        if (!candidate)
+            return std::nullopt;
+
+        auto const prior_key = representative(*candidate);
+        for (std::uint8_t depth = parent_depth; depth < target_depth; ++depth)
+            if (branch_at(prior_key, depth) !=
+                branch_at(current_representative, depth))
+                return std::nullopt;
+        return candidate;
     }
 
     [[nodiscard]] Summary
@@ -913,6 +959,11 @@ private:
         Frame root_frame;
         root_frame.offset = root;
         root_frame.record = read_inner(root, true);
+        if (previous)
+            root_frame.previous = PreviousNode{
+                PhysicalKind::inner,
+                previous->root_offset_,
+                read_inner(previous->root_offset_, true)};
         stack.push_back(std::move(root_frame));
         stats.max_stack_depth = 1;
 
@@ -957,10 +1008,19 @@ private:
             {
                 auto const leaf = read_pod<LeafHeader>(child);
                 (void)read_logical_leaf_body(child, leaf);
-                auto inherited = try_inherit(
-                    previous, child, PhysicalKind::leaf, leaf.key, stats);
-                auto summary = inherited ? std::move(*inherited)
-                                         : verify_leaf(child, kind, stats);
+                auto prior = project_previous(
+                    frame.previous,
+                    frame.record.depth,
+                    *branch,
+                    std::nullopt,
+                    leaf.key);
+                auto const inherited = prior &&
+                    prior->kind == PhysicalKind::leaf && prior->offset == child;
+                auto summary = inherited
+                    ? inherited_summary(child, PhysicalKind::leaf)
+                    : verify_leaf(child, kind, stats);
+                if (inherited)
+                    ++stats.subtrees_inherited;
                 accept_child(
                     frame, *branch, std::move(summary), std::nullopt, stats);
                 continue;
@@ -972,25 +1032,24 @@ private:
                     VerificationError::invalid_depth,
                     child,
                     "inner child depth is not greater than parent depth");
-            if (previous)
+            auto const representative_key = extreme_key(child, true);
+            auto prior = project_previous(
+                frame.previous,
+                frame.record.depth,
+                *branch,
+                inner.depth,
+                representative_key);
+            if (prior && prior->kind == PhysicalKind::inner &&
+                prior->offset == child)
             {
-                auto const representative = extreme_key(child, true);
-                auto inherited = try_inherit(
-                    previous,
-                    child,
-                    PhysicalKind::inner,
-                    representative,
+                ++stats.subtrees_inherited;
+                accept_child(
+                    frame,
+                    *branch,
+                    inherited_summary(child, PhysicalKind::inner),
+                    inner.depth,
                     stats);
-                if (inherited)
-                {
-                    accept_child(
-                        frame,
-                        *branch,
-                        std::move(*inherited),
-                        inner.depth,
-                        stats);
-                    continue;
-                }
+                continue;
             }
 
             if (stack.size() >= 64)
@@ -998,8 +1057,12 @@ private:
                     VerificationError::invalid_depth,
                     child,
                     "physical inner stack exceeds 64 levels");
-            stack.push_back(
-                Frame{child, inner, 0, 0, {}, false, {}, {}, branch});
+            Frame child_frame;
+            child_frame.offset = child;
+            child_frame.record = inner;
+            child_frame.parent_branch = branch;
+            child_frame.previous = std::move(prior);
+            stack.push_back(std::move(child_frame));
             stats.max_stack_depth = std::max(
                 stats.max_stack_depth, static_cast<std::uint8_t>(stack.size()));
         }

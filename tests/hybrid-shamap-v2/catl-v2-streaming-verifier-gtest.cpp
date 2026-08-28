@@ -160,6 +160,37 @@ find_node(
     return {catl::v2::ChildType::EMPTY, 0};
 }
 
+catl::v2::abs_off_t
+find_leaf_offset_slot(
+    std::vector<std::uint8_t> const& bytes,
+    catl::v2::abs_off_t root,
+    Key const& key)
+{
+    auto current = root;
+    for (std::uint8_t physical_depth = 0; physical_depth < 64; ++physical_depth)
+    {
+        auto const inner = pod_at<catl::v2::InnerNodeHeader>(bytes, current);
+        auto const depth = inner.get_depth();
+        auto const byte = key.data()[depth / 2];
+        auto const branch = depth % 2 == 0
+            ? static_cast<std::uint8_t>(byte >> 4)
+            : static_cast<std::uint8_t>(byte & 0x0f);
+        std::uint8_t sparse_index = 0;
+        for (std::uint8_t candidate = 0; candidate < branch; ++candidate)
+            if (inner.get_child_type(candidate) != catl::v2::ChildType::EMPTY)
+                ++sparse_index;
+        auto const type = inner.get_child_type(branch);
+        EXPECT_NE(type, catl::v2::ChildType::EMPTY);
+        auto const slot = current + sizeof(inner) +
+            sparse_index * sizeof(catl::v2::rel_off_t);
+        if (type == catl::v2::ChildType::LEAF)
+            return slot;
+        current = child_offset(bytes, current, branch);
+    }
+    ADD_FAILURE() << "test tree exceeds 64 physical inner levels";
+    return 0;
+}
+
 template <class Callable>
 void
 expect_failure(Callable&& callable, streaming::VerificationError reason)
@@ -465,7 +496,7 @@ TEST(CatlV2StreamingVerifier, VerifiesCollapsedDeletionTransition)
     auto const* second = mmap->get_ledger_index().find_ledger(2);
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
-    auto const bytes = pack_bytes(*mmap);
+    auto bytes = pack_bytes(*mmap);
     auto const old_retained =
         find_node(bytes, first->state_tree_offset, retained->key());
     auto const new_retained =
@@ -484,6 +515,93 @@ TEST(CatlV2StreamingVerifier, VerifiesCollapsedDeletionTransition)
         verified, second->state_tree_offset, second_hash);
     EXPECT_EQ(successor.root_hash(), second_hash);
     EXPECT_EQ(successor.stats().subtrees_inherited, 1u);
+}
+
+TEST(CatlV2StreamingVerifier, VerifiesCollapsedInsertionTransition)
+{
+    TestMmapItems items;
+    auto retained = items.make(
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "CAFE");
+    auto inserted = items.make(
+        "1111171111111111111111111111111111111111111111111111111111111111",
+        "BABE");
+    auto other_branch = items.make(
+        "2111111111111111111111111111111111111111111111111111111111111111",
+        "FACE");
+    auto other_replacement = items.make(
+        "2111111111111111111111111111111111111111111111111111111111111111",
+        "DEAD");
+    GoldMap state(catl::shamap::tnACCOUNT_STATE);
+    GoldMap tx(catl::shamap::tnTRANSACTION_MD);
+    ASSERT_EQ(state.add_item(retained), catl::shamap::SetResult::ADD);
+    ASSERT_EQ(state.add_item(other_branch), catl::shamap::SetResult::ADD);
+    auto const first_hash = state.get_hash();
+
+    TempPack pack;
+    catl::v2::CatlV2Writer writer(pack.path.string());
+    ASSERT_TRUE(writer.write_ledger(fake_ledger(1, first_hash), state, tx));
+    auto snapshot = state.snapshot();
+    ASSERT_TRUE(snapshot);
+    ASSERT_EQ(state.add_item(inserted), catl::shamap::SetResult::ADD);
+    ASSERT_EQ(
+        state.update_item(other_replacement), catl::shamap::SetResult::UPDATE);
+    auto const second_hash = state.get_hash();
+    ASSERT_TRUE(writer.write_ledger(fake_ledger(2, second_hash), state, tx));
+    ASSERT_TRUE(writer.finalize());
+
+    auto mmap = catl::v2::CatlV2Reader::create(pack.path.string());
+    auto const* first = mmap->get_ledger_index().find_ledger(1);
+    auto const* second = mmap->get_ledger_index().find_ledger(2);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    auto bytes = pack_bytes(*mmap);
+    auto const old_retained =
+        find_node(bytes, first->state_tree_offset, retained->key());
+    auto const new_retained =
+        find_node(bytes, second->state_tree_offset, retained->key());
+    EXPECT_EQ(old_retained.first, catl::v2::ChildType::LEAF);
+    EXPECT_EQ(new_retained.first, catl::v2::ChildType::LEAF);
+    ASSERT_NE(old_retained.second, new_retained.second);
+    auto const old_header =
+        pod_at<catl::v2::LeafHeader>(bytes, old_retained.second);
+    auto const new_header =
+        pod_at<catl::v2::LeafHeader>(bytes, new_retained.second);
+    ASSERT_EQ(old_header.hash, new_header.hash);
+    ASSERT_EQ(old_header.data_size(), new_header.data_size());
+    ASSERT_EQ(
+        std::memcmp(
+            bytes.data() + old_retained.second + sizeof(old_header),
+            bytes.data() + new_retained.second + sizeof(new_header),
+            old_header.data_size()),
+        0);
+
+    // Make the otherwise equivalent successor leaf structurally shared with
+    // its verified predecessor. Offsets are not part of the SHAMap hash, so
+    // the successor root remains unchanged while the verifier must project a
+    // prior leaf through the newly expanded collapsed path.
+    auto const slot = find_leaf_offset_slot(
+        bytes, second->state_tree_offset, retained->key());
+    ASSERT_GT(slot, old_retained.second);
+    auto const relative =
+        -static_cast<catl::v2::rel_off_t>(slot - old_retained.second);
+    put_pod(bytes, slot, relative);
+    EXPECT_EQ(
+        find_node(bytes, second->state_tree_offset, retained->key()).second,
+        old_retained.second);
+
+    auto verifier =
+        streaming::Reader(streaming::ImmutableByteSource::copy(bytes));
+    auto verified = verifier.verify_full(
+        first->state_tree_offset,
+        streaming::TreeKind::account_state,
+        first_hash);
+    auto successor = verifier.verify_successor(
+        verified, second->state_tree_offset, second_hash);
+    EXPECT_EQ(successor.root_hash(), second_hash);
+    EXPECT_EQ(successor.stats().subtrees_inherited, 1u);
+    EXPECT_GT(successor.stats().nodes_rehashed, 0u);
+    EXPECT_GT(successor.stats().logical_skipped_inners, 0u);
 }
 
 TEST(CatlV2StreamingVerifier, RejectsCollapsedRangeWithEscapingMaximum)
