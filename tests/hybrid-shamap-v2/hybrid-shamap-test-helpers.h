@@ -67,8 +67,8 @@ public:
     }
 
     const uint8_t*
-    root_ptr() const
+    root_ptr()
     {
-        return reader_->current_data();
+        return reader_->current_state_tree_root();
     }
 };

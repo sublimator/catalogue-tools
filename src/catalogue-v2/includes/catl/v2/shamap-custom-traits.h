@@ -53,6 +53,7 @@ struct SerializedNode
         [[maybe_unused]] SHAMapInnerNodeS* parent)
     {
         // Reset serialization state for the new copy
+        this->node_offset = 0;
         this->processed = false;
         // Could track lineage: store source->node_offset for overlay decisions
         // Parent can be used to establish parent-child relationships in
@@ -67,6 +68,7 @@ struct SerializedNode
         [[maybe_unused]] SHAMapInnerNodeS* parent)
     {
         // Reset serialization state for the new copy
+        this->node_offset = 0;
         this->processed = false;
         // Could track which items are being modified frequently
         // Parent can be used to understand which branch this leaf belongs to

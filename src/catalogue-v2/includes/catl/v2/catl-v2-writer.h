@@ -11,7 +11,9 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stack>
 #include <stdexcept>
 #include <string>
@@ -159,24 +161,21 @@ public:
     {
         try
         {
+            if (!output_.is_open())
+                throw std::runtime_error("CATL2 writer is not open");
+
             // Record ledger entry for index
             LedgerIndexEntry index_entry;
             index_entry.sequence = ledger_info.seq;
             index_entry.header_offset = current_offset();
 
             // Write the canonical ledger header
-            output_.write(
-                reinterpret_cast<const char*>(&ledger_info),
-                sizeof(ledger_info));
-            stats_.total_bytes_written += sizeof(ledger_info);
+            append_bytes(&ledger_info, sizeof(ledger_info));
 
             // Reserve space for TreesHeader (we'll fill it in later)
             TreesHeader trees_header{};
             auto trees_header_offset = current_offset();
-            output_.write(
-                reinterpret_cast<const char*>(&trees_header),
-                sizeof(trees_header));
-            stats_.total_bytes_written += sizeof(trees_header);
+            append_bytes(&trees_header, sizeof(trees_header));
 
             // CRITICAL: Compute hashes for both trees before serialization
             // This populates the cached hash in every node
@@ -192,10 +191,12 @@ public:
                 return false;
             }
 
-            // Write state tree (now with hashes computed)
-            index_entry.state_tree_offset = current_offset();
+            // Write state-tree delta (now with hashes computed). Child-first
+            // serialization means the root is generally the last new node,
+            // and a fully shared tree may append no nodes at all, so only the
+            // returned offset is authoritative.
             auto state_start = current_offset();
-            serialize_tree(state_root);
+            index_entry.state_tree_offset = serialize_tree(state_root);
             trees_header.state_tree_size = current_offset() - state_start;
 
             // A zero transaction hash names the canonical empty tree. Keep
@@ -219,10 +220,9 @@ public:
                     return false;
                 }
 
-                // Write transaction tree (now with hashes computed)
-                index_entry.tx_tree_offset = current_offset();
+                // Write transaction-tree delta (now with hashes computed).
                 auto tx_start = current_offset();
-                serialize_tree(tx_root);
+                index_entry.tx_tree_offset = serialize_tree(tx_root);
                 trees_header.tx_tree_size = current_offset() - tx_start;
             }
 
@@ -240,7 +240,6 @@ public:
             }
             last_ledger_seq_ = ledger_info.seq;
 
-            output_.flush();
             return true;
         }
         catch (const std::exception& e)
@@ -264,15 +263,24 @@ public:
             // Write the ledger index
             for (const auto& entry : ledger_index_)
             {
-                output_.write(
-                    reinterpret_cast<const char*>(&entry), sizeof(entry));
-                stats_.total_bytes_written += sizeof(entry);
+                append_bytes(&entry, sizeof(entry));
             }
 
             // Update and rewrite the file header
             finalize_file_header(index_offset);
 
+            auto const stream_position = output_.tellp();
+            if (stream_position < 0 ||
+                static_cast<std::uint64_t>(stream_position) != append_offset_)
+                throw std::runtime_error(
+                    "CATL2 append cursor disagrees with output stream");
+
             output_.flush();
+            if (!output_)
+                throw std::runtime_error("Failed to flush finalized CATL2");
+            output_.close();
+            if (output_.fail())
+                throw std::runtime_error("Failed to close finalized CATL2");
             return true;
         }
         catch (const std::exception& e)
@@ -286,9 +294,9 @@ public:
      * Get current file position
      */
     std::uint64_t
-    current_offset()
+    current_offset() const
     {
-        return static_cast<std::uint64_t>(output_.tellp());
+        return append_offset_;
     }
 
     /**
@@ -322,6 +330,30 @@ private:
     CatlV2Header header_;  // Store header to preserve network_id
     PhysicalNodeObserver node_observer_;
     abs_off_t canonical_empty_tree_offset_ = 0;
+    abs_off_t append_offset_ = 0;
+
+    /**
+     * Append bytes at the one authoritative logical output cursor.
+     *
+     * Random-access header patches restore the stream to this cursor without
+     * changing it. A cold tellp() check at finalization validates the tracked
+     * position without paying a tellp()/lseek cost for every physical node.
+     */
+    void
+    append_bytes(const void* data, std::size_t size)
+    {
+        if (size > static_cast<std::size_t>(
+                       std::numeric_limits<std::streamsize>::max()) ||
+            size > std::numeric_limits<abs_off_t>::max() - append_offset_)
+            throw std::runtime_error("CATL2 append size overflow");
+        output_.write(
+            reinterpret_cast<const char*>(data),
+            static_cast<std::streamsize>(size));
+        if (!output_)
+            throw std::runtime_error("Failed to append CATL2 output");
+        append_offset_ += size;
+        stats_.total_bytes_written += size;
+    }
 
     /**
      * Return the one canonical physical empty-root node for this pack.
@@ -346,8 +378,7 @@ private:
         header.overlay_mask = 0;
         header.hash.fill(0);
 
-        output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        stats_.total_bytes_written += sizeof(header);
+        append_bytes(&header, sizeof(header));
         stats_.inner_bytes_written += sizeof(header);
         stats_.inner_nodes_written++;
 
@@ -368,8 +399,7 @@ private:
     void
     write_file_header()
     {
-        output_.write(reinterpret_cast<const char*>(&header_), sizeof(header_));
-        stats_.total_bytes_written += sizeof(header_);
+        append_bytes(&header_, sizeof(header_));
     }
 
     /**
@@ -383,11 +413,7 @@ private:
         header_.last_ledger_seq = last_ledger_seq_;
         header_.ledger_index_offset = index_offset;
 
-        // Seek to beginning and rewrite header
-        auto current_pos = output_.tellp();
-        output_.seekp(0);
-        output_.write(reinterpret_cast<const char*>(&header_), sizeof(header_));
-        output_.seekp(current_pos);
+        write_at(0, &header_, sizeof(header_));
     }
 
     /**
@@ -396,10 +422,11 @@ private:
     void
     write_at(std::uint64_t offset, const void* data, size_t size)
     {
-        auto current_pos = output_.tellp();
         output_.seekp(offset);
         output_.write(reinterpret_cast<const char*>(data), size);
-        output_.seekp(current_pos);
+        output_.seekp(append_offset_);
+        if (!output_)
+            throw std::runtime_error("Failed to patch CATL2 output");
     }
 
     /**
@@ -454,8 +481,7 @@ private:
             compress ? CompressionType::ZSTD : CompressionType::NONE);
 
         // Write header
-        output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        stats_.total_bytes_written += sizeof(header);
+        append_bytes(&header, sizeof(header));
         stats_.leaf_bytes_written += sizeof(header);
 
         if (compress)
@@ -481,9 +507,7 @@ private:
                 header.set_compression_type(CompressionType::NONE);
                 // Rewrite header with updated compression type
                 write_at(offset, &header, sizeof(header));
-                output_.write(
-                    reinterpret_cast<const char*>(data.data()), data.size());
-                stats_.total_bytes_written += data.size();
+                append_bytes(data.data(), data.size());
                 stats_.leaf_bytes_written += data.size();
             }
             else if (compressed_size >= data.size())
@@ -492,9 +516,7 @@ private:
                 header.set_compression_type(CompressionType::NONE);
                 // Rewrite header with updated compression type
                 write_at(offset, &header, sizeof(header));
-                output_.write(
-                    reinterpret_cast<const char*>(data.data()), data.size());
-                stats_.total_bytes_written += data.size();
+                append_bytes(data.data(), data.size());
                 stats_.leaf_bytes_written += data.size();
             }
             else
@@ -503,10 +525,7 @@ private:
                 header.set_data_size(compressed_size);
                 // Rewrite header with correct compressed size
                 write_at(offset, &header, sizeof(header));
-                output_.write(
-                    reinterpret_cast<const char*>(compressed_buffer.data()),
-                    compressed_size);
-                stats_.total_bytes_written += compressed_size;
+                append_bytes(compressed_buffer.data(), compressed_size);
                 stats_.leaf_bytes_written += compressed_size;
 
                 // Track compression statistics
@@ -518,9 +537,7 @@ private:
         else
         {
             // Write raw data
-            output_.write(
-                reinterpret_cast<const char*>(data.data()), data.size());
-            stats_.total_bytes_written += data.size();
+            append_bytes(data.data(), data.size());
             stats_.leaf_bytes_written += data.size();
         }
 
@@ -539,12 +556,12 @@ private:
     std::uint64_t
     write_inner_node(
         const boost::intrusive_ptr<SHAMapInnerNodeS>& inner,
-        std::vector<std::uint64_t>& child_offsets_abs)
+        const std::vector<std::uint64_t>& child_offsets_abs)
     {
         auto offset = current_offset();
 
         // Build inner node header with perma-cached hash
-        InnerNodeHeader header;
+        InnerNodeHeader header{};
         header.set_depth(inner->get_depth());
         header.set_rfu(0);
         header.child_types = build_child_types(inner);
@@ -554,24 +571,43 @@ private:
         auto node_hash = inner->valid_hash_or_throw();
         std::memcpy(header.hash.data(), node_hash.data(), 32);
 
-        // Count non-empty children
-        int child_count = header.count_children();
+        auto const child_count =
+            static_cast<std::size_t>(header.count_children());
+        if (child_offsets_abs.size() != child_count)
+            throw std::runtime_error(
+                "Resolved CATL2 child-offset population disagrees with "
+                "child bitmap");
 
-        // Write header (now includes hash)
-        output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        stats_.total_bytes_written += sizeof(header);
-        stats_.inner_bytes_written += sizeof(header);
+        auto const offsets_position = offset + sizeof(InnerNodeHeader);
+        std::vector<rel_off_t> relative_offsets(child_count);
+        for (std::size_t i = 0; i < child_count; ++i)
+        {
+            if (child_offsets_abs[i] == 0)
+                throw std::runtime_error(
+                    "Cannot write CATL2 inner with an unresolved child");
+            relative_offsets[i] = rel_from_abs(
+                child_offsets_abs[i], slot_from_index(offsets_position, i));
+        }
 
-        // Write placeholder rel_off_t zeros for the N child slots
-        child_offsets_abs.resize(child_count);  // we'll fill absolutes later
-        std::vector<rel_off_t> zeros(child_count, 0);
-        size_t offsets_size = child_count * sizeof(rel_off_t);
-        output_.write(
-            reinterpret_cast<const char*>(zeros.data()), offsets_size);
-        stats_.total_bytes_written += offsets_size;
-        stats_.inner_bytes_written += offsets_size;
+        // Append the complete node in one stream write. The parent follows
+        // every newly written child, so no placeholder or seek-back is needed.
+        auto const offsets_size = child_count * sizeof(rel_off_t);
+        std::vector<std::uint8_t> serialized(sizeof(header) + offsets_size);
+        std::memcpy(serialized.data(), &header, sizeof(header));
+        if (offsets_size != 0)
+            std::memcpy(
+                serialized.data() + sizeof(header),
+                relative_offsets.data(),
+                offsets_size);
+        append_bytes(serialized.data(), serialized.size());
+        stats_.inner_bytes_written += serialized.size();
 
         stats_.inner_nodes_written++;
+        if (node_observer_)
+        {
+            node_observer_(PhysicalNodeObservation{
+                header.hash, offset, PhysicalNodeKind::inner});
+        }
         return offset;
     }
 
@@ -615,10 +651,8 @@ private:
      * 1. **Inner Node First Visit**:
      *    - If processed=true: use existing node_offset, skip subtree
      *    - If processed=false:
-     *      - Write header with child_types bitmap
-     *      - Write placeholder offsets (zeros) for N children (N = non-empty)
-     *      - Mark processed=true, save node_offset
-     *      - Push children onto stack for processing
+     *      - Reserve an in-memory vector for N resolved child offsets
+     *      - Push each unprocessed child onto the stack
      *
      * 2. **Child Processing**:
      *    - Process children in order (0-15)
@@ -626,18 +660,17 @@ private:
      *    - CRITICAL: Offsets must be stored in bitmap order!
      *
      * 3. **Inner Node Completion**:
-     *    - After all children processed, seek back to offset array location
-     *    - Overwrite placeholder zeros with actual child offsets
-     *    - Seek back to current write position
+     *    - Convert every resolved absolute child offset to a signed,
+     *      self-relative offset
+     *    - Append the complete header and offsets once
+     *    - Publish node_offset and processed only after the append and
+     *      physical-node observation complete
      *
      * ## File Writing Pattern
      *
-     * The algorithm uses a two-phase approach for inner nodes:
-     * - Phase 1: Write header + placeholder offsets, continue depth-first
-     * - Phase 2: After children written, seek back and update offsets
-     *
-     * This requires file seeking but maintains depth-first layout for optimal
-     * cache locality during reads.
+     * The traversal is depth-first post-order. New descendants precede their
+     * parent, while already processed subtrees are referenced at their stored
+     * offsets without traversal or rewriting.
      *
      * ## Example
      *
@@ -649,26 +682,28 @@ private:
      * ## Invariants
      *
      * - Nodes are written exactly once (first time processed=false)
-     * - Inner node headers written before children (offsets updated later)
+     * - New children are written before their new parent
      * - Child offsets are ordered by their position in the bitmap
-     * - Zero offset means bug (all valid nodes have offset > sizeof(header))
+     * - Zero offset means unresolved and is never serialized
      */
     std::uint64_t
     serialize_tree(const boost::intrusive_ptr<SHAMapTreeNodeS>& root)
     {
         struct StackEntry
         {
+            explicit StackEntry(
+                boost::intrusive_ptr<SHAMapTreeNodeS> node_,
+                std::optional<std::size_t> parent_slot_ = std::nullopt)
+                : node(std::move(node_)), parent_slot(parent_slot_)
+            {
+            }
+
             boost::intrusive_ptr<SHAMapTreeNodeS> node;
-            int parent_depth;
-            bool is_first_visit;
-            // For inner nodes:
             boost::intrusive_ptr<SHAMapInnerNodeS> inner;
             std::vector<std::uint64_t> child_offsets;
-            std::uint64_t inner_offset;
-            int next_child_index;
-            int child_count;  // Total number of non-empty children
-            std::vector<int> child_positions;  // Maps child branch (0-15) to
-                                               // offset array position
+            int next_child_branch = 0;
+            std::size_t next_child_slot = 0;
+            std::optional<std::size_t> parent_slot;
         };
 
         if (!root)
@@ -677,9 +712,27 @@ private:
         }
 
         std::stack<StackEntry> stack;
-        stack.push({root, -1, true, nullptr, {}, 0, 0, 0, {}});
+        stack.emplace(root);
 
         std::uint64_t root_offset = 0;
+
+        auto complete_top = [&](std::uint64_t offset) {
+            auto const parent_slot = stack.top().parent_slot;
+            stack.pop();
+            if (!parent_slot)
+            {
+                if (!stack.empty())
+                    throw std::runtime_error(
+                        "CATL2 traversal lost a parent slot");
+                root_offset = offset;
+                return;
+            }
+            if (stack.empty() ||
+                *parent_slot >= stack.top().child_offsets.size())
+                throw std::runtime_error(
+                    "CATL2 traversal produced an invalid parent slot");
+            stack.top().child_offsets[*parent_slot] = offset;
+        };
 
         LOGD("Starting serialize_tree traversal");
 
@@ -687,396 +740,81 @@ private:
         {
             auto& entry = stack.top();
 
-            if (entry.node->is_leaf())
+            if (entry.node->processed)
             {
-                // Check if already processed
-                if (entry.node->processed)
-                {
-                    // Already written - use existing offset
-                    std::uint64_t leaf_offset = entry.node->node_offset;
-
-                    LOGD(
-                        "Leaf already processed, using existing offset: ",
-                        leaf_offset);
-                    assert(
-                        leaf_offset > sizeof(CatlV2Header) &&
-                        "Invalid leaf offset");
-
-                    if (stack.size() == 1)
-                    {
-                        root_offset = leaf_offset;
-                    }
-
-                    stack.pop();
-
-                    // Update parent's child offset if needed
-                    if (!stack.empty() && stack.top().inner)
-                    {
-                        auto& parent = stack.top();
-                        // Find which child branch we just completed
-                        int branch = -1;
-                        for (int i = 0; i < 16; ++i)
-                        {
-                            if (parent.inner->get_child(i) == entry.node)
-                            {
-                                branch = i;
-                                break;
-                            }
-                        }
-                        assert(
-                            branch >= 0 && branch < 16 &&
-                            "Child not found in parent");
-
-                        int offset_index = parent.child_positions[branch];
-                        assert(
-                            offset_index >= 0 &&
-                            offset_index < parent.child_count &&
-                            "Invalid offset index");
-
-                        parent.child_offsets[offset_index] = leaf_offset;
-                        LOGD(
-                            "Set child offset[",
-                            offset_index,
-                            "] = ",
-                            leaf_offset,
-                            " for branch ",
-                            branch);
-                    }
-                }
-                else
-                {
-                    // Process leaf node
-                    auto leaf =
-                        boost::static_pointer_cast<SHAMapLeafNodeS>(entry.node);
-                    auto item = leaf->get_item();
-                    if (!item)
-                    {
-                        throw std::runtime_error("Leaf node has null item");
-                    }
-
-                    std::uint64_t leaf_offset = write_leaf_node(
-                        leaf,  // Pass the leaf node so we can get its hash
-                        item->key(),
-                        item->slice(),
-                        false);  // Default to no compression
-
-                    LOGD("Wrote new leaf at offset: ", leaf_offset);
-                    assert(
-                        leaf_offset > sizeof(CatlV2Header) &&
-                        "Invalid leaf offset");
-
-                    // Mark as processed and save offset
-                    entry.node->processed = true;
-                    entry.node->node_offset = leaf_offset;
-
-                    if (stack.size() == 1)
-                    {
-                        root_offset = leaf_offset;
-                    }
-
-                    stack.pop();
-
-                    // Update parent's child offset if needed
-                    if (!stack.empty() && stack.top().inner)
-                    {
-                        auto& parent = stack.top();
-                        // Find which child branch we just completed
-                        int branch = -1;
-                        for (int i = 0; i < 16; ++i)
-                        {
-                            if (parent.inner->get_child(i) == entry.node)
-                            {
-                                branch = i;
-                                break;
-                            }
-                        }
-                        assert(
-                            branch >= 0 && branch < 16 &&
-                            "Child not found in parent");
-
-                        int offset_index = parent.child_positions[branch];
-                        assert(
-                            offset_index >= 0 &&
-                            offset_index < parent.child_count &&
-                            "Invalid offset index");
-
-                        parent.child_offsets[offset_index] = leaf_offset;
-                        LOGD(
-                            "Set child offset[",
-                            offset_index,
-                            "] = ",
-                            leaf_offset,
-                            " for branch ",
-                            branch);
-                    }
-                }
-
-                // Continue processing parent's children
+                auto const offset = entry.node->node_offset;
+                if (offset == 0)
+                    throw std::runtime_error(
+                        "Processed CATL2 node has no physical offset");
+                complete_top(offset);
                 continue;
             }
-            else
+
+            if (entry.node->is_leaf())
             {
-                // Process inner node
-                if (entry.is_first_visit)
-                {
-                    // Check if already processed
-                    if (entry.node->processed)
-                    {
-                        // Already written - use existing offset
-                        std::uint64_t inner_offset = entry.node->node_offset;
+                auto leaf =
+                    boost::static_pointer_cast<SHAMapLeafNodeS>(entry.node);
+                auto item = leaf->get_item();
+                if (!item)
+                    throw std::runtime_error("Leaf node has null item");
 
-                        LOGD(
-                            "Inner node already processed, using existing "
-                            "offset: ",
-                            inner_offset);
-                        assert(
-                            inner_offset > sizeof(CatlV2Header) &&
-                            "Invalid inner offset");
-
-                        if (stack.size() == 1)
-                        {
-                            root_offset = inner_offset;
-                        }
-
-                        stack.pop();
-
-                        // Update parent's child offset if needed
-                        if (!stack.empty() && stack.top().inner)
-                        {
-                            auto& parent = stack.top();
-                            // Find which child branch we just completed
-                            int branch = -1;
-                            for (int i = 0; i < 16; ++i)
-                            {
-                                if (parent.inner->get_child(i) == entry.node)
-                                {
-                                    branch = i;
-                                    break;
-                                }
-                            }
-                            assert(
-                                branch >= 0 && branch < 16 &&
-                                "Child not found in parent");
-
-                            int offset_index = parent.child_positions[branch];
-                            assert(
-                                offset_index >= 0 &&
-                                offset_index < parent.child_count &&
-                                "Invalid offset index");
-
-                            parent.child_offsets[offset_index] = inner_offset;
-                            LOGD(
-                                "Set child offset[",
-                                offset_index,
-                                "] = ",
-                                inner_offset,
-                                " for branch ",
-                                branch);
-                        }
-                    }
-                    else
-                    {
-                        // First visit: write header and prepare for children
-                        entry.inner =
-                            boost::static_pointer_cast<SHAMapInnerNodeS>(
-                                entry.node);
-
-                        LOGD(
-                            "Processing new inner node at depth ",
-                            entry.inner->get_depth());
-
-                        // Build child positions mapping
-                        entry.child_positions.resize(16, -1);
-                        entry.child_count = 0;
-                        for (int i = 0; i < 16; ++i)
-                        {
-                            if (entry.inner->get_child(i))
-                            {
-                                entry.child_positions[i] = entry.child_count++;
-                            }
-                        }
-
-                        LOGD(
-                            "Inner node has ",
-                            entry.child_count,
-                            " non-empty children");
-                        // Empty inner nodes are valid (empty tree case)
-                        // Resize child_offsets to match child count
-                        entry.child_offsets.resize(entry.child_count, 0);
-
-                        // Write inner node header with placeholder offsets
-                        entry.inner_offset =
-                            write_inner_node(entry.inner, entry.child_offsets);
-
-                        LOGD(
-                            "Wrote inner node header at offset: ",
-                            entry.inner_offset);
-                        assert(
-                            entry.inner_offset > sizeof(CatlV2Header) &&
-                            "Invalid inner offset");
-
-                        // Mark as processed and save offset
-                        entry.node->processed = true;
-                        entry.node->node_offset = entry.inner_offset;
-
-                        if (stack.size() == 1)
-                        {
-                            root_offset = entry.inner_offset;
-                        }
-
-                        entry.is_first_visit = false;
-                        entry.next_child_index = 0;
-
-                        // Don't push first child here - let the main loop
-                        // handle it
-                    }
-                }
-
-                // After first visit OR returning from a child - process next
-                // child
-                if (!entry.is_first_visit)
-                {
-                    // Look for next child to process
-                    bool found_next = false;
-
-                    for (int i = entry.next_child_index; i < 16; ++i)
-                    {
-                        auto child = entry.inner->get_child(i);
-                        if (child)
-                        {
-                            entry.next_child_index = i + 1;
-                            LOGD("Pushing child at branch ", i);
-
-                            // Check if child is already processed
-                            if (child->processed)
-                            {
-                                LOGD(
-                                    "Child at branch ",
-                                    i,
-                                    " already processed with offset ",
-                                    child->node_offset);
-
-                                // Update offset directly without pushing to
-                                // stack
-                                int offset_index = entry.child_positions[i];
-                                assert(
-                                    offset_index >= 0 &&
-                                    offset_index < entry.child_count &&
-                                    "Invalid offset index");
-                                entry.child_offsets[offset_index] =
-                                    child->node_offset;
-
-                                // Continue loop to find next child
-                                continue;
-                            }
-
-                            // Child needs processing - push to stack
-                            stack.push(
-                                {child,
-                                 entry.inner->get_depth(),
-                                 true,
-                                 nullptr,
-                                 {},
-                                 0,
-                                 0,
-                                 0,
-                                 {}});
-                            found_next = true;
-                            break;
-                        }
-                    }
-
-                    if (!found_next)
-                    {
-                        // All children processed - verify and update offsets
-                        LOGD(
-                            "All children processed for inner node at offset ",
-                            entry.inner_offset);
-
-                        // Verify all child offsets have been filled
-                        for (int i = 0; i < entry.child_count; ++i)
-                        {
-                            assert(
-                                entry.child_offsets[i] != 0 &&
-                                "Child offset not set - this is a bug!");
-                            LOGD(
-                                "  Child offset[",
-                                i,
-                                "] = ",
-                                entry.child_offsets[i]);
-                        }
-
-                        auto offset_position =
-                            entry.inner_offset + sizeof(InnerNodeHeader);
-
-                        // Convert each absolute child offset to a self-relative
-                        // rel_off_t, where the base is the file position of
-                        // that slot.
-                        std::vector<rel_off_t> rels(entry.child_offsets.size());
-                        for (size_t i = 0; i < entry.child_offsets.size(); ++i)
-                        {
-                            std::uint64_t slot =
-                                slot_from_index(offset_position, i);
-                            rels[i] =
-                                rel_from_abs(entry.child_offsets[i], slot);
-                        }
-                        write_at(
-                            offset_position,
-                            rels.data(),
-                            rels.size() * sizeof(rel_off_t));
-
-                        if (node_observer_)
-                        {
-                            std::array<std::uint8_t, 32> hash;
-                            auto const node_hash =
-                                entry.inner->valid_hash_or_throw();
-                            std::memcpy(
-                                hash.data(), node_hash.data(), hash.size());
-                            node_observer_(PhysicalNodeObservation{
-                                hash,
-                                entry.inner_offset,
-                                PhysicalNodeKind::inner});
-                        }
-
-                        stack.pop();
-
-                        // Update parent's child offset if needed
-                        if (!stack.empty() && stack.top().inner)
-                        {
-                            auto& parent = stack.top();
-                            // Find which child branch we just completed
-                            int branch = -1;
-                            for (int i = 0; i < 16; ++i)
-                            {
-                                if (parent.inner->get_child(i) == entry.node)
-                                {
-                                    branch = i;
-                                    break;
-                                }
-                            }
-                            assert(
-                                branch >= 0 && branch < 16 &&
-                                "Child not found in parent");
-
-                            int offset_index = parent.child_positions[branch];
-                            assert(
-                                offset_index >= 0 &&
-                                offset_index < parent.child_count &&
-                                "Invalid offset index");
-
-                            parent.child_offsets[offset_index] =
-                                entry.inner_offset;
-                            LOGD(
-                                "Set parent's child offset[",
-                                offset_index,
-                                "] = ",
-                                entry.inner_offset,
-                                " for branch ",
-                                branch);
-                        }
-                    }
-                }
+                auto const leaf_offset =
+                    write_leaf_node(leaf, item->key(), item->slice(), false);
+                entry.node->node_offset = leaf_offset;
+                entry.node->processed = true;
+                complete_top(leaf_offset);
+                continue;
             }
+
+            if (!entry.inner)
+            {
+                entry.inner =
+                    boost::static_pointer_cast<SHAMapInnerNodeS>(entry.node);
+                std::size_t child_count = 0;
+                for (int branch = 0; branch < 16; ++branch)
+                    if (entry.inner->get_child(branch))
+                        ++child_count;
+                entry.child_offsets.resize(child_count, 0);
+            }
+
+            bool pushed_child = false;
+            while (entry.next_child_branch < 16)
+            {
+                auto const branch = entry.next_child_branch++;
+                auto child = entry.inner->get_child(branch);
+                if (!child)
+                    continue;
+
+                auto const slot = entry.next_child_slot++;
+                if (slot >= entry.child_offsets.size())
+                    throw std::runtime_error(
+                        "CATL2 traversal child population overflow");
+                if (child->processed)
+                {
+                    if (child->node_offset == 0)
+                        throw std::runtime_error(
+                            "Processed CATL2 child has no physical offset");
+                    entry.child_offsets[slot] = child->node_offset;
+                    continue;
+                }
+
+                stack.emplace(std::move(child), slot);
+                pushed_child = true;
+                break;
+            }
+
+            if (pushed_child)
+                continue;
+
+            if (entry.next_child_slot != entry.child_offsets.size())
+                throw std::runtime_error(
+                    "CATL2 traversal child population underflow");
+
+            auto const inner_offset =
+                write_inner_node(entry.inner, entry.child_offsets);
+            entry.node->node_offset = inner_offset;
+            entry.node->processed = true;
+            complete_top(inner_offset);
         }
 
         LOGD("serialize_tree complete, root offset = ", root_offset);

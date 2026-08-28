@@ -84,7 +84,7 @@ test_diff(
 {
     // Create hybrid map from the first ledger's mmap'd data
     auto hmap = create_hybrid_map_from_mmap(
-        reader.current_data(), reader.mmap_holder());
+        reader.current_state_tree_root(), reader.mmap_holder());
 
     // Verify initial hash
     if (first_ledger_info.account_hash != hmap->get_root_hash())
@@ -104,7 +104,7 @@ test_diff(
 
     // Get the first ledger's state view for diffing
     auto first_state_view =
-        catl::v2::MemTreeOps::get_inner_node(reader.current_data());
+        catl::v2::MemTreeOps::get_inner_node(reader.current_state_tree_root());
 
     // Seek to target ledger (first + delta_n)
     uint32_t target_seq = first_ledger_info.seq + delta_n;
@@ -112,7 +112,7 @@ test_diff(
     reader.seek_to_ledger(target_seq);
     auto second_ledger_info = reader.read_ledger_info();
     auto second_state_view =
-        catl::v2::MemTreeOps::get_inner_node(reader.current_data());
+        catl::v2::MemTreeOps::get_inner_node(reader.current_state_tree_root());
 
     LOGI("Applying diff: ledger ", first_ledger_info.seq, " -> ", target_seq);
     if (materialize_only)

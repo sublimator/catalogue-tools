@@ -11,6 +11,7 @@
 #include "catl/shamap/shamap-utils.h"
 #include "catl/v2/catl-v2-structs.h"
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace catl::v2 {
@@ -38,7 +39,26 @@ slot_from_index(abs_off_t base_offset, size_t index)
 inline rel_off_t
 rel_from_abs(abs_off_t target_offset, abs_off_t slot_offset)
 {
-    return static_cast<rel_off_t>(target_offset - slot_offset);
+    auto constexpr positive_limit =
+        static_cast<abs_off_t>(std::numeric_limits<rel_off_t>::max());
+
+    if (target_offset >= slot_offset)
+    {
+        auto const distance = target_offset - slot_offset;
+        if (distance > positive_limit)
+            throw std::overflow_error(
+                "CATL2 forward relative offset is not representable");
+        return static_cast<rel_off_t>(distance);
+    }
+
+    auto const distance = slot_offset - target_offset;
+    auto constexpr negative_limit = positive_limit + abs_off_t{1};
+    if (distance > negative_limit)
+        throw std::overflow_error(
+            "CATL2 backward relative offset is not representable");
+    if (distance == negative_limit)
+        return std::numeric_limits<rel_off_t>::min();
+    return -static_cast<rel_off_t>(distance);
 }
 
 /**

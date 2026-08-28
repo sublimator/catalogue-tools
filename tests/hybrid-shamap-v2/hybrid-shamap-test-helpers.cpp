@@ -59,7 +59,7 @@ HybridMapTestFixture::HybridMapTestFixture(
 
     // Create hybrid map from mmap'd data
     hybrid_map_ = std::make_unique<Hmap>(reader_->mmap_holder());
-    hybrid_map_->set_root_raw(reader_->current_data());
+    hybrid_map_->set_root_raw(reader_->current_state_tree_root());
 }
 
 HybridMapTestFixture::~HybridMapTestFixture()

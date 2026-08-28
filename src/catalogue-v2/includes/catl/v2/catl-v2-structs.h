@@ -72,30 +72,26 @@ namespace catl::v2 {
  *     - state_tree_size             // 8 bytes
  *     - tx_tree_size                // 8 bytes
  *
- *   [State Tree]
+ *   [State Tree Delta]              // newly emitted nodes in child-first DFS
+ *     [Descendant node records]
+ *     [Root node record, if new]    // index always names the actual root
+ *
+ *   Node records have one of these forms:
  *     [InnerNodeHeader]             // 40 bytes
  *       - child_types               // 4 bytes (2 bits × 16 children)
  *       - depth                     // 2 bytes (6 bits used)
  *       - overlay_mask              // 2 bytes
- *       - hash                      // 32 bytes (perma-cached, first 256 bits
- * of SHA512) [Child Offsets]               // rel_off_t (8 bytes) × N non-empty
- * children
- *                                   // Each entry is self-relative to its own
- * slot:
- *                                   // abs_child = slot_file_offset + rel_off
- *     ... (depth-first traversal)
+ *       - hash                      // 32 bytes, perma-cached SHA512-half
+ *     [Child Offsets]               // rel_off_t × N non-empty children
+ *                                   // each entry is self-relative to its slot
  *
  *     [LeafHeader]                  // 68 bytes
  *       - key                       // 32 bytes
- *       - hash                      // 32 bytes (perma-cached, first 256 bits
- * of SHA512)
+ *       - hash                      // 32 bytes, perma-cached SHA512-half
  *       - size_and_flags            // 4 bytes
- *         - bits 0-23: data size
- *         - bits 24-27: compression type
- *         - bits 28-31: reserved
- *     [Leaf Data]                   // Variable length
+ *     [Leaf Data]                   // variable length
  *
- *   [Transaction Tree]              // Same structure as State Tree
+ *   [Transaction Tree Delta]        // Same structure as State Tree
  *     ...
  *
  * [Ledger 1]
@@ -121,7 +117,7 @@ namespace catl::v2 {
  *
  * Key Features:
  * - Structural sharing: unchanged nodes reference existing offsets
- * - Depth-first layout: optimizes cache locality
+ * - Child-first depth-first layout: complete nodes, no inner backpatching
  * - Parallel-friendly: inner node child offsets enable concurrent processing
  * - Compression-ready: leaf headers support multiple compression schemes
  */
@@ -433,8 +429,10 @@ public:
 #pragma pack(push, 1)  // Ensure consistent binary layout
 struct TreesHeader
 {
-    std::uint64_t state_tree_size;  // Size of state tree in bytes
-    std::uint64_t tx_tree_size;     // Size of tx tree in bytes
+    // Ledger-local appended byte counts. These are used for sequential
+    // skipping and do not identify roots; LedgerIndexEntry owns root offsets.
+    std::uint64_t state_tree_size;
+    std::uint64_t tx_tree_size;
 };
 #pragma pack(pop)  // Restore default alignment
 static_assert(sizeof(TreesHeader) == 16, "TreesHeader must be 16 bytes");

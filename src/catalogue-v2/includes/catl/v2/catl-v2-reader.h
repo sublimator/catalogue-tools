@@ -216,6 +216,7 @@ public:
         current_pos_ += sizeof(TreesHeader);
 
         current_ledger_seq_ = info->seq;
+        current_ledger_loaded_ = true;
         return *info;
     }
 
@@ -290,6 +291,30 @@ public:
     }
 
     /**
+     * Return the indexed root of the current ledger's state tree.
+     *
+     * TreesHeader sizes describe ledger-local append deltas, not root
+     * positions. A child-first writer may put the root at the end of that
+     * delta or reuse a root written by an earlier ledger.
+     */
+    const uint8_t*
+    current_state_tree_root()
+    {
+        auto const& entry = current_ledger_index_entry();
+        return data_at(entry.state_tree_offset);
+    }
+
+    /** Return the indexed transaction-tree root for the current ledger. */
+    const uint8_t*
+    current_tx_tree_root()
+    {
+        auto const& entry = current_ledger_index_entry();
+        if (entry.tx_tree_offset == 0)
+            return nullptr;
+        return data_at(entry.tx_tree_offset);
+    }
+
+    /**
      * Get the file size for bounds checking
      */
     size_t
@@ -310,10 +335,7 @@ public:
     std::optional<Slice>
     lookup_key_in_state(const Key& key)
     {
-        // The state tree starts at current_pos_ after read_ledger_info()
-        // read_ledger_info() reads: LedgerInfo + TreesHeader
-        // and positions current_pos_ right at the start of the state tree
-        const uint8_t* tree_ptr = data_ + current_pos_;
+        const uint8_t* tree_ptr = current_state_tree_root();
         LOGD(
             "State tree lookup - tree ptr: ",
             static_cast<const void*>(tree_ptr),
@@ -336,13 +358,10 @@ public:
     std::optional<Slice>
     lookup_key_in_tx(const Key& key)
     {
-        if (current_trees_header_.tx_tree_size == 0)
+        const uint8_t* tree_ptr = current_tx_tree_root();
+        if (!tree_ptr || tree_ptr == data_ + sizeof(CatlV2Header))
             return std::nullopt;
 
-        // The tx tree starts after the state tree
-        // current_pos_ is at the start of state tree after read_ledger_info()
-        const uint8_t* tree_ptr =
-            data_ + current_pos_ + current_trees_header_.state_tree_size;
         LOGD(
             "Tx tree lookup - tree ptr: ",
             static_cast<const void*>(tree_ptr),
@@ -414,7 +433,7 @@ public:
     size_t
     walk_state_items(Callback&& callback, const WalkOptions& options = {})
     {
-        const uint8_t* tree_ptr = data_ + current_pos_;
+        const uint8_t* tree_ptr = current_state_tree_root();
         LOGD(
             "walk_state_items - tree_ptr: ",
             static_cast<const void*>(tree_ptr),
@@ -452,11 +471,9 @@ public:
     size_t
     walk_tx_items(Callback&& callback)
     {
-        if (current_trees_header_.tx_tree_size == 0)
+        const uint8_t* tree_ptr = current_tx_tree_root();
+        if (!tree_ptr || tree_ptr == data_ + sizeof(CatlV2Header))
             return 0;
-
-        const uint8_t* tree_ptr =
-            data_ + current_pos_ + current_trees_header_.state_tree_size;
         LOGD(
             "walk_tx_items - tree_ptr: ",
             static_cast<const void*>(tree_ptr),
@@ -502,6 +519,7 @@ public:
         }
 
         current_pos_ = entry->header_offset;
+        current_ledger_loaded_ = false;
         return true;
     }
 
@@ -513,9 +531,23 @@ private:
 
     CatlV2Header header_;
     std::uint32_t current_ledger_seq_ = 0;
+    bool current_ledger_loaded_ = false;
     TreesHeader current_trees_header_{};
     std::optional<LedgerIndexView> ledger_index_;
     std::optional<NodeIndexEnvelope> node_index_envelope_;
+
+    LedgerIndexEntry const&
+    current_ledger_index_entry()
+    {
+        if (!current_ledger_loaded_)
+            throw std::runtime_error(
+                "No current CATL2 ledger; call read_ledger_info first");
+        auto const* entry = get_ledger_index().find_ledger(current_ledger_seq_);
+        if (!entry)
+            throw std::runtime_error(
+                "Current CATL2 ledger is absent from the ledger index");
+        return *entry;
+    }
 
     bool
     range_is_mapped(abs_off_t offset, std::uint64_t size) const
