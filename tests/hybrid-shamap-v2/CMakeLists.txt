@@ -22,6 +22,7 @@ target_link_libraries(
           catl_shamap_serialized # This brings in the precompiled SHAMapS
           catl_hybrid_shamap_v2
           catl_catalogue_v2
+          catl_catalogue_v2_streaming
           catl::test_utils
           GTest::gtest_main
           OpenSSL::SSL

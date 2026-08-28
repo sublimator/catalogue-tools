@@ -20,6 +20,14 @@ target_link_libraries(
             Boost::iostreams # For mapped_file_source
 )
 
+# Additive bounded-memory CATL1 -> CATL2 path. Keep it separate from the
+# serialized-SHAMap writer so that writer remains the compatibility oracle.
+add_library(catl_catalogue_v2_streaming STATIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/catl-v2-direct-writer.cpp)
+target_link_libraries(catl_catalogue_v2_streaming
+                      PUBLIC catl_catalogue_v2 OpenSSL::SSL)
+target_compile_features(catl_catalogue_v2_streaming PUBLIC cxx_std_20)
+
 # Optional immutable node-by-hash index. This remains an explicit research
 # dependency: ordinary CATL2 readers and writers neither include nor link
 # PTHash. The exact checkout and tracked bytes are checked before its native

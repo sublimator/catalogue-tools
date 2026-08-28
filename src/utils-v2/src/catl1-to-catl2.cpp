@@ -36,6 +36,7 @@
 #include "catl/core/types.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-utils.h"
+#include "catl/v2/catl-v2-direct-writer.h"
 #include "catl/v2/catl-v2-node-index-records.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
@@ -596,6 +597,66 @@ process_all_ledgers(
 }
 
 /**
+ * Convert ordered CATL1 directly into child-first CATL2 without materializing
+ * a complete SHAMap. The existing converter remains the compatibility oracle.
+ */
+void
+process_all_ledgers_streaming(
+    const std::string& input_file,
+    const std::string& output_file,
+    uint32_t max_ledgers,
+    bool verify)
+{
+    v1::Reader reader(input_file);
+    auto const header = reader.header();
+    auto const max_ledger = (max_ledgers > 0)
+        ? std::min(header.min_ledger + max_ledgers - 1, header.max_ledger)
+        : header.max_ledger;
+    auto const source_ledgers =
+        static_cast<std::uint64_t>(header.max_ledger) - header.min_ledger + 1;
+    auto const selected_ledgers =
+        static_cast<std::uint64_t>(max_ledger) - header.min_ledger + 1;
+    constexpr std::uint64_t minimum_reserve = 256ULL << 20;
+    constexpr std::uint64_t maximum_reserve = 64ULL << 30;
+    auto const proportional_source_bytes =
+        static_cast<long double>(header.filesize) * selected_ledgers /
+        source_ledgers;
+    auto const estimated_output_bytes =
+        proportional_source_bytes * 16 + minimum_reserve;
+    auto const reserved_output_bytes = std::clamp<std::uint64_t>(
+        static_cast<std::uint64_t>(
+            std::min<long double>(estimated_output_bytes, maximum_reserve)),
+        minimum_reserve,
+        maximum_reserve);
+
+    LOGI("Sparse CATL2 read-view reserve: ", reserved_output_bytes, " bytes");
+    streaming::Catl1ToCatl2Writer writer(
+        output_file, header.network_id, reserved_output_bytes);
+    for (uint32_t ledger_seq = header.min_ledger; ledger_seq <= max_ledger;
+         ++ledger_seq)
+    {
+        auto const source = reader.read_ledger_info();
+        if (source.sequence != ledger_seq)
+            throw std::runtime_error(
+                "CATL1 ledger sequence disagrees with its declared range");
+        writer.write_ledger(reader, to_canonical_ledger_info(source));
+    }
+    writer.finalize();
+
+    auto const& stats = writer.stats();
+    LOGI("Direct streaming conversion complete:");
+    LOGI("  Ledgers: ", stats.ledgers);
+    LOGI("  Inner nodes written: ", stats.inner_nodes_written);
+    LOGI("  Leaf nodes written: ", stats.leaf_nodes_written);
+    LOGI("  Reused subtrees: ", stats.reused_subtrees);
+    LOGI("  Read-view mappings: ", stats.read_view_mappings);
+    LOGI("  Bytes written: ", stats.bytes_written);
+
+    if (verify)
+        (void)verify_catl2_file(output_file, header.min_ledger, max_ledger);
+}
+
+/**
  * Main entry point
  */
 int
@@ -611,6 +672,8 @@ main(int argc, char* argv[])
             "max-ledgers,m",
             po::value<uint32_t>()->default_value(0),
             "Maximum number of ledgers to process (0 = all)")(
+            "streaming",
+            "Use bounded-memory direct ordered CATL1-to-CATL2 conversion")(
             "node-records",
             po::value<std::string>()->default_value(""),
             "Write physical CATL2 node hash/type/offset observations for "
@@ -863,6 +926,11 @@ main(int argc, char* argv[])
         uint32_t max_ledgers = vm["max-ledgers"].as<uint32_t>();
         std::string const node_records_file =
             vm["node-records"].as<std::string>();
+        bool const streaming = vm.count("streaming") != 0;
+
+        if (streaming && !node_records_file.empty())
+            throw std::runtime_error(
+                "--streaming does not yet support --node-records");
 
         // Check input file exists
         if (!fs::exists(input_file))
@@ -892,8 +960,16 @@ main(int argc, char* argv[])
         LOGI("Verify: ", verify ? "enabled" : "disabled");
 
         // Process the file
-        process_all_ledgers(
-            input_file, output_file, max_ledgers, verify, node_records_file);
+        if (streaming)
+            process_all_ledgers_streaming(
+                input_file, output_file, max_ledgers, verify);
+        else
+            process_all_ledgers(
+                input_file,
+                output_file,
+                max_ledgers,
+                verify,
+                node_records_file);
 
         return 0;
     }

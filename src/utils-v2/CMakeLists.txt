@@ -22,6 +22,7 @@ target_link_libraries(
   PRIVATE catl_hybrid_shamap_v2 # Brings in catl_catalogue_v2 →
                                 # catl_catalogue_v1 → catl_catalogue_common,
                                 # catl::crypto, catl_core
+          catl_catalogue_v2_streaming
           catl::xdata
           catl::base58
           Boost::filesystem
