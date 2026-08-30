@@ -66,6 +66,9 @@ if(CATL_PTHASH_SOURCE_DIR)
 
   add_subdirectory("${CATL_PTHASH_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/_deps/pthash-build" EXCLUDE_FROM_ALL)
+  set_property(
+    TARGET PTHASH
+    PROPERTY CATL_VERIFIED_PTHASH_REVISION "${CATL_PTHASH_REVISION}")
   add_library(catl_catalogue_v2_pthash STATIC
               ${CMAKE_CURRENT_SOURCE_DIR}/src/catl-v2-pthash-index.cpp)
   target_link_libraries(catl_catalogue_v2_pthash
