@@ -793,93 +793,22 @@ swing_entry(
 {
     using namespace detail;
     auto const key_size = s_->kh.key_size;
-    // Bytes at or past the writer's flushed extent are still in
-    // its buffer; flush before reading them from the file.
-    auto const ensure_readable = [&](noff_t offset, std::size_t len)
+    // The new record's key: it may still be in the writer's
+    // buffer, so flush before reading it back.
+    buffer keybuf{key_size};
+    if(e.offset + field<uint48_t>::size + key_size >
+        w.offset() - w.size())
     {
-        if(offset + len > w.offset() - w.size())
-            w.flush(ec);
-    };
-    buffer keybuf{2 * key_size};
-    std::uint8_t* const want = keybuf.get();
-    std::uint8_t* const have = keybuf.get() + key_size;
-    ensure_readable(e.offset + field<uint48_t>::size, key_size);
-    if(ec)
-        return false;
-    s_->df.read(e.offset + field<uint48_t>::size, want, key_size, ec);
-    if(ec)
-        return false;
-    auto const same_key = [&](noff_t offset) -> bool
-    {
-        ensure_readable(offset + field<uint48_t>::size, key_size);
-        if(ec)
-            return false;
-        s_->df.read(offset + field<uint48_t>::size, have, key_size, ec);
-        if(ec)
-            return false;
-        return std::memcmp(want, have, key_size) == 0;
-    };
-    // In the block: overwrite in place.
-    for(auto i = b.lower_bound(e.hash); i < b.size(); ++i)
-    {
-        auto const item = b[i];
-        if(item.hash != e.hash)
-            break;
-        if(same_key(item.offset))
-        {
-            b.replace(i, e.offset, e.size);
-            return true;
-        }
+        w.flush(ec);
         if(ec)
             return false;
     }
-    // In the spill chain: find it, then rebuild the chain without it.
-    noff_t spill = b.spill();
-    if(! spill)
-        return false;
-    std::vector<typename bucket::value_type> keep;
-    bool found = false;
-    do
-    {
-        ensure_readable(spill, bucket_size(s_->kh.capacity));
-        if(ec)
-            return false;
-        tmp.read(s_->df, spill, ec);
-        if(ec)
-            return false;
-        for(std::size_t i = 0; i < tmp.size(); ++i)
-        {
-            auto const item = tmp[i];
-            if(! found && item.hash == e.hash && same_key(item.offset))
-            {
-                found = true;
-                continue;
-            }
-            if(ec)
-                return false;
-            keep.push_back(item);
-        }
-        spill = tmp.spill();
-    }
-    while(spill);
-    if(! found)
-        return false;
-    // Pull the chain back into the block, minus the stale entry,
-    // then add the new one. maybe_spill writes fresh spill records
-    // through w as the block fills; the old ones become dead bytes.
-    b.spill(0);
-    for(auto const& item : keep)
-    {
-        maybe_spill(b, w, ec);
-        if(ec)
-            return false;
-        b.insert(item.offset, item.size, item.hash);
-    }
-    maybe_spill(b, w, ec);
+    s_->df.read(e.offset + field<uint48_t>::size,
+        keybuf.get(), key_size, ec);
     if(ec)
         return false;
-    b.insert(e.offset, e.size, e.hash);
-    return true;
+    return promote_entry(s_->df, w, b, tmp, key_size,
+        s_->kh.capacity, keybuf.get(), e.hash, e.offset, e.size, ec);
 }
 
 // Publish the new buckets to readers, log the old ones,

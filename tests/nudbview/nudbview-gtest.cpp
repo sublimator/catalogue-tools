@@ -846,3 +846,92 @@ TEST(NuDBView, ReplaceSwingsTheSingleIndexEntry)
     again.close(ec);
     ASSERT_FALSE(ec) << ec.message();
 }
+
+// rekey: rebuilding .key from a .dat that holds superseded records must
+// reproduce the live winner: the later record, indexed exactly once.
+TEST(NuDBView, RekeyReproducesThePromotedWinner)
+{
+    auto db = std::make_unique<TestDatabase>();
+    db->dir = fs::temp_directory_path() /
+        fs::unique_path("nudb-rekey-promote-%%%%-%%%%");
+    fs::create_directories(db->dir);
+    db->dat_path = db->dir / "nudb.dat";
+    db->key_path = db->dir / "nudb.key";
+    db->log_path = db->dir / "nudb.log";
+    db->block_size = 256;  // spills abound
+    for (std::uint32_t i = 0; i < 3000; ++i)
+        db->records.push_back({generate_key(i), i});
+
+    nudbview::error_code ec;
+    nudbview::create<nudbview::xxhasher, nudbview::native_file>(
+        db->dat_path.string(), db->key_path.string(), db->log_path.string(),
+        db->appnum, db->uid, db->key_size, db->block_size, db->load_factor,
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    std::vector<std::pair<std::array<std::uint8_t, 64>, std::uint32_t>>
+        expect;
+    {
+        nudbview::store w;
+        w.open(
+            db->dat_path.string(), db->key_path.string(),
+            db->log_path.string(), ec);
+        ASSERT_FALSE(ec) << ec.message();
+        for (auto const& r : db->records)
+        {
+            w.insert(r.key.data(), &r.value, sizeof(r.value), ec);
+            ASSERT_FALSE(ec) << ec.message();
+        }
+        // Two rounds of replaces so some keys have three records.
+        for (std::uint32_t round = 1; round <= 2; ++round)
+        {
+            w.batch(
+                [&](nudbview::store::appender& a) {
+                    nudbview::error_code aec;
+                    for (std::uint32_t i = 0; i < 3000; i += 3)
+                    {
+                        std::uint32_t const v = 100000 * round + i;
+                        a.replace(
+                            db->records[i].key.data(), &v, sizeof(v), aec);
+                        ASSERT_FALSE(aec) << aec.message();
+                    }
+                },
+                ec);
+            ASSERT_FALSE(ec) << ec.message();
+        }
+        for (std::uint32_t i = 0; i < 3000; i += 3)
+            expect.push_back({db->records[i].key, 200000 + i});
+        w.close(ec);
+        ASSERT_FALSE(ec) << ec.message();
+    }
+
+    // Throw the key file away and rebuild it from the data file alone.
+    fs::remove(db->key_path);
+    nudbview::rekey<nudbview::xxhasher, nudbview::native_file>(
+        db->dat_path.string(),
+        db->key_path.string(),
+        db->log_path.string(),
+        db->block_size,
+        db->load_factor,
+        3000,
+        64 * 1024,
+        ec,
+        nudbview::no_progress{});
+    ASSERT_FALSE(ec) << ec.message();
+
+    for (auto const& [key, v] : expect)
+        EXPECT_EQ(count_index_entries(*db, key), 1u);
+    for (std::uint32_t i = 1; i < 3000; i += 3)
+        EXPECT_EQ(count_index_entries(*db, db->records[i].key), 1u);
+
+    nudbview::store store;
+    store.open(
+        db->dat_path.string(), db->key_path.string(), db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    for (auto const& [key, v] : expect)
+        EXPECT_EQ(fetch_u32(store, key), v);
+    for (std::uint32_t i = 1; i < 3000; i += 3)
+        EXPECT_EQ(fetch_u32(store, db->records[i].key), i);
+    store.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+}

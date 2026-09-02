@@ -15,6 +15,7 @@
 #include <nudbview/detail/gentex.hpp>
 #include <nudbview/detail/mutex.hpp>
 #include <nudbview/detail/pool.hpp>
+#include <nudbview/detail/promote.hpp>
 #include <nudbview/detail/store_base.hpp>
 #include <boost/optional.hpp>
 #include <chrono>

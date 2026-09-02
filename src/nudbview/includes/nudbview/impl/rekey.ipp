@@ -13,6 +13,7 @@
 #include <nudbview/detail/bucket.hpp>
 #include <nudbview/detail/bulkio.hpp>
 #include <nudbview/detail/format.hpp>
+#include <nudbview/detail/promote.hpp>
 #include <cmath>
 
 namespace nudbview {
@@ -167,6 +168,9 @@ rekey(
     progress(0, nwork);
 
     buf.reserve(chunkSize * kh.block_size);
+    // Scratch bucket for reading spill records during promotion.
+    buffer tmpbuf{kh.block_size};
+    bucket tmp{kh.block_size, tmpbuf.get(), empty};
     bulk_writer<File> dw{df, dataFileSize, writeSize};
     for(nbuck_t b0 = 0; b0 < kh.buckets; b0 += chunkSize)
     {
@@ -210,6 +214,17 @@ rekey(
                     continue;
                 bucket b{kh.block_size, buf.get() +
                    (n - b0) * kh.block_size};
+                // The data file is scanned in offset order, so a
+                // later record under the same key supersedes the
+                // earlier one: swing its entry instead of adding a
+                // second. The winner is therefore the same one the
+                // live batch path published.
+                auto const promoted = promote_entry(df, dw, b, tmp,
+                    dh.key_size, kh.capacity, key, h, offset, size, ec);
+                if(ec)
+                    return;
+                if(promoted)
+                    continue;
                 maybe_spill(b, dw, ec);
                 if(ec)
                     return;
