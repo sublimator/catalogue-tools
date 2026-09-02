@@ -57,6 +57,7 @@ drop_mappings()
     // Callers guarantee no concurrent reader: close and trunc are not
     // thread safe with respect to reads by contract.
     map_.store(nullptr);
+    known_size_.store(0);
     std::lock_guard<std::mutex> l{remap_mutex_};
     maps_.clear();
 }

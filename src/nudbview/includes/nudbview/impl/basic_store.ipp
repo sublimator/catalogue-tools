@@ -1217,6 +1217,10 @@ flush()
                 "\n";
         #endif
         }
+        // Lock order is shard then store: release the store lock before
+        // touching the shards, or an insert holding a shard lock while it
+        // takes the store lock shared deadlocks against this.
+        m.unlock();
         for(std::size_t i = 0; i < nshards; ++i)
         {
             std::lock_guard<std::mutex> l{sh_[i]};
