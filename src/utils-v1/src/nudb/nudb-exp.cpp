@@ -10,6 +10,7 @@
 #include "catl/xdata/pretty_print.h"
 #include "catl/xdata/protocol.h"
 
+#include <atomic>
 #include <boost/filesystem.hpp>
 #include <boost/json.hpp>
 #include <iomanip>
@@ -207,28 +208,33 @@ private:
     void
     analyze_node_data(const uint8_t* compressed_data, size_t compressed_size)
     {
-        if (compressed_size < 9)
+        if (compressed_size < 1)
         {
-            std::cout << "Data too small (< 9 bytes for header)\n";
+            std::cout << "Data too small (empty value)\n";
             return;
         }
 
         try
         {
-            // Create compressed blob from NuDB data
+            // Create on-disk blob from NuDB data
             catl::nodestore::node_blob compressed_blob;
             compressed_blob.data.assign(
                 compressed_data, compressed_data + compressed_size);
 
-            // Get node type from compressed blob
-            auto node_type = compressed_blob.get_type();
+            auto const codec =
+                catl::nodestore::peek_compression_type(compressed_blob);
+            std::cout << "Codec: " << static_cast<int>(codec) << " ("
+                      << catl::nodestore::compression_type_to_string(codec)
+                      << ")\n";
+
+            // The node type lives in the decoded form, so decode first
+            catl::nodestore::node_blob decompressed_blob =
+                catl::nodestore::nodeobject_decompress(compressed_blob);
+
+            auto node_type = decompressed_blob.get_type();
             std::cout << "Node type: " << static_cast<int>(node_type) << " ("
                       << catl::nodestore::node_type_to_string(node_type)
                       << ")\n";
-
-            // Decompress using node_blob helper
-            catl::nodestore::node_blob decompressed_blob =
-                catl::nodestore::nodeobject_decompress(compressed_blob);
 
             // Get the decompressed payload (after 9-byte header)
             auto payload = decompressed_blob.payload();
@@ -497,8 +503,8 @@ private:
                         auto payload_span = result.blob.payload();
                         Slice payload_slice(
                             payload_span.data(), payload_span.size());
-                        auto json_result = catl::xdata::parse_leaf(
-                            payload_slice, protocol_);
+                        auto json_result =
+                            catl::xdata::parse_leaf(payload_slice, protocol_);
 
                         std::cout << "\nParsed JSON:\n";
                         catl::xdata::pretty_print(std::cout, json_result);
@@ -674,7 +680,7 @@ private:
             catl::nodestore::TreeWalker walker(backend);
 
             // Counter for account states
-            size_t state_count = 0;
+            std::atomic<size_t> state_count{0};
 
             // Configure walk options
             catl::nodestore::WalkOptions walk_opts;
@@ -705,8 +711,7 @@ private:
 
                             // Pretty print to string first, then log
                             std::ostringstream json_stream;
-                            catl::xdata::pretty_print(
-                                json_stream, json_result);
+                            catl::xdata::pretty_print(json_stream, json_result);
                             LOGD(json_stream.str());
                         }
                         catch (const std::exception& e)
@@ -778,7 +783,7 @@ private:
             catl::nodestore::TreeWalker walker(backend);
 
             // Counter for transactions
-            size_t tx_count = 0;
+            std::atomic<size_t> tx_count{0};
 
             // Configure walk options
             catl::nodestore::WalkOptions walk_opts;
@@ -804,14 +809,12 @@ private:
                             auto payload_span = blob.payload();
                             Slice payload_slice(
                                 payload_span.data(), payload_span.size());
-                            auto json_result =
-                                catl::xdata::parse_transaction(
-                                    payload_slice, protocol_);
+                            auto json_result = catl::xdata::parse_transaction(
+                                payload_slice, protocol_);
 
                             // Pretty print to string first, then log
                             std::ostringstream json_stream;
-                            catl::xdata::pretty_print(
-                                json_stream, json_result);
+                            catl::xdata::pretty_print(json_stream, json_result);
                             LOGD(json_stream.str());
                         }
                         catch (const std::exception& e)

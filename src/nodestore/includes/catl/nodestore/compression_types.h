@@ -48,9 +48,10 @@ constexpr std::size_t INNER_NODE_HASH_ARRAY_SIZE = 512;  // 16 * 32 bytes
 constexpr std::size_t INNER_NODE_HASH_SIZE = 32;         // Single hash size
 constexpr std::size_t INNER_NODE_BRANCH_COUNT = 16;      // Number of branches
 
-// Nodeobject header sizes
-constexpr std::size_t NODEOBJECT_HEADER_SIZE =
-    9;  // 8 unused bytes + 1 type byte
+// Prelude of the DECODED form only: 8 unused bytes + 1 type byte.
+// It is NOT present in front of the on-disk value; the on-disk value starts
+// with the codec varint (see node_blob.h).
+constexpr std::size_t NODEOBJECT_HEADER_SIZE = 9;
 
 }  // namespace format
 

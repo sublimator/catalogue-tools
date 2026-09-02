@@ -115,6 +115,14 @@ public:
         result.found = false;
         result.depth = 0;
 
+        // A zero root is the canonical empty tree (a ledger with no
+        // transactions has tx_hash == 0). Nothing is stored for it.
+        if (root_hash == Hash256::zero())
+        {
+            PLOGD(log_partition_, "Zero root hash: empty tree");
+            return result;
+        }
+
         Hash256 current_hash = root_hash;
         result.path.push_back(current_hash);
 
@@ -142,20 +150,33 @@ public:
             }
 
             node_blob const& compressed = compressed_opt.value();
-            auto node_type = compressed.get_type();
 
-            PLOGD(
-                log_partition_,
-                "Node type: ",
-                static_cast<int>(node_type),
-                " (0=inner, 3=account, 4=tx)");
-
-            // Check if we've reached a leaf
-            if (node_type == node_type::hot_account_node ||
-                node_type == node_type::hot_transaction_node)
+            // On disk, only codec 2/3 announce themselves as inners. Anything
+            // else must be decoded before its type is known.
+            if (!is_ondisk_inner(compressed))
             {
-                // Reached a leaf - need to decompress to verify key
                 node_blob decompressed = nodeobject_decompress(compressed);
+                auto node_type = decompressed.get_type();
+
+                PLOGD(
+                    log_partition_,
+                    "Node type: ",
+                    static_cast<int>(node_type),
+                    " (0=inner, 3=account, 4=tx)");
+
+                if (node_type != node_type::hot_account_node &&
+                    node_type != node_type::hot_transaction_node)
+                {
+                    PLOGE(
+                        log_partition_,
+                        "Unexpected node type: ",
+                        static_cast<int>(node_type));
+                    throw std::runtime_error(
+                        "TreeWalker: unexpected node type " +
+                        std::to_string(static_cast<int>(node_type)));
+                }
+
+                // Reached a leaf - payload is [prefix][item][key]
                 auto payload = decompressed.payload();
 
                 PLOGD(
@@ -182,18 +203,6 @@ public:
 
                 result.blob = std::move(decompressed);
                 return result;
-            }
-
-            // Must be an inner node - validate type
-            if (node_type != node_type::hot_unknown)
-            {
-                PLOGE(
-                    log_partition_,
-                    "Unexpected node type: ",
-                    static_cast<int>(node_type));
-                throw std::runtime_error(
-                    "TreeWalker: unexpected node type " +
-                    std::to_string(static_cast<int>(node_type)));
             }
 
             // Extract nibble from target_key at current depth
@@ -295,6 +304,14 @@ public:
         Visitor&& visitor,
         const WalkOptions& options = {})
     {
+        // A zero root is the canonical empty tree; there are no leaves.
+        if (root_hash == Hash256::zero())
+        {
+            PLOGD(
+                log_partition_, "Zero root hash: empty tree, nothing to walk");
+            return;
+        }
+
         if (!options.parallel)
         {
             PLOGD(
@@ -344,28 +361,25 @@ private:
         }
 
         node_blob const& compressed = compressed_opt.value();
-        auto node_type = compressed.get_type();
 
-        // Check if we've reached a leaf
-        if (node_type == node_type::hot_account_node ||
-            node_type == node_type::hot_transaction_node)
+        if (!is_ondisk_inner(compressed))
         {
-            // Decompress leaf and call visitor
+            // Decode to learn the type; leaves are visited decoded
             node_blob decompressed = nodeobject_decompress(compressed);
+            auto node_type = decompressed.get_type();
+            if (node_type != node_type::hot_account_node &&
+                node_type != node_type::hot_transaction_node)
+            {
+                PLOGE(
+                    log_partition_,
+                    "Unexpected node type: ",
+                    static_cast<int>(node_type));
+                throw std::runtime_error(
+                    "TreeWalker: unexpected node type " +
+                    std::to_string(static_cast<int>(node_type)));
+            }
             visitor(current_hash, decompressed);
             return;
-        }
-
-        // Must be an inner node
-        if (node_type != node_type::hot_unknown)
-        {
-            PLOGE(
-                log_partition_,
-                "Unexpected node type: ",
-                static_cast<int>(node_type));
-            throw std::runtime_error(
-                "TreeWalker: unexpected node type " +
-                std::to_string(static_cast<int>(node_type)));
         }
 
         // Visit all branches (depth-first)
@@ -405,30 +419,28 @@ private:
         }
 
         node_blob const& compressed = compressed_opt.value();
-        auto node_type = compressed.get_type();
 
-        // Handle special case: root is a leaf (very small tree)
-        if (node_type == node_type::hot_account_node ||
-            node_type == node_type::hot_transaction_node)
+        if (!is_ondisk_inner(compressed))
         {
+            // Root is a leaf (very small tree) or something unexpected
+            node_blob decompressed = nodeobject_decompress(compressed);
+            auto node_type = decompressed.get_type();
+            if (node_type != node_type::hot_account_node &&
+                node_type != node_type::hot_transaction_node)
+            {
+                PLOGE(
+                    log_partition_,
+                    "Unexpected root node type: ",
+                    static_cast<int>(node_type));
+                throw std::runtime_error(
+                    "TreeWalker: unexpected root node type " +
+                    std::to_string(static_cast<int>(node_type)));
+            }
             PLOGD(
                 log_partition_,
                 "Root is a leaf - using sequential walk instead");
-            node_blob decompressed = nodeobject_decompress(compressed);
             visitor(root_hash, decompressed);
             return;
-        }
-
-        // Must be an inner node
-        if (node_type != node_type::hot_unknown)
-        {
-            PLOGE(
-                log_partition_,
-                "Unexpected root node type: ",
-                static_cast<int>(node_type));
-            throw std::runtime_error(
-                "TreeWalker: unexpected root node type " +
-                std::to_string(static_cast<int>(node_type)));
         }
 
         // Collect all branch hashes from root

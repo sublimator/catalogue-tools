@@ -40,6 +40,7 @@ target_link_libraries(
   node_blob_gtest
   PRIVATE catl::nodestore
           catl::core
+          catl::crypto
           LZ4::lz4_static
           GTest::gtest_main)
 
