@@ -92,6 +92,12 @@ remap() const
     // key file does on every bucket split, remaps logarithmically rather
     // than per block. Pages past the end of the file are never touched:
     // the store only reads what it has written.
+    //
+    // TODO(nudbview): doubling is uncapped and superseded mappings are
+    // kept until close. At a terabyte that reserves twice the file in
+    // address space and retains every earlier mapping. Cap the headroom
+    // at a few GB and retire old mappings once no reader can hold them,
+    // using the store's generation drain rather than a lock per read.
     auto len = cur ? std::max(size, cur->len * 2) : size;
     len = std::max<std::size_t>(len, std::size_t{16} << 20);
     void* const p = ::mmap(nullptr, len, PROT_READ, MAP_SHARED, fd_, 0);
