@@ -250,12 +250,11 @@ make_decoded_inner(
     std::memset(out, 0, 8);
     out[8] = static_cast<std::uint8_t>(node_type::hot_unknown);
     out += format::NODEOBJECT_HEADER_SIZE;
-    // HashPrefix::innerNode, big-endian 'M','I','N',0
-    out[0] = 'M';
-    out[1] = 'I';
-    out[2] = 'N';
-    out[3] = 0;
-    out += 4;
+    std::memcpy(
+        out,
+        inner_node::HASH_PREFIX_INNER_NODE_BYTES.data(),
+        inner_node::HASH_PREFIX_INNER_NODE_BYTES.size());
+    out += inner_node::HASH_PREFIX_INNER_NODE_BYTES.size();
     for (std::size_t i = 0; i < format::INNER_NODE_BRANCH_COUNT; ++i)
     {
         std::memcpy(out, branches[i].data(), format::INNER_NODE_HASH_SIZE);
@@ -436,6 +435,9 @@ public:
                     throw std::runtime_error(
                         "compressed_inner_node_view: too small for mask");
                 branch_mask_ = static_cast<std::uint16_t>((p[0] << 8) | p[1]);
+                if (branch_mask_ == 0)
+                    throw std::runtime_error(
+                        "compressed_inner_node_view: empty inner node");
                 auto const expected_hashes = __builtin_popcount(branch_mask_);
                 auto const expected_size = 2 +
                     static_cast<std::size_t>(expected_hashes) *

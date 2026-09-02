@@ -27,10 +27,18 @@ namespace catl::nodestore {
 namespace inner_node {
 
 /**
- * Hash prefix used in inner node headers.
- * From rippled's HashPrefix::innerNode.
+ * Hash prefix of an inner node, rippled's HashPrefix::innerNode: the bytes
+ * 'M','I','N',0 as a big-endian u32. This is the four-byte prefix that
+ * precedes the sixteen hashes in the decoded form (node_blob.h).
  */
-constexpr std::uint32_t HASH_PREFIX_INNER_NODE = 0x4D494E53;  // 'MINS'
+constexpr std::uint32_t HASH_PREFIX_INNER_NODE = 0x4D494E00;  // "MIN\0"
+
+/** The same prefix as bytes, in the order they appear on disk. */
+constexpr std::array<std::uint8_t, 4> HASH_PREFIX_INNER_NODE_BYTES = {
+    'M',
+    'I',
+    'N',
+    0};
 
 /**
  * Returns pointer to 32 zero bytes (canonical empty hash).

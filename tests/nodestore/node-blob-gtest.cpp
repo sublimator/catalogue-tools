@@ -359,6 +359,33 @@ TEST(NodeBlobTest, InnerNodeSourceEmptyIsRefusedOnDecode)
     EXPECT_EQ(ondisk.data[0], 2);
 
     EXPECT_THROW(nodeobject_decompress(ondisk), std::runtime_error);
+    // The zero-copy view refuses the same bytes, so the two readers agree
+    EXPECT_THROW(compressed_inner_node_view{ondisk}, std::runtime_error);
+}
+
+TEST(NodeBlobTest, InnerPrefixConstantMatchesDecodedForm)
+{
+    // "MIN\0" as big-endian u32 and as bytes must agree with what the
+    // decoder writes in front of the sixteen hashes
+    EXPECT_EQ(inner_node::HASH_PREFIX_INNER_NODE, 0x4D494E00u);
+    EXPECT_EQ(
+        std::memcmp(
+            inner_node::HASH_PREFIX_INNER_NODE_BYTES.data(), "MIN\0", 4),
+        0);
+
+    mock_inner_node node;
+    for (auto& b : node.branches)
+        b = Hash256::zero();
+    node.branches[5] = make_test_hash(0x55);
+    node.mask = 1 << (15 - 5);
+
+    node_blob decoded = nodeobject_decompress(nodeobject_compress(node));
+    EXPECT_EQ(
+        std::memcmp(
+            decoded.payload().data(),
+            inner_node::HASH_PREFIX_INNER_NODE_BYTES.data(),
+            4),
+        0);
 }
 
 // ---------------------------------------------------------------------------
