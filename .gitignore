@@ -50,3 +50,12 @@ proof-*.json
 .mcp.json
 .codex/hooks.json
 scripts/uv.lock
+
+# Native Release build tree (storeidx host tools, local gates)
+build-release/
+# STOREIDX measurement artifacts: build/host/run receipts, plans, snapshots
+.storeidx-runs/
+# Per-seat agent state
+.grok/
+# Ring advisory worktree mutex — per-checkout state, never a repository input
+WORKTREE_OWNER
