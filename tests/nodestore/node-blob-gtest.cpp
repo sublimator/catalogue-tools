@@ -520,3 +520,134 @@ TEST(NodeBlobRealXahaud, FullInnerViewDecodeHashAndReencode)
     node_blob reencoded = nodeobject_compress(node_type::hot_unknown, payload);
     EXPECT_EQ(reencoded.data, ondisk.data);
 }
+
+// ---------------------------------------------------------------------------
+// Codec 4: augmented inner, the codec 2 form plus one 48-bit .dat offset per
+// populated child.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+detail::hash_array_inner_source
+three_branch_source()
+{
+    detail::hash_array_inner_source src;
+    src.branches.fill(Hash256::zero());
+    src.branches[0] = make_test_hash(0x10);
+    src.branches[7] = make_test_hash(0x77);
+    src.branches[15] = make_test_hash(0xFF);
+    return src;
+}
+
+}  // namespace
+
+TEST(NodeBlobAugmented, LayoutRoundTripAndDecodeMatchesCodec2)
+{
+    auto const src = three_branch_source();
+    std::array<std::uint64_t, 16> offsets{};
+    offsets[0] = 92;                       // right after the .dat header
+    offsets[7] = 0x0000ABCDEF012345ull & format::INNER_NODE_CHILD_OFFSET_MAX;
+    offsets[15] = format::INNER_NODE_CHILD_OFFSET_MAX;
+
+    auto const aug = nodeobject_compress_augmented(src, offsets);
+    // [varint 4][mask 2][3 x 32][3 x 6]
+    ASSERT_EQ(aug.data.size(), 1u + 2u + 3u * 32u + 3u * 6u);
+    EXPECT_EQ(aug.data[0], 4u);
+    EXPECT_EQ(peek_compression_type(aug), compression_type::inner_node_augmented);
+    EXPECT_TRUE(is_ondisk_inner(aug));
+    // mask: branches 0, 7, 15 => bits 15, 8, 0 => 0x8101
+    EXPECT_EQ(aug.data[1], 0x81u);
+    EXPECT_EQ(aug.data[2], 0x01u);
+    // The hash part is byte-identical to the codec 2 encoding.
+    auto const plain = nodeobject_compress(src);
+    ASSERT_EQ(plain.data.size(), 1u + 2u + 3u * 32u);
+    EXPECT_EQ(std::memcmp(aug.data.data() + 1, plain.data.data() + 1, 2 + 96), 0);
+    // Offsets are big-endian 48-bit, in branch order.
+    std::uint8_t const* off = aug.data.data() + 3 + 96;
+    EXPECT_EQ(off[5], 92u);
+    EXPECT_EQ(off[6 + 0], 0xABu);
+    EXPECT_EQ(off[6 + 5], 0x45u);
+    for (int b = 0; b < 6; ++b)
+        EXPECT_EQ(off[12 + b], 0xFFu);
+
+    // View exposes hashes and offsets; absent branches yield nullopt.
+    compressed_inner_node_view view(aug);
+    EXPECT_TRUE(view.is_augmented());
+    EXPECT_EQ(view.get_branch_mask(), 0x8101u);
+    EXPECT_EQ(view.get_child_hash(0), make_test_hash(0x10));
+    EXPECT_EQ(view.get_child_hash(7), make_test_hash(0x77));
+    EXPECT_EQ(view.get_child_hash(15), make_test_hash(0xFF));
+    EXPECT_FALSE(view.get_child_hash(3).has_value());
+    EXPECT_EQ(view.get_child_offset(0), 92u);
+    EXPECT_EQ(view.get_child_offset(7), offsets[7]);
+    EXPECT_EQ(view.get_child_offset(15), format::INNER_NODE_CHILD_OFFSET_MAX);
+    EXPECT_FALSE(view.get_child_offset(3).has_value());
+
+    // Decoding drops the offsets and yields exactly the codec 2 decode.
+    auto const from_aug = nodeobject_decompress(aug);
+    auto const from_plain = nodeobject_decompress(plain);
+    ASSERT_EQ(from_aug.data.size(), format::INNER_NODE_V1_SIZE);
+    EXPECT_EQ(from_aug.data, from_plain.data);
+
+    // Plain views have no offsets.
+    compressed_inner_node_view plain_view(plain);
+    EXPECT_FALSE(plain_view.is_augmented());
+    EXPECT_FALSE(plain_view.get_child_offset(0).has_value());
+}
+
+TEST(NodeBlobAugmented, SixteenChildrenAllowed)
+{
+    detail::hash_array_inner_source src;
+    std::array<std::uint64_t, 16> offsets{};
+    for (int i = 0; i < 16; ++i)
+    {
+        src.branches[i] = make_test_hash(static_cast<uint8_t>(0x20 + i));
+        offsets[i] = 1000u * static_cast<std::uint64_t>(i + 1);
+    }
+    auto const aug = nodeobject_compress_augmented(src, offsets);
+    ASSERT_EQ(aug.data.size(), 1u + 2u + 16u * 38u);
+    compressed_inner_node_view view(aug);
+    EXPECT_EQ(view.get_branch_mask(), 0xFFFFu);
+    for (int i = 0; i < 16; ++i)
+    {
+        EXPECT_EQ(view.get_child_hash(i), src.branches[i]);
+        EXPECT_EQ(view.get_child_offset(i), offsets[i]);
+    }
+    auto const decoded = nodeobject_decompress(aug);
+    auto const expected = nodeobject_decompress(nodeobject_compress(src));
+    EXPECT_EQ(decoded.data, expected.data);
+}
+
+TEST(NodeBlobAugmented, Refusals)
+{
+    auto const src = three_branch_source();
+    std::array<std::uint64_t, 16> offsets{};
+
+    // Offset wider than 48 bits.
+    offsets[7] = format::INNER_NODE_CHILD_OFFSET_MAX + 1;
+    EXPECT_THROW(nodeobject_compress_augmented(src, offsets), std::runtime_error);
+    offsets[7] = 0;
+
+    // Empty inner.
+    detail::hash_array_inner_source empty;
+    empty.branches.fill(Hash256::zero());
+    EXPECT_THROW(nodeobject_compress_augmented(empty, offsets), std::runtime_error);
+
+    // A well-formed record truncated by one byte, or extended by one, is
+    // refused by both the view and the decoder.
+    auto good = nodeobject_compress_augmented(src, offsets);
+    auto short_rec = good;
+    short_rec.data.pop_back();
+    EXPECT_THROW(compressed_inner_node_view{short_rec}, std::runtime_error);
+    EXPECT_THROW(nodeobject_decompress(short_rec), std::runtime_error);
+    auto long_rec = good;
+    long_rec.data.push_back(0);
+    EXPECT_THROW(compressed_inner_node_view{long_rec}, std::runtime_error);
+    EXPECT_THROW(nodeobject_decompress(long_rec), std::runtime_error);
+
+    // Mask zero.
+    node_blob zero_mask;
+    zero_mask.data = {4, 0, 0};
+    EXPECT_THROW(compressed_inner_node_view{zero_mask}, std::runtime_error);
+    EXPECT_THROW(nodeobject_decompress(zero_mask), std::runtime_error);
+}

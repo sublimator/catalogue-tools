@@ -48,6 +48,17 @@ namespace catl::nodestore {
  *                                               sparse inner; bit (15 - i)
  *                                               set means branch i present
  *   [varint 3][16 x 32]                         full inner, no mask
+ *   [varint 4][u16 mask][32 x n][6 x n]         augmented inner: the codec 2
+ *                                               form followed by one 48-bit
+ *                                               big-endian .dat record
+ *                                               offset per populated child,
+ *                                               in the same branch order.
+ *                                               catalogue-tools only; xahaud
+ *                                               does not write or read it.
+ *                                               Decodes to the same 525-byte
+ *                                               form as codec 2, offsets
+ *                                               dropped. n = popcount(mask),
+ *                                               and n = 16 is allowed.
  *
  * Verified against real xahaud nudb.dat files: value byte 0 is always
  * 0x01, 0x02 or 0x03. An earlier revision of this header put the nine-byte
@@ -121,16 +132,17 @@ peek_compression_type(node_blob const& ondisk)
 }
 
 /**
- * True if the ON-DISK value is an inner node (codec 2 or 3). Only these
- * two codecs reveal the node kind without decoding; a codec 1 value must
- * be decoded before its type is known.
+ * True if the ON-DISK value is an inner node (codec 2, 3 or 4). Only
+ * these codecs reveal the node kind without decoding; a codec 1 value
+ * must be decoded before its type is known.
  */
 inline bool
 is_ondisk_inner(std::span<std::uint8_t const> ondisk)
 {
     auto const c = peek_compression_type(ondisk);
     return c == compression_type::inner_node_compressed ||
-        c == compression_type::inner_node_full;
+        c == compression_type::inner_node_full ||
+        c == compression_type::inner_node_augmented;
 }
 
 inline bool
@@ -197,6 +209,68 @@ nodeobject_compress(inner_node_source auto const& node)
             std::memcpy(out, hash.data(), format::INNER_NODE_HASH_SIZE);
             out += format::INNER_NODE_HASH_SIZE;
         }
+    }
+
+    return blob;
+}
+
+/**
+ * Encode an augmented inner (codec 4) directly to the ON-DISK form.
+ *
+ * The hashes come from the inner_node_source; child_offsets[i] is the
+ * .dat record offset of branch i and is read only for populated
+ * branches. Every populated child's offset must fit in 48 bits.
+ *
+ * An augmented inner is written only when every child it links already
+ * exists as a committed record; that rule belongs to the writer, not to
+ * this encoder.
+ */
+node_blob
+nodeobject_compress_augmented(
+    inner_node_source auto const& node,
+    std::array<std::uint64_t, format::INNER_NODE_BRANCH_COUNT> const&
+        child_offsets)
+{
+    std::uint16_t const mask = node.get_node_source_branch_mask();
+    if (mask == 0)
+        throw std::runtime_error(
+            "nodeobject_compress_augmented: empty inner node");
+    auto const branch_count =
+        static_cast<std::size_t>(__builtin_popcount(mask));
+
+    auto const comp_type = compression_type::inner_node_augmented;
+    auto const vn = size_varint(static_cast<std::size_t>(comp_type));
+    auto const total_size = vn + 2 +
+        branch_count *
+            (format::INNER_NODE_HASH_SIZE + format::INNER_NODE_CHILD_OFFSET_SIZE);
+
+    node_blob blob;
+    blob.data.resize(total_size);
+    std::uint8_t* out = blob.data.data();
+
+    write_varint(out, static_cast<std::size_t>(comp_type));
+    out += vn;
+    out[0] = static_cast<std::uint8_t>(mask >> 8);
+    out[1] = static_cast<std::uint8_t>(mask & 0xFF);
+    out += 2;
+
+    std::uint8_t* offsets_out = out + branch_count * format::INNER_NODE_HASH_SIZE;
+    for (int i = 0; i < 16; ++i)
+    {
+        if (!(mask & (1u << (15 - i))))
+            continue;
+        auto const& hash = node.get_node_source_child_hash(i);
+        std::memcpy(out, hash.data(), format::INNER_NODE_HASH_SIZE);
+        out += format::INNER_NODE_HASH_SIZE;
+
+        auto const offset = child_offsets[static_cast<std::size_t>(i)];
+        if (offset > format::INNER_NODE_CHILD_OFFSET_MAX)
+            throw std::runtime_error(
+                "nodeobject_compress_augmented: child offset exceeds 48 "
+                "bits");
+        for (int b = 0; b < 6; ++b)
+            offsets_out[b] = static_cast<std::uint8_t>(offset >> (8 * (5 - b)));
+        offsets_out += format::INNER_NODE_CHILD_OFFSET_SIZE;
     }
 
     return blob;
@@ -386,6 +460,32 @@ nodeobject_decompress(std::span<std::uint8_t const> ondisk)
             return detail::make_decoded_inner(branches);
         }
 
+        case compression_type::inner_node_augmented: {
+            // Codec 2 form followed by the offsets, which the decoded
+            // form has no place for. Validate the whole record, decode
+            // the hash part.
+            if (in_size < 2 + format::INNER_NODE_HASH_SIZE +
+                    format::INNER_NODE_CHILD_OFFSET_SIZE)
+                throw std::runtime_error(
+                    "nodeobject_decompress: short augmented inner node");
+            std::uint16_t const mask =
+                static_cast<std::uint16_t>((p[0] << 8) | p[1]);
+            if (mask == 0)
+                throw std::runtime_error(
+                    "nodeobject_decompress: empty augmented inner node");
+            auto const n = static_cast<std::size_t>(__builtin_popcount(mask));
+            auto const hash_part = 2 + n * format::INNER_NODE_HASH_SIZE;
+            if (in_size != hash_part + n * format::INNER_NODE_CHILD_OFFSET_SIZE)
+                throw std::runtime_error(
+                    "nodeobject_decompress: augmented inner node size "
+                    "mismatch");
+            std::array<Hash256, format::INNER_NODE_BRANCH_COUNT> branches;
+            if (!inner_node::decode_compressed(p, hash_part, branches))
+                throw std::runtime_error(
+                    "nodeobject_decompress: invalid augmented inner node");
+            return detail::make_decoded_inner(branches);
+        }
+
         default:
             throw std::runtime_error(
                 "nodeobject_decompress: unknown compression type " +
@@ -400,13 +500,18 @@ nodeobject_decompress(node_blob const& ondisk)
 }
 
 /**
- * Zero-copy view over an ON-DISK inner node value (codec 2 or 3).
+ * Zero-copy view over an ON-DISK inner node value (codec 2, 3 or 4).
  *
  * Works directly on the stored bytes, no decode, no copy. The caller keeps
  * the bytes alive. Construct from a span over a mapped file or a fetch
  * callback's buffer, or from a node_blob holding the on-disk bytes.
  *
- * Throws if the value is not codec 2 or 3.
+ * Child offsets are available only for codec 4 (get_child_offset returns
+ * nullopt otherwise). A view never verifies an offset: the reader that
+ * follows one checks the record framing and that the key at offset + 6
+ * equals the child hash the view reports.
+ *
+ * Throws if the value is not codec 2, 3 or 4, or is malformed.
  */
 class compressed_inner_node_view
 {
@@ -415,6 +520,16 @@ private:
     std::uint16_t branch_mask_;
     std::uint8_t const* hash_data_;
     std::size_t hash_data_size_;
+    std::uint8_t const* offset_data_ = nullptr;
+
+    // Index of `branch` among the populated branches, in branch order.
+    std::size_t
+    storage_index(int branch) const
+    {
+        std::uint16_t const mask_before =
+            static_cast<std::uint16_t>(branch_mask_ >> (16 - branch));
+        return static_cast<std::size_t>(__builtin_popcount(mask_before));
+    }
 
 public:
     explicit compressed_inner_node_view(std::span<std::uint8_t const> ondisk)
@@ -462,6 +577,31 @@ public:
                 break;
             }
 
+            case compression_type::inner_node_augmented: {
+                if (remaining < 2)
+                    throw std::runtime_error(
+                        "compressed_inner_node_view: too small for mask");
+                branch_mask_ = static_cast<std::uint16_t>((p[0] << 8) | p[1]);
+                if (branch_mask_ == 0)
+                    throw std::runtime_error(
+                        "compressed_inner_node_view: empty augmented inner "
+                        "node");
+                auto const n = static_cast<std::size_t>(
+                    __builtin_popcount(branch_mask_));
+                auto const expected_size = 2 +
+                    n *
+                        (format::INNER_NODE_HASH_SIZE +
+                         format::INNER_NODE_CHILD_OFFSET_SIZE);
+                if (remaining != expected_size)
+                    throw std::runtime_error(
+                        "compressed_inner_node_view: size mismatch for "
+                        "augmented inner");
+                hash_data_ = p + 2;
+                hash_data_size_ = n * format::INNER_NODE_HASH_SIZE;
+                offset_data_ = hash_data_ + hash_data_size_;
+                break;
+            }
+
             default:
                 throw std::runtime_error(
                     "compressed_inner_node_view: not an inner node codec " +
@@ -499,12 +639,31 @@ public:
             return Hash256(
                 hash_data_ + (branch * format::INNER_NODE_HASH_SIZE));
 
-        // Count populated branches before this one
-        std::uint16_t const mask_before =
-            static_cast<std::uint16_t>(branch_mask_ >> (16 - branch));
-        std::size_t const storage_index = __builtin_popcount(mask_before);
         return Hash256(
-            hash_data_ + (storage_index * format::INNER_NODE_HASH_SIZE));
+            hash_data_ + (storage_index(branch) * format::INNER_NODE_HASH_SIZE));
+    }
+
+    /**
+     * The child's .dat record offset, codec 4 only. Unverified: see the
+     * class comment.
+     */
+    std::optional<std::uint64_t>
+    get_child_offset(int branch) const
+    {
+        if (!offset_data_ || !has_branch(branch))
+            return std::nullopt;
+        std::uint8_t const* p = offset_data_ +
+            storage_index(branch) * format::INNER_NODE_CHILD_OFFSET_SIZE;
+        std::uint64_t offset = 0;
+        for (int b = 0; b < 6; ++b)
+            offset = (offset << 8) | p[b];
+        return offset;
+    }
+
+    bool
+    is_augmented() const
+    {
+        return comp_type_ == compression_type::inner_node_augmented;
     }
 
     compression_type
