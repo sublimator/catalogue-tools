@@ -821,15 +821,26 @@ TEST(NuDBView, ReplaceSwingsTheSingleIndexEntry)
                 ASSERT_FALSE(aec) << aec.message();
             }
             expect[2].second = 777003;  // records[10] is the third entry
+        },
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    // Replacing existing keys adds no entries and therefore no buckets,
+    // however many times the split threshold was crossed.
+    EXPECT_EQ(fs::file_size(db->key_path), key_file_size_before);
+
+    for (auto const& [key, v] : expect)
+        EXPECT_EQ(fetch_u32(store, key), v);
+
+    // An absent key through replace is an ordinary insert, and may split.
+    store.batch(
+        [&](nudbview::store::appender& a) {
+            nudbview::error_code aec;
             std::uint32_t const av = 4242;
             a.replace(absent.data(), &av, sizeof(av), aec);
             ASSERT_FALSE(aec) << aec.message();
         },
         ec);
     ASSERT_FALSE(ec) << ec.message();
-
-    for (auto const& [key, v] : expect)
-        EXPECT_EQ(fetch_u32(store, key), v);
     EXPECT_EQ(fetch_u32(store, absent), 4242u);
     // Untouched keys still resolve to their original values.
     for (std::uint32_t i = 1; i < 3000; i += 5)
@@ -852,11 +863,6 @@ TEST(NuDBView, ReplaceSwingsTheSingleIndexEntry)
         EXPECT_EQ(fetch_u32(store, key), v);
     store.close(ec);
     ASSERT_FALSE(ec) << ec.message();
-
-    // 1200 replaces of existing keys, far past the split threshold, add
-    // no entries and therefore no buckets: the key file did not grow. (The
-    // one absent key added a single entry, which cannot add a bucket.)
-    EXPECT_EQ(fs::file_size(db->key_path), key_file_size_before);
 
     // Exactly one index entry per key, replaced or not, and the values
     // survive reopen.
