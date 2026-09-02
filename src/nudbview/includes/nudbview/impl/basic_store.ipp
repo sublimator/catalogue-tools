@@ -758,12 +758,128 @@ index_records(
         auto b = load(n, c1, c0, buf, ec);
         if(ec)
             return;
+        if(e.replace)
+        {
+            auto const swung = swing_entry(b, e, w, tmp, ec);
+            if(ec)
+                return;
+            if(swung)
+                continue;
+            // No entry for this key yet: fall through to insert.
+        }
         // This can amplify writes if it spills.
         maybe_spill(b, w, ec);
         if(ec)
             return;
         b.insert(e.offset, e.size, e.hash);
     }
+}
+
+// Swing the bucket entry for e's exact key to {e.offset, e.size}.
+// Returns true if an entry was found and swung, false if the key
+// has no entry in b or its spill chain. If the stale entry lives
+// in a spill record, which is immutable, the whole chain is pulled
+// back into the block without it, the way split does.
+//
+template<class Hasher, class File>
+bool
+basic_store<Hasher, File>::
+swing_entry(
+    detail::bucket& b,
+    record_entry const& e,
+    detail::bulk_writer<File>& w,
+    detail::bucket& tmp,
+    error_code& ec)
+{
+    using namespace detail;
+    auto const key_size = s_->kh.key_size;
+    // Bytes at or past the writer's flushed extent are still in
+    // its buffer; flush before reading them from the file.
+    auto const ensure_readable = [&](noff_t offset, std::size_t len)
+    {
+        if(offset + len > w.offset() - w.size())
+            w.flush(ec);
+    };
+    buffer keybuf{2 * key_size};
+    std::uint8_t* const want = keybuf.get();
+    std::uint8_t* const have = keybuf.get() + key_size;
+    ensure_readable(e.offset + field<uint48_t>::size, key_size);
+    if(ec)
+        return false;
+    s_->df.read(e.offset + field<uint48_t>::size, want, key_size, ec);
+    if(ec)
+        return false;
+    auto const same_key = [&](noff_t offset) -> bool
+    {
+        ensure_readable(offset + field<uint48_t>::size, key_size);
+        if(ec)
+            return false;
+        s_->df.read(offset + field<uint48_t>::size, have, key_size, ec);
+        if(ec)
+            return false;
+        return std::memcmp(want, have, key_size) == 0;
+    };
+    // In the block: overwrite in place.
+    for(auto i = b.lower_bound(e.hash); i < b.size(); ++i)
+    {
+        auto const item = b[i];
+        if(item.hash != e.hash)
+            break;
+        if(same_key(item.offset))
+        {
+            b.replace(i, e.offset, e.size);
+            return true;
+        }
+        if(ec)
+            return false;
+    }
+    // In the spill chain: find it, then rebuild the chain without it.
+    noff_t spill = b.spill();
+    if(! spill)
+        return false;
+    std::vector<typename bucket::value_type> keep;
+    bool found = false;
+    do
+    {
+        ensure_readable(spill, bucket_size(s_->kh.capacity));
+        if(ec)
+            return false;
+        tmp.read(s_->df, spill, ec);
+        if(ec)
+            return false;
+        for(std::size_t i = 0; i < tmp.size(); ++i)
+        {
+            auto const item = tmp[i];
+            if(! found && item.hash == e.hash && same_key(item.offset))
+            {
+                found = true;
+                continue;
+            }
+            if(ec)
+                return false;
+            keep.push_back(item);
+        }
+        spill = tmp.spill();
+    }
+    while(spill);
+    if(! found)
+        return false;
+    // Pull the chain back into the block, minus the stale entry,
+    // then add the new one. maybe_spill writes fresh spill records
+    // through w as the block fills; the old ones become dead bytes.
+    b.spill(0);
+    for(auto const& item : keep)
+    {
+        maybe_spill(b, w, ec);
+        if(ec)
+            return false;
+        b.insert(item.offset, item.size, item.hash);
+    }
+    maybe_spill(b, w, ec);
+    if(ec)
+        return false;
+    b.insert(e.offset, e.size, e.hash);
+    return true;
 }
 
 // Publish the new buckets to readers, log the old ones,
@@ -951,7 +1067,23 @@ append(
     write(os, key, key_size_);          // Key
     write(os, data, size);              // Data
     records_.push_back({
-        hash(key, key_size_, hasher_), size, offset});
+        hash(key, key_size_, hasher_), size, offset, false});
+    return offset;
+}
+
+template<class Hasher, class File>
+noff_t
+basic_store<Hasher, File>::appender::
+replace(
+    void const* key,
+    void const* data,
+    nsize_t size,
+    error_code& ec)
+{
+    auto const offset = append(key, data, size, ec);
+    if(ec)
+        return 0;
+    records_.back().replace = true;
     return offset;
 }
 

@@ -119,6 +119,11 @@ private:
         detail::nhash_t hash;
         nsize_t size;
         noff_t offset;
+        // When set, the bucket entry for this exact key is
+        // swung to {offset, size} instead of a new entry
+        // being added. The key is read back from the data
+        // file at offset + 6 when the entry is indexed.
+        bool replace = false;
     };
 
     error_code ec_;
@@ -512,6 +517,21 @@ public:
         append(void const* key, void const* data,
             nsize_t size, error_code& ec);
 
+        /** Append a data record that supersedes the key's current one.
+
+            The record is written exactly as by @ref append. When the
+            batch is indexed, the existing bucket entry for this exact
+            key, if any, is swung to the new record, so the key keeps
+            a single entry and the old record becomes inert. If the
+            key has no entry, one is added. If the key was appended
+            earlier in the same batch, the later record wins.
+
+            @return The offset of the record's size field.
+        */
+        noff_t
+        replace(void const* key, void const* data,
+            nsize_t size, error_code& ec);
+
         /// The offset the next append will return.
         noff_t
         offset() const
@@ -657,6 +677,11 @@ private:
         detail::bulk_writer<File>& w, detail::cache& c0,
         detail::cache& c1, detail::bucket& tmp, void* buf,
         nbuck_t& buckets, nbuck_t& modulus, error_code& ec);
+
+    bool
+    swing_entry(detail::bucket& b, record_entry const& e,
+        detail::bulk_writer<File>& w, detail::bucket& tmp,
+        error_code& ec);
 
     void
     finish_commit(detail::unique_lock_type& m,

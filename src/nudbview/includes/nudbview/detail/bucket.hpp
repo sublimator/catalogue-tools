@@ -141,6 +141,12 @@ public:
     void
     insert(noff_t offset, nsize_t size, nhash_t h);
 
+    // Overwrite the offset and size of the entry at
+    // index i. The hash is unchanged so ordering holds.
+    //
+    void
+    replace(nkey_t i, noff_t offset, nsize_t size);
+
     // Erase an element by index
     //
     void
@@ -318,6 +324,30 @@ insert(
         os, size);                  // Size
     detail::write<f_hash>(
         os, h);                     // Prefix
+}
+
+template<class _>
+void
+bucket_t<_>::
+replace(nkey_t i, noff_t offset, nsize_t size)
+{
+    BOOST_ASSERT(i < size_);
+    // Bucket Record
+    auto const p = p_ +
+        field<std::uint16_t>::size +    // Count
+        field<uint48_t>::size;          // Spill
+    // Bucket Entry
+    auto const w =
+        field<uint48_t>::size +         // Offset
+        field<uint48_t>::size +         // Size
+        field<f_hash>::size;            // Hash
+    ostream os{p + i * w,
+        field<uint48_t>::size +         // Offset
+        field<uint48_t>::size};         // Size
+    detail::write<uint48_t>(
+        os, offset);                    // Offset
+    detail::write<uint48_t>(
+        os, size);                      // Size
 }
 
 template<class _>

@@ -633,3 +633,216 @@ TEST(NuDBView, EmptyBatchIsNoOp)
     EXPECT_TRUE(verify_record(
         db->dat_path.string(), db->key_path.string(), db->records[3], ec));
 }
+
+namespace {
+
+// Count the bucket entries that resolve to `key`, in the block and its
+// spill chain, by parsing the key and data files directly.
+std::size_t
+count_index_entries(
+    TestDatabase const& db,
+    std::array<std::uint8_t, 64> const& key)
+{
+    using namespace nudbview::detail;
+    boost::iostreams::mapped_file_source kf;
+    kf.open(db.key_path.string());
+    boost::iostreams::mapped_file_source df;
+    df.open(db.dat_path.string());
+    auto const* kdat = reinterpret_cast<std::uint8_t const*>(kf.data());
+    auto const* ddat = reinterpret_cast<std::uint8_t const*>(df.data());
+
+    key_file_header kh;
+    istream is{kdat, key_file_header::size};
+    read(is, static_cast<nudbview::noff_t>(kf.size()), kh);
+
+    auto const h = nudbview::detail::hash<nudbview::xxhasher>(
+        key.data(), kh.key_size, kh.salt);
+    auto const n = bucket_index(h, kh.buckets, kh.modulus);
+    std::vector<std::uint8_t> blk(
+        kdat + (n + 1) * kh.block_size,
+        kdat + (n + 2) * kh.block_size);
+    bucket b{kh.block_size, blk.data()};
+
+    std::size_t count = 0;
+    for (;;)
+    {
+        for (auto i = b.lower_bound(h); i < b.size(); ++i)
+        {
+            auto const item = b[i];
+            if (item.hash != h)
+                break;
+            if (std::memcmp(ddat + item.offset + 6, key.data(), kh.key_size) ==
+                0)
+                ++count;
+        }
+        auto const spill = b.spill();
+        if (!spill)
+            break;
+        blk.assign(ddat + spill, ddat + spill + kh.block_size);
+        b = bucket{kh.block_size, blk.data()};
+    }
+    return count;
+}
+
+std::uint32_t
+fetch_u32(nudbview::store& store, std::array<std::uint8_t, 64> const& key)
+{
+    std::uint32_t v = 0;
+    nudbview::error_code ec;
+    store.fetch(
+        key.data(),
+        [&](void const* p, std::size_t n) {
+            if (n == sizeof(v))
+                std::memcpy(&v, p, n);
+        },
+        ec);
+    if (ec)
+        throw std::runtime_error("fetch: " + ec.message());
+    return v;
+}
+
+}  // namespace
+
+// replace: the key keeps exactly one index entry, pointing at the newest
+// record, across in-block entries, spill chains, repeated replaces, and a
+// reopen. A tiny block size makes spills common.
+TEST(NuDBView, ReplaceSwingsTheSingleIndexEntry)
+{
+    auto db = std::make_unique<TestDatabase>();
+    db->dir = fs::temp_directory_path() /
+        fs::unique_path("nudb-replace-%%%%-%%%%");
+    fs::create_directories(db->dir);
+    db->dat_path = db->dir / "nudb.dat";
+    db->key_path = db->dir / "nudb.key";
+    db->log_path = db->dir / "nudb.log";
+    db->block_size = 256;  // capacity (256 - 8) / 18 = 13 entries
+    for (std::uint32_t i = 0; i < 3000; ++i)
+        db->records.push_back({generate_key(i), i});
+
+    nudbview::error_code ec;
+    nudbview::create<nudbview::xxhasher, nudbview::native_file>(
+        db->dat_path.string(), db->key_path.string(), db->log_path.string(),
+        db->appnum, db->uid, db->key_size, db->block_size, db->load_factor,
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    {
+        nudbview::store w;
+        w.open(
+            db->dat_path.string(), db->key_path.string(),
+            db->log_path.string(), ec);
+        ASSERT_FALSE(ec) << ec.message();
+        for (auto const& r : db->records)
+        {
+            w.insert(r.key.data(), &r.value, sizeof(r.value), ec);
+            ASSERT_FALSE(ec) << ec.message();
+        }
+        w.close(ec);
+        ASSERT_FALSE(ec) << ec.message();
+    }
+
+    // Some buckets must have spilled for this test to mean anything.
+    std::size_t spilled = 0;
+    for (std::uint32_t i = 0; i < 3000; i += 7)
+        if (count_index_entries(*db, db->records[i].key) != 1)
+            FAIL() << "record " << i << " not indexed exactly once";
+    {
+        boost::iostreams::mapped_file_source ddf;
+        ddf.open(db->dat_path.string());
+        auto const* d = reinterpret_cast<std::uint8_t const*>(ddf.data());
+        for (std::uint64_t off = 92; off + 6 <= ddf.size();)
+        {
+            std::uint64_t sz = 0;
+            for (int k = 0; k < 6; ++k)
+                sz = (sz << 8) | d[off + k];
+            if (sz == 0)
+            {
+                ++spilled;
+                std::uint16_t ss = static_cast<std::uint16_t>(
+                    (d[off + 6] << 8) | d[off + 7]);
+                off += 8 + ss;
+            }
+            else
+                off += 6 + 64 + sz;
+        }
+    }
+    ASSERT_GT(spilled, 0u) << "no spill records; raise the record count";
+
+    nudbview::store store;
+    store.open(
+        db->dat_path.string(), db->key_path.string(), db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    // Replace every 5th key once, and key 10 three times in one batch.
+    std::vector<std::pair<std::array<std::uint8_t, 64>, std::uint32_t>>
+        expect;
+    std::array<std::uint8_t, 64> const absent = generate_key(1u << 20);
+    store.batch(
+        [&](nudbview::store::appender& a) {
+            nudbview::error_code aec;
+            for (std::uint32_t i = 0; i < 3000; i += 5)
+            {
+                std::uint32_t const v = 100000 + i;
+                a.replace(db->records[i].key.data(), &v, sizeof(v), aec);
+                ASSERT_FALSE(aec) << aec.message();
+                expect.push_back({db->records[i].key, v});
+            }
+            for (std::uint32_t v = 1; v <= 3; ++v)
+            {
+                std::uint32_t const vv = 777000 + v;
+                a.replace(db->records[10].key.data(), &vv, sizeof(vv), aec);
+                ASSERT_FALSE(aec) << aec.message();
+            }
+            expect[2].second = 777003;  // records[10] is the third entry
+            std::uint32_t const av = 4242;
+            a.replace(absent.data(), &av, sizeof(av), aec);
+            ASSERT_FALSE(aec) << aec.message();
+        },
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    for (auto const& [key, v] : expect)
+        EXPECT_EQ(fetch_u32(store, key), v);
+    EXPECT_EQ(fetch_u32(store, absent), 4242u);
+    // Untouched keys still resolve to their original values.
+    for (std::uint32_t i = 1; i < 3000; i += 5)
+        EXPECT_EQ(fetch_u32(store, db->records[i].key), i);
+
+    // A second batch replaces the same keys again.
+    store.batch(
+        [&](nudbview::store::appender& a) {
+            nudbview::error_code aec;
+            for (auto& [key, v] : expect)
+            {
+                v += 1;
+                a.replace(key.data(), &v, sizeof(v), aec);
+                ASSERT_FALSE(aec) << aec.message();
+            }
+        },
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    for (auto const& [key, v] : expect)
+        EXPECT_EQ(fetch_u32(store, key), v);
+    store.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    // Exactly one index entry per key, replaced or not, and the values
+    // survive reopen.
+    for (auto const& [key, v] : expect)
+        EXPECT_EQ(count_index_entries(*db, key), 1u);
+    EXPECT_EQ(count_index_entries(*db, absent), 1u);
+    for (std::uint32_t i = 1; i < 3000; i += 5)
+        EXPECT_EQ(count_index_entries(*db, db->records[i].key), 1u);
+
+    nudbview::store again;
+    again.open(
+        db->dat_path.string(), db->key_path.string(), db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    for (auto const& [key, v] : expect)
+        EXPECT_EQ(fetch_u32(again, key), v);
+    for (std::uint32_t i = 1; i < 3000; i += 5)
+        EXPECT_EQ(fetch_u32(again, db->records[i].key), i);
+    again.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+}
