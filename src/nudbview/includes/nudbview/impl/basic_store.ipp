@@ -37,13 +37,18 @@ state(File&& df_, File&& kf_, File&& lf_,
     , kp(kp_)
     , lp(lp_)
     , hasher(kh_.salt)
-    , p0(kh_.key_size, "p0")
-    , p1(kh_.key_size, "p1")
     , c1(kh_.key_size, kh_.block_size, "c1")
     , kh(kh_)
 {
     static_assert(is_File<File>::value,
         "File requirements not met");
+    p0.reserve(nshards);
+    p1.reserve(nshards);
+    for(std::size_t i = 0; i < nshards; ++i)
+    {
+        p0.emplace_back(kh_.key_size, "p0");
+        p1.emplace_back(kh_.key_size, "p1");
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -200,7 +205,7 @@ close(error_code& ec)
     {
         open_ = false;
         ctx_->erase(*this);
-        if(! s_->p1.empty())
+        if(! pool_empty())
         {
             std::size_t work;
             std::lock_guard<std::mutex> wl{w_};
@@ -240,19 +245,21 @@ fetch(
     }
     auto const h =
         hash(key, s_->kh.key_size, s_->hasher);
-    shared_lock_type m{m_};
     {
-        auto iter = s_->p1.find(key);
-        if(iter == s_->p1.end())
+        auto const sh = shard(h);
+        std::lock_guard<std::mutex> l{sh_[sh]};
+        auto iter = s_->p1[sh].find(key);
+        if(iter == s_->p1[sh].end())
         {
-            iter = s_->p0.find(key);
-            if(iter == s_->p0.end())
+            iter = s_->p0[sh].find(key);
+            if(iter == s_->p0[sh].end())
                 goto cont;
         }
         callback(iter->first.data, iter->first.size);
         return;
     }
 cont:
+    shared_lock_type m{m_};
     auto const n = bucket_index(h, buckets_, modulus_);
     auto const iter = s_->c1.find(n);
     if(iter != s_->c1.end())
@@ -285,15 +292,19 @@ fetch_offset(
     }
     auto const h =
         hash(key, s_->kh.key_size, s_->hasher);
-    shared_lock_type m{m_};
     // A key still in a pool has not been assigned
     // a data file offset; commit assigns them.
-    if(s_->p1.find(key) != s_->p1.end() ||
-       s_->p0.find(key) != s_->p0.end())
     {
-        ec = error::key_pending;
-        return;
+        auto const sh = shard(h);
+        std::lock_guard<std::mutex> l{sh_[sh]};
+        if(s_->p1[sh].find(key) != s_->p1[sh].end() ||
+           s_->p0[sh].find(key) != s_->p0[sh].end())
+        {
+            ec = error::key_pending;
+            return;
+        }
     }
+    shared_lock_type m{m_};
     auto const n = bucket_index(h, buckets_, modulus_);
     auto const iter = s_->c1.find(n);
     if(iter != s_->c1.end())
@@ -331,15 +342,18 @@ insert(
     BOOST_ASSERT(size <= field<uint32_t>::max); // too large
     auto const h =
         hash(key, s_->kh.key_size, s_->hasher);
-    std::lock_guard<std::mutex> u{u_};
+    auto const sh = shard(h);
+    // The shard lock makes check-then-insert atomic for this key and
+    // serializes only inserts that share the shard.
+    std::lock_guard<std::mutex> u{sh_[sh]};
     {
-        shared_lock_type m{m_};
-        if(s_->p1.find(key) != s_->p1.end() ||
-           s_->p0.find(key) != s_->p0.end())
+        if(s_->p1[sh].find(key) != s_->p1[sh].end() ||
+           s_->p0[sh].find(key) != s_->p0[sh].end())
         {
             ec = error::key_exists;
             return;
         }
+        shared_lock_type m{m_};
         auto const n = bucket_index(h, buckets_, modulus_);
         auto const iter = s_->c1.find(n);
         if(iter != s_->c1.end())
@@ -377,19 +391,22 @@ insert(
             }
         }
     }
-    // Perform insert
-    unique_lock_type m{m_};
-    s_->p1.insert(h, key, data, size);
-    auto const now = clock_type::now();
-    auto const elapsed = duration_cast<duration<float>>(
-        now > s_->when ? now - s_->when : clock_type::duration{1});
-    auto const work = s_->p1.data_size() +
-        3 * s_->p1.size() * s_->kh.block_size;
-    auto const rate = static_cast<std::size_t>(
-        std::ceil(work / elapsed.count()));
-    auto const sleep =
-        s_->rate && rate > s_->rate && work > s_->burst;
-    m.unlock();
+    // Perform insert, under the shard lock only.
+    s_->p1[sh].insert(h, key, data, size);
+    auto const pending_bytes = pending_bytes_.fetch_add(size) + size;
+    auto const pending_count = pending_count_.fetch_add(1) + 1;
+    bool sleep = false;
+    {
+        shared_lock_type m{m_};
+        auto const now = clock_type::now();
+        auto const elapsed = duration_cast<duration<float>>(
+            now > s_->when ? now - s_->when : clock_type::duration{1});
+        auto const work = pending_bytes +
+            3 * pending_count * s_->kh.block_size;
+        auto const rate = static_cast<std::size_t>(
+            std::ceil(work / elapsed.count()));
+        sleep = s_->rate && rate > s_->rate && work > s_->burst;
+    }
 
     // The caller of insert must be blocked when the rate of insertion
     // (measured in approximate bytes per second) exceeds the maximum rate
@@ -840,11 +857,18 @@ finish_commit(
     // view since there could be fewer spills.
     m.lock();
     swap(c1, s_->c1);
-    s_->p0.clear();
     buckets_ = buckets;
     modulus_ = modulus;
     g_.start();
     m.unlock();
+    // The committed records are now findable through the published
+    // buckets, so the committing pools can go. Shard locks only, never
+    // under the store lock.
+    for(std::size_t i = 0; i < nshards; ++i)
+    {
+        std::lock_guard<std::mutex> l{sh_[i]};
+        s_->p0[i].clear();
+    }
     // Write clean buckets to log file
     {
         auto const size = s_->lf.size(ec);
@@ -918,16 +942,28 @@ commit(detail::unique_lock_type& m,
 {
     using namespace detail;
     BOOST_ASSERT(m.owns_lock());
-    BOOST_ASSERT(! s_->p1.empty());
-    swap(s_->p0, s_->p1);
+    BOOST_ASSERT(! pool_empty());
+    // Lock order is shard then store (insert holds a shard lock while it
+    // takes the store lock), so release the store lock before swapping.
+    // Pool access is guarded by the shard locks alone.
     m.unlock();
-    work = s_->p0.data_size();
+    std::size_t total = 0;
+    work = 0;
+    for(std::size_t i = 0; i < nshards; ++i)
+    {
+        std::lock_guard<std::mutex> l{sh_[i]};
+        swap(s_->p0[i], s_->p1[i]);
+        total += s_->p0[i].size();
+        work += s_->p0[i].data_size();
+    }
+    pending_bytes_.store(0);
+    pending_count_.store(0);
     cache c0(s_->kh.key_size, s_->kh.block_size, "c0");
     cache c1(s_->kh.key_size, s_->kh.block_size, "c1");
     // 0.63212 ~= 1 - 1/e
     {
         auto const size = static_cast<std::size_t>(
-            std::ceil(0.63212 * s_->p0.size()));
+            std::ceil(0.63212 * total));
         c0.reserve(size);
         c1.reserve(size);
     }
@@ -949,8 +985,9 @@ commit(detail::unique_lock_type& m,
         bulk_writer<File> w{s_->df, size, dataWriteSize_};
         // Write inserted data to the data file
         std::vector<record_entry> records;
-        records.reserve(s_->p0.size());
-        for(auto const& e : s_->p0)
+        records.reserve(total);
+        for(std::size_t i = 0; i < nshards; ++i)
+        for(auto const& e : s_->p0[i])
         {
             auto const offset = w.offset();
             auto os = w.prepare(value_size(
@@ -1036,13 +1073,14 @@ batch(Fn&& fn, error_code& ec)
         ec = ec_;
         return;
     }
-    // Lock order: u_ (inserts), w_ (commits), m_ (state).
-    std::lock_guard<std::mutex> u{u_};
+    // Lock order: w_ (commits), m_ (state). Inserts may continue during
+    // the batch: they reach the data file only at a commit, and no
+    // commit runs while w_ is held.
     std::lock_guard<std::mutex> wl{w_};
     unique_lock_type m{m_};
     // Pending inserts are committed first, so they
     // precede the batch in the data file.
-    if(! s_->p1.empty())
+    if(! pool_empty())
     {
         std::size_t work;
         commit(m, work, ec_);
@@ -1140,7 +1178,7 @@ flush()
         std::lock_guard<std::mutex> wl{w_};
         unique_lock_type m{m_};
         s_->when = clock_type::now();
-        if(! s_->p1.empty())
+        if(! pool_empty())
         {
             std::size_t work;
             commit(m, work, ec_);
@@ -1169,7 +1207,11 @@ flush()
                 "\n";
         #endif
         }
-        s_->p1.periodic_activity();
+        for(std::size_t i = 0; i < nshards; ++i)
+        {
+            std::lock_guard<std::mutex> l{sh_[i]};
+            s_->p1[i].periodic_activity();
+        }
     }
     if(ec_)
         ecb_.store(true);

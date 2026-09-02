@@ -18,6 +18,8 @@
 #include <nudbview/detail/promote.hpp>
 #include <nudbview/detail/store_base.hpp>
 #include <boost/optional.hpp>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <vector>
@@ -75,8 +77,8 @@ private:
         path_type kp;
         path_type lp;
         Hasher hasher;
-        detail::pool p0;
-        detail::pool p1;
+        std::vector<detail::pool> p0;   // committing pools, one per shard
+        std::vector<detail::pool> p1;   // pending pools, one per shard
         detail::cache c1;
         detail::key_file_header kh;
 
@@ -108,7 +110,27 @@ private:
     nbuck_t buckets_;               // number of buckets
     nbuck_t modulus_;               // hash modulus
 
-    std::mutex u_;                  // serializes insert()
+    // The pending pool is sharded by a nibble of the key hash so inserts
+    // on different shards, and readers checking the pool, never contend.
+    // Each shard's lock guards its p0 and p1 maps; the pool as a whole is
+    // swapped under m_ with every shard lock held.
+    static constexpr std::size_t nshards = 16;
+    std::array<std::mutex, nshards> sh_;
+    std::atomic<std::size_t> pending_bytes_{0};
+    std::atomic<std::size_t> pending_count_{0};
+
+    static constexpr std::size_t
+    shard(detail::nhash_t h) noexcept
+    {
+        return static_cast<std::size_t>((h >> 44) & (nshards - 1));
+    }
+
+    bool
+    pool_empty() const
+    {
+        return pending_count_.load() == 0;
+    }
+
     std::mutex w_;                  // serializes commit() and batch()
     detail::gentex g_;
     boost::shared_mutex m_;
