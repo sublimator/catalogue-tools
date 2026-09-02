@@ -10,8 +10,11 @@
 
 #include <nudbview/file.hpp>
 #include <nudbview/error.hpp>
+#include <atomic>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -25,6 +28,7 @@
 
 #if NUDB_POSIX_FILE
 # include <fcntl.h>
+# include <sys/mman.h>
 # include <sys/types.h>
 # include <sys/uio.h>
 # include <sys/stat.h>
@@ -35,9 +39,49 @@
 
 namespace nudbview {
 
+/** A POSIX file with a mapped read path.
+
+    Reads are served from a shared, read-only mapping of the file when
+    the requested range lies inside the mapped length, and from `pread`
+    otherwise. The mapping is created lazily on the first read and
+    replaced, at the current file size, when a read falls past its end,
+    so a file that grows by appends remaps once per growth step rather
+    than per read. In-place writes made through `write` are visible
+    through the mapping because both go through the same page cache.
+    `trunc` and `close` drop the mapping.
+
+    The store's hot reads, one bucket and one record per lookup, are
+    two `pread` calls each without this; with it they are two copies.
+*/
 class posix_file
 {
+    struct mapping
+    {
+        void* p = MAP_FAILED;
+        std::size_t len = 0;
+
+        mapping(void* p_, std::size_t len_) : p(p_), len(len_)
+        {
+        }
+        mapping(mapping const&) = delete;
+        mapping& operator=(mapping const&) = delete;
+        ~mapping()
+        {
+            if(p != MAP_FAILED)
+                ::munmap(p, len);
+        }
+    };
+
     int fd_ = -1;
+    // Accessed through std::atomic_load/atomic_store: libc++ has no
+    // atomic<shared_ptr> specialization.
+    std::shared_ptr<mapping const> map_;
+
+    // Replace the mapping with one covering the current file size.
+    // Returns the new mapping, or null if the file is empty or the
+    // mapping failed, in which case reads fall back to pread.
+    std::shared_ptr<mapping const>
+    remap() const;
 
 public:
     /// Constructor
@@ -138,6 +182,10 @@ public:
     size(error_code& ec) const;
 
     /** Read data from a location in the file.
+
+        Served from the mapped read path when the range is inside the
+        current mapping, otherwise the mapping is refreshed and the
+        read retried, and only then does it fall back to `pread`.
 
         @par Requirements
 
