@@ -199,6 +199,7 @@ close(error_code& ec)
         if(! s_->p1.empty())
         {
             std::size_t work;
+            std::lock_guard<std::mutex> wl{w_};
             detail::unique_lock_type m{m_};
             commit(m, work, ec_);
             if (ec_)
@@ -668,31 +669,16 @@ load(
     return c1.insert(n, tmp)->second;
 }
 
+// Write the log file header naming the current file sizes,
+// and checkpoint it. Recovery truncates both files back to
+// these sizes if the commit or batch that follows is torn.
+//
 template<class Hasher, class File>
 void
 basic_store<Hasher, File>::
-commit(detail::unique_lock_type& m,
-    std::size_t& work, error_code& ec)
+write_log_header(error_code& ec)
 {
     using namespace detail;
-    BOOST_ASSERT(m.owns_lock());
-    BOOST_ASSERT(! s_->p1.empty());
-    swap(s_->p0, s_->p1);
-    m.unlock();
-    work = s_->p0.data_size();
-    cache c0(s_->kh.key_size, s_->kh.block_size, "c0");
-    cache c1(s_->kh.key_size, s_->kh.block_size, "c1");
-    // 0.63212 ~= 1 - 1/e
-    {
-        auto const size = static_cast<std::size_t>(
-            std::ceil(0.63212 * s_->p0.size()));
-        c0.reserve(size);
-        c1.reserve(size);
-    }
-    buffer buf1{s_->kh.block_size};
-    buffer buf2{s_->kh.block_size};
-    bucket tmp{s_->kh.block_size, buf1.get()};
-    // Prepare rollback information
     log_file_header lh;
     lh.version = currentVersion;            // Version
     lh.uid = s_->kh.uid;                    // UID
@@ -712,74 +698,80 @@ commit(detail::unique_lock_type& m,
         return;
     // Checkpoint
     s_->lf.sync(ec);
-    if(ec)
-        return;
-    // Append data and spills to data file
-    auto modulus = modulus_;
-    auto buckets = buckets_;
+}
+
+// Do inserts, splits, and build view of original and
+// modified buckets for records already written to the
+// data file through w. Spills are appended through w.
+//
+template<class Hasher, class File>
+void
+basic_store<Hasher, File>::
+index_records(
+    std::vector<record_entry> const& records,
+    detail::bulk_writer<File>& w,
+    detail::cache& c0,
+    detail::cache& c1,
+    detail::bucket& tmp,
+    void* buf,
+    nbuck_t& buckets,
+    nbuck_t& modulus,
+    error_code& ec)
+{
+    using namespace detail;
+    for(auto const& e : records)
     {
-        // Bulk write to avoid write amplification
-        auto const size = s_->df.size(ec);
+        // VFALCO Should this be >= or > ?
+        if((frac_ += 65536) >= thresh_)
+        {
+            // split
+            frac_ -= thresh_;
+            if(buckets == modulus)
+                modulus *= 2;
+            auto const n1 = buckets - (modulus / 2);
+            auto const n2 = buckets++;
+            auto b1 = load(n1, c1, c0, buf, ec);
+            if(ec)
+                return;
+            auto b2 = c1.create(n2);
+            // If split spills, the writer is
+            // flushed which can amplify writes.
+            split(b1, b2, tmp, n1, n2,
+                buckets, modulus, w, ec);
+            if(ec)
+                return;
+        }
+        // Insert
+        auto const n = bucket_index(
+            e.hash, buckets, modulus);
+        auto b = load(n, c1, c0, buf, ec);
         if(ec)
             return;
-        bulk_writer<File> w{s_->df, size, dataWriteSize_};
-        // Write inserted data to the data file
-        for(auto& e : s_->p0)
-        {
-            // VFALCO This could be UB since other
-            // threads are reading other data members
-            // of this object in memory
-            e.second = w.offset();
-            auto os = w.prepare(value_size(
-                e.first.size, s_->kh.key_size), ec);
-            if(ec)
-                return;
-            // Data Record
-            write<uint48_t>(os, e.first.size);          // Size
-            write(os, e.first.key, s_->kh.key_size);    // Key
-            write(os, e.first.data, e.first.size);      // Data
-        }
-        // Do inserts, splits, and build view
-        // of original and modified buckets
-        for(auto const& e : s_->p0)
-        {
-            // VFALCO Should this be >= or > ?
-            if((frac_ += 65536) >= thresh_)
-            {
-                // split
-                frac_ -= thresh_;
-                if(buckets == modulus)
-                    modulus *= 2;
-                auto const n1 = buckets - (modulus / 2);
-                auto const n2 = buckets++;
-                auto b1 = load(n1, c1, c0, buf2.get(), ec);
-                if(ec)
-                    return;
-                auto b2 = c1.create(n2);
-                // If split spills, the writer is
-                // flushed which can amplify writes.
-                split(b1, b2, tmp, n1, n2,
-                    buckets, modulus, w, ec);
-                if(ec)
-                    return;
-            }
-            // Insert
-            auto const n = bucket_index(
-                e.first.hash, buckets, modulus);
-            auto b = load(n, c1, c0, buf2.get(), ec);
-            if(ec)
-                return;
-            // This can amplify writes if it spills.
-            maybe_spill(b, w, ec);
-            if(ec)
-                return;
-            b.insert(e.second, e.first.size, e.first.hash);
-        }
-        w.flush(ec);
+        // This can amplify writes if it spills.
+        maybe_spill(b, w, ec);
         if(ec)
             return;
+        b.insert(e.offset, e.size, e.hash);
     }
-    work += s_->kh.block_size * (2 * c0.size() + c1.size());
+}
+
+// Publish the new buckets to readers, log the old ones,
+// write the new ones to the key file, sync, and clear
+// the log. On return m is locked.
+//
+template<class Hasher, class File>
+void
+basic_store<Hasher, File>::
+finish_commit(
+    detail::unique_lock_type& m,
+    detail::cache& c0,
+    detail::cache& c1,
+    nbuck_t buckets,
+    nbuck_t modulus,
+    error_code& ec)
+{
+    using namespace detail;
+    BOOST_ASSERT(! m.owns_lock());
     // Give readers a view of the new buckets.
     // This might be slightly better than the old
     // view since there could be fewer spills.
@@ -845,6 +837,193 @@ commit(detail::unique_lock_type& m,
     s_->c1.clear();
 }
 
+// Caller holds w_ for the whole call.
+//
+template<class Hasher, class File>
+void
+basic_store<Hasher, File>::
+commit(detail::unique_lock_type& m,
+    std::size_t& work, error_code& ec)
+{
+    using namespace detail;
+    BOOST_ASSERT(m.owns_lock());
+    BOOST_ASSERT(! s_->p1.empty());
+    swap(s_->p0, s_->p1);
+    m.unlock();
+    work = s_->p0.data_size();
+    cache c0(s_->kh.key_size, s_->kh.block_size, "c0");
+    cache c1(s_->kh.key_size, s_->kh.block_size, "c1");
+    // 0.63212 ~= 1 - 1/e
+    {
+        auto const size = static_cast<std::size_t>(
+            std::ceil(0.63212 * s_->p0.size()));
+        c0.reserve(size);
+        c1.reserve(size);
+    }
+    buffer buf1{s_->kh.block_size};
+    buffer buf2{s_->kh.block_size};
+    bucket tmp{s_->kh.block_size, buf1.get()};
+    // Prepare rollback information
+    write_log_header(ec);
+    if(ec)
+        return;
+    // Append data and spills to data file
+    auto modulus = modulus_;
+    auto buckets = buckets_;
+    {
+        // Bulk write to avoid write amplification
+        auto const size = s_->df.size(ec);
+        if(ec)
+            return;
+        bulk_writer<File> w{s_->df, size, dataWriteSize_};
+        // Write inserted data to the data file
+        std::vector<record_entry> records;
+        records.reserve(s_->p0.size());
+        for(auto const& e : s_->p0)
+        {
+            auto const offset = w.offset();
+            auto os = w.prepare(value_size(
+                e.first.size, s_->kh.key_size), ec);
+            if(ec)
+                return;
+            // Data Record
+            write<uint48_t>(os, e.first.size);          // Size
+            write(os, e.first.key, s_->kh.key_size);    // Key
+            write(os, e.first.data, e.first.size);      // Data
+            records.push_back({e.first.hash, e.first.size, offset});
+        }
+        index_records(records, w, c0, c1, tmp,
+            buf2.get(), buckets, modulus, ec);
+        if(ec)
+            return;
+        w.flush(ec);
+        if(ec)
+            return;
+    }
+    work += s_->kh.block_size * (2 * c0.size() + c1.size());
+    finish_commit(m, c0, c1, buckets, modulus, ec);
+}
+
+template<class Hasher, class File>
+noff_t
+basic_store<Hasher, File>::appender::
+append(
+    void const* key,
+    void const* data,
+    nsize_t size,
+    error_code& ec)
+{
+    using namespace detail;
+    BOOST_ASSERT(size > 0);
+    if(ec_)
+    {
+        ec = ec_;
+        return 0;
+    }
+    auto const offset = w_.offset();
+    auto os = w_.prepare(value_size(size, key_size_), ec);
+    if(ec)
+    {
+        ec_ = ec;
+        return 0;
+    }
+    // Data Record
+    write<uint48_t>(os, size);          // Size
+    write(os, key, key_size_);          // Key
+    write(os, data, size);              // Data
+    records_.push_back({
+        hash(key, key_size_, hasher_), size, offset});
+    return offset;
+}
+
+template<class Hasher, class File>
+template<class Fn>
+void
+basic_store<Hasher, File>::
+batch(Fn&& fn, error_code& ec)
+{
+    using namespace detail;
+    BOOST_ASSERT(is_open());
+    if(ecb_)
+    {
+        ec = ec_;
+        return;
+    }
+    // Lock order: u_ (inserts), w_ (commits), m_ (state).
+    std::lock_guard<std::mutex> u{u_};
+    std::lock_guard<std::mutex> wl{w_};
+    unique_lock_type m{m_};
+    // Pending inserts are committed first, so they
+    // precede the batch in the data file.
+    if(! s_->p1.empty())
+    {
+        std::size_t work;
+        commit(m, work, ec_);
+        if(ec_)
+        {
+            ecb_.store(true);
+            ec = ec_;
+            return;
+        }
+        BOOST_ASSERT(m.owns_lock());
+    }
+    m.unlock();
+    cache c0(s_->kh.key_size, s_->kh.block_size, "c0");
+    cache c1(s_->kh.key_size, s_->kh.block_size, "c1");
+    buffer buf1{s_->kh.block_size};
+    buffer buf2{s_->kh.block_size};
+    bucket tmp{s_->kh.block_size, buf1.get()};
+    // Prepare rollback information
+    write_log_header(ec_);
+    if(ec_)
+    {
+        ecb_.store(true);
+        ec = ec_;
+        return;
+    }
+    auto modulus = modulus_;
+    auto buckets = buckets_;
+    {
+        auto const size = s_->df.size(ec_);
+        if(ec_)
+        {
+            ecb_.store(true);
+            ec = ec_;
+            return;
+        }
+        bulk_writer<File> w{s_->df, size, dataWriteSize_};
+        std::vector<record_entry> records;
+        appender a{w, s_->hasher, s_->kh.key_size, records};
+        try
+        {
+            fn(a);
+        }
+        catch(...)
+        {
+            ec_ = error::batch_aborted;
+        }
+        if(! ec_ && a.ec_)
+            ec_ = a.ec_;
+        if(! ec_)
+            index_records(records, w, c0, c1, tmp,
+                buf2.get(), buckets, modulus, ec_);
+        if(! ec_)
+            w.flush(ec_);
+        if(ec_)
+        {
+            ecb_.store(true);
+            ec = ec_;
+            return;
+        }
+    }
+    finish_commit(m, c0, c1, buckets, modulus, ec_);
+    if(ec_)
+    {
+        ecb_.store(true);
+        ec = ec_;
+    }
+}
+
 template<class Hasher, class File>
 void
 basic_store<Hasher, File>::
@@ -857,6 +1036,7 @@ flush()
     beast::unit_test::dstream dout{std::cout};
 #endif
     {
+        std::lock_guard<std::mutex> wl{w_};
         unique_lock_type m{m_};
         s_->when = clock_type::now();
         if(! s_->p1.empty())

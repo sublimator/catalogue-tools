@@ -386,3 +386,209 @@ TEST(NuDBView, FetchOffsetMatchesRawDatRecord)
     store.close(ec);
     ASSERT_FALSE(ec) << ec.message();
 }
+
+// batch: pending inserts commit first, appended records land at the
+// offsets the appender reported, a same-key duplicate is allowed, and
+// everything survives a reopen.
+TEST(NuDBView, BatchAppendsCommitAndSurviveReopen)
+{
+    auto db = create_test_database(1000, "batch");
+
+    nudbview::store store;
+    nudbview::error_code ec;
+    store.open(
+        db->dat_path.string(),
+        db->key_path.string(),
+        db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    // Five inserts left pending when the batch starts.
+    for (std::uint32_t i = 1000; i < 1005; ++i)
+    {
+        auto const k = generate_key(i);
+        store.insert(k.data(), &i, sizeof(i), ec);
+        ASSERT_FALSE(ec) << ec.message();
+    }
+
+    struct Appended
+    {
+        std::array<std::uint8_t, 64> key;
+        std::uint32_t value;
+        nudbview::noff_t offset;
+    };
+    std::vector<Appended> appended;
+    nudbview::noff_t first_batch_offset = 0;
+    auto const dup_key = db->records[7].key;
+    std::uint32_t const dup_value = 0xDEADBEEFu;
+    nudbview::noff_t dup_offset = 0;
+
+    store.batch(
+        [&](nudbview::store::appender& a) {
+            first_batch_offset = a.offset();
+            nudbview::noff_t last = 0;
+            for (std::uint32_t i = 2000; i < 2500; ++i)
+            {
+                auto const k = generate_key(i);
+                nudbview::error_code aec;
+                auto const off = a.append(k.data(), &i, sizeof(i), aec);
+                ASSERT_FALSE(aec) << aec.message();
+                EXPECT_GT(off, last);
+                last = off;
+                appended.push_back({k, i, off});
+            }
+            nudbview::error_code aec;
+            dup_offset = a.append(
+                dup_key.data(), &dup_value, sizeof(dup_value), aec);
+            ASSERT_FALSE(aec) << aec.message();
+            EXPECT_EQ(a.size(), 501u);
+        },
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    boost::iostreams::mapped_file_source mmap;
+    mmap.open(db->dat_path.string());
+    ASSERT_TRUE(mmap.is_open());
+    auto const* dat = reinterpret_cast<std::uint8_t const*>(mmap.data());
+    auto const file_size = static_cast<std::uint64_t>(mmap.size());
+
+    // The pending inserts were committed before the batch.
+    for (std::uint32_t i = 1000; i < 1005; ++i)
+    {
+        auto const k = generate_key(i);
+        nudbview::store::record_location loc{};
+        store.fetch_offset(k.data(), loc, ec);
+        ASSERT_FALSE(ec) << ec.message();
+        EXPECT_LT(loc.offset, first_batch_offset);
+    }
+
+    // Appended records are where the appender said, byte for byte.
+    for (auto const& rec : appended)
+    {
+        nudbview::store::record_location loc{};
+        store.fetch_offset(rec.key.data(), loc, ec);
+        ASSERT_FALSE(ec) << ec.message();
+        EXPECT_EQ(loc.offset, rec.offset);
+        EXPECT_EQ(loc.size, sizeof(rec.value));
+        auto const raw =
+            read_record_at_offset(dat, file_size, rec.offset, db->key_size);
+        ASSERT_TRUE(raw.valid);
+        EXPECT_EQ(
+            std::memcmp(raw.key.data(), rec.key.data(), rec.key.size()), 0);
+        std::uint32_t value = 0;
+        std::memcpy(&value, raw.value.data(), sizeof(value));
+        EXPECT_EQ(value, rec.value);
+    }
+
+    // The duplicate exists as its own record; fetch returns one of the two.
+    {
+        auto const raw =
+            read_record_at_offset(dat, file_size, dup_offset, db->key_size);
+        ASSERT_TRUE(raw.valid);
+        EXPECT_EQ(
+            std::memcmp(raw.key.data(), dup_key.data(), dup_key.size()), 0);
+        std::uint32_t value = 0;
+        std::memcpy(&value, raw.value.data(), sizeof(value));
+        EXPECT_EQ(value, dup_value);
+
+        std::uint32_t fetched = 0;
+        store.fetch(
+            dup_key.data(),
+            [&](void const* p, std::size_t n) {
+                ASSERT_EQ(n, sizeof(fetched));
+                std::memcpy(&fetched, p, n);
+            },
+            ec);
+        ASSERT_FALSE(ec) << ec.message();
+        EXPECT_TRUE(fetched == 7u || fetched == dup_value);
+    }
+    mmap.close();
+
+    store.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_FALSE(fs::exists(db->log_path));
+
+    // Reopen: still there, same offsets.
+    nudbview::store again;
+    again.open(
+        db->dat_path.string(),
+        db->key_path.string(),
+        db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    for (auto const* rec : {&appended.front(), &appended.back()})
+    {
+        nudbview::store::record_location loc{};
+        again.fetch_offset(rec->key.data(), loc, ec);
+        ASSERT_FALSE(ec) << ec.message();
+        EXPECT_EQ(loc.offset, rec->offset);
+    }
+    again.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_TRUE(verify_record(
+        db->dat_path.string(), db->key_path.string(), db->records[0], ec));
+}
+
+// batch: a throwing function tears the batch. Nothing it appended is
+// visible after recovery, and what was committed before is intact.
+TEST(NuDBView, BatchThrowIsTornAndRecovered)
+{
+    auto db = create_test_database(500, "batch-torn");
+    auto const dat_size_before = fs::file_size(db->dat_path);
+    auto const key_size_before = fs::file_size(db->key_path);
+
+    nudbview::error_code ec;
+    auto const k = generate_key(9000);
+    std::uint32_t const v = 42;
+    {
+        nudbview::store store;
+        store.open(
+            db->dat_path.string(),
+            db->key_path.string(),
+            db->log_path.string(),
+            ec);
+        ASSERT_FALSE(ec) << ec.message();
+
+        store.batch(
+            [&](nudbview::store::appender& a) {
+                nudbview::error_code aec;
+                a.append(k.data(), &v, sizeof(v), aec);
+                throw std::runtime_error("boom");
+            },
+            ec);
+        EXPECT_EQ(ec, nudbview::error::batch_aborted);
+
+        // Poisoned: every later call reports the same error.
+        ec = {};
+        store.fetch(k.data(), [](void const*, std::size_t) {}, ec);
+        EXPECT_EQ(ec, nudbview::error::batch_aborted);
+        ec = {};
+        store.close(ec);
+        EXPECT_EQ(ec, nudbview::error::batch_aborted);
+    }
+    // The log left behind drives recovery on the next open.
+    EXPECT_TRUE(fs::exists(db->log_path));
+
+    nudbview::store again;
+    ec = {};
+    again.open(
+        db->dat_path.string(),
+        db->key_path.string(),
+        db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(fs::file_size(db->dat_path), dat_size_before);
+    EXPECT_EQ(fs::file_size(db->key_path), key_size_before);
+
+    nudbview::store::record_location loc{};
+    again.fetch_offset(k.data(), loc, ec);
+    EXPECT_EQ(ec, nudbview::error::key_not_found);
+    ec = {};
+    again.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    EXPECT_TRUE(verify_record(
+        db->dat_path.string(), db->key_path.string(), db->records[0], ec));
+    EXPECT_TRUE(verify_record(
+        db->dat_path.string(), db->key_path.string(), db->records[499], ec));
+}

@@ -170,6 +170,9 @@ nudb_category()
 
                 case error::key_pending:
                     return "key is pending commit and has no offset";
+
+                case error::batch_aborted:
+                    return "batch function threw; batch torn";
             }
         }
 

@@ -18,6 +18,8 @@
 #include <nudbview/detail/store_base.hpp>
 #include <boost/optional.hpp>
 #include <chrono>
+#include <mutex>
+#include <vector>
 
 namespace nudbview {
 
@@ -106,8 +108,18 @@ private:
     nbuck_t modulus_;               // hash modulus
 
     std::mutex u_;                  // serializes insert()
+    std::mutex w_;                  // serializes commit() and batch()
     detail::gentex g_;
     boost::shared_mutex m_;
+
+    // A record written to the data file during a commit
+    // or a batch, before its bucket entry exists.
+    struct record_entry
+    {
+        detail::nhash_t hash;
+        nsize_t size;
+        noff_t offset;
+    };
 
     error_code ec_;
     std::atomic<bool> ecb_;         // `true` when ec_ set
@@ -437,6 +449,111 @@ public:
     fetch_offset(void const* key,
         record_location& location, error_code& ec);
 
+    /** Appends records to the data file inside a @ref batch.
+
+        An appender is handed to the batch function and is valid
+        only for the duration of that call.
+    */
+    class appender
+    {
+        friend class basic_store;
+
+        detail::bulk_writer<File>& w_;
+        Hasher const& hasher_;
+        nsize_t key_size_;
+        std::vector<record_entry>& records_;
+        error_code ec_;
+
+        appender(detail::bulk_writer<File>& w, Hasher const& hasher,
+            nsize_t key_size, std::vector<record_entry>& records)
+            : w_(w)
+            , hasher_(hasher)
+            , key_size_(key_size)
+            , records_(records)
+        {
+        }
+
+    public:
+        appender(appender const&) = delete;
+        appender& operator=(appender const&) = delete;
+
+        /** Append a data record.
+
+            The record is written as `[size48][key][value]` at the
+            returned offset. No check is made for an existing key:
+            a batch may deliberately write a second record under a
+            key that already exists, and the store's fetch decides
+            between them.
+
+            The returned offset is provisional. It names real bytes
+            in the data file and may be used to link records appended
+            earlier in the same batch, but it is committed only when
+            @ref batch returns without error. If the batch is torn,
+            the offset names bytes that recovery removes.
+
+            @param key A buffer of at least `key_size()` bytes.
+            @param data The value bytes.
+            @param size The value size, greater than 0.
+            @param ec Set to the error, if any occurred.
+            @return The offset of the record's size field.
+        */
+        noff_t
+        append(void const* key, void const* data,
+            nsize_t size, error_code& ec);
+
+        /// The offset the next append will return.
+        noff_t
+        offset() const
+        {
+            return w_.offset();
+        }
+
+        /// Number of records appended so far in this batch.
+        std::size_t
+        size() const
+        {
+            return records_.size();
+        }
+    };
+
+    /** Run a function that appends records as one commit.
+
+        The function is called once with an @ref appender. Every
+        record it appends is written to the data file in order, then
+        indexed, published and synced exactly as @ref insert records
+        are during a commit. Visibility and failure follow commit's:
+        a batch interrupted at any point before its final sync is
+        removed as a unit by recovery on the next open, and an error
+        inside the batch poisons the store as a commit error does.
+
+        For the window of the call no @ref insert lands between the
+        batch's records, so records appended together are physically
+        adjacent in the data file. Any records inserted before the
+        batch and still pending are committed first, so they precede
+        the batch in the data file.
+
+        The function must not call any member of this store, and must
+        not throw; if it throws, `ec` is set to
+        @ref error::batch_aborted and the store is poisoned.
+
+        @par Requirements
+
+        The database must be open.
+
+        @par Thread safety
+
+        Safe to call concurrently with any function except
+        @ref close. Concurrent inserts block for the duration.
+
+        @param fn A function with the equivalent signature
+        `void fn(appender&)`.
+
+        @param ec Set to the error, if any occurred.
+    */
+    template<class Fn>
+    void
+    batch(Fn&& fn, error_code& ec);
+
     /** Insert a value.
 
         This function attempts to insert the specified key/value
@@ -514,6 +631,20 @@ private:
     detail::bucket
     load(nbuck_t n, detail::cache& c1,
         detail::cache& c0, void* buf, error_code& ec);
+
+    void
+    write_log_header(error_code& ec);
+
+    void
+    index_records(std::vector<record_entry> const& records,
+        detail::bulk_writer<File>& w, detail::cache& c0,
+        detail::cache& c1, detail::bucket& tmp, void* buf,
+        nbuck_t& buckets, nbuck_t& modulus, error_code& ec);
+
+    void
+    finish_commit(detail::unique_lock_type& m,
+        detail::cache& c0, detail::cache& c1,
+        nbuck_t buckets, nbuck_t modulus, error_code& ec);
 
     void
     commit(detail::unique_lock_type& m,

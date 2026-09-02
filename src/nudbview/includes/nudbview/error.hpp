@@ -266,7 +266,17 @@ enum class error {
         still in a pending pool. It has no data file offset until the
         next commit assigns one.
     */
-    key_pending
+    key_pending,
+
+    /** The batch function threw.
+
+        Returned by @ref basic_store::batch when the caller's
+        function exits by exception. The batch is torn: nothing it
+        appended is committed, and the store is poisoned exactly as
+        it is after an I/O error during a commit. Recovery on the
+        next open removes the torn batch.
+    */
+    batch_aborted
 };
 
 /// Returns the error category used for database error codes.
