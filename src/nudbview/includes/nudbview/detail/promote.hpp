@@ -82,13 +82,15 @@ promote_entry(
         if(ec)
             return false;
     }
-    // In the spill chain: find it, then rebuild the chain without it.
-    noff_t spill = b.spill();
-    if(! spill)
+    // In the spill chain. Pass one: find the stale entry, one
+    // scratch bucket at a time, remembering only its record
+    // offset. Memory is one block regardless of chain length.
+    noff_t const head = b.spill();
+    if(! head)
         return false;
-    std::vector<typename bucket::value_type> keep;
+    noff_t stale = 0;
     bool found = false;
-    do
+    for(noff_t spill = head; spill && ! found;)
     {
         ensure_readable(spill, bucket_size(capacity));
         if(ec)
@@ -99,27 +101,43 @@ promote_entry(
         for(std::size_t i = 0; i < tmp.size(); ++i)
         {
             auto const item = tmp[i];
-            if(! found && item.hash == h && same_key(item.offset))
+            if(item.hash == h && same_key(item.offset))
             {
+                stale = item.offset;
                 found = true;
-                continue;
+                break;
             }
             if(ec)
                 return false;
-            keep.push_back(item);
         }
         spill = tmp.spill();
     }
-    while(spill);
     if(! found)
         return false;
+    // Pass two: stream the old chain back into the block, skipping
+    // the stale entry by its unique record offset. maybe_spill writes
+    // fresh spill records through w as the block fills; the old chain
+    // is read from the file and becomes dead bytes.
     b.spill(0);
-    for(auto const& item : keep)
+    for(noff_t spill = head; spill;)
     {
-        maybe_spill(b, w, ec);
+        ensure_readable(spill, bucket_size(capacity));
         if(ec)
             return false;
-        b.insert(item.offset, item.size, item.hash);
+        tmp.read(df, spill, ec);
+        if(ec)
+            return false;
+        for(std::size_t i = 0; i < tmp.size(); ++i)
+        {
+            auto const item = tmp[i];
+            if(item.offset == stale)
+                continue;
+            maybe_spill(b, w, ec);
+            if(ec)
+                return false;
+            b.insert(item.offset, item.size, item.hash);
+        }
+        spill = tmp.spill();
     }
     maybe_spill(b, w, ec);
     if(ec)

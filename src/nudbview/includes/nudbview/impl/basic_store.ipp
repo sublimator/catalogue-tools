@@ -732,6 +732,22 @@ index_records(
     using namespace detail;
     for(auto const& e : records)
     {
+        if(e.replace)
+        {
+            // Promotion of an existing key adds no entry, so it
+            // must not advance the load accounting or split.
+            auto const n = bucket_index(
+                e.hash, buckets, modulus);
+            auto b = load(n, c1, c0, buf, ec);
+            if(ec)
+                return;
+            auto const swung = swing_entry(b, e, w, tmp, ec);
+            if(ec)
+                return;
+            if(swung)
+                continue;
+            // No entry for this key yet: insert as new, below.
+        }
         // VFALCO Should this be >= or > ?
         if((frac_ += 65536) >= thresh_)
         {
@@ -758,15 +774,6 @@ index_records(
         auto b = load(n, c1, c0, buf, ec);
         if(ec)
             return;
-        if(e.replace)
-        {
-            auto const swung = swing_entry(b, e, w, tmp, ec);
-            if(ec)
-                return;
-            if(swung)
-                continue;
-            // No entry for this key yet: fall through to insert.
-        }
         // This can amplify writes if it spills.
         maybe_spill(b, w, ec);
         if(ec)

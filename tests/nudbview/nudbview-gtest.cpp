@@ -638,8 +638,14 @@ namespace {
 
 // Count the bucket entries that resolve to `key`, in the block and its
 // spill chain, by parsing the key and data files directly.
-std::size_t
-count_index_entries(
+struct IndexEntries
+{
+    std::size_t count = 0;
+    std::size_t in_spill = 0;
+};
+
+IndexEntries
+locate_index_entries(
     TestDatabase const& db,
     std::array<std::uint8_t, 64> const& key)
 {
@@ -663,7 +669,8 @@ count_index_entries(
         kdat + (n + 2) * kh.block_size);
     bucket b{kh.block_size, blk.data()};
 
-    std::size_t count = 0;
+    IndexEntries out;
+    bool spilled = false;
     for (;;)
     {
         for (auto i = b.lower_bound(h); i < b.size(); ++i)
@@ -673,15 +680,28 @@ count_index_entries(
                 break;
             if (std::memcmp(ddat + item.offset + 6, key.data(), kh.key_size) ==
                 0)
-                ++count;
+            {
+                ++out.count;
+                if (spilled)
+                    ++out.in_spill;
+            }
         }
         auto const spill = b.spill();
         if (!spill)
             break;
         blk.assign(ddat + spill, ddat + spill + kh.block_size);
         b = bucket{kh.block_size, blk.data()};
+        spilled = true;
     }
-    return count;
+    return out;
+}
+
+std::size_t
+count_index_entries(
+    TestDatabase const& db,
+    std::array<std::uint8_t, 64> const& key)
+{
+    return locate_index_entries(db, key).count;
 }
 
 std::uint32_t
@@ -766,6 +786,13 @@ TEST(NuDBView, ReplaceSwingsTheSingleIndexEntry)
         }
     }
     ASSERT_GT(spilled, 0u) << "no spill records; raise the record count";
+    // Some of the keys about to be replaced must have their stale entry in
+    // a spill record, or the spill-chain path is not exercised.
+    std::size_t targets_in_spill = 0;
+    for (std::uint32_t i = 0; i < 3000; i += 5)
+        targets_in_spill += locate_index_entries(*db, db->records[i].key).in_spill;
+    ASSERT_GT(targets_in_spill, 0u) << "no replace target sits in a spill";
+    auto const key_file_size_before = fs::file_size(db->key_path);
 
     nudbview::store store;
     store.open(
@@ -825,6 +852,11 @@ TEST(NuDBView, ReplaceSwingsTheSingleIndexEntry)
         EXPECT_EQ(fetch_u32(store, key), v);
     store.close(ec);
     ASSERT_FALSE(ec) << ec.message();
+
+    // 1200 replaces of existing keys, far past the split threshold, add
+    // no entries and therefore no buckets: the key file did not grow. (The
+    // one absent key added a single entry, which cannot add a bucket.)
+    EXPECT_EQ(fs::file_size(db->key_path), key_file_size_before);
 
     // Exactly one index entry per key, replaced or not, and the values
     // survive reopen.
