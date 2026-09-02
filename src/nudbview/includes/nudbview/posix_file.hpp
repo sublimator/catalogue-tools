@@ -80,6 +80,7 @@ class posix_file
     // the pointer just before a remap can never touch freed memory;
     // address space is the only cost and remaps are rare.
     mutable std::atomic<mapping const*> map_{nullptr};
+    mutable std::atomic<std::uint64_t> known_size_{0};  // last observed file size
     mutable std::mutex remap_mutex_;
     mutable std::vector<std::unique_ptr<mapping const>> maps_;
 

@@ -13,6 +13,7 @@
 #include <boost/assert.hpp>
 #include <cmath>
 #include <memory>
+#include <thread>
 
 #ifndef NUDB_DEBUG_LOG
 #define NUDB_DEBUG_LOG 0
@@ -37,7 +38,6 @@ state(File&& df_, File&& kf_, File&& lf_,
     , kp(kp_)
     , lp(lp_)
     , hasher(kh_.salt)
-    , c1(kh_.key_size, kh_.block_size, "c1")
     , kh(kh_)
 {
     static_assert(is_File<File>::value,
@@ -188,6 +188,11 @@ open(
     dataWriteSize_ = 32 * nudbview::block_size(dat_path);
     logWriteSize_ = 32 * nudbview::block_size(log_path);
     s_.emplace(std::move(*s));
+    gen_.store(0);
+    readers_[0].store(0);
+    readers_[1].store(0);
+    snap_[0] = snapshot{buckets_, modulus_, nullptr};
+    snap_[1] = snapshot{};
     // Recovery has run: everything in the data file is durable.
     durable_size_.store(s_->df.size(ec));
     if(ec)
@@ -259,13 +264,14 @@ fetch(
         return;
     }
 cont:
-    shared_lock_type m{m_};
-    auto const n = bucket_index(h, buckets_, modulus_);
-    auto const iter = s_->c1.find(n);
-    if(iter != s_->c1.end())
-        return fetch(h, key, iter->second, callback, ec);
-    genlock<gentex> g{g_};
-    m.unlock();
+    read_guard rg{*this};
+    auto const n = bucket_index(h, rg.snap->buckets, rg.snap->modulus);
+    if(rg.snap->c1)
+    {
+        auto const iter = rg.snap->c1->find(n);
+        if(iter != rg.snap->c1->end())
+            return fetch(h, key, iter->second, callback, ec);
+    }
     buffer buf{s_->kh.block_size};
     // b constructs from uninitialized buf
     bucket b{s_->kh.block_size, buf.get()};
@@ -304,13 +310,14 @@ fetch_offset(
             return;
         }
     }
-    shared_lock_type m{m_};
-    auto const n = bucket_index(h, buckets_, modulus_);
-    auto const iter = s_->c1.find(n);
-    if(iter != s_->c1.end())
-        return fetch_offset(h, key, iter->second, location, ec);
-    genlock<gentex> g{g_};
-    m.unlock();
+    read_guard rg{*this};
+    auto const n = bucket_index(h, rg.snap->buckets, rg.snap->modulus);
+    if(rg.snap->c1)
+    {
+        auto const iter = rg.snap->c1->find(n);
+        if(iter != rg.snap->c1->end())
+            return fetch_offset(h, key, iter->second, location, ec);
+    }
     buffer buf{s_->kh.block_size};
     // b constructs from uninitialized buf
     bucket b{s_->kh.block_size, buf.get()};
@@ -353,27 +360,22 @@ insert(
             ec = error::key_exists;
             return;
         }
-        shared_lock_type m{m_};
-        auto const n = bucket_index(h, buckets_, modulus_);
-        auto const iter = s_->c1.find(n);
-        if(iter != s_->c1.end())
+        read_guard rg{*this};
+        auto const n = bucket_index(h, rg.snap->buckets, rg.snap->modulus);
+        bool found = false;
+        typename detail::cache::iterator iter;
+        bool cached = false;
+        if(rg.snap->c1)
         {
-            auto const found = exists(
-                h, key, &m, iter->second, ec);
-            if(ec)
-                return;
-            if(found)
-            {
-                ec = error::key_exists;
-                return;
-            }
-            // m is now unlocked
+            iter = rg.snap->c1->find(n);
+            cached = iter != rg.snap->c1->end();
+        }
+        if(cached)
+        {
+            found = exists(h, key, nullptr, iter->second, ec);
         }
         else
         {
-            // VFALCO Audit for concurrency
-            genlock<gentex> g{g_};
-            m.unlock();
             buffer buf;
             buf.reserve(s_->kh.block_size);
             bucket b{s_->kh.block_size, buf.get()};
@@ -381,14 +383,14 @@ insert(
                    static_cast<noff_t>(n + 1) * s_->kh.block_size, ec);
             if(ec)
                 return;
-            auto const found = exists(h, key, nullptr, b, ec);
-            if(ec)
-                return;
-            if(found)
-            {
-                ec = error::key_exists;
-                return;
-            }
+            found = exists(h, key, nullptr, b, ec);
+        }
+        if(ec)
+            return;
+        if(found)
+        {
+            ec = error::key_exists;
+            return;
         }
     }
     // Perform insert, under the shard lock only.
@@ -852,15 +854,24 @@ finish_commit(
 {
     using namespace detail;
     BOOST_ASSERT(! m.owns_lock());
-    // Give readers a view of the new buckets.
-    // This might be slightly better than the old
-    // view since there could be fewer spills.
-    m.lock();
-    swap(c1, s_->c1);
+    // Publish the new buckets to readers under a new generation. The
+    // slot being reused belonged to the generation before last, whose
+    // readers were drained by the previous commit, so it is free to
+    // clear and refill.
+    auto const g = gen_.load(std::memory_order_acquire);
+    auto const ng = g + 1;
+    auto& slot = s_->c1[ng & 1];
+    slot.clear();
+    swap(c1, slot);
     buckets_ = buckets;
     modulus_ = modulus;
-    g_.start();
-    m.unlock();
+    snap_[ng & 1] = snapshot{buckets, modulus, &slot};
+    gen_.store(ng, std::memory_order_release);
+    // Readers of the previous generation may still be inside a bucket
+    // read from the key file or its cache; wait them out before the
+    // key file is rewritten. Their critical sections are microseconds.
+    while(readers_[g & 1].load(std::memory_order_acquire) != 0)
+        std::this_thread::yield();
     // The committed records are now findable through the published
     // buckets, so the committing pools can go. Shard locks only, never
     // under the store lock.
@@ -895,9 +906,10 @@ finish_commit(
         if(ec)
             return;
     }
-    g_.finish();
-    // Write new buckets to key file
-    for(auto const e : s_->c1)
+    // Write new buckets to key file. Current-generation readers take
+    // every touched bucket from the published cache, so none of these
+    // blocks is read from the file while it is being written.
+    for(auto const e : slot)
     {
         e.second.write(s_->kf,
            (e.first + 1) * s_->kh.block_size, ec);
@@ -925,11 +937,9 @@ finish_commit(
             return;
         durable_size_.store(size);
     }
-    // Cache is no longer needed, all fetches will go straight
-    // to disk again. Do this after the sync, otherwise readers
-    // might get blocked longer due to the extra I/O.
+    // The published cache stays until the next commit reuses its slot,
+    // so a current-generation reader can never see it cleared.
     m.lock();
-    s_->c1.clear();
 }
 
 // Caller holds w_ for the whole call.

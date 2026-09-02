@@ -9,6 +9,8 @@
 #define NUDB_IMPL_POSIX_FILE_IPP
 
 #include <boost/assert.hpp>
+#include <algorithm>
+#include <cstdlib>
 #include <limits.h>
 
 namespace nudbview {
@@ -82,9 +84,16 @@ remap() const
     struct stat st;
     if(::fstat(fd_, &st) != 0 || st.st_size <= 0)
         return nullptr;
-    auto const len = static_cast<std::size_t>(st.st_size);
-    if(auto const* cur = map_.load(); cur && cur->len >= len)
+    auto const size = static_cast<std::size_t>(st.st_size);
+    auto const* cur = map_.load();
+    if(cur && cur->len >= size)
         return cur;
+    // Map with headroom so a file that grows a block at a time, as the
+    // key file does on every bucket split, remaps logarithmically rather
+    // than per block. Pages past the end of the file are never touched:
+    // the store only reads what it has written.
+    auto len = cur ? std::max(size, cur->len * 2) : size;
+    len = std::max<std::size_t>(len, std::size_t{16} << 20);
     void* const p = ::mmap(nullptr, len, PROT_READ, MAP_SHARED, fd_, 0);
     if(p == MAP_FAILED)
         return nullptr;
@@ -163,15 +172,30 @@ read(std::uint64_t offset,
         return;
     // Mapped fast path: copy when the range is inside the mapping,
     // refreshing the mapping once if the file has grown past it.
+    // NUDBVIEW_NO_MMAP=1 in the environment disables it, for A/B runs.
+    static bool const no_mmap = std::getenv("NUDBVIEW_NO_MMAP") != nullptr;
+    if(! no_mmap)
     {
         auto const* m = map_.load(std::memory_order_acquire);
         if(! m || offset + bytes > m->len)
             m = remap();
         if(m && offset + bytes <= m->len)
         {
-            std::memcpy(buffer,
-                static_cast<char const*>(m->p) + offset, bytes);
-            return;
+            // Headroom past the file's end would fault; a read there is
+            // a caller error and gets pread's short_read instead.
+            if(offset + bytes > known_size_.load(std::memory_order_acquire))
+            {
+                struct stat st;
+                if(::fstat(fd_, &st) == 0)
+                    known_size_.store(static_cast<std::uint64_t>(st.st_size),
+                        std::memory_order_release);
+            }
+            if(offset + bytes <= known_size_.load(std::memory_order_acquire))
+            {
+                std::memcpy(buffer,
+                    static_cast<char const*>(m->p) + offset, bytes);
+                return;
+            }
         }
     }
     while(bytes > 0)

@@ -12,7 +12,6 @@
 #include <nudbview/file.hpp>
 #include <nudbview/type_traits.hpp>
 #include <nudbview/detail/cache.hpp>
-#include <nudbview/detail/gentex.hpp>
 #include <nudbview/detail/mutex.hpp>
 #include <nudbview/detail/pool.hpp>
 #include <nudbview/detail/promote.hpp>
@@ -79,7 +78,7 @@ private:
         Hasher hasher;
         std::vector<detail::pool> p0;   // committing pools, one per shard
         std::vector<detail::pool> p1;   // pending pools, one per shard
-        detail::cache c1;
+        detail::cache c1[2];            // published bucket caches, by generation parity
         detail::key_file_header kh;
 
         std::size_t rate = 0;
@@ -132,8 +131,48 @@ private:
     }
 
     std::mutex w_;                  // serializes commit() and batch()
-    detail::gentex g_;
-    boost::shared_mutex m_;
+    boost::shared_mutex m_;         // rate/burst/when only; readers never take it
+
+    // Lock-free reader path. A commit publishes an immutable snapshot of
+    // the bucket geometry and its bucket cache under a new generation.
+    // A reader increments the counter of the generation it observed,
+    // re-checks the generation, reads, and decrements. Before the
+    // committer rewrites the key file it waits for the previous
+    // generation's readers to drain, so no reader sees a torn bucket or
+    // a cleared cache: a generation's cache is cleared only at the
+    // publish two generations later, when its readers are long gone.
+    struct snapshot
+    {
+        nbuck_t buckets = 0;
+        nbuck_t modulus = 0;
+        detail::cache* c1 = nullptr;   // buckets touched by the publishing commit
+    };
+    std::atomic<std::size_t> gen_{0};
+    std::atomic<std::size_t> readers_[2]{{0}, {0}};
+    snapshot snap_[2];
+
+    struct read_guard
+    {
+        basic_store& st;
+        std::size_t gen;
+        snapshot const* snap;
+        explicit read_guard(basic_store& s) : st(s)
+        {
+            for(;;)
+            {
+                gen = st.gen_.load(std::memory_order_acquire);
+                st.readers_[gen & 1].fetch_add(1, std::memory_order_acq_rel);
+                if(st.gen_.load(std::memory_order_acquire) == gen)
+                    break;
+                st.readers_[gen & 1].fetch_sub(1, std::memory_order_acq_rel);
+            }
+            snap = &st.snap_[gen & 1];
+        }
+        ~read_guard()
+        {
+            st.readers_[gen & 1].fetch_sub(1, std::memory_order_acq_rel);
+        }
+    };
 
     // A record written to the data file during a commit
     // or a batch, before its bucket entry exists.
