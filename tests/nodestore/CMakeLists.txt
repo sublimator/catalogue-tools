@@ -94,3 +94,7 @@ target_link_libraries(
           GTest::gtest_main)
 
 gtest_discover_tests(catl1_nudb_pipeline_drain_gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(wire_form_gtest wire-form-gtest.cpp)
+target_link_libraries(wire_form_gtest PRIVATE catl::nodestore catl::crypto LZ4::lz4_static GTest::gtest_main)
+gtest_discover_tests(wire_form_gtest DISCOVERY_TIMEOUT 30)
