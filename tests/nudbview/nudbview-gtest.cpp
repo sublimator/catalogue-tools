@@ -592,3 +592,44 @@ TEST(NuDBView, BatchThrowIsTornAndRecovered)
     EXPECT_TRUE(verify_record(
         db->dat_path.string(), db->key_path.string(), db->records[499], ec));
 }
+
+// batch: a function that appends nothing leaves the store unchanged and
+// the log cleared.
+TEST(NuDBView, EmptyBatchIsNoOp)
+{
+    auto db = create_test_database(200, "batch-empty");
+    auto const dat_size_before = fs::file_size(db->dat_path);
+    auto const key_size_before = fs::file_size(db->key_path);
+
+    nudbview::store store;
+    nudbview::error_code ec;
+    store.open(
+        db->dat_path.string(),
+        db->key_path.string(),
+        db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    bool called = false;
+    store.batch(
+        [&](nudbview::store::appender& a) {
+            called = true;
+            EXPECT_EQ(a.size(), 0u);
+        },
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_TRUE(called);
+    EXPECT_EQ(fs::file_size(db->dat_path), dat_size_before);
+    EXPECT_EQ(fs::file_size(db->key_path), key_size_before);
+    EXPECT_EQ(fs::file_size(db->log_path), 0u);
+
+    // Still a working store: locate and fetch a record.
+    nudbview::store::record_location loc{};
+    store.fetch_offset(db->records[3].key.data(), loc, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(loc.size, sizeof(std::uint32_t));
+    store.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_TRUE(verify_record(
+        db->dat_path.string(), db->key_path.string(), db->records[3], ec));
+}

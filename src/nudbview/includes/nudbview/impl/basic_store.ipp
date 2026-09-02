@@ -183,6 +183,10 @@ open(
     dataWriteSize_ = 32 * nudbview::block_size(dat_path);
     logWriteSize_ = 32 * nudbview::block_size(log_path);
     s_.emplace(std::move(*s));
+    // Recovery has run: everything in the data file is durable.
+    durable_size_.store(s_->df.size(ec));
+    if(ec)
+        return;
     open_ = true;
     ctx_->insert(*this);
 }
@@ -481,6 +485,13 @@ fetch_offset(
             if(std::memcmp(buf0.get(), key,
                 s_->kh.key_size) == 0)
             {
+                // Published by a commit that has not
+                // cleared its log yet: not durable.
+                if(item.offset >= durable_size_.load())
+                {
+                    ec = error::key_pending;
+                    return;
+                }
                 location.offset = item.offset;
                 location.size = item.size;
                 return;
@@ -830,6 +841,14 @@ finish_commit(
     s_->lf.sync(ec);
     if(ec)
         return;
+    // The log is gone, so recovery can no longer remove
+    // anything appended by this commit: it is all durable.
+    {
+        auto const size = s_->df.size(ec);
+        if(ec)
+            return;
+        durable_size_.store(size);
+    }
     // Cache is no longer needed, all fetches will go straight
     // to disk again. Do this after the sync, otherwise readers
     // might get blocked longer due to the extra I/O.
@@ -1004,6 +1023,20 @@ batch(Fn&& fn, error_code& ec)
         }
         if(! ec_ && a.ec_)
             ec_ = a.ec_;
+        if(! ec_ && records.empty())
+        {
+            // Nothing appended: clear the log header we wrote
+            // and leave the store exactly as it was.
+            s_->lf.trunc(0, ec_);
+            if(! ec_)
+                s_->lf.sync(ec_);
+            if(ec_)
+            {
+                ecb_.store(true);
+                ec = ec_;
+            }
+            return;
+        }
         if(! ec_)
             index_records(records, w, c0, c1, tmp,
                 buf2.get(), buckets, modulus, ec_);

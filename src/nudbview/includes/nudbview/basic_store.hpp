@@ -124,6 +124,12 @@ private:
     error_code ec_;
     std::atomic<bool> ecb_;         // `true` when ec_ set
 
+    // Data file size at the end of the last commit or batch
+    // whose log was cleared. Records at or past it were
+    // published to readers by a commit still in flight and
+    // would be truncated by recovery if the process died now.
+    std::atomic<noff_t> durable_size_{0};
+
     std::size_t dataWriteSize_;
     std::size_t logWriteSize_;
 
@@ -424,9 +430,14 @@ public:
         uncommitted tail. The returned offset is therefore a stable
         handle for as long as the data file is not rebuilt.
 
-        If the key is present but still in a pending pool it has no
-        offset yet, and `ec` is set to @ref error::key_pending. If the
-        key is not present, `ec` is set to @ref error::key_not_found.
+        Only durable records are located. A commit publishes its
+        records to @ref fetch before its final syncs, but this
+        function reports such a record as @ref error::key_pending
+        until the commit that wrote it has cleared its log, because
+        until then recovery would remove it. If the key is present
+        but still in a pending pool it likewise has no offset yet
+        and `ec` is @ref error::key_pending. If the key is not
+        present, `ec` is set to @ref error::key_not_found.
 
         @par Requirements
 
@@ -532,9 +543,15 @@ public:
         batch and still pending are committed first, so they precede
         the batch in the data file.
 
-        The function must not call any member of this store, and must
-        not throw; if it throws, `ec` is set to
-        @ref error::batch_aborted and the store is poisoned.
+        The function may call @ref fetch and @ref fetch_offset on this
+        store: no commit is in flight while it runs, so every record
+        they find is durable, and the batch's own records are not yet
+        indexed so they are never found. It must not call @ref insert,
+        @ref batch, or @ref close, which would deadlock. It must not
+        throw; if it throws, `ec` is set to @ref error::batch_aborted
+        and the store is poisoned.
+
+        A function that appends nothing leaves the store unchanged.
 
         @par Requirements
 
