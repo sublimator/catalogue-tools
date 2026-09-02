@@ -25,8 +25,9 @@ posix_file::
 posix_file(posix_file &&other)
     : fd_(other.fd_)
 {
-    std::atomic_store(&map_, std::atomic_exchange(
-        &other.map_, std::shared_ptr<mapping const>{}));
+    std::lock_guard<std::mutex> l{other.remap_mutex_};
+    maps_ = std::move(other.maps_);
+    map_.store(other.map_.exchange(nullptr));
     other.fd_ = -1;
 }
 
@@ -38,9 +39,10 @@ operator=(posix_file&& other)
     if(&other == this)
         return *this;
     close();
+    std::lock_guard<std::mutex> l{other.remap_mutex_};
     fd_ = other.fd_;
-    std::atomic_store(&map_, std::atomic_exchange(
-        &other.map_, std::shared_ptr<mapping const>{}));
+    maps_ = std::move(other.maps_);
+    map_.store(other.map_.exchange(nullptr));
     other.fd_ = -1;
     return *this;
 }
@@ -48,9 +50,21 @@ operator=(posix_file&& other)
 inline
 void
 posix_file::
+drop_mappings()
+{
+    // Callers guarantee no concurrent reader: close and trunc are not
+    // thread safe with respect to reads by contract.
+    map_.store(nullptr);
+    std::lock_guard<std::mutex> l{remap_mutex_};
+    maps_.clear();
+}
+
+inline
+void
+posix_file::
 close()
 {
-    std::atomic_store(&map_, std::shared_ptr<mapping const>{});
+    drop_mappings();
     if(fd_ != -1)
     {
         ::close(fd_);
@@ -59,19 +73,24 @@ close()
 }
 
 inline
-std::shared_ptr<posix_file::mapping const>
+posix_file::mapping const*
 posix_file::
 remap() const
 {
+    std::lock_guard<std::mutex> l{remap_mutex_};
+    // Another reader may have remapped while we waited.
     struct stat st;
     if(::fstat(fd_, &st) != 0 || st.st_size <= 0)
         return nullptr;
     auto const len = static_cast<std::size_t>(st.st_size);
+    if(auto const* cur = map_.load(); cur && cur->len >= len)
+        return cur;
     void* const p = ::mmap(nullptr, len, PROT_READ, MAP_SHARED, fd_, 0);
     if(p == MAP_FAILED)
         return nullptr;
-    auto m = std::make_shared<mapping const>(p, len);
-    std::atomic_store(&const_cast<posix_file*>(this)->map_, m);
+    maps_.push_back(std::make_unique<mapping const>(p, len));
+    auto const* m = maps_.back().get();
+    map_.store(m);
     return m;
 }
 
@@ -145,7 +164,7 @@ read(std::uint64_t offset,
     // Mapped fast path: copy when the range is inside the mapping,
     // refreshing the mapping once if the file has grown past it.
     {
-        auto m = std::atomic_load(&map_);
+        auto const* m = map_.load(std::memory_order_acquire);
         if(! m || offset + bytes > m->len)
             m = remap();
         if(m && offset + bytes <= m->len)
@@ -225,7 +244,7 @@ posix_file::
 trunc(std::uint64_t length, error_code& ec)
 {
     // A mapping longer than the file would fault past the new end.
-    std::atomic_store(&map_, std::shared_ptr<mapping const>{});
+    drop_mappings();
     for(;;)
     {
         if(::ftruncate(fd_, length) == 0)

@@ -15,8 +15,10 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #ifndef NUDB_POSIX_FILE
 # ifdef _MSC_VER
@@ -73,15 +75,22 @@ class posix_file
     };
 
     int fd_ = -1;
-    // Accessed through std::atomic_load/atomic_store: libc++ has no
-    // atomic<shared_ptr> specialization.
-    std::shared_ptr<mapping const> map_;
+    // The current mapping, read lock-free by every reader. Superseded
+    // mappings are kept in maps_ until close, so a reader that loaded
+    // the pointer just before a remap can never touch freed memory;
+    // address space is the only cost and remaps are rare.
+    mutable std::atomic<mapping const*> map_{nullptr};
+    mutable std::mutex remap_mutex_;
+    mutable std::vector<std::unique_ptr<mapping const>> maps_;
 
     // Replace the mapping with one covering the current file size.
     // Returns the new mapping, or null if the file is empty or the
     // mapping failed, in which case reads fall back to pread.
-    std::shared_ptr<mapping const>
+    mapping const*
     remap() const;
+
+    void
+    drop_mappings();
 
 public:
     /// Constructor
