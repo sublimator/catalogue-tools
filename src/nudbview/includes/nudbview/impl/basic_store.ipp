@@ -250,6 +250,7 @@ fetch(
     }
     auto const h =
         hash(key, s_->kh.key_size, s_->hasher);
+    if(! in_batch_.load(std::memory_order_acquire))
     {
         auto const sh = shard(h);
         std::lock_guard<std::mutex> l{sh_[sh]};
@@ -300,6 +301,7 @@ fetch_offset(
         hash(key, s_->kh.key_size, s_->hasher);
     // A key still in a pool has not been assigned
     // a data file offset; commit assigns them.
+    if(! in_batch_.load(std::memory_order_acquire))
     {
         auto const sh = shard(h);
         std::lock_guard<std::mutex> l{sh_[sh]};
@@ -850,7 +852,8 @@ finish_commit(
     detail::cache& c1,
     nbuck_t buckets,
     nbuck_t modulus,
-    error_code& ec)
+    error_code& ec,
+    bool shards_held)
 {
     using namespace detail;
     BOOST_ASSERT(! m.owns_lock());
@@ -877,6 +880,11 @@ finish_commit(
     // under the store lock.
     for(std::size_t i = 0; i < nshards; ++i)
     {
+        if(shards_held)
+        {
+            s_->p0[i].clear();
+            continue;
+        }
         std::lock_guard<std::mutex> l{sh_[i]};
         s_->p0[i].clear();
     }
@@ -965,9 +973,13 @@ commit(detail::unique_lock_type& m,
         swap(s_->p0[i], s_->p1[i]);
         total += s_->p0[i].size();
         work += s_->p0[i].data_size();
+        // Subtract exactly what this shard moved, under its lock, so an
+        // insert landing on an already swapped shard keeps its count.
+        // Zeroing after the loop would count it away and let close()
+        // skip the commit that carries it.
+        pending_count_.fetch_sub(s_->p0[i].size());
+        pending_bytes_.fetch_sub(s_->p0[i].data_size());
     }
-    pending_bytes_.store(0);
-    pending_count_.store(0);
     cache c0(s_->kh.key_size, s_->kh.block_size, "c0");
     cache c1(s_->kh.key_size, s_->kh.block_size, "c1");
     // 0.63212 ~= 1 - 1/e
@@ -1103,6 +1115,25 @@ batch(Fn&& fn, error_code& ec)
         BOOST_ASSERT(m.owns_lock());
     }
     m.unlock();
+    // Exclude inserts for the batch's duration: every shard lock, in
+    // order. The pool is empty from here (committed above, nothing can
+    // land), so readers skip it while in_batch_ is set.
+    struct shard_guard
+    {
+        basic_store& st;
+        explicit shard_guard(basic_store& s) : st(s)
+        {
+            for(auto& mx : st.sh_)
+                mx.lock();
+            st.in_batch_.store(true, std::memory_order_release);
+        }
+        ~shard_guard()
+        {
+            st.in_batch_.store(false, std::memory_order_release);
+            for(auto it = st.sh_.rbegin(); it != st.sh_.rend(); ++it)
+                it->unlock();
+        }
+    } shards{*this};
     cache c0(s_->kh.key_size, s_->kh.block_size, "c0");
     cache c1(s_->kh.key_size, s_->kh.block_size, "c1");
     buffer buf1{s_->kh.block_size};
@@ -1165,7 +1196,7 @@ batch(Fn&& fn, error_code& ec)
             return;
         }
     }
-    finish_commit(m, c0, c1, buckets, modulus, ec_);
+    finish_commit(m, c0, c1, buckets, modulus, ec_, true);
     if(ec_)
     {
         ecb_.store(true);

@@ -117,6 +117,10 @@ private:
     std::array<std::mutex, nshards> sh_;
     std::atomic<std::size_t> pending_bytes_{0};
     std::atomic<std::size_t> pending_count_{0};
+    // True while a batch holds every shard lock. The pool is empty then
+    // (the batch committed it first and inserts are excluded), so readers
+    // skip the pool instead of blocking on a shard lock the batch holds.
+    std::atomic<bool> in_batch_{false};
 
     static constexpr std::size_t
     shard(detail::nhash_t h) noexcept
@@ -633,6 +637,11 @@ public:
         throw; if it throws, `ec` is set to @ref error::batch_aborted
         and the store is poisoned.
 
+        Inserts from other threads block for the batch's duration: the
+        batch holds every pool shard lock from after its opening commit
+        until its buckets are published, so a key the batch appends can
+        never also be inserted through the pool and indexed twice.
+
         A function that appends nothing leaves the store unchanged.
 
         @par Requirements
@@ -748,7 +757,8 @@ private:
     void
     finish_commit(detail::unique_lock_type& m,
         detail::cache& c0, detail::cache& c1,
-        nbuck_t buckets, nbuck_t modulus, error_code& ec);
+        nbuck_t buckets, nbuck_t modulus, error_code& ec,
+        bool shards_held = false);
 
     void
     commit(detail::unique_lock_type& m,

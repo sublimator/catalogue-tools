@@ -973,3 +973,69 @@ TEST(NuDBView, RekeyReproducesThePromotedWinner)
     store.close(ec);
     ASSERT_FALSE(ec) << ec.message();
 }
+
+// posix_file mapped read path: initial map, growth and remap, in-place
+// write visibility, truncation and short read, and the overflow guard.
+TEST(NuDBView, PosixFileMappedReads)
+{
+    auto const dir = fs::temp_directory_path() /
+        fs::unique_path("nudb-mapped-%%%%-%%%%");
+    fs::create_directories(dir);
+    auto const path = (dir / "f.bin").string();
+    nudbview::error_code ec;
+    nudbview::posix_file f;
+    f.create(nudbview::file_mode::write, path, ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    std::vector<std::uint8_t> a(8192, 0xA1);
+    f.write(0, a.data(), a.size(), ec);
+    ASSERT_FALSE(ec);
+    std::vector<std::uint8_t> out(8192);
+    f.read(0, out.data(), out.size(), ec);  // creates the mapping
+    ASSERT_FALSE(ec);
+    EXPECT_EQ(out, a);
+
+    // Growth past the mapping: the next read must see appended bytes.
+    std::vector<std::uint8_t> b(70000, 0xB2);
+    f.write(8192, b.data(), b.size(), ec);
+    ASSERT_FALSE(ec);
+    std::vector<std::uint8_t> tail(b.size());
+    f.read(8192, tail.data(), tail.size(), ec);
+    ASSERT_FALSE(ec);
+    EXPECT_EQ(tail, b);
+
+    // In-place overwrite is visible through the mapping.
+    std::vector<std::uint8_t> c(4096, 0xC3);
+    f.write(4096, c.data(), c.size(), ec);
+    ASSERT_FALSE(ec);
+    std::vector<std::uint8_t> mid(4096);
+    f.read(4096, mid.data(), mid.size(), ec);
+    ASSERT_FALSE(ec);
+    EXPECT_EQ(mid, c);
+
+    // Past the end: short_read, never a copy from headroom.
+    std::vector<std::uint8_t> beyond(16);
+    f.read(8192 + 70000 - 8, beyond.data(), beyond.size(), ec);
+    EXPECT_EQ(ec, nudbview::error::short_read);
+    ec = {};
+
+    // Truncate, then a read in the removed range is a short read.
+    f.trunc(4096, ec);
+    ASSERT_FALSE(ec);
+    std::vector<std::uint8_t> gone(4096);
+    f.read(4096, gone.data(), gone.size(), ec);
+    EXPECT_EQ(ec, nudbview::error::short_read);
+    ec = {};
+    std::vector<std::uint8_t> kept(4096);
+    f.read(0, kept.data(), kept.size(), ec);
+    ASSERT_FALSE(ec);
+    EXPECT_EQ(kept, std::vector<std::uint8_t>(4096, 0xA1));
+
+    // Overflow: offset + bytes wraps; must not pass the range check.
+    std::vector<std::uint8_t> ov(64);
+    f.read(std::numeric_limits<std::uint64_t>::max() - 8, ov.data(), ov.size(), ec);
+    EXPECT_TRUE(ec);
+    ec = {};
+    f.close();
+    fs::remove_all(dir);
+}

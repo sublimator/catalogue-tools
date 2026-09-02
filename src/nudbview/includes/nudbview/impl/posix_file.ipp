@@ -183,21 +183,27 @@ read(std::uint64_t offset,
     static bool const no_mmap = std::getenv("NUDBVIEW_NO_MMAP") != nullptr;
     if(! no_mmap)
     {
+        // Compare without forming offset + bytes: it can wrap.
+        auto const inside = [](std::uint64_t off, std::size_t n,
+            std::uint64_t len)
+        {
+            return off <= len && n <= len - off;
+        };
         auto const* m = map_.load(std::memory_order_acquire);
-        if(! m || offset + bytes > m->len)
+        if(! m || ! inside(offset, bytes, m->len))
             m = remap();
-        if(m && offset + bytes <= m->len)
+        if(m && inside(offset, bytes, m->len))
         {
             // Headroom past the file's end would fault; a read there is
             // a caller error and gets pread's short_read instead.
-            if(offset + bytes > known_size_.load(std::memory_order_acquire))
+            if(! inside(offset, bytes, known_size_.load(std::memory_order_acquire)))
             {
                 struct stat st;
                 if(::fstat(fd_, &st) == 0)
                     known_size_.store(static_cast<std::uint64_t>(st.st_size),
                         std::memory_order_release);
             }
-            if(offset + bytes <= known_size_.load(std::memory_order_acquire))
+            if(inside(offset, bytes, known_size_.load(std::memory_order_acquire)))
             {
                 std::memcpy(buffer,
                     static_cast<char const*>(m->p) + offset, bytes);
