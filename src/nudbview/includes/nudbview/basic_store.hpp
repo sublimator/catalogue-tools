@@ -389,6 +389,54 @@ public:
     void
     fetch(void const* key, Callback && callback, error_code& ec);
 
+    /** A committed data record's location in the data file. */
+    struct record_location
+    {
+        /// Offset of the data record's size field in the data file.
+        noff_t offset;
+
+        /// Size of the value in bytes.
+        nsize_t size;
+    };
+
+    /** Locate a committed value in the data file.
+
+        This performs the same lookup as @ref fetch but returns the
+        data record's location instead of its bytes. The record at
+        `offset` is laid out as `[size48][key][value]`, so the key
+        starts at `offset + 6` and the value at
+        `offset + 6 + key_size()`.
+
+        A committed data record never moves within a data file:
+        commits only append, and recovery only truncates the
+        uncommitted tail. The returned offset is therefore a stable
+        handle for as long as the data file is not rebuilt.
+
+        If the key is present but still in a pending pool it has no
+        offset yet, and `ec` is set to @ref error::key_pending. If the
+        key is not present, `ec` is set to @ref error::key_not_found.
+
+        @par Requirements
+
+        The database must be open.
+
+        @par Thread safety
+
+        Safe to call concurrently with any function except
+        @ref close.
+
+        @param key A pointer to a memory buffer of at least
+        @ref key_size() bytes, containing the key to be searched
+        for.
+
+        @param location Set to the record's location on success.
+
+        @param ec Set to the error, if any occurred.
+    */
+    void
+    fetch_offset(void const* key,
+        record_location& location, error_code& ec);
+
     /** Insert a value.
 
         This function attempts to insert the specified key/value
@@ -448,6 +496,10 @@ private:
     void
     fetch(detail::nhash_t h, void const* key,
         detail::bucket b, Callback && callback, error_code& ec);
+
+    void
+    fetch_offset(detail::nhash_t h, void const* key,
+        detail::bucket b, record_location& location, error_code& ec);
 
     bool
     exists(detail::nhash_t h, void const* key,

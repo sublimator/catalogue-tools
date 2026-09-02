@@ -258,7 +258,15 @@ enum class error {
     slice_invalid_interval,
 
     /// Slice expected record count doesn't match actual
-    slice_record_count_mismatch
+    slice_record_count_mismatch,
+
+    /** The key is inserted but not yet committed.
+
+        Returned by @ref basic_store::fetch_offset when the key is
+        still in a pending pool. It has no data file offset until the
+        next commit assigns one.
+    */
+    key_pending
 };
 
 /// Returns the error category used for database error codes.

@@ -167,6 +167,9 @@ nudb_category()
 
                 case error::slice_record_count_mismatch:
                     return "slice expected record count doesn't match actual";
+
+                case error::key_pending:
+                    return "key is pending commit and has no offset";
             }
         }
 

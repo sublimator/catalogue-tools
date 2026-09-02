@@ -266,6 +266,47 @@ cont:
 template<class Hasher, class File>
 void
 basic_store<Hasher, File>::
+fetch_offset(
+    void const* key,
+    record_location& location,
+    error_code& ec)
+{
+    using namespace detail;
+    BOOST_ASSERT(is_open());
+    if(ecb_)
+    {
+        ec = ec_;
+        return;
+    }
+    auto const h =
+        hash(key, s_->kh.key_size, s_->hasher);
+    shared_lock_type m{m_};
+    // A key still in a pool has not been assigned
+    // a data file offset; commit assigns them.
+    if(s_->p1.find(key) != s_->p1.end() ||
+       s_->p0.find(key) != s_->p0.end())
+    {
+        ec = error::key_pending;
+        return;
+    }
+    auto const n = bucket_index(h, buckets_, modulus_);
+    auto const iter = s_->c1.find(n);
+    if(iter != s_->c1.end())
+        return fetch_offset(h, key, iter->second, location, ec);
+    genlock<gentex> g{g_};
+    m.unlock();
+    buffer buf{s_->kh.block_size};
+    // b constructs from uninitialized buf
+    bucket b{s_->kh.block_size, buf.get()};
+    b.read(s_->kf, (n + 1) * b.block_size(), ec);
+    if(ec)
+        return;
+    fetch_offset(h, key, b, location, ec);
+}
+
+template<class Hasher, class File>
+void
+basic_store<Hasher, File>::
 insert(
     void const* key,
     void const* data,
@@ -391,6 +432,56 @@ fetch(
             {
                 callback(
                     buf0.get() + s_->kh.key_size, item.size);
+                return;
+            }
+        }
+        auto const spill = b.spill();
+        if(! spill)
+            break;
+        buf1.reserve(s_->kh.block_size);
+        b = bucket(s_->kh.block_size,
+            buf1.get());
+        b.read(s_->df, spill, ec);
+        if(ec)
+            return;
+    }
+    ec = error::key_not_found;
+}
+
+// Locate key in loaded bucket b or its spills.
+// Reads only the key of each candidate record.
+//
+template<class Hasher, class File>
+void
+basic_store<Hasher, File>::
+fetch_offset(
+    detail::nhash_t h,
+    void const* key,
+    detail::bucket b,
+    record_location& location,
+    error_code& ec)
+{
+    using namespace detail;
+    buffer buf0{s_->kh.key_size};
+    buffer buf1;
+    for(;;)
+    {
+        for(auto i = b.lower_bound(h); i < b.size(); ++i)
+        {
+            auto const item = b[i];
+            if(item.hash != h)
+                break;
+            // Data Record
+            s_->df.read(item.offset +
+                field<uint48_t>::size,      // Size
+                    buf0.get(), s_->kh.key_size, ec);   // Key
+            if(ec)
+                return;
+            if(std::memcmp(buf0.get(), key,
+                s_->kh.key_size) == 0)
+            {
+                location.offset = item.offset;
+                location.size = item.size;
                 return;
             }
         }

@@ -1,4 +1,6 @@
 #include "test-helpers.hpp"
+#include <algorithm>
+#include <limits>
 #include <boost/filesystem.hpp>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -298,3 +300,89 @@ TEST(NuDBView, IncrementalIndexing)
 //     // Verify slice files
 //     // Verify records in slice
 // }
+
+// fetch_offset: the returned location must point at the record whose key
+// and value bytes in the raw .dat file match what fetch returns.
+TEST(NuDBView, FetchOffsetMatchesRawDatRecord)
+{
+    auto db = create_test_database(2000, "fetch-offset");
+
+    nudbview::store store;
+    nudbview::error_code ec;
+    store.open(
+        db->dat_path.string(),
+        db->key_path.string(),
+        db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    boost::iostreams::mapped_file_source mmap;
+    mmap.open(db->dat_path.string());
+    ASSERT_TRUE(mmap.is_open());
+    auto const* dat = reinterpret_cast<std::uint8_t const*>(mmap.data());
+    auto const file_size = static_cast<std::uint64_t>(mmap.size());
+
+    std::uint64_t min_offset = std::numeric_limits<std::uint64_t>::max();
+    for (auto const& rec : db->records)
+    {
+        nudbview::store::record_location loc{};
+        store.fetch_offset(rec.key.data(), loc, ec);
+        ASSERT_FALSE(ec) << ec.message();
+        EXPECT_EQ(loc.size, sizeof(rec.value));
+
+        auto const raw = read_record_at_offset(
+            dat, file_size, loc.offset, db->key_size);
+        ASSERT_TRUE(raw.valid);
+        ASSERT_EQ(raw.key.size(), rec.key.size());
+        EXPECT_EQ(std::memcmp(raw.key.data(), rec.key.data(), rec.key.size()), 0);
+        ASSERT_EQ(raw.value.size(), sizeof(rec.value));
+        std::uint32_t value = 0;
+        std::memcpy(&value, raw.value.data(), sizeof(value));
+        EXPECT_EQ(value, rec.value);
+        min_offset = std::min(min_offset, loc.offset);
+    }
+    // Every record lives after the data file header.
+    EXPECT_GE(min_offset, nudbview::detail::dat_file_header::size);
+
+    // An absent key is key_not_found.
+    auto const absent = generate_key(1u << 30);
+    nudbview::store::record_location loc{};
+    store.fetch_offset(absent.data(), loc, ec);
+    EXPECT_EQ(ec, nudbview::error::key_not_found);
+
+    // A key inserted but not yet committed is key_pending; after the
+    // commit that close performs it has an offset like any other.
+    ec = {};
+    auto const pending_key = generate_key(1u << 29);
+    std::uint32_t const pending_value = 0xABCD1234u;
+    store.insert(pending_key.data(), &pending_value, sizeof(pending_value), ec);
+    ASSERT_FALSE(ec) << ec.message();
+    store.fetch_offset(pending_key.data(), loc, ec);
+    EXPECT_EQ(ec, nudbview::error::key_pending);
+
+    ec = {};
+    store.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+    store.open(
+        db->dat_path.string(),
+        db->key_path.string(),
+        db->log_path.string(),
+        ec);
+    ASSERT_FALSE(ec) << ec.message();
+    store.fetch_offset(pending_key.data(), loc, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(loc.size, sizeof(pending_value));
+    // The file grew; re-map and check the committed bytes.
+    mmap.close();
+    mmap.open(db->dat_path.string());
+    ASSERT_TRUE(mmap.is_open());
+    dat = reinterpret_cast<std::uint8_t const*>(mmap.data());
+    auto const raw = read_record_at_offset(
+        dat, static_cast<std::uint64_t>(mmap.size()), loc.offset, db->key_size);
+    ASSERT_TRUE(raw.valid);
+    std::uint32_t value = 0;
+    std::memcpy(&value, raw.value.data(), sizeof(value));
+    EXPECT_EQ(value, pending_value);
+    store.close(ec);
+    ASSERT_FALSE(ec) << ec.message();
+}
