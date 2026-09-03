@@ -106,21 +106,25 @@ class LinuxClangCachePairingTests(unittest.TestCase):
         self.assert_only_build_and_run(arm_log)
         self.assert_only_build_and_run(amd_log)
 
-    def test_vqt_tsan_defaults_to_one_repeat_and_honors_override(self) -> None:
-        default_completed, default_log = self.run_gate(
-            mode="vqt-tsan", repeat=None
-        )
-        explicit_completed, explicit_log = self.run_gate(
-            mode="vqt-tsan", repeat="7"
-        )
-        self.assertEqual(default_completed.returncode, 0, default_completed.stderr)
-        self.assertEqual(
-            explicit_completed.returncode, 0, explicit_completed.stderr
-        )
-        self.assertIn("--env\tLINUX_CLANG_REPEAT=1", default_log)
-        self.assertIn("--env\tLINUX_CLANG_REPEAT=7", explicit_log)
-        self.assert_only_build_and_run(default_log)
-        self.assert_only_build_and_run(explicit_log)
+    def test_specialized_tsan_defaults_to_one_repeat_and_honors_override(self) -> None:
+        for mode in ("vqt-tsan",):
+            with self.subTest(mode=mode):
+                default_completed, default_log = self.run_gate(
+                    mode=mode, repeat=None
+                )
+                explicit_completed, explicit_log = self.run_gate(
+                    mode=mode, repeat="7"
+                )
+                self.assertEqual(
+                    default_completed.returncode, 0, default_completed.stderr
+                )
+                self.assertEqual(
+                    explicit_completed.returncode, 0, explicit_completed.stderr
+                )
+                self.assertIn("--env\tLINUX_CLANG_REPEAT=1", default_log)
+                self.assertIn("--env\tLINUX_CLANG_REPEAT=7", explicit_log)
+                self.assert_only_build_and_run(default_log)
+                self.assert_only_build_and_run(explicit_log)
 
     def test_invalid_generation_refuses_before_docker(self) -> None:
         for generation in ("../predecessor", "", " ", "foo/bar"):
