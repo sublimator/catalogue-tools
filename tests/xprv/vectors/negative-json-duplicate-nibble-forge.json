@@ -4,7 +4,7 @@
   "provenance": "independent adversarial review, 2026-07-25 \u2014 forged a ~1e9 XRP Payment that never existed on-ledger; both reference verifiers returned exit 0 before the fix",
   "form": {
     "json": {
-      "format_version": 6,
+      "format_version": 7,
       "network_id": 0,
       "steps": [
         {

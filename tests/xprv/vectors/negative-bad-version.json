@@ -1,6 +1,6 @@
 {
   "name": "bad-version",
-  "violates": "spec \u00a73.8: a file header version other than 0x06",
+  "violates": "spec \u00a73.8: a file header version other than 0x07",
   "mutations": [
     {
       "at": 4,
@@ -13,6 +13,6 @@
   },
   "base": "positive-tx-skiplist",
   "observed": {
-    "python_reason": "ValueError: binary proof: version 5 != expected 6"
+    "python_reason": "ValueError: binary proof: version 5 != expected 7"
   }
 }

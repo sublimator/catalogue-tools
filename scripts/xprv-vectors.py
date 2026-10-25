@@ -194,7 +194,7 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
 
     mut(
         "bad-version",
-        "spec §3.8: a file header version other than 0x06",
+        f"spec §3.8: a file header version other than 0x{V.FORMAT_VERSION:02X}",
         [{"at": 4, "set_hex": "05"}],
         "version",
     )

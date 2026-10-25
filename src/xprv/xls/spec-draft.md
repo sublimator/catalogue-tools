@@ -312,7 +312,7 @@ identical bytes. A cached verdict MUST therefore be keyed by both: the proof's
 §1.2 identity, and the material that resolved the view, namely the primary
 list's signed blob bytes and the raw bytes of each master's winning manifest.
 
-Renewal produces an ordinary v6 proof. A tail without an anchor is not a v6
+Renewal produces an ordinary v7 proof. A tail without an anchor is not a v7
 proof; carrying tails or anchors as standalone objects would need a new format
 version (§9.1).
 
@@ -324,7 +324,7 @@ parent-first linearization of the logical proof DAG.
 
 ```json
 {
-    "format_version": 6,
+    "format_version": 7,
     "network_id": 0,
     "steps": [
         { "type": "anchor", ... },
@@ -544,7 +544,7 @@ Every binary proof begins with a **10-byte file header**:
 ```
 Offset  Size  Field
   0       4   magic       "XPRV" (0x58 0x50 0x52 0x56)
-  4       1   version     0x06 (same version space as JSON format_version)
+  4       1   version     0x07 (same version space as JSON format_version)
   5       1   flags       bit 0: zlib compressed body
   6       4   network_id  big-endian uint32 (0 = XRPL, 21337 = Xahau)
 ```
@@ -575,7 +575,7 @@ Type bytes:
 | `0x04` | Map proof (state) | Binary trie for account state tree |
 | `0x05` | Anchor UNL | Publisher manifest, blob signature, decomposed VL |
 
-For format version 6, all other type bytes are reserved. Verifiers MUST reject
+For format version 7, all other type bytes are reserved. Verifiers MUST reject
 unknown TLV types.
 
 Length is unsigned LEB128 varint:
@@ -736,7 +736,7 @@ The shaped encoding is valid only for a VL blob whose top-level keys are
 exactly `{sequence, expiration, validators}` and whose validator objects have
 exactly `{validation_public_key, manifest}`. Producers MUST verify the shaped
 encoding round-trips to the exact signed blob bytes before emitting binary
-form. If it does not round-trip, a v6 binary producer MUST fail rather than
+form. If it does not round-trip, a v7 binary producer MUST fail rather than
 emit a non-verifiable decomposed blob; the JSON form can still carry the raw
 blob bytes in `unl.blob`.
 
@@ -790,7 +790,7 @@ canonical STObject bytes; tx tree: `VL(tx) || VL(meta)`. Note the 32-byte key
 precedes the data on the wire but is appended **after** the data in the leaf
 hash preimage.
 
-Every inner node in v6 advances exactly one nibble, so a node's depth is its
+Every inner node in v7 advances exactly one nibble, so a node's depth is its
 nesting depth and is never encoded.
 
 <!-- TODO: collapsed (depth-skipping) inner nodes. Proofs get a lot smaller:
@@ -826,9 +826,9 @@ nesting depth and is never encoded.
 
 ### 3.8 Binary Parsing Policy
 
-Version 6 is a closed format. A v6 verifier MUST reject:
+Version 7 is a closed format. A v7 verifier MUST reject:
 
-- a file header version other than `0x06`;
+- a file header version other than `0x07`;
 - nonzero reserved flag bits;
 - unknown TLV types;
 - a TLV length that exceeds the remaining body bytes;
@@ -844,7 +844,7 @@ Version 6 is a closed format. A v6 verifier MUST reject:
 - trie recursion deeper than 64 nibbles.
 
 The empty tree, lone-leaf tree root, and proofs of absence are out of scope for
-v6. A `map_proof` MUST contain at least one authenticated leaf and enough inner
+v7. A `map_proof` MUST contain at least one authenticated leaf and enough inner
 nodes or hash placeholders to recompute a non-empty SHAMap root.
 
 JSON verifiers MUST reject unknown top-level proof versions and unknown step types,
@@ -1258,7 +1258,7 @@ A conforming producer:
 - emits no JSON form for a proof whose leaves cannot be round-tripped exactly
   through its codec, and points the consumer to the binary form;
 - emits binary VL decomposition only when the shaped blob round-trips exactly;
-- does not emit unknown, reserved, or extension values in format v6.
+- does not emit unknown, reserved, or extension values in format v7.
 
 A conforming verifier:
 
@@ -1326,7 +1326,8 @@ At minimum, verifier output SHOULD expose:
 | Version | Status | Notes |
 |---------|--------|-------|
 | 5 | superseded, never released | Required the `0x05` anchor-UNL record in every binary proof |
-| 6 | current draft | JSON `format_version` and binary header version are the same value. Makes the `0x05` anchor-UNL record OPTIONAL (§3.3) |
+| 6 | superseded, deployed on xprv.it until 2026-10-25 | JSON `format_version` and binary header version are the same value. Makes the `0x05` anchor-UNL record OPTIONAL (§3.3) |
+| 7 | current draft | JSON leaves are decoded only (no hex leaves, §2.3). A JSON anchor may omit its list, like binary (§2.1). Only full validations count; the time reference is the anchor's close time; one primary publisher per network; N ≥ 1; equal-sequence lists conflict (§1.3). Canonical signatures (§8). Proof identity is the uncompressed canonical form (§1.2) |
 
 Version 6 exists because optional `0x05` changes which byte sequences are
 valid: a proof omitting the anchor UNL is malformed under v5 and well-formed
@@ -1334,7 +1335,14 @@ under v6. Reusing the v5 number would leave two verifiers, both claiming v5,
 disagreeing about the same bytes — which is the interop failure version numbers
 exist to prevent. v5 was never released, so no deployed proof is invalidated.
 
-Versions other than 6 are unrecognized by this draft and MUST be rejected.
+Version 7 exists because it changes which inputs are valid. Hex leaves were
+permitted by the v6 text and are rejected under v7. A quorum that needed partial
+validations passed the v6 reference verifiers and fails under v7. A list-less
+JSON anchor is malformed under v6 and well-formed under v7. v6 proofs were
+served publicly by xprv.it, so v7 verifiers reject them by version rather than
+by content, and producers re-issue.
+
+Versions other than 7 are unrecognized by this draft and MUST be rejected.
 
 ### 9.2 Network IDs
 
@@ -1350,7 +1358,7 @@ set (§8).
 ### 9.3 Binary Type Registries
 
 The TLV type registry is defined in §3.2. The shape-byte registry is defined in
-§3.5. All unassigned values are reserved in format v6 and MUST be rejected.
+§3.5. All unassigned values are reserved in format v7 and MUST be rejected.
 
 ### 9.4 MIME Types and File Extensions
 
