@@ -357,6 +357,20 @@ class ManifestTemplateTests(unittest.TestCase):
             sign_manifest(self.fields(f, Sequence=0xFFFFFFFF), f.masters[0], f.signers[0])
         )
 
+    def test_revocation_refuses_even_empty_signing_fields(self) -> None:
+        f = Fixture()
+        fields = {"Sequence": 0xFFFFFFFF, "PublicKey": f.masters[0][0], "SigningPubKey": ""}
+        data = v.manifest_signing_data(fields)
+        fields["Signature"] = ""
+        fields["MasterSignature"] = sign(data, f.masters[0][1])
+        ok, err, _ = v.verify_manifest(unhexlify(encode(fields)))
+        self.assertFalse(ok)
+        self.assertIn("revocation carries", err)
+
+        clean = {"Sequence": 0xFFFFFFFF, "PublicKey": f.masters[0][0]}
+        ok, err, _ = v.verify_manifest(sign_manifest(clean, f.masters[0], None))
+        self.assertTrue(ok, err)
+
     def test_rejects_field_outside_template(self) -> None:
         f = Fixture()
         self.assertValidatorManifestRejected(

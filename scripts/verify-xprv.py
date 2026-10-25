@@ -740,7 +740,8 @@ def verify_manifest(manifest_bytes: bytes) -> tuple[bool, str, dict[str, Any]]:
         return False, "master key signature invalid", parsed
 
     if sequence == MANIFEST_REVOKED:
-        if signing_key or signature_hex:
+        # Presence, not value, as in C++: even an empty field is refused.
+        if "SigningPubKey" in parsed or "Signature" in parsed:
             return False, "revocation carries a signing key or signature", parsed
         return True, "ok", parsed
 
