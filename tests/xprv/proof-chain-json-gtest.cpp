@@ -351,3 +351,73 @@ TEST(ProofChainJson, XahauBinaryLeafUsesXahauProtocol)
     auto const xahau_type = tx_type(xahau_chain);
     EXPECT_EQ(std::string(xahau_type.as_string()), "Invoke");
 }
+
+// D3: a JSON anchor may omit its validator list, the counterpart of a binary
+// proof without 0x05. The list is bundled whole or not at all.
+
+#include "xprv/anchor-verifier.h"
+#include "xprv/proof-chain-binary.h"
+
+namespace {
+
+boost::json::object
+list_less_fixture()
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) + "tests/xprv/fixture/proof.json");
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto proof = boost::json::parse(buffer.str()).as_object();
+    auto& unl = proof.at("steps").as_array().front().at("unl").as_object();
+    unl.erase("manifest");
+    unl.erase("blob");
+    unl.erase("signature");
+    return proof;
+}
+
+}  // namespace
+
+TEST(ProofChainJson, ListLessAnchorRoundTripsThroughJsonAndBinary)
+{
+    auto const proof = list_less_fixture();
+    auto const chain = xprv::from_json(proof);
+    auto const& anchor = std::get<xprv::AnchorData>(chain.steps.front());
+    EXPECT_TRUE(anchor.blob.empty());
+
+    auto const json = xprv::to_json(chain);
+    auto const& unl =
+        json.at("steps").as_array().front().at("unl").as_object();
+    EXPECT_EQ(unl.size(), 1u);
+    EXPECT_TRUE(unl.contains("public_key"));
+
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    xprv::BinaryOptions opts;
+    opts.protocol = &protocol;
+    auto const bin = xprv::to_binary(chain, opts);
+    auto const back = xprv::from_binary(bin);
+    EXPECT_EQ(
+        xprv::to_json(back).at("steps").as_array().front().at("unl"),
+        json.at("steps").as_array().front().at("unl"));
+}
+
+TEST(ProofChainJson, PartlyBundledListIsRejected)
+{
+    auto proof = list_less_fixture();
+    proof.at("steps").as_array().front().at("unl").as_object()["blob"] = "AB";
+    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
+}
+
+TEST(ProofChainJson, ListLessAnchorNeedsAnExternalList)
+{
+    auto const proof = list_less_fixture();
+    auto const& anchor = proof.at("steps").as_array().front().as_object();
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    std::vector<std::string> narrative;
+    auto const result = xprv::AnchorVerifier::verify(
+        anchor,
+        std::string(anchor.at("unl").at("public_key").as_string()),
+        protocol,
+        narrative);
+    EXPECT_FALSE(result.verified);
+    EXPECT_EQ(result.error, "validator list not bundled and no external list");
+}

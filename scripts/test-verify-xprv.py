@@ -325,6 +325,14 @@ class AnchorVerificationTests(unittest.TestCase):
         f.voters, f.partial_voters = f.signers[:4], f.signers[4:]
         self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
 
+    def test_list_less_anchor_needs_an_external_list(self) -> None:
+        f = Fixture()
+        anchor = f.anchor()
+        anchor["unl"] = {"public_key": anchor["unl"]["public_key"]}
+        self.assertRejected(
+            self.verify(anchor, f.trusted_key), "validator list not bundled and no external list"
+        )
+
     def test_revoked_master_stays_in_n_and_never_votes(self) -> None:
         f = Fixture()
         revocation = sign_manifest(

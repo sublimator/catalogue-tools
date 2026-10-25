@@ -30,11 +30,16 @@ anchor_to_json(AnchorData const& a)
 
     if (!a.publisher_key_hex.empty())
     {
+        // An anchor without its list carries only the publisher key, the
+        // JSON counterpart of a binary proof without 0x05 (§2.1, §3.3).
         boost::json::object unl;
         unl["public_key"] = a.publisher_key_hex;
-        unl["manifest"] = bytes_hex(a.publisher_manifest);
-        unl["blob"] = bytes_hex(a.blob);
-        unl["signature"] = bytes_hex(a.blob_signature);
+        if (!a.blob.empty())
+        {
+            unl["manifest"] = bytes_hex(a.publisher_manifest);
+            unl["blob"] = bytes_hex(a.blob);
+            unl["signature"] = bytes_hex(a.blob_signature);
+        }
         obj["unl"] = unl;
     }
 
@@ -315,11 +320,29 @@ anchor_from_json(boost::json::object const& obj)
     if (from_hex(a.publisher_key_hex).size() != 33)
         throw std::runtime_error(
             "proof JSON: publisher key must be exactly 33 bytes");
-    a.publisher_manifest =
-        from_hex(std::string(unl.at("manifest").as_string()));
-    a.blob = from_hex(std::string(unl.at("blob").as_string()));
-    a.blob_signature =
-        from_hex(std::string(unl.at("signature").as_string()));
+    // The list is bundled whole or not at all: manifest, blob and signature
+    // together, or only the publisher key (§2.1).
+    auto const bundled = unl.contains("manifest") + unl.contains("blob") +
+        unl.contains("signature");
+    if (bundled != 0 && bundled != 3)
+        throw std::runtime_error(
+            "proof JSON: unl must carry manifest, blob and signature together, "
+            "or none of them");
+    if (unl.size() != static_cast<std::size_t>(1 + bundled))
+        throw std::runtime_error("proof JSON: unknown member in unl");
+    if (bundled == 3)
+    {
+        a.publisher_manifest =
+            from_hex(std::string(unl.at("manifest").as_string()));
+        a.blob = from_hex(std::string(unl.at("blob").as_string()));
+        a.blob_signature =
+            from_hex(std::string(unl.at("signature").as_string()));
+        if (a.publisher_manifest.empty() || a.blob.empty() ||
+            a.blob_signature.empty())
+            throw std::runtime_error(
+                "proof JSON: a bundled list needs a non-empty manifest, blob "
+                "and signature");
+    }
 
     auto const& validations = obj.at("validations").as_object();
     for (auto const& kv : validations)

@@ -271,6 +271,17 @@ AnchorVerifier::verify(
         "... matches the trusted key we were given.");
 
     // ── Step 2: Publisher manifest signature ─────────────────────
+    // A list-less anchor (§2.1, §3.3) needs the verifier's own copy of the
+    // list for this publisher key. This verifier has no external list source
+    // yet (§1.3 discrete trust, D4), so it refuses rather than guessing.
+    if (unl.size() == 1)
+    {
+        result.error = "validator list not bundled and no external list";
+        narrative.push_back(
+            "   FAIL: the proof does not bundle its validator list, and this "
+            "verifier has no external copy of it.");
+        return result;
+    }
     if (!unl.contains("manifest"))
     {
         result.error = "no manifest in UNL";

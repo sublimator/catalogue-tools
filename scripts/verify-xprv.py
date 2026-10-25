@@ -863,6 +863,13 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
         )
     print(f"    A1: Publisher key {proof_key[:16]}... matches trusted key")
 
+    # A list-less anchor (§2.1, §3.3) needs the verifier's own copy of the
+    # list; this verifier has no external list source yet (§1.3, D4).
+    if set(unl) == {"public_key"}:
+        return AnchorResult(
+            ok=False, message="validator list not bundled and no external list"
+        )
+
     # Step 2: verify publisher manifest, bound to the trusted key → signing key
     manifest_hex = unl.get("manifest")
     if not isinstance(manifest_hex, str) or not manifest_hex:
