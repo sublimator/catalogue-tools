@@ -20,6 +20,7 @@ Usage:
   ./scripts/verify-xprv.py proof.json
   ./scripts/verify-xprv.py proof.xprv.bin
   ./scripts/verify-xprv.py proof.json --trusted-key ED2677AB...
+  ./scripts/verify-xprv.py xahau-proof.json --network 21337
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ import argparse
 import base64
 import hashlib
 import json
-import math
 import struct
 import sys
 from binascii import hexlify, unhexlify
@@ -158,6 +158,9 @@ class AnchorResult:
     unl_size: int = 0
     matched_unl: int = 0
     verified_sigs: int = 0
+    vl_sequence: int = 0
+    vl_effective: int = 0
+    vl_expiration: int = 0
 
 
 @dataclass
@@ -219,6 +222,13 @@ PREFIX_TX_SIGNING = b"STX\x00"  # STObject signing (swapped to VAL for validatio
 
 # Default XRPL mainnet VL publisher key
 XRPL_VL_KEY = "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734"
+XAHAU_VL_KEY = "EDA46E9C39B1389894E690E58914DC1029602870370A0993E5B87C4A24EAF4A8E8"
+
+# Spec §8: network_id is bound to the configured publisher key set.
+PUBLISHER_KEY_BY_NETWORK: dict[int, str] = {0: XRPL_VL_KEY, 21337: XAHAU_VL_KEY}
+NETWORK_BY_PUBLISHER_KEY: dict[str, int] = {
+    key: network for network, key in PUBLISHER_KEY_BY_NETWORK.items()
+}
 
 
 # ─── SHA512-Half ─────────────────────────────────────────────────────
@@ -691,86 +701,154 @@ def verify_manifest(manifest_bytes: bytes) -> tuple[bool, str, dict[str, Any]]:
 # ─── Anchor verification ────────────────────────────────────────────
 
 
+def validator_list_active_at(effective: int, expiration: int, close_time: int) -> bool:
+    """Whether a ledger closed inside a signed list's validity interval."""
+    return expiration > effective and effective <= close_time < expiration
+
+
+def _upper_hex(value: Any) -> str:
+    return value.upper() if isinstance(value, str) else ""
+
+
+def _blob_uint32(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= 0xFFFFFFFF else None
+
+
 def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
-    """Verify anchor: manifest chain + VL blob + validations + quorum."""
+    """Verify anchor: manifest chain + VL blob + validations + quorum.
+
+    Mirrors AnchorVerifier::verify (src/xprv/src/anchor-verifier.cpp): a
+    malformed or unbound input fails the anchor rather than being skipped.
+    """
     unl = anchor.get("unl")
-    if not unl:
+    if not isinstance(unl, dict):
         return AnchorResult(ok=False, message="no UNL data")
+    trusted = trusted_key.upper()
 
     # Step 1: publisher key matches trusted key
-    proof_key: str = unl.get("public_key", "")
-    if proof_key.lower() != trusted_key.lower():
+    proof_key = _upper_hex(unl.get("public_key"))
+    if proof_key != trusted:
         return AnchorResult(
             ok=False,
-            message=f"publisher key mismatch: {proof_key[:16]}... != {trusted_key[:16]}...",
+            message=f"publisher key mismatch: {proof_key[:16]}... != {trusted[:16]}...",
         )
     print(f"    A1: Publisher key {proof_key[:16]}... matches trusted key")
 
-    # Step 2: verify publisher manifest → get signing key
-    manifest_hex: str = unl.get("manifest", "")
-    if not manifest_hex:
+    # Step 2: verify publisher manifest, bound to the trusted key → signing key
+    manifest_hex = unl.get("manifest")
+    if not isinstance(manifest_hex, str) or not manifest_hex:
         return AnchorResult(ok=False, message="no manifest")
-    manifest_bytes = unhexlify(manifest_hex)
-    ok, err, manifest = verify_manifest(manifest_bytes)
+    try:
+        ok, err, manifest = verify_manifest(unhexlify(manifest_hex))
+    except Exception as exc:
+        ok, err, manifest = False, str(exc), {}
     if not ok:
         return AnchorResult(ok=False, message=f"publisher manifest: {err}")
-    signing_key: str = manifest.get("SigningPubKey", "").upper()
+    if _upper_hex(manifest.get("PublicKey")) != trusted:
+        return AnchorResult(
+            ok=False, message="publisher manifest master key does not match trusted key"
+        )
+    signing_key = _upper_hex(manifest.get("SigningPubKey"))
     if not signing_key:
         return AnchorResult(ok=False, message="manifest has no SigningPubKey")
     print(f"    A2: Publisher manifest VERIFIED, signing key {signing_key[:16]}...")
 
     # Step 3: verify blob signature (raw bytes, signed by publisher signing key)
-    blob_hex: str = unl.get("blob", "")
-    sig_hex: str = unl.get("signature", "")
-    if not blob_hex or not sig_hex:
+    blob_hex = unl.get("blob")
+    sig_hex = unl.get("signature")
+    if not isinstance(blob_hex, str) or not isinstance(sig_hex, str) or not blob_hex or not sig_hex:
         return AnchorResult(ok=False, message="no blob or signature")
-    blob_bytes = unhexlify(blob_hex)
-    sig_bytes = unhexlify(sig_hex)
-
-    if not xrpl.core.keypairs.is_valid_message(blob_bytes, sig_bytes, signing_key):
+    try:
+        blob_bytes = unhexlify(blob_hex)
+        blob_ok = xrpl.core.keypairs.is_valid_message(
+            blob_bytes, unhexlify(sig_hex), signing_key
+        )
+    except Exception:
+        blob_ok = False
+    if not blob_ok:
         return AnchorResult(ok=False, message="blob signature FAILED")
     print(f"    A3: Blob signature VERIFIED ({len(blob_bytes)} bytes)")
 
     # Step 4: verify validator manifests from blob → build signing→master key map
-    blob_json = json.loads(blob_bytes)
-    validators: list[dict[str, Any]] = blob_json.get("validators", [])
+    try:
+        blob_json = json.loads(blob_bytes)
+    except ValueError:
+        return AnchorResult(ok=False, message="invalid blob JSON")
+    if not isinstance(blob_json, dict):
+        return AnchorResult(ok=False, message="UNL blob is not an object")
+    validators = blob_json.get("validators")
+    if (
+        "sequence" not in blob_json
+        or "expiration" not in blob_json
+        or not isinstance(validators, list)
+    ):
+        return AnchorResult(ok=False, message="UNL blob is missing required fields")
+    vl_sequence = _blob_uint32(blob_json["sequence"])
+    vl_expiration = _blob_uint32(blob_json["expiration"])
+    vl_effective = _blob_uint32(blob_json.get("effective", 0))
+    if vl_sequence is None or vl_expiration is None or vl_effective is None:
+        return AnchorResult(ok=False, message="UNL blob validity fields are malformed")
+    if vl_expiration <= vl_effective:
+        return AnchorResult(ok=False, message="UNL blob validity interval is invalid")
+
     signing_to_master: dict[str, str] = {}
-    manifest_warnings = 0
+    masters: set[str] = set()
+    for entry in validators:
+        if not isinstance(entry, dict):
+            return AnchorResult(ok=False, message="malformed validator entry in UNL blob")
+        m_b64 = entry.get("manifest")
+        advertised = entry.get("validation_public_key")
+        if not isinstance(m_b64, str) or not isinstance(advertised, str):
+            return AnchorResult(ok=False, message="validator entry missing key or manifest")
+        try:
+            ok, err, m = verify_manifest(base64.b64decode(m_b64, validate=True))
+        except Exception as exc:
+            ok, err, m = False, str(exc), {}
+        sk = _upper_hex(m.get("SigningPubKey"))
+        if not ok or not sk:
+            return AnchorResult(
+                ok=False, message=f"invalid validator manifest: {err if not ok else 'no signing key'}"
+            )
+        mk = _upper_hex(m.get("PublicKey"))
+        if advertised.upper() != mk:
+            return AnchorResult(ok=False, message="validator manifest master key mismatch")
+        if mk in masters:
+            return AnchorResult(ok=False, message="duplicate validator master key")
+        if sk in signing_to_master:
+            return AnchorResult(ok=False, message="duplicate validator signing key")
+        masters.add(mk)
+        signing_to_master[sk] = mk
 
-    for v in validators:
-        m_b64: str = v.get("manifest", "")
-        if not m_b64:
-            continue
-        m_bytes = base64.b64decode(m_b64)
-        ok, err, m = verify_manifest(m_bytes)
-        if not ok:
-            manifest_warnings += 1
-            continue
-        sk = m.get("SigningPubKey", "").upper()
-        mk = m.get("PublicKey", "").upper()
-        if sk:
-            signing_to_master[sk] = mk
+    if masters & signing_to_master.keys():
+        return AnchorResult(ok=False, message="validator key reused across roles")
+    unl_size = len(masters)
+    if unl_size == 0:
+        return AnchorResult(ok=False, message="UNL contains no verified validators")
+    print(f"    A4: {unl_size} validator manifests verified from UNL blob")
 
-    unl_size = len(signing_to_master)
-    if manifest_warnings:
-        print(
-            f"    A4: {unl_size} validator manifests verified, {manifest_warnings} ignored"
-        )
-    else:
-        print(f"    A4: {unl_size} validator manifests verified from UNL blob")
-
-    # Step 5: verify each STValidation
-    validations: dict[str, str] = anchor.get("validations", {})
-    anchor_hash = anchor.get("ledger_hash", "").upper()
+    # Step 5: verify each STValidation; one vote per validator master key
+    validations = anchor.get("validations")
+    if not isinstance(validations, dict):
+        return AnchorResult(ok=False, message="no validations in anchor")
+    anchor_hash = _upper_hex(anchor.get("ledger_hash"))
 
     verified = 0
     matched_unl = 0
-    counted_keys: set[str] = set()
+    counted_masters: set[str] = set()
 
-    for _key_hex, val_hex in validations.items():
-        parsed = parse_validation(val_hex)
+    for key_hex, val_hex in validations.items():
+        try:
+            parsed = parse_validation(val_hex) if isinstance(val_hex, str) else None
+        except Exception:
+            parsed = None
         if not parsed:
             continue
+        if _upper_hex(key_hex) != parsed.signing_key:
+            return AnchorResult(
+                ok=False, message="validation map key does not match SigningPubKey"
+            )
         if parsed.ledger_hash != anchor_hash:
             continue
         try:
@@ -782,47 +860,52 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
             continue
 
         verified += 1
-        if (
-            parsed.signing_key in signing_to_master
-            and parsed.signing_key not in counted_keys
-        ):
-            counted_keys.add(parsed.signing_key)
+        master = signing_to_master.get(parsed.signing_key)
+        if master is not None and master not in counted_masters:
+            counted_masters.add(master)
             matched_unl += 1
 
     print(f"    A5: {verified} sigs verified, {matched_unl}/{unl_size} UNL validators")
 
-    # Step 6: quorum check (80%)
-    quorum = math.ceil(unl_size * 0.8)
-    if matched_unl >= quorum:
+    # Step 6: quorum check, ceil(80%) as in the C++ verifier
+    quorum = (unl_size * 4 + 4) // 5
+    result = AnchorResult(
+        ok=matched_unl >= quorum,
+        message=f"{matched_unl}/{unl_size} validators",
+        unl_size=unl_size,
+        matched_unl=matched_unl,
+        verified_sigs=verified,
+        vl_sequence=vl_sequence,
+        vl_effective=vl_effective,
+        vl_expiration=vl_expiration,
+    )
+    if result.ok:
         print(f"    A6: QUORUM — {matched_unl}/{unl_size} (>= 80%)")
-        return AnchorResult(
-            ok=True,
-            message=f"{matched_unl}/{unl_size} validators",
-            unl_size=unl_size,
-            matched_unl=matched_unl,
-            verified_sigs=verified,
-        )
     else:
-        return AnchorResult(
-            ok=False,
-            message=f"quorum not met: {matched_unl}/{unl_size} (need {quorum})",
-            unl_size=unl_size,
-            matched_unl=matched_unl,
-            verified_sigs=verified,
-        )
+        result.message = f"quorum not met: {matched_unl}/{unl_size} (need {quorum})"
+    return result
 
 
 # ─── Main verifier ──────────────────────────────────────────────────
 
 
 def verify(
-    proof: Proof | dict[str, Any] | list[Any], trusted_key: str | None = None
+    proof: Proof | dict[str, Any] | list[Any],
+    trusted_key: str | None = None,
+    network_id: int | None = None,
 ) -> VerifyResult:
-    """Verify a proof DAG serialized as a parent-first step list."""
+    """Verify a proof DAG serialized as a parent-first step list.
+
+    `network_id` is the configured network. It defaults to the network of a
+    known `trusted_key`, else to XRPL mainnet (0), and the proof's own
+    `network_id` must match it (spec §8).
+    """
     if isinstance(proof, list):
         steps: list[dict[str, Any]] = proof
+        proof_network = None
     else:
         steps = proof.get("steps", [])
+        proof_network = proof.get("network_id")
     result = VerifyResult()
 
     if not steps:
@@ -830,8 +913,34 @@ def verify(
         result.errors.append("proof has no steps")
         return result
 
+    if network_id is None:
+        network_id = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper()) if trusted_key else 0
+    if not trusted_key and network_id is not None:
+        trusted_key = PUBLISHER_KEY_BY_NETWORK.get(network_id)
+    key_network = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper()) if trusted_key else None
+
+    binding_error = None
     if not trusted_key:
-        trusted_key = XRPL_VL_KEY
+        binding_error = f"no trusted publisher key configured for network {network_id}"
+    elif key_network is not None and network_id is not None and key_network != network_id:
+        binding_error = (
+            f"trusted key belongs to network {key_network}, not configured network {network_id}"
+        )
+    elif network_id is None:
+        result.warnings.append(
+            "network binding not checked: custom trusted key and no configured network"
+        )
+    elif isinstance(proof, list):
+        result.warnings.append("network binding not checked: bare step list has no network_id")
+    elif proof_network != network_id:
+        binding_error = (
+            f"proof network_id {proof_network} does not match configured network {network_id}"
+        )
+    if binding_error:
+        print(f"\n  FAIL: {binding_error}")
+        result.ok = False
+        result.errors.append(binding_error)
+        return result
 
     anchor_count = sum(1 for step in steps if step.get("type") == "anchor")
     if anchor_count != 1:
@@ -847,6 +956,7 @@ def verify(
     seen_map_roots: set[tuple[str, str]] = set()
     skip_source_last_seq: dict[str, int] = {}
     anchor_seen = False
+    anchor_vl_window: tuple[int, int] | None = None
 
     print(f"\n{'=' * 60}")
     print(f"  PROOF VERIFICATION ({len(steps)} steps)")
@@ -881,6 +991,7 @@ def verify(
             if ar.ok:
                 ledger_hash = step["ledger_hash"].upper()
                 add_capability(trusted_ledger_hashes, ledger_hash, "anchor")
+                anchor_vl_window = (ar.vl_effective, ar.vl_expiration)
                 print(f"    [PASS] anchor verified ({ar.message})")
             else:
                 print(f"    [FAIL] {ar.message}")
@@ -911,6 +1022,16 @@ def verify(
                     "header hash is not supported by any earlier authenticated "
                     "ancestor or recognized LedgerHashes leaf"
                 )
+                print(f"    [FAIL] {msg}")
+                result.ok = False
+                result.errors.append(f"step {i}: {msg}")
+                continue
+            if (
+                direct_source == "anchor"
+                and anchor_vl_window is not None
+                and not validator_list_active_at(*anchor_vl_window, int(hdr["close_time"]))
+            ):
+                msg = "anchor close time is outside the signed list interval"
                 print(f"    [FAIL] {msg}")
                 result.ok = False
                 result.errors.append(f"step {i}: {msg}")
@@ -1458,6 +1579,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Verify an xprv proof (JSON or binary)")
     ap.add_argument("proof", help="Path to proof file (.json or .bin)")
     ap.add_argument("--trusted-key", default=None, help="VL publisher key (hex)")
+    ap.add_argument(
+        "--network",
+        type=int,
+        default=None,
+        help="configured network id (0 = XRPL, 21337 = Xahau); the proof must match",
+    )
     args = ap.parse_args()
 
     path = Path(args.proof)
@@ -1473,7 +1600,7 @@ def main() -> None:
         print("Format: JSON")
         proof = json.loads(raw)
 
-    r = verify(proof, args.trusted_key)
+    r = verify(proof, args.trusted_key, args.network)
     sys.exit(0 if r.ok else 1)
 
 
