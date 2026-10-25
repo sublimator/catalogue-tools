@@ -801,9 +801,11 @@ ValidationQuorumTracker::abandon_manifest_packets_locked()
 void
 ValidationQuorumTracker::set_unl(
     std::vector<catl::vl::Manifest> const& validators,
-    uint32_t vl_sequence)
+    uint32_t vl_sequence,
+    catl::vl::Manifest const& publisher_manifest)
 {
-    auto owned = std::make_shared<std::vector<catl::vl::Manifest>>(validators);
+    auto owned =
+        std::make_shared<UnlUpdate>(UnlUpdate{validators, publisher_manifest});
     auto self = shared_from_this();
 
     bool schedule_drain = false;
@@ -889,12 +891,14 @@ ValidationQuorumTracker::set_unl(
 asio::awaitable<bool>
 ValidationQuorumTracker::co_sync_unl(
     std::vector<catl::vl::Manifest> const& validators,
-    uint32_t vl_sequence)
+    uint32_t vl_sequence,
+    catl::vl::Manifest const& publisher_manifest)
 {
-    auto owned = std::make_shared<std::vector<catl::vl::Manifest>>(validators);
+    auto owned =
+        std::make_shared<UnlUpdate>(UnlUpdate{validators, publisher_manifest});
     auto self = shared_from_this();
     // clang-format off
-    //@@authority transition=prv.T0353 status=provisional scope=statement bind=co_return_statement@bc5c759eae17a6c5
+    //@@authority transition=prv.T0353 status=provisional scope=statement bind=co_return_statement@b3aaba5e475bc93a
     // owner=unresolved owner_hypothesis=validation_quorum_tracker
     // commit=validation_quorum_tracker_strand
     // execution_home=validation_quorum_tracker.strand birth=co_spawn
@@ -915,7 +919,7 @@ ValidationQuorumTracker::co_sync_unl(
 
 asio::awaitable<bool>
 ValidationQuorumTracker::co_sync_unl_on_strand(
-    std::shared_ptr<std::vector<catl::vl::Manifest>> validators,
+    std::shared_ptr<UnlUpdate> update,
     uint32_t vl_sequence)
 {
     if (!strand_.running_in_this_thread())
@@ -935,14 +939,14 @@ ValidationQuorumTracker::co_sync_unl_on_strand(
             std::lock_guard admission_lock(admission_mutex_);
             ++trust_admission_generation_;
         }
-        apply_unl_locked(*validators, vl_sequence, true);
+        apply_unl_locked(*update, vl_sequence, true);
     }
     co_return true;
 }
 
 bool
 ValidationQuorumTracker::apply_unl_locked(
-    std::vector<catl::vl::Manifest> const& validators,
+    UnlUpdate const& update,
     uint32_t vl_sequence,
     bool publish)
 {
@@ -955,9 +959,11 @@ ValidationQuorumTracker::apply_unl_locked(
 
     auto const old_keys = collector_.unl_signing_keys;
     auto const old_size = collector_.unl_size;
-    collector_.set_unl(validators);
+    collector_.set_unl(update.validators);
+    collector_.note_publisher_manifest(update.publisher_manifest);
     vl_sequence_ = vl_sequence;
-    // A new list can carry newer manifests (revocations included).
+    // A new list can carry newer manifests (revocations included), its
+    // publisher's among them.
     refresh_held_manifests_locked();
 
     bool const keys_changed = collector_.unl_signing_keys != old_keys;

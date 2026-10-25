@@ -179,7 +179,7 @@ ProofEngine::start()
     // set_unl() clears the quorum cache, so this must only fire on actual
     // VL changes — not per-request.
     vl_cache_->set_on_refresh([vbuf](catl::vl::ValidatorList const& vl) {
-        vbuf->set_unl(vl.validators, vl.sequence);
+        vbuf->set_unl(vl.validators, vl.sequence, vl.publisher_manifest);
     });
 
     // The configured endpoint uses PeerSet's owned background census. A
@@ -607,7 +607,8 @@ ProofEngine::prove(
     {
         vl = std::make_shared<catl::vl::ValidatorList>(
             co_await vl_cache_->co_get());
-        if (co_await quorum_tracker_->co_sync_unl(vl->validators, vl->sequence))
+        if (co_await quorum_tracker_->co_sync_unl(
+                vl->validators, vl->sequence, vl->publisher_manifest))
             break;
         vl.reset();
     }
@@ -1013,7 +1014,7 @@ ProofEngine::get_or_reuse_anchor(
     if (reusable)
     {
         if (!co_await quorum_tracker_->co_sync_unl(
-                vl->validators, vl->sequence))
+                vl->validators, vl->sequence, vl->publisher_manifest))
         {
             throw std::runtime_error(
                 "validator list changed while reusing proof anchor");
@@ -1142,7 +1143,8 @@ ProofEngine::get_or_reuse_anchor(
         throw std::runtime_error(
             "anchor is outside validator list validity interval");
     }
-    if (!co_await quorum_tracker_->co_sync_unl(vl->validators, vl->sequence))
+    if (!co_await quorum_tracker_->co_sync_unl(
+            vl->validators, vl->sequence, vl->publisher_manifest))
     {
         throw std::runtime_error(
             "validator list changed while building proof anchor");

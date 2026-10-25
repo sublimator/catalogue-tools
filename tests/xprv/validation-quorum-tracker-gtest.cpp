@@ -1,3 +1,4 @@
+#include "xprv/anchor-verifier.h"
 #include "xprv/proof-chain-json.h"
 #include "xprv/proof-resolver.h"
 #include "xprv/validation-collector.h"
@@ -21,6 +22,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
+#include <boost/json.hpp>
 
 #include <gtest/gtest.h>
 
@@ -2439,6 +2441,66 @@ TEST(ProofQuorumAt80, ListUpdateRepublishesHeldManifests)
         std::find(held->begin(), held->end(), revocation.raw), held->end());
     EXPECT_EQ(
         std::find(held->begin(), held->end(), listed.raw), held->end());
+
+    auto future = asio::co_spawn(io, tracker->co_stop(), asio::use_future);
+    io.run();
+    future.get();
+}
+
+// codex/astra batch-2: the publisher manifest of a list the server loaded
+// reaches /verify's held set. The fixture's anchor embeds a list under
+// publisher manifest seq 1. Once the server has loaded a list carrying the
+// fixture's newer publisher manifest, the held set refuses that anchor, as a
+// verifier holding that manifest would, and a stale site's list doesn't undo
+// it.
+TEST(ProofQuorumAt80, LoadedPublisherManifestReachesHeldManifests)
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) +
+        "tests/xprv/fixture/trust-view-overlay.json");
+    ASSERT_TRUE(in);
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto const fixture = boost::json::parse(buffer.str());
+    auto const& superseded = fixture.at("cases").at("publisher-superseded");
+    auto const& anchor = superseded.at("anchor").as_object();
+    std::string const key(fixture.at("trusted_key").as_string());
+    auto const embedded = catl::vl::parse_manifest(catl::vl::decode_hex(
+        std::string(anchor.at("unl").at("manifest").as_string())));
+    auto const newer = catl::vl::parse_manifest(catl::base64_decode(
+        std::string(superseded.at("extras").as_array().at(0).as_string())));
+    ASSERT_GT(newer.sequence, embedded.sequence);
+
+    auto const xrpl = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    auto verify_held =
+        [&](std::shared_ptr<std::vector<std::vector<uint8_t>> const> held) {
+            std::vector<std::string> narrative;
+            return xprv::AnchorVerifier::verify(
+                anchor, key, xrpl, narrative, *held);
+        };
+
+    asio::io_context io;
+    auto protocol = test_protocol();
+    auto tracker = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    tracker->set_unl({}, 7, embedded);
+    io.run();
+    io.restart();
+    auto const before = verify_held(tracker->held_manifests());
+    EXPECT_TRUE(before.verified) << before.error;
+
+    tracker->set_unl({}, 8, newer);
+    io.run();
+    io.restart();
+    EXPECT_EQ(
+        verify_held(tracker->held_manifests()).error,
+        "validator list is signed by a superseded publisher key");
+
+    tracker->set_unl({}, 9, embedded);  // a stale site's list
+    io.run();
+    io.restart();
+    EXPECT_EQ(
+        verify_held(tracker->held_manifests()).error,
+        "validator list is signed by a superseded publisher key");
 
     auto future = asio::co_spawn(io, tracker->co_stop(), asio::use_future);
     io.run();

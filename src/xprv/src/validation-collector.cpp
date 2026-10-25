@@ -48,6 +48,17 @@ ValidationCollector::ValidationCollector(
 }
 
 void
+ValidationCollector::note_publisher_manifest(catl::vl::Manifest const& manifest)
+{
+    auto const master_key_hex = manifest.master_key_hex();
+    if (manifest.raw.empty() || master_key_hex.empty())
+        return;
+    auto& seen = publisher_manifests_seen_[master_key_hex];
+    if (seen.second.empty() || manifest.sequence > seen.first)
+        seen = {manifest.sequence, manifest.raw};
+}
+
+void
 ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
 {
     // Clear old keys first — a VL refresh may remove validators.

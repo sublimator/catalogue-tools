@@ -109,11 +109,12 @@ public:
     co_stop();
 
     /// Update UNL keys (called when VlCache refreshes). Older list sequences
-    /// are ignored.
+    /// are ignored. The list's publisher manifest joins held_manifests().
     void
     set_unl(
         std::vector<catl::vl::Manifest> const& validators,
-        uint32_t vl_sequence);
+        uint32_t vl_sequence,
+        catl::vl::Manifest const& publisher_manifest = catl::vl::Manifest());
 
     /// Apply the list on the validation strand, or report that a newer list is
     /// already active. Returning true guarantees subsequent quorum reads use
@@ -121,7 +122,8 @@ public:
     boost::asio::awaitable<bool>
     co_sync_unl(
         std::vector<catl::vl::Manifest> const& validators,
-        uint32_t vl_sequence);
+        uint32_t vl_sequence,
+        catl::vl::Manifest const& publisher_manifest = catl::vl::Manifest());
 
     /// Awaitable: snapshot of latest quorum for health checks.
     boost::asio::awaitable<std::optional<QuorumEntry>>
@@ -304,9 +306,17 @@ private:
         catl::xdata::Protocol const& protocol,
         uint32_t network_id);
 
+    // A list's validators and its publisher manifest, carried to the strand
+    // together.
+    struct UnlUpdate
+    {
+        std::vector<catl::vl::Manifest> validators;
+        catl::vl::Manifest publisher_manifest;
+    };
+
     bool
     apply_unl_locked(
-        std::vector<catl::vl::Manifest> const& validators,
+        UnlUpdate const& update,
         uint32_t vl_sequence,
         bool publish);
 
@@ -359,7 +369,7 @@ private:
 
     boost::asio::awaitable<bool>
     co_sync_unl_on_strand(
-        std::shared_ptr<std::vector<catl::vl::Manifest>> validators,
+        std::shared_ptr<UnlUpdate> update,
         uint32_t vl_sequence);
 
     boost::asio::awaitable<std::optional<QuorumEntry>>
@@ -412,12 +422,16 @@ private:
     std::mutex publication_mutex_;
     std::mutex admission_mutex_;
 
-    // Immutable snapshot of the collector's held peer manifests, republished
-    // on the strand after each manifest packet; read from any thread by
-    // held_manifests(). Leaf lock: never held while taking another.
+    // Immutable snapshot of collector_.held_manifest_bytes(), republished on
+    // the strand after each list update and manifest packet; read from any
+    // thread by held_manifests(). Leaf lock: never held while taking another.
     mutable std::mutex held_manifests_mutex_;
 
     // Republish held_manifests_ from the collector (owner strand only).
+    // The ack must stay ONE line, so clang-format is off around it.
+    // clang-format off
+    //@@audit-ack unannotated_authority_candidate reason="republishes an immutable copy of collector state for read-only verifiers behind a leaf mutex and grants or revokes nothing itself; its only callers, apply_unl_locked and the manifest-apply completion on the owner strand, are where trust state changes, and they are unannotated debt in the xprv-only scope"
+    // clang-format on
     void
     refresh_held_manifests_locked()
     {

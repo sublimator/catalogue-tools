@@ -45,6 +45,12 @@ public:
     void
     set_unl(std::vector<catl::vl::Manifest> const& validators);
 
+    /// Keep the newest manifest of a publisher whose list was loaded, for
+    /// held_manifest_bytes(). A list from a site serving an older publisher
+    /// manifest doesn't replace a newer one. Empty raw bytes are ignored.
+    void
+    note_publisher_manifest(catl::vl::Manifest const& manifest);
+
     /// Call from unsolicited handler. Filters for type 41 (validation).
     void
     on_packet(uint16_t type, std::vector<uint8_t> const& data);
@@ -149,9 +155,11 @@ public:
     apply_peer_manifests(std::vector<catl::vl::Manifest> manifests);
 
     /// The §1.3 material this server holds, for verifiers on this server:
-    /// per master, the newest manifest from the current list or a peer (so a
-    /// list-borne revocation reaches them too), plus the one conflicting pair
-    /// for each equivocated master (so they drop the same validator).
+    /// per master, the newest manifest from any list this process has loaded
+    /// or a peer (so a list-borne revocation reaches them too), plus the one
+    /// conflicting pair for each equivocated master (so they drop the same
+    /// validator), plus the newest manifest of each publisher whose list was
+    /// loaded (so a superseded publisher key is refused there too).
     /// Not filtered by the current list: an older proof's own primary list
     /// can still name a master the current list dropped, and a verifier's
     /// rule 1 already filters by that proof's list (codex F8). Peers' manifests
@@ -191,6 +199,8 @@ public:
                 out.insert(
                     out.end(), evidence->second.begin(), evidence->second.end());
         }
+        for (auto const& [_, seen] : publisher_manifests_seen_)
+            out.push_back(seen.second);
         return out;
     }
 
@@ -238,6 +248,10 @@ private:
     // available to local verifiers after a newer list drops the master.
     std::map<std::string, std::pair<uint32_t, std::vector<uint8_t>>>
         list_manifests_seen_;
+    // Newest manifest (sequence, raw) per publisher master, from the lists
+    // loaded in this process. One publisher per network in practice (D5).
+    std::map<std::string, std::pair<uint32_t, std::vector<uint8_t>>>
+        publisher_manifests_seen_;
     // §1.3 rule 2: masters seen signing two different manifests at one
     // sequence. They stay in N and never vote again in this process. Exactly
     // one conflicting pair per master is kept (bounded; replays add nothing),

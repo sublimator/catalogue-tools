@@ -1430,12 +1430,16 @@ Both reference verifiers resolve the §1.3 view from the embedded list plus any
 held manifests passed to them: `xprv verify --manifests FILE` and
 `verify-xprv.py --manifests FILE`, where FILE is a JSON array of base64 raw
 manifests. The reference server's `/verify` passes, for every master it has
-seen listed on the proof's network, the newest manifest it holds from any
-list it has loaded or from peers (so a revocation in a newer list reaches it, and
-stays after a later list drops that master), plus the
-conflicting pair for any validator it has seen equivocate. It does not filter by
-its current list, because an older proof's own primary list may name a master
-the current list dropped; the verifier's rule 1 filters by the proof's list.
+seen listed on the proof's network, the newest manifest it holds from any list
+it has loaded or from peers (so a revocation in a newer list reaches it, and
+stays after a later list drops that master), plus the conflicting pair for any
+validator it has seen equivocate. It does not filter by its current list,
+because an older proof's own primary list may name a master the current list
+dropped; the verifier's rule 1 filters by the proof's list. It also passes the
+newest publisher manifest from the lists it has loaded, so it refuses a proof
+whose list was signed under a publisher key since superseded. A publisher
+revocation is not held: the server's list loader refuses a list whose publisher
+manifest carries no signing key, and keeps the last list it accepted.
 The server counts its proof quorum under the same view and attaches one
 validation per listed master, signed under that master's current key; a
 validation under a superseded key, from a validator caught mid-rotation, is not

@@ -869,3 +869,25 @@ TEST(ValidationCollector, ListBorneRevocationSurvivesTheMasterLeavingTheList)
     EXPECT_TRUE(contains(held, revocation.raw));
     EXPECT_FALSE(contains(held, rotation.raw));
 }
+
+// codex/astra batch-2: the publisher manifest of a loaded list is held, it
+// outlives later lists, and a stale site's older one doesn't replace it.
+TEST(ValidationCollector, NewestPublisherManifestIsHeldAcrossLists)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    auto const stays = fake_manifest(0x04, 0x05, 1, 0xB0);
+    auto const publisher_old = fake_manifest(0xED, 0x06, 1, 0xD0);
+    auto const publisher_new = fake_manifest(0xED, 0x07, 2, 0xD1);
+    collector.set_unl({stays});
+    collector.note_publisher_manifest(publisher_old);
+    EXPECT_TRUE(contains(collector.held_manifest_bytes(), publisher_old.raw));
+
+    collector.set_unl({stays});
+    collector.note_publisher_manifest(publisher_new);
+    collector.set_unl({stays});
+    collector.note_publisher_manifest(publisher_old);  // a stale site
+    auto const held = collector.held_manifest_bytes();
+    EXPECT_TRUE(contains(held, publisher_new.raw));
+    EXPECT_FALSE(contains(held, publisher_old.raw));
+}
