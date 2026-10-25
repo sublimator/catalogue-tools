@@ -146,11 +146,12 @@ log "flag target JSON: era-direct shape OK + verified"
 # ── Flag target: binary form, assert header bytes + verifies ────────
 log "proving flag target (binary) ..."
 prove "$FLAG_TX" bin "$WORK/flag.bin"
-python3 - "$WORK/flag.bin" "$NETWORK" <<'PY' || fail "binary header bytes wrong"
+python3 - "$WORK/flag.bin" "$NETWORK" src/xprv/VERSION <<'PY' || fail "binary header bytes wrong"
 import sys
 d = open(sys.argv[1], "rb").read(); net = int(sys.argv[2])
+version = int(open(sys.argv[3]).read().strip())
 assert d[:4] == b"XPRV", "bad magic"
-assert d[4] == 5, "version byte != 5 (got %d)" % d[4]
+assert d[4] == version, "version byte != %d (got %d)" % (version, d[4])
 assert int.from_bytes(d[6:10], "big") == net, "network_id not big-endian %s" % net
 print("[live-smoke] binary header OK: magic=XPRV version=%d net(BE)=%d size=%dB"
       % (d[4], int.from_bytes(d[6:10], "big"), len(d)))
