@@ -1415,7 +1415,7 @@ ValidationQuorumTracker::co_latest_quorum_at_or_before_on_strand(
 
     auto validations = collector_.get_quorum_at_or_before(
         max_ledger_sequence,
-        kQuorumPercent,
+        kProofQuorumPercent,
         ValidationCollector::QuorumMode::proof);
     if (validations.empty())
         co_return std::nullopt;
@@ -1771,7 +1771,10 @@ std::optional<QuorumEntry>
 ValidationQuorumTracker::latest_quorum_locked(
     ValidationCollector::QuorumMode mode) const
 {
-    auto validations = collector_.get_quorum(kQuorumPercent, mode);
+    auto validations = collector_.get_quorum(
+        mode == ValidationCollector::QuorumMode::proof ? kProofQuorumPercent
+                                                       : kQuorumPercent,
+        mode);
     if (validations.empty())
         return std::nullopt;
 
@@ -1854,7 +1857,7 @@ ValidationQuorumTracker::co_has_live_only_quorum_on_strand()
         collector_.has_quorum(
             kQuorumPercent, ValidationCollector::QuorumMode::live) &&
         !collector_.has_quorum(
-            kQuorumPercent, ValidationCollector::QuorumMode::proof);
+            kProofQuorumPercent, ValidationCollector::QuorumMode::proof);
 }
 
 asio::awaitable<ValidationQuorumTracker::Stats>

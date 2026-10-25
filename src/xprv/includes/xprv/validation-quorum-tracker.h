@@ -63,11 +63,15 @@ class ValidationQuorumTracker
 {
 public:
     static constexpr int kQuorumPercent = 90;
+    // Proof anchors need exactly what the reference verifiers accept,
+    // ceil(80%) of the embedded list (spec §1.3). Live tracking keeps the
+    // stricter kQuorumPercent.
+    static constexpr int kProofQuorumPercent = 80;
 
     static constexpr std::size_t
     proof_quorum_threshold(std::size_t validator_count) noexcept
     {
-        return (validator_count * kQuorumPercent + 99) / 100;
+        return (validator_count * kProofQuorumPercent + 99) / 100;
     }
 
     ~ValidationQuorumTracker();
