@@ -1065,8 +1065,8 @@ def validate_json_trie(node: Any, depth: int = 0) -> None:
             raise ValueError("trie leaf must be exactly [key, data]")
         if len(node[0]) != 64 or any(c not in "0123456789abcdefABCDEF" for c in node[0]):
             raise ValueError("trie leaf key must be a 32-byte hex hash")
-        if not isinstance(node[1], (dict, str)):
-            raise ValueError("trie leaf data must be an object or hex string")
+        if not isinstance(node[1], dict):
+            raise ValueError("trie leaf data must be a decoded object, not hex (§2.3)")
     elif isinstance(node, dict):
         if depth >= 64:
             raise ValueError("trie depth exceeds maximum (64)")

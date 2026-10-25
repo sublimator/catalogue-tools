@@ -283,8 +283,9 @@ TEST(XprvVectors, RecordedLeafBytesMatchCppReserialization)
             for (size_t i = 0; i < leaves.size(); ++i)
             {
                 auto const& data = (*leaves[i])[1];
-                if (!data.is_object())
-                    continue;  // raw form: nothing to re-serialize
+                ASSERT_TRUE(data.is_object())
+                    << path.filename() << " step " << step_idx
+                    << ": JSON leaf data must be a decoded object (v7 §2.3)";
                 auto bytes = is_tx
                     ? catl::xdata::serialize_transaction(data.as_object(), protocol)
                     : catl::xdata::serialize_leaf(data.as_object(), protocol);
