@@ -252,7 +252,22 @@ never trust. Material may be:
 
 and either **discrete** (separate objects, verified and cached on their own) or
 **bundled** with the proof (the anchor's embedded list and `0x05` are the
-bundled form of one candidate list). Every combination MUST resolve the same view
+bundled form of one candidate list).
+
+XPRV defines no wrapper for discrete material; it uses the formats XRPL nodes
+already exchange:
+
+- **A validator list** is the publisher's signed list document, the one rippled
+  fetches from its configured list sites: `public_key`, `manifest` and either
+  `blob` with `signature` (version 1) or `blobs_v2` (version 2). Each `blob` is
+  one candidate list. Its contents are those of the anchor's `unl` object
+  (§2.1).
+- **A validator manifest** is its raw serialized STObject, the bytes carried
+  in a list entry and in peer manifest messages, and returned base64-encoded by
+  rippled's `manifest` RPC.
+
+Each verifies by its own signatures (§5.1), so the transport that delivers it
+is irrelevant. Every combination MUST resolve the same view
 from the same material under the same verifier policy. Supplied material never
 lowers what the verifier already holds: an older manifest does not displace a
 newer one it knows.
