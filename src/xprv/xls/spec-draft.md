@@ -268,6 +268,10 @@ already exchange:
     per `blobs_v2` entry, with that entry's `blob` and `signature`, the
     document's `public_key`, and the entry's own `manifest` if it has one, else
     the document's.
+
+  The site document carries `manifest` and `blob` as base64, and `blob`'s
+  content is the list JSON; a `unl` object carries the same bytes as hex
+  (§2.1). Decode, then re-encode; the bytes are what signatures cover.
 - **A validator manifest** is its raw serialized STObject, the bytes carried
   in a list entry and in peer manifest messages, and returned base64-encoded by
   rippled's `manifest` RPC.
