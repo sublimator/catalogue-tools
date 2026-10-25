@@ -133,11 +133,14 @@ set(CATL_PEER_CLIENT_TEST_TARGETS
     session-signature-gtest
     inbound-budget-gtest)
 
+# TIMEOUT bounds each discovered test process. In-test waits such as
+# run_one_for() cannot preempt a handler that is already running, so this is
+# the only guard against a blocked handler hanging the run (issue 2054).
 foreach(catl_test IN LISTS CATL_PEER_CLIENT_TEST_TARGETS)
   gtest_discover_tests(
     ${catl_test}
     DISCOVERY_TIMEOUT 30
-    PROPERTIES ENVIRONMENT "XPRV_STRAND_FAIL_FAST=1")
+    PROPERTIES ENVIRONMENT "XPRV_STRAND_FAIL_FAST=1" TIMEOUT 300)
 endforeach()
 
 
