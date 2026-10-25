@@ -530,6 +530,15 @@ def _der_parts(sig: bytes) -> tuple[int, int]:
     return r, s
 
 
+class DecompressionBoundTests(unittest.TestCase):
+    def test_zlib_body_over_the_cap_is_refused(self) -> None:
+        import zlib
+        bomb = zlib.compress(b"\x00" * (v.MAX_DECOMPRESSED_PROOF_SIZE + 1), 9)
+        data = b"XPRV" + bytes([v.FORMAT_VERSION, 1]) + (0).to_bytes(4, "big") + bomb
+        with self.assertRaisesRegex(ValueError, "exceeds cap"):
+            v.binary_to_proof(data)
+
+
 class SignatureCanonicalityTests(unittest.TestCase):
     """Python must refuse what libsecp256k1 refuses in the C++ verifier."""
 

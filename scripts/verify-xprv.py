@@ -720,6 +720,7 @@ def is_properly_formed_toml_domain(domain: bytes) -> bool:
 
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493  # L
+MAX_DECOMPRESSED_PROOF_SIZE = 16 * 1024 * 1024  # matches kMaxDecompressedProofSize
 
 
 def _der_integer(sig: bytes, pos: int) -> tuple[int, int] | None:
@@ -1800,7 +1801,14 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
 
     body = data[body_offset:]
     if flags & FLAG_ZLIB:
-        body = zlib.decompress(body)
+        # §3.8: bound the decompressed size before parsing (zlib bomb), with
+        # the same 16 MiB ceiling as the C++ verifier.
+        inflater = zlib.decompressobj()
+        body = inflater.decompress(body, MAX_DECOMPRESSED_PROOF_SIZE + 1)
+        if len(body) > MAX_DECOMPRESSED_PROOF_SIZE or inflater.unconsumed_tail:
+            raise ValueError("binary proof: decompressed size exceeds cap")
+        if not inflater.eof:
+            raise ValueError("binary proof: truncated zlib body")
 
     records = parse_tlv_records(body)
 
