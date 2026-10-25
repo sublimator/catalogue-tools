@@ -227,7 +227,8 @@ XRPL_VL_KEY = "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F473
 XAHAU_VL_KEY = "EDA46E9C39B1389894E690E58914DC1029602870370A0993E5B87C4A24EAF4A8E8"
 
 # Spec §8: network_id is bound to the configured publisher key set.
-PUBLISHER_KEY_BY_NETWORK: dict[int, str] = {0: XRPL_VL_KEY, 21337: XAHAU_VL_KEY}
+XAHAU_NETWORK_ID = 21337
+PUBLISHER_KEY_BY_NETWORK: dict[int, str] = {0: XRPL_VL_KEY, XAHAU_NETWORK_ID: XAHAU_VL_KEY}
 NETWORK_BY_PUBLISHER_KEY: dict[str, int] = {
     key: network for network, key in PUBLISHER_KEY_BY_NETWORK.items()
 }
@@ -1301,9 +1302,17 @@ def verify(
                     root_hex = hash_trie(trie, is_tx=is_tx).hex().upper()
                     leaves = collect_json_leaves(trie)
             except Exception as exc:
-                print(f"    [ERROR] {exc}")
+                detail = str(exc)
+                if network_id == XAHAU_NETWORK_ID and isinstance(exc, KeyError):
+                    # Known limitation: xrpl-py ships XRPL definitions only, so
+                    # it can't re-serialize Xahau fields in a decoded JSON leaf.
+                    detail = (
+                        f"xrpl-py has no Xahau definition for {exc}; this verifier "
+                        "can't check Xahau JSON leaves, verify the binary proof instead"
+                    )
+                print(f"    [ERROR] {detail}")
                 result.ok = False
-                result.errors.append(f"step {i}: {tree} tree error: {exc}")
+                result.errors.append(f"step {i}: {tree} tree error: {detail}")
                 continue
 
             capability_store = trusted_tx_roots if is_tx else trusted_state_roots

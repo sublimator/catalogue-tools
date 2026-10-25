@@ -1369,6 +1369,11 @@ embedded list: a revoked validator stays in N and never votes. The reference
 server's list loader is stricter: it refuses to load a list that contains a
 revocation, so it produces no proofs against such a list.
 
+The Python reference verifier uses xrpl-py's codec, which ships XRPL
+definitions only. It verifies Xahau binary proofs, whose leaves are exact bytes,
+but cannot re-serialize decoded Xahau leaves, so it rejects Xahau JSON proofs
+with fields XRPL lacks and says to verify the binary form instead.
+
 Progressive verification with a cached UNL is not implemented in the reference
 verifiers. The `0x05` anchor UNL record is OPTIONAL (§3.3) and both reference
 binary parsers accept a proof without it, but neither verifier sources the UNL from
