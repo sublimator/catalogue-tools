@@ -1100,6 +1100,9 @@ ValidationCollector::apply_manifest(
         erase_master_mapping(vl_signing_to_master_);
         vl_manifest_sequence_by_master_[master_key_hex] = manifest.sequence;
         vl_manifest_raw_by_master_[master_key_hex] = manifest.raw;
+        auto& seen = list_manifests_seen_[master_key_hex];
+        if (seen.second.empty() || manifest.sequence > seen.first)
+            seen = {manifest.sequence, manifest.raw};
         stale_vl_masters_.erase(master_key_hex);
     }
 

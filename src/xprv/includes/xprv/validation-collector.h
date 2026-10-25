@@ -162,23 +162,29 @@ public:
         std::set<std::string> masters(unl_master_keys_);
         for (auto const& [master, _] : peer_manifests_by_master_)
             masters.insert(master);
+        for (auto const& [master, _] : list_manifests_seen_)
+            masters.insert(master);
         for (auto const& [master, _] : equivocation_evidence_)
             masters.insert(master);
         std::vector<std::vector<uint8_t>> out;
         for (auto const& master : masters)
         {
-            auto const vl_seq = vl_manifest_sequence_by_master_.find(master);
-            auto const vl_raw = vl_manifest_raw_by_master_.find(master);
-            auto const peer = peer_manifests_by_master_.find(master);
-            bool const has_vl = vl_seq != vl_manifest_sequence_by_master_.end() &&
-                vl_raw != vl_manifest_raw_by_master_.end() &&
-                !vl_raw->second.empty();
-            bool const has_peer = peer != peer_manifests_by_master_.end() &&
-                !peer->second.raw.empty();
-            if (has_peer && (!has_vl || peer->second.sequence > vl_seq->second))
-                out.push_back(peer->second.raw);
-            else if (has_vl)
-                out.push_back(vl_raw->second);
+            // Newest of: any list this process has applied (kept across list
+            // updates, so a list-borne revocation survives the master leaving
+            // the list) and peers.
+            std::optional<std::pair<uint32_t, std::vector<uint8_t>>> newest;
+            auto const consider = [&](uint32_t seq, std::vector<uint8_t> const& raw) {
+                if (!raw.empty() && (!newest || seq > newest->first))
+                    newest.emplace(seq, raw);
+            };
+            if (auto it = list_manifests_seen_.find(master);
+                it != list_manifests_seen_.end())
+                consider(it->second.first, it->second.second);
+            if (auto it = peer_manifests_by_master_.find(master);
+                it != peer_manifests_by_master_.end())
+                consider(it->second.sequence, it->second.raw);
+            if (newest)
+                out.push_back(newest->second);
 
             auto const evidence = equivocation_evidence_.find(master);
             if (evidence != equivocation_evidence_.end())
@@ -227,6 +233,11 @@ private:
     // Raw bytes of each master's manifest in the current list, per sequence,
     // to detect same-sequence equivocation against the list.
     std::map<std::string, std::vector<uint8_t>> vl_manifest_raw_by_master_;
+    // Newest manifest (sequence, raw) each master has had in any list applied
+    // in this process. Not cleared by set_unl, so a list-borne revocation stays
+    // available to local verifiers after a newer list drops the master.
+    std::map<std::string, std::pair<uint32_t, std::vector<uint8_t>>>
+        list_manifests_seen_;
     // §1.3 rule 2: masters seen signing two different manifests at one
     // sequence. They stay in N and never vote again in this process. Exactly
     // one conflicting pair per master is kept (bounded; replays add nothing),

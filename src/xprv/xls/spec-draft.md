@@ -1430,8 +1430,9 @@ Both reference verifiers resolve the §1.3 view from the embedded list plus any
 held manifests passed to them: `xprv verify --manifests FILE` and
 `verify-xprv.py --manifests FILE`, where FILE is a JSON array of base64 raw
 manifests. The reference server's `/verify` passes, for every master it has
-seen listed on the proof's network, the newest manifest it holds from its
-current list or from peers (so a revocation in a newer list reaches it), plus the
+seen listed on the proof's network, the newest manifest it holds from any
+list it has loaded or from peers (so a revocation in a newer list reaches it, and
+stays after a later list drops that master), plus the
 conflicting pair for any validator it has seen equivocate. It does not filter by
 its current list, because an older proof's own primary list may name a master
 the current list dropped; the verifier's rule 1 filters by the proof's list.

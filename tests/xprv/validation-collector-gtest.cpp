@@ -846,3 +846,26 @@ TEST(ValidationCollector, HeldRevocationSurvivesTheMasterLeavingTheList)
     collector.set_unl({stays});  // the newer list drops master 0x02
     EXPECT_TRUE(contains(collector.held_manifest_bytes(), revocation.raw));
 }
+
+
+// astra batch-2: a revocation that arrived in a list must outlive the master
+// leaving the list, and an older peer rotation must not replace it.
+TEST(ValidationCollector, ListBorneRevocationSurvivesTheMasterLeavingTheList)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    auto const listed = fake_manifest(0x02, 0x03, 1, 0xA0);
+    auto const stays = fake_manifest(0x04, 0x05, 1, 0xB0);
+    collector.set_unl({listed, stays});
+    auto const rotation = fake_manifest(0x02, 0xED, 2, 0xA1);
+    collector.apply_peer_manifests({rotation});
+
+    auto const revocation =
+        fake_manifest(0x02, 0, std::numeric_limits<uint32_t>::max(), 0xC0);
+    collector.set_unl({revocation, stays});  // the list revokes 0x02
+    collector.set_unl({stays});              // a newer list drops 0x02
+
+    auto const held = collector.held_manifest_bytes();
+    EXPECT_TRUE(contains(held, revocation.raw));
+    EXPECT_FALSE(contains(held, rotation.raw));
+}
