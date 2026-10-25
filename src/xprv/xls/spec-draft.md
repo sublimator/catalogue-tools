@@ -221,10 +221,13 @@ Resolution rules:
 1. A manifest is a candidate only if it verifies (§5.1) and its `PublicKey` is
    a master in the primary list. A manifest for any other master grants
    nothing.
-2. The highest `Sequence` wins. Two candidates with the same master and the
-   same `Sequence` but different raw manifest bytes make the view
-   unresolvable, and the anchor MUST be rejected. Byte-identical candidates are
-   one candidate.
+2. The highest `Sequence` wins. Byte-identical candidates are one candidate.
+   Two candidates with the same master and the same `Sequence` but different
+   raw bytes are equivocation: only that master's key could have signed both,
+   so it is misused or compromised. That master is treated as revoked (rule 3):
+   it stays in N, never votes, and the verifier SHOULD report the conflict. The
+   rest of the anchor is unaffected. A publisher manifest conflict is different:
+   the list's own trust root is in doubt, and the anchor MUST be rejected.
 3. If the winning manifest is a revocation (`Sequence` `0xFFFFFFFF`), that
    master has no signing key. N does not change.
 4. If a resolved signing key is also another master's resolved key, or equals
@@ -935,9 +938,9 @@ function verify(chain, trusted_publisher_keys):
             //    each master's delegation from its highest-sequence verified
             //    manifest among the list's and any others held (§1.3), and
             //    build the signing_key → master_key map from the result,
-            //    applying §1.3 rules 2-4: equal-sequence manifests with
-            //    different bytes reject; a revoked master stays in N with no
-            //    key; a key collision rejects
+            //    applying §1.3 rules 2-4: an equivocating master (equal
+            //    sequence, different bytes) is treated as revoked; a revoked
+            //    master stays in N with no key; a key collision rejects
             // 6. For each validation:
             //      deserialize STValidation
             //      verify LedgerHash == anchor.ledger_hash

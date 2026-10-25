@@ -40,6 +40,7 @@ struct AnchorVerifyResult
     int unl_size = 0;
     int unl_revoked = 0;  // revoked masters: counted in unl_size, never vote
     int unl_overlaid = 0;  // delegations updated by manifests held outside
+    int unl_equivocated = 0;  // masters with conflicting same-sequence manifests
     int validations_total = 0;
     int validations_verified = 0;
     int validations_partial = 0;

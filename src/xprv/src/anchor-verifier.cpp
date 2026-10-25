@@ -331,29 +331,40 @@ AnchorVerifier::verify(
     }
 
     // §1.3: the publisher's signing key comes from the highest-sequence
-    // publisher manifest held; a list signed by a superseded key can't be
-    // primary.
-    for (auto const& m : held)
+    // publisher manifest held; the list must verify under that key. A newer
+    // manifest naming the same key leaves the list valid.
+    auto publisher_signing_key = publisher_manifest.signing_public_key;
+    auto publisher_sequence = publisher_manifest.sequence;
     {
-        if (lower(m.master_key_hex()) != lower(trusted_key))
-            continue;
-        if (m.sequence > publisher_manifest.sequence)
+        std::map<std::uint32_t, std::vector<uint8_t>> publisher_seen{
+            {publisher_manifest.sequence, publisher_manifest.raw}};
+        for (auto const& m : held)
         {
-            result.error =
-                "validator list is signed by a superseded publisher key";
-            narrative.push_back(
-                "   FAIL: a newer publisher manifest is held, so this list's "
-                "signing key is superseded.");
-            return result;
-        }
-        if (m.sequence == publisher_manifest.sequence &&
-            m.raw != publisher_manifest.raw)
-        {
-            result.error =
-                "conflicting publisher manifests at the same sequence";
-            narrative.push_back(
-                "   FAIL: two different publisher manifests share a sequence.");
-            return result;
+            if (lower(m.master_key_hex()) != lower(trusted_key))
+                continue;
+            auto const [it, inserted] =
+                publisher_seen.emplace(m.sequence, m.raw);
+            if (!inserted && it->second != m.raw)
+            {
+                result.error =
+                    "conflicting publisher manifests at the same sequence";
+                narrative.push_back(
+                    "   FAIL: two different publisher manifests share a "
+                    "sequence.");
+                return result;
+            }
+            if (m.sequence > publisher_sequence)
+            {
+                if (m.is_revocation())
+                {
+                    result.error = "the validator list publisher is revoked";
+                    narrative.push_back(
+                        "   FAIL: a held manifest revokes the list publisher.");
+                    return result;
+                }
+                publisher_sequence = m.sequence;
+                publisher_signing_key = m.signing_public_key;
+            }
         }
     }
 
@@ -384,11 +395,14 @@ AnchorVerifier::verify(
     // The blob is signed directly by the publisher's signing key
     // (no hash prefix — raw bytes)
     bool blob_sig_ok = catl::crypto::verify_message(
-        publisher_manifest.signing_public_key, blob_sig, blob_bytes);
+        publisher_signing_key, blob_sig, blob_bytes);
 
     if (!blob_sig_ok)
     {
-        result.error = "blob signature verification failed";
+        result.error =
+            publisher_signing_key != publisher_manifest.signing_public_key
+            ? "validator list is signed by a superseded publisher key"
+            : "blob signature verification failed";
         PLOGE(log_, "Step 3: Blob signature FAILED");
         narrative.push_back("   FAIL: blob signature verification failed.");
         return result;
@@ -558,20 +572,30 @@ AnchorVerifier::verify(
 
     // §1.3 delegations: the highest-sequence verified manifest held for each
     // listed master wins. Membership and N don't change.
+    // Rule 2, checked over every candidate (the list's and all held), not just
+    // the winner: two different manifests at one sequence for one master is
+    // equivocation, and the anchor is rejected.
+    std::map<std::pair<std::string, std::uint32_t>, std::vector<uint8_t>>
+        seen_at;
+    for (auto const& [master, d] : best)
+        seen_at.emplace(std::make_pair(master, d.sequence), d.raw);
+    std::set<std::string> equivocated;
+    for (auto const& m : held)
+    {
+        auto const master = lower(m.master_key_hex());
+        if (!best.count(master))
+            continue;  // rule 1
+        auto const [it, inserted] =
+            seen_at.emplace(std::make_pair(master, m.sequence), m.raw);
+        if (!inserted && it->second != m.raw)
+            equivocated.insert(master);
+    }
     for (auto const& m : held)
     {
         auto const master = lower(m.master_key_hex());
         auto const it = best.find(master);
-        if (it == best.end())
-            continue;  // rule 1: not a member of the primary list
-        if (m.sequence == it->second.sequence && m.raw != it->second.raw)
-        {
-            result.error = "conflicting validator manifests at the same sequence";
-            narrative.push_back(
-                "   FAIL: two different manifests for one validator share a "
-                "sequence.");
-            return result;  // rule 2
-        }
+        if (it == best.end() || equivocated.count(master))
+            continue;  // rule 1; an equivocated master is handled below
         if (m.sequence > it->second.sequence)
         {
             it->second = Delegation{
@@ -581,7 +605,17 @@ AnchorVerifier::verify(
             result.unl_overlaid++;
         }
     }
-    if (result.unl_overlaid > 0)
+    // Rule 2: a master that signed two different manifests at one sequence is
+    // treated as revoked (in N, no vote) until it publishes a sane one.
+    for (auto const& master : equivocated)
+    {
+        best[master].signing_key.clear();
+        result.unl_equivocated++;
+        narrative.push_back(
+            "   WARN: validator " + master.substr(0, 16) +
+            "... has conflicting manifests at one sequence; not counted.");
+    }
+    if (result.unl_overlaid > 0 || result.unl_equivocated > 0)
     {
         signing_to_master.clear();
         for (auto const& [master, d] : best)

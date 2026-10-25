@@ -230,16 +230,49 @@ TEST(AnchorVerifier, SupersededKeyStopsCounting)
     EXPECT_EQ(with.validations_matched_unl, 3);
 }
 
-TEST(AnchorVerifier, HeldManifestConflictsAndCollisionsReject)
+TEST(AnchorVerifier, EquivocatingValidatorIsDroppedNotTheAnchor)
+{
+    // Rule 2: the fixture's five validators all vote; validator 0 has two
+    // different seq-1 manifests, so it is treated as revoked: 4/5 still
+    // reaches quorum and N stays 5.
+    auto const [key, cases] = load_overlay_fixture();
+    auto const r = verify_with(cases.at("equal-sequence-conflict"), key, true);
+    EXPECT_TRUE(r.verified) << r.error;
+    EXPECT_EQ(r.unl_equivocated, 1);
+    EXPECT_EQ(r.unl_size, 5);
+    EXPECT_EQ(r.validations_matched_unl, 4);
+}
+
+TEST(AnchorVerifier, HeldManifestCollisionsAndSupersededPublisherReject)
 {
     auto const [key, cases] = load_overlay_fixture();
-    EXPECT_EQ(
-        verify_with(cases.at("equal-sequence-conflict"), key, true).error,
-        "conflicting validator manifests at the same sequence");
     EXPECT_EQ(
         verify_with(cases.at("key-collision"), key, true).error,
         "resolved signing key collides with another validator key");
     EXPECT_EQ(
         verify_with(cases.at("publisher-superseded"), key, true).error,
         "validator list is signed by a superseded publisher key");
+}
+
+TEST(AnchorVerifier, NewerPublisherManifestWithTheSameKeyKeepsTheList)
+{
+    // codex batch-2 F2: a re-issued publisher manifest naming the same signing
+    // key doesn't invalidate a list that key signed.
+    auto const [key, cases] = load_overlay_fixture();
+    auto const r = verify_with(cases.at("publisher-same-key"), key, true);
+    EXPECT_TRUE(r.verified) << r.error;
+}
+
+TEST(AnchorVerifier, ConflictVerdictIsIndependentOfManifestOrder)
+{
+    // codex batch-2 F1: the same held set in different orders gives one
+    // verdict. Validator 0 equivocates at seq 2 and is dropped, so 3/5.
+    auto const [key, cases] = load_overlay_fixture();
+    auto const abh = verify_with(cases.at("conflict-order-abh"), key, true);
+    auto const hab = verify_with(cases.at("conflict-order-hab"), key, true);
+    EXPECT_FALSE(abh.verified);
+    EXPECT_FALSE(hab.verified);
+    EXPECT_EQ(abh.validations_matched_unl, hab.validations_matched_unl);
+    EXPECT_EQ(abh.unl_equivocated, 1);
+    EXPECT_EQ(hab.unl_equivocated, 1);
 }

@@ -400,11 +400,35 @@ class TrustViewOverlayTests(unittest.TestCase):
             self.verify(f.anchor(), f.trusted_key, [self.rotation]), "quorum not met: 3/5"
         )
 
-    def test_equal_sequence_conflict_rejects(self) -> None:
+    def test_equal_sequence_conflict_drops_that_validator(self) -> None:
+        # Equivocation (rule 2): the validator is treated as revoked, so its
+        # vote stops counting and N stays 5; the rest of the anchor stands.
         f = self.f
         twin = make_manifest(f.masters[0], self.rotated_key, seq=1)  # list has seq 1
+        f.voters = f.signers[:4]
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key, [twin]), "quorum not met: 3/5")
+        f.voters = f.signers[1:]
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [twin]).ok)
+
+    def test_equal_sequence_conflict_between_held_manifests_drops_the_validator(self) -> None:
+        # Both held manifests are newer than the list's (seq 1) and disagree at
+        # seq 2; the conflict rejects whichever is processed first.
+        f = self.f
+        a = make_manifest(f.masters[0], self.rotated_key, seq=2)
+        b = make_manifest(f.masters[0], keypair(301), seq=2)
+        f.voters = [self.rotated_key] + f.signers[1:4]
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key, [a, b]), "quorum not met: 3/5")
+
+    def test_equal_sequence_conflict_below_the_winner_still_drops_the_validator(self) -> None:
+        # Two different seq-2 manifests both lose to a seq-3 one; rule 2 still
+        # applies to every candidate, not only the winner.
+        f = self.f
+        a = make_manifest(f.masters[0], keypair(301), seq=2)
+        b = make_manifest(f.masters[0], keypair(302), seq=2)
+        winner = make_manifest(f.masters[0], self.rotated_key, seq=3)
+        f.voters = [self.rotated_key] + f.signers[1:4]
         self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [twin]), "conflicting validator manifests"
+            self.verify(f.anchor(), f.trusted_key, [winner, a, b]), "quorum not met: 3/5"
         )
 
     def test_resolved_key_collision_rejects(self) -> None:
@@ -429,6 +453,26 @@ class TrustViewOverlayTests(unittest.TestCase):
         self.assertRejected(
             self.verify(f.anchor(), f.trusted_key, [stranger]), "quorum not met: 3/5"
         )
+
+    def test_newer_publisher_manifest_with_the_same_key_keeps_the_list(self) -> None:
+        # codex batch-2 F2: a re-issued publisher manifest naming the same
+        # signing key doesn't invalidate a list that key signed.
+        f = self.f
+        same = make_manifest(f.publisher, f.publisher_signing, seq=2)
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [same]).ok)
+
+    def test_conflict_outcome_is_independent_of_manifest_order(self) -> None:
+        # codex batch-2 F1: the same held set in any order gives one verdict.
+        f = self.f
+        a = make_manifest(f.masters[0], keypair(301), seq=2)
+        b = make_manifest(f.masters[0], keypair(302), seq=2)
+        h = make_manifest(f.masters[0], self.rotated_key, seq=3)
+        f.voters = [self.rotated_key] + f.signers[1:4]
+        verdicts = {
+            self.verify(f.anchor(), f.trusted_key, order).ok
+            for order in ([a, b, h], [h, a, b], [b, h, a])
+        }
+        self.assertEqual(verdicts, {False})
 
     def test_newer_publisher_manifest_supersedes_the_list(self) -> None:
         f = self.f

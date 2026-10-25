@@ -938,19 +938,22 @@ def verify_anchor(
     if not signing_key:
         return AnchorResult(ok=False, message="manifest has no SigningPubKey")
     # §1.3: the publisher's signing key comes from the highest-sequence
-    # publisher manifest held; a list signed by a superseded key can't be primary.
-    publisher_raw = unhexlify(manifest_hex)
-    for master_x, seq_x, raw_x, _ in held:
+    # publisher manifest held; the list must verify under that key. A newer
+    # manifest naming the same key leaves the list valid.
+    bundled_signing_key = signing_key
+    publisher_seq = int(manifest.get("Sequence", -1))
+    publisher_seen: dict[int, bytes] = {publisher_seq: unhexlify(manifest_hex)}
+    for master_x, seq_x, raw_x, sk_x in held:
         if master_x != trusted:
             continue
-        if seq_x > int(manifest.get("Sequence", -1)):
-            return AnchorResult(
-                ok=False, message="validator list is signed by a superseded publisher key"
-            )
-        if seq_x == int(manifest.get("Sequence", -1)) and raw_x != publisher_raw:
+        if publisher_seen.setdefault(seq_x, raw_x) != raw_x:
             return AnchorResult(
                 ok=False, message="conflicting publisher manifests at the same sequence"
             )
+        if seq_x > publisher_seq:
+            if seq_x == MANIFEST_REVOKED:
+                return AnchorResult(ok=False, message="the validator list publisher is revoked")
+            publisher_seq, signing_key = seq_x, sk_x
     print(f"    A2: Publisher manifest VERIFIED, signing key {signing_key[:16]}...")
 
     # Step 3: verify blob signature (raw bytes, signed by publisher signing key)
@@ -964,6 +967,10 @@ def verify_anchor(
     except Exception:
         blob_ok = False
     if not blob_ok:
+        if signing_key != bundled_signing_key:
+            return AnchorResult(
+                ok=False, message="validator list is signed by a superseded publisher key"
+            )
         return AnchorResult(ok=False, message="blob signature FAILED")
     print(f"    A3: Blob signature VERIFIED ({len(blob_bytes)} bytes)")
 
@@ -1032,19 +1039,35 @@ def verify_anchor(
 
     # §1.3 delegations: the highest-sequence verified manifest held for each
     # listed master wins. Membership and N don't change.
+    # Rule 2, checked over every candidate (the list's and all held), not just
+    # the winner: two different manifests at one sequence for one master is
+    # equivocation, and the anchor is rejected.
+    seen_at: dict[tuple[str, int], bytes] = {
+        (master_b, seq_b): raw_b for master_b, (seq_b, raw_b, _) in best.items()
+    }
+    equivocated: set[str] = set()
+    for master_x, seq_x, raw_x, _ in held:
+        if master_x not in best:
+            continue  # rule 1
+        prior = seen_at.setdefault((master_x, seq_x), raw_x)
+        if prior != raw_x:
+            equivocated.add(master_x)
     overlaid = 0
     for master_x, seq_x, raw_x, sk_x in held:
-        if master_x not in best:
-            continue  # rule 1: not a member of the primary list
+        if master_x not in best or master_x in equivocated:
+            continue  # rule 1; an equivocated master is handled below
         seq_b, raw_b, _ = best[master_x]
-        if seq_x == seq_b and raw_x != raw_b:
-            return AnchorResult(
-                ok=False, message="conflicting validator manifests at the same sequence"
-            )  # rule 2
         if seq_x > seq_b:
             best[master_x] = (seq_x, raw_x, "" if seq_x == MANIFEST_REVOKED else sk_x)
             overlaid += 1
-    if overlaid:
+    # Rule 2: a master that signed two different manifests at one sequence is
+    # treated as revoked (in N, no vote) until it publishes a sane one.
+    for master_x in sorted(equivocated):
+        seq_b, raw_b, _ = best[master_x]
+        best[master_x] = (seq_b, raw_b, "")
+        warn = f"validator {master_x[:16]}... has conflicting manifests at one sequence; not counted"
+        print(f"    [WARN] {warn}")
+    if overlaid or equivocated:
         signing_to_master = {}
         for master_x, (_, _, sk_x) in best.items():
             if not sk_x:
@@ -1054,7 +1077,10 @@ def verify_anchor(
                     ok=False, message="resolved signing key collides with another validator key"
                 )  # rule 4
             signing_to_master[sk_x] = master_x
-        print(f"    A4: {overlaid} delegation(s) updated from manifests held outside the proof")
+        print(
+            f"    A4: {overlaid} delegation(s) updated from manifests held outside the proof"
+            + (f", {len(equivocated)} equivocating validator(s) dropped" if equivocated else "")
+        )
     unl_size = len(masters)
     if unl_size == 0:
         return AnchorResult(ok=False, message="UNL contains no verified validators")
