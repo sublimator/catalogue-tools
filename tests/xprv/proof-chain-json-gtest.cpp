@@ -428,3 +428,79 @@ TEST(ProofChainJson, ListLessAnchorNeedsAnExternalList)
     EXPECT_FALSE(result.verified);
     EXPECT_EQ(result.error, "validator list not bundled and no external list");
 }
+
+// v7 §2.3: a hex string is not JSON leaf data, at load and at conversion.
+namespace {
+
+boost::json::array&
+first_leaf_mut(boost::json::value& node)
+{
+    if (node.is_array())
+        return node.as_array();
+    for (auto& kv : node.as_object())
+    {
+        if (kv.value().is_object() || kv.value().is_array())
+            return first_leaf_mut(kv.value());
+    }
+    throw std::runtime_error("trie has no leaf");
+}
+
+boost::json::value
+hex_leaf_proof()
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) + "tests/xprv/fixture/proof.json");
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto proof = boost::json::parse(buffer.str());
+    for (auto& step : proof.at("steps").as_array())
+    {
+        if (step.at("type") == "map_proof" && step.at("tree") == "tx")
+        {
+            first_leaf_mut(step.at("trie")).at(1) = "ABCDEF";
+            break;
+        }
+    }
+    return proof;
+}
+
+}  // namespace
+
+TEST(ProofChainJson, HexLeafIsRejectedAtLoad)
+{
+    auto const text = boost::json::serialize(hex_leaf_proof());
+    try
+    {
+        xprv::from_json_text(text);
+        FAIL() << "expected a hex leaf to be rejected";
+    }
+    catch (std::runtime_error const& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("not hex"), std::string::npos)
+            << e.what();
+    }
+}
+
+TEST(ProofChainJson, HexLeafIsRejectedByBinaryConversion)
+{
+    // The loader refuses this already; build the chain in memory so the
+    // encoder's own refusal is exercised too.
+    auto const proof = hex_leaf_proof();
+    xprv::ProofChain chain;
+    chain.network_id = 0;
+    for (auto const& step : proof.at("steps").as_array())
+    {
+        if (step.at("type") == "map_proof" && step.at("tree") == "tx")
+        {
+            xprv::TrieData trie;
+            trie.tree = xprv::TrieData::TreeType::tx;
+            trie.trie_json = step.at("trie");
+            chain.steps.push_back(trie);
+        }
+    }
+    ASSERT_EQ(chain.steps.size(), 1u);
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    xprv::BinaryOptions opts;
+    opts.protocol = &protocol;
+    EXPECT_THROW(xprv::to_binary(chain, opts), std::runtime_error);
+}

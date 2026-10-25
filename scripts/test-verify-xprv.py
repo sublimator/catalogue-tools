@@ -342,6 +342,11 @@ class AnchorVerificationTests(unittest.TestCase):
         del anchor["unl"]["blob"], anchor["unl"]["signature"]
         self.assertRejected(self.verify(anchor, f.trusted_key), "together, or none of them")
 
+    def test_hex_leaf_is_not_leaf_data(self) -> None:
+        trie = {"0": ["AB" * 32, "ABCDEF"]}
+        with self.assertRaisesRegex(ValueError, "not hex"):
+            v.hash_trie(trie, is_tx=True)
+
     def test_revoked_master_stays_in_n_and_never_votes(self) -> None:
         f = Fixture()
         revocation = sign_manifest(

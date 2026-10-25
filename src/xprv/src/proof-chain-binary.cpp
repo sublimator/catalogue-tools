@@ -1073,14 +1073,10 @@ encode_trie_json_node(
             auto key = hash_from_hex(std::string(arr[0].as_string()));
             out.insert(out.end(), key.data(), key.data() + 32);
 
-            // Raw form is already exactly the hashed bytes (§2.3); decoded form
-            // must round-trip back through the codec.
+            // JSON leaves are decoded only (§2.3, v7); the decoded form must
+            // round-trip back through the codec.
             std::vector<uint8_t> data;
-            if (arr[1].is_string())
-            {
-                data = from_hex(std::string(arr[1].as_string()));
-            }
-            else if (arr[1].is_object())
+            if (arr[1].is_object())
             {
                 // Encode from the DECODED content, deliberately ignoring any
                 // sibling `blob`. Sourcing the bytes from `blob` would make the
@@ -1088,8 +1084,8 @@ encode_trie_json_node(
                 // the legible form and the authenticated form could diverge
                 // while the proof still verified. Re-serialising is what keeps
                 // "what you see is what you hash" true. A leaf whose decoded
-                // form cannot round-trip belongs in raw form (a hex string),
-                // where nothing legible is claimed in the first place.
+                // form cannot round-trip has no JSON form at all; only the
+                // binary form can carry it.
                 data = is_tx
                     ? catl::xdata::serialize_transaction(
                           arr[1].as_object(), protocol)
@@ -1097,8 +1093,8 @@ encode_trie_json_node(
             }
             else
                 throw std::runtime_error(
-                    "to_binary: JSON trie leaf data must be an object or hex "
-                    "string");
+                    "to_binary: JSON trie leaf data must be a decoded object, "
+                    "not hex (§2.3)");
 
             leb128_encode(out, data.size());
             out.insert(out.end(), data.begin(), data.end());

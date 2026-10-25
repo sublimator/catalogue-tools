@@ -427,6 +427,8 @@ def hash_trie(node: TrieNode, *, is_tx: bool, depth: int = 0) -> Hash256:
         return bytes.fromhex(node)
     if isinstance(node, list):
         key_hex: str = node[0]
+        if not isinstance(node[1], dict):
+            raise ValueError("JSON trie leaf data must be a decoded object, not hex (§2.3)")
         return hash_leaf(key_hex, serialize_leaf(node[1], is_tx=is_tx), is_tx=is_tx)
     if isinstance(node, dict):
         children: list[Hash256] = [ZERO_HASH] * 16

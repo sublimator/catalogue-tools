@@ -63,10 +63,14 @@ validate_json_trie(boost::json::value const& node, size_t depth = 0)
     {
         auto const& leaf = node.as_array();
         if (leaf.size() != 2 || !leaf[0].is_string() ||
-            !is_trie_hash(leaf[0].as_string()) ||
-            (!leaf[1].is_object() && !leaf[1].is_string()))
+            !is_trie_hash(leaf[0].as_string()))
             throw std::runtime_error(
                 "json trie: leaf must be exactly [key, data]");
+        // XPRV v7 §2.3: JSON leaves are decoded only; a hex string is not
+        // leaf data (the binary form carries exact bytes).
+        if (!leaf[1].is_object())
+            throw std::runtime_error(
+                "json trie: leaf data must be a decoded object, not hex");
     }
     else if (node.is_object())
     {

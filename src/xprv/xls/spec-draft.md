@@ -925,7 +925,7 @@ function verify(chain, trusted_publisher_keys):
             //      deserialize STValidation
             //      verify LedgerHash == anchor.ledger_hash
             //      verify VAL\0 signing data signature using SigningPubKey
-            //        (secp256k1: strict DER and low S, §8)
+            //        (canonical form, §8: secp256k1 strict DER and low S; Ed25519 S < L)
             //      count it only if Flags has vfFullValidation (0x00000001):
             //        a partial validation never counts (§1.3 rule 8)
             //      verify SigningPubKey maps to a resolved delegation
@@ -1291,10 +1291,12 @@ At minimum, verifier output SHOULD expose:
   metadata.
 - All hashes use SHA512-Half as specified by the XRPL protocol.
 - The verifier MUST reject chains where any step fails.
-- Every secp256k1 signature a verifier checks (validations, manifests, the list
-  blob) MUST be strict DER with `0 < r < n` and `0 < s <= n/2` (low S), as
-  libsecp256k1 enforces. A high-S twin is a second valid encoding of one
-  signature, and two verifiers that disagree on it disagree on the same bytes.
+- Every signature a verifier checks (validations, manifests, the list blob) MUST
+  be in canonical form. secp256k1: strict DER with `0 < r < n` and
+  `0 < s <= n/2` (low S), as libsecp256k1 enforces. Ed25519: 64 bytes with
+  `S < L` (RFC 8032 §5.1.7), as libsodium enforces. A non-canonical twin is a
+  second valid encoding of one signature, and two verifiers that disagree on it
+  disagree on the same bytes.
 - Consumers of compressed binary proofs SHOULD enforce a decompressed-size
   limit before parsing (zlib-bomb protection), and SHOULD bound trie
   recursion depth (a SHAMap key is 64 nibbles, so depth cannot exceed 64).

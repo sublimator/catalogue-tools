@@ -702,12 +702,9 @@ resolve_proof_chain_impl(
                                     -> boost::intrusive_ptr<MmapItem> {
                                     auto key = hash_from_hex(key_hex);
                                     if (!leaf_data.is_object())
-                                    {
-                                        uint8_t dummy = 0;
-                                        return boost::intrusive_ptr<MmapItem>(
-                                            OwnedItem::create(
-                                                key, Slice(&dummy, 0)));
-                                    }
+                                        throw std::runtime_error(
+                                            "JSON trie leaf data must be a "
+                                            "decoded object, not hex (§2.3)");
                                     if (is_state)
                                     {
                                         auto candidate =
