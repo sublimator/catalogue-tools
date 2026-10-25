@@ -1398,8 +1398,7 @@ Trust resolution with material beyond the proof (§1.3) is not yet implemented:
 both reference verifiers resolve the view from the embedded list alone, and
 reject a list-less anchor as having no list. Both follow §1.3 rule 3 for the
 embedded list: a revoked validator stays in N and never votes. The reference
-server's list loader is stricter: it refuses to load a list that contains a
-revocation, so it produces no proofs against such a list.
+server applies the same rule to the lists it loads.
 
 The Python reference verifier uses xrpl-py's codec, which ships XRPL
 definitions only. It verifies Xahau binary proofs, whose leaves are exact bytes,

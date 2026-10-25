@@ -330,19 +330,23 @@ verify_fetched_vl(
     std::set<std::string> signing_keys;
     for (auto const& validator : vl.validators)
     {
-        if (validator.is_revocation() || !verify_manifest(validator, protocol))
+        if (!verify_manifest(validator, protocol))
         {
             error = "validator list contains an invalid validator manifest";
             return false;
         }
 
         auto const master = lower(validator.master_key_hex());
-        auto const signing = lower(validator.signing_key_hex());
         if (!master_keys.insert(master).second)
         {
             error = "validator list contains a duplicate master key";
             return false;
         }
+        // A revoked validator stays a member, counts toward N and never votes
+        // (spec §1.3 rule 3); it has no signing key to register.
+        if (validator.is_revocation())
+            continue;
+        auto const signing = lower(validator.signing_key_hex());
         if (!signing_keys.insert(signing).second)
         {
             error = "validator list contains a duplicate signing key";

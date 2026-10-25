@@ -2,6 +2,7 @@
 #include "xprv/validation-collector.h"
 
 #include <catl/core/base64.h>
+#include <catl/vl-client/vl-client.h>
 #include <catl/peer-client/connection-types.h>
 #include <catl/xdata/protocol.h>
 
@@ -623,4 +624,33 @@ TEST(ValidationCollector, DropsPartialValidations)
     for (auto const& [hash, entries] : collector.by_ledger)
         stored += entries.size();
     EXPECT_EQ(stored, 4u) << "the one partial validation must not be stored";
+}
+
+// §1.3 rule 3: a revoked list member counts toward N (unl_size, which sets the
+// proof quorum threshold) and registers no signing key, so it can never vote.
+TEST(ValidationCollector, RevokedMemberCountsInNWithoutASigningKey)
+{
+    auto const xrpl_protocol = test_protocol();
+    auto const anchor = load_anchor_fixture();
+    auto const blob = boost::json::parse(
+        std::string(anchor.blob.begin(), anchor.blob.end()));
+    std::vector<catl::vl::Manifest> manifests;
+    for (auto const& entry : blob.at("validators").as_array())
+        manifests.push_back(catl::vl::parse_manifest(catl::base64_decode(
+            std::string(entry.at("manifest").as_string()))));
+    auto const members = manifests.size();
+
+    // Self-signed revocation by a synthetic master (keypair(900) in
+    // scripts/test-verify-xprv.py).
+    manifests.push_back(catl::vl::parse_manifest(catl::vl::decode_hex(
+        "24FFFFFFFF7121ED0AF92088023084FC4563169B374383A65C00EF57B495F07B7AF6"
+        "6C47287194D370124057EFFE8BB8708219F085F16BB9E8A4546847BE8F06F37010"
+        "90A9C57F23D30C6014599C6B4ABB1F44A52E49B94CEFF612D6BD6D8092D58D0B7C"
+        "74FBBFDF256805")));
+    ASSERT_TRUE(manifests.back().is_revocation());
+
+    xprv::ValidationCollector collector(xrpl_protocol, 0);
+    collector.set_unl(manifests);
+    EXPECT_EQ(collector.unl_size, static_cast<int>(members + 1));
+    EXPECT_EQ(collector.unl_signing_keys.size(), members);
 }

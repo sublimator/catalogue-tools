@@ -318,3 +318,34 @@ TEST(VlSecurity, FreshnessRequiresSequenceForContentChanges)
         xprv::assess_vl_freshness(readded, &removed, 100, error, &history),
         xprv::VlFreshnessDisposition::reject);
 }
+
+// §1.3 rule 3 (D8): a list may carry revoked validators. They stay members
+// (counted in N) and never vote; the loader must not refuse the list. These
+// are self-signed revocations by synthetic test masters (keypair(900/901) in
+// scripts/test-verify-xprv.py).
+TEST(VlSecurity, FetchedListAcceptsRevokedValidators)
+{
+    auto const protocol = test_protocol();
+    auto vl = load_vl_fixture();
+    std::string error;
+    for (auto const* hex :
+         {"24FFFFFFFF7121ED0AF92088023084FC4563169B374383A65C00EF57B495F07B7AF6"
+          "6C47287194D370124057EFFE8BB8708219F085F16BB9E8A4546847BE8F06F37010"
+          "90A9C57F23D30C6014599C6B4ABB1F44A52E49B94CEFF612D6BD6D8092D58D0B7C"
+          "74FBBFDF256805",
+          "24FFFFFFFF7121ED249C3C61B88F9A4EB3B614C9028DB97F3C186016AFA1C7B68C"
+          "9B262BB3900118701240F8A07F067600FB20F950DDEB03CD0CCD142C438234B670"
+          "7D2BBC8B41932BDEEFDA6B08FDD0B899F4469E8F653DBD401350D4F85FC8A43611"
+          "B4A1207BB549620E"})
+    {
+        auto const bytes = catl::vl::decode_hex(hex);
+        auto revocation = catl::vl::parse_manifest(bytes);
+        ASSERT_TRUE(revocation.is_revocation());
+        ASSERT_TRUE(xprv::verify_manifest(revocation, protocol));
+        vl.validators.push_back(std::move(revocation));
+    }
+    // Two revocations: neither registers a signing key, so they can't collide.
+    EXPECT_TRUE(
+        xprv::verify_fetched_vl(vl, vl.publisher_key_hex, protocol, error))
+        << error;
+}
