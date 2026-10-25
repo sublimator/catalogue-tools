@@ -276,3 +276,16 @@ TEST(AnchorVerifier, ConflictVerdictIsIndependentOfManifestOrder)
     EXPECT_EQ(abh.unl_equivocated, 1);
     EXPECT_EQ(hab.unl_equivocated, 1);
 }
+
+TEST(AnchorVerifier, HeldBytesThatAreNotAManifestGrantNothing)
+{
+    // codex batch-2 F3: held material that doesn't even parse is ignored like
+    // any other invalid candidate; it must not make the anchor fail.
+    auto const [key, cases] = load_overlay_fixture();
+    auto c = cases.at("rotated-signs");
+    std::vector<uint8_t> const garbage{0x01, 0x02, 0x03, 'n', 'o', 'p', 'e'};
+    c.extras.insert(c.extras.begin(), garbage);
+    auto const r = verify_with(c, key, true);
+    EXPECT_TRUE(r.verified) << r.error;
+    EXPECT_EQ(r.unl_overlaid, 1);
+}

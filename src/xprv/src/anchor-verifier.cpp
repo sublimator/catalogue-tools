@@ -231,8 +231,15 @@ AnchorVerifier::verify(
     std::vector<catl::vl::Manifest> held;
     for (auto const& raw : extra_manifests)
     {
-        if (auto m = parse_and_verify_manifest(raw, protocol))
-            held.push_back(std::move(*m));
+        try
+        {
+            if (auto m = parse_and_verify_manifest(raw, protocol))
+                held.push_back(std::move(*m));
+        }
+        catch (std::exception const&)
+        {
+            // Not a manifest at all: grants nothing, like a bad signature.
+        }
     }
 
     // ── Step 1: Publisher key check ─────────────────────────────

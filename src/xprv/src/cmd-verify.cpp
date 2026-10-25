@@ -8,6 +8,8 @@
 #include <catl/core/logger.h>
 
 #include <boost/json.hpp>
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -40,8 +42,29 @@ cmd_verify(
         {
             auto const parsed = boost::json::parse(text.str());
             for (auto const& item : parsed.as_array())
-                extra_manifests.push_back(
-                    catl::base64_decode(std::string(item.as_string())));
+            {
+                auto const b64 = std::string(item.as_string());
+                // Strict standard base64; the shared decoder skips stray
+                // characters, which would accept input Python rejects.
+                auto const pad = b64.find('=');
+                bool const shaped = b64.size() % 4 == 0 &&
+                    std::all_of(
+                        b64.begin(),
+                        b64.begin() +
+                            static_cast<std::ptrdiff_t>(
+                                pad == std::string::npos ? b64.size() : pad),
+                        [](char ch) {
+                            return std::isalnum(
+                                       static_cast<unsigned char>(ch)) ||
+                                ch == '+' || ch == '/';
+                        }) &&
+                    (pad == std::string::npos ||
+                     (b64.size() - pad <= 2 &&
+                      b64.find_first_not_of('=', pad) == std::string::npos));
+                if (!shaped)
+                    throw std::runtime_error("not strict base64: " + b64);
+                extra_manifests.push_back(catl::base64_decode(b64));
+            }
         }
         catch (std::exception const& e)
         {
