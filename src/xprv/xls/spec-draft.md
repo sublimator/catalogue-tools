@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Date** | 2026-07-25 |
+| **Date** | 2026-10-25 |
 | **Authors** | Nicholas Dudfield ([@sublimator](https://github.com/sublimator)) |
 | **Discussion** | [XRPLF/XRPL-Standards#107](https://github.com/XRPLF/XRPL-Standards/discussions/107) |
 | **Reference** | [XLS-41d XPOP](../../../.ai-docs/xpop/xls-41d-xpop-spec.md) (Richard Holland) |
@@ -95,6 +95,8 @@ Trust enters the proof exactly once: the verifier's configured Validator List
 (VL) publisher key. Every subsequent object is authenticated by signature or
 by preimage membership — a field is trusted only because it lies inside bytes
 whose hash or signature is already trusted, never because a step asserts it.
+Validator manifests newer than the list's own are no exception: they count
+only when signed by a master key the list already names (§1.3).
 
 The anchor's validators sign full STValidation messages — which include a
 `LedgerSequence` field alongside the ledger hash — but chain verification
@@ -113,7 +115,8 @@ verifier config: trusted publisher master key
  └─ MAN\0 manifest sig ──────────→ publisher signing key
      └─ sig over raw blob bytes ─→ VL blob (validator manifests)
          └─ MAN\0 manifest sigs ─→ validator signing keys (the Unique Node
-                                     List, UNL)
+                                     List, UNL; a newer manifest signed by
+                                     a listed master replaces its key, §1.3)
              └─ VAL\0 sigs, quorum ≥ ⌈0.8·N⌉ ─→ anchor ledger hash (32 bytes;
                  │                               the only attested value the
                  │                               chain consumes)
@@ -169,6 +172,106 @@ order or formatting encode the same proof and MUST verify identically, but they
 are not expected to be byte-identical, and nothing in this specification requires
 them to be. A producer needing a stable identifier for a JSON-delivered proof
 hashes the equivalent canonical binary encoding rather than the JSON text.
+
+### 1.3 Trust Material
+
+A verifier assesses the anchor against a **trust view** that it resolves before
+verification begins and holds fixed for the whole proof. The view has two
+parts:
+
+- **Membership.** The validator master keys, and their count N, come from
+  exactly one signed Validator List: the **primary list**, published under a
+  configured publisher key and valid at the anchor ledger (§5).
+- **Delegations.** For each master in the primary list, the signing key that
+  counts is the one named by the highest-sequence manifest that verifies under
+  that master. The candidates are the master's manifest inside the primary list
+  and any other validator manifests the verifier holds.
+
+Resolution rules:
+
+1. A manifest is a candidate only if it verifies (§5.1) and its `PublicKey` is
+   a master in the primary list. A manifest for any other master grants
+   nothing.
+2. The highest `Sequence` wins. Two different candidates with the same master
+   and the same `Sequence` make the view unresolvable, and the anchor MUST be
+   rejected.
+3. If the winning manifest is a revocation (`Sequence` `0xFFFFFFFF`), that
+   master has no signing key. N does not change.
+4. If a resolved signing key is also another master's resolved key, or equals
+   any master key in the primary list, the view is unresolvable and the anchor
+   MUST be rejected.
+5. Each master contributes at most one vote, and only through its resolved
+   signing key. A validation signed by a superseded key does not count.
+6. Quorum is ⌈0.8 × N⌉ masters, N being the number of masters in the primary
+   list.
+
+**Sources and packaging.** Lists and validator manifests authenticate
+themselves by signature, so where they come from affects only availability,
+never trust. Material may be:
+
+- **ambient**: already held by the verifier or fetched by it on its own, e.g.
+  from a cache, its own peer connections, or any node's `manifest` RPC;
+- **direct**: handed over by whoever supplies the proof, e.g. a file or an
+  endpoint;
+
+and either **discrete** (separate objects, verified and cached on their own) or
+**bundled** with the proof (the anchor's embedded list and `0x05` are the
+bundled form of the primary list). Every combination MUST resolve the same view
+from the same material under the same verifier policy. Supplied material never
+lowers what the verifier already holds: an older manifest does not displace a
+newer one it knows.
+
+**Secondary lists.** A verifier MAY be configured with secondary list
+publishers. A secondary list contributes only its validator manifests, as
+candidates under rule 1. It adds no masters, does not affect N, and never
+stands in for the primary list: if the primary list is unavailable or expired,
+membership is unavailable. A secondary list's own expiry does not matter for
+this use, since manifests do not expire.
+
+**Embedded-only verification.** A verifier holding no material beyond the
+proof resolves the view from the embedded list alone, delegations included.
+That is conforming.
+
+**Staleness.** Manifests carry no dates, so a view describes the delegations
+the verifier knows now, not those in force when the anchor ledger closed. A
+proof whose quorum depended on keys since rotated can fail under a newer view.
+That is expected; the remedy is a fresher anchor (§1.4). A verifier MUST NOT
+fall back to an older view after failing under its current one.
+
+### 1.4 Replacing the Anchor
+
+The anchor is the only step whose authority comes from signatures. Everything
+below it is authenticated by hashes and never goes stale. A proof therefore
+divides into three parts:
+
+- **Anchor:** proves that ledger hash `H_a` was validated, under a trust view.
+- **Bridge:** headers and LedgerHashes leaves (§5.3) that authenticate an older
+  ledger hash `H_t` starting from `H_a`.
+- **Tail:** the steps that consume `H_t`, typically a target header and its
+  map proofs.
+
+A stale proof is renewed by a new anchor, a bridge from the new anchor ledger
+to `H_t`, and the retained tail. The result still contains exactly one anchor
+(§1): the old anchor is removed, although its ledger header may remain as an
+ordinary step if the bridge reaches it. Renewed proofs MUST be emitted in
+canonical form (§1.2), so producers SHOULD build the canonical bridge (§6) from
+the new anchor rather than extend the old bridge.
+
+For a historical target reached through a flag ledger (§6.2), every step from
+the flag ledger's header downward is independent of the anchor: the flag ledger
+depends only on the target, and every later ledger's state holds that era's
+long LedgerHashes list, which contains the flag ledger's hash. Renewal then
+replaces only the anchor, the anchor ledger's header and its long-list
+`map_proof`.
+
+A renewed proof is a different proof, with a different identity (§1.2).
+Separately, a verdict depends on the trust view as well as on the proof bytes:
+two verifiers holding different manifests can reach different verdicts on
+identical bytes. A cached verdict MUST therefore be keyed by both.
+
+Renewal produces an ordinary v6 proof. A tail without an anchor is not a v6
+proof; carrying tails or anchors as standalone objects would need a new format
+version (§9.1).
 
 ## 2. JSON Form
 
@@ -240,15 +343,19 @@ one, which is a smuggling vector rather than a formatting question.
 An anchor carries the VL snapshot it was built against, so an offline verifier can
 establish quorum entirely from the proof — or, per §3.3, from equivalent trust it
 already holds. Producers SHOULD include every distinct validation available for
-the anchor ledger, not merely the minimum that reaches quorum: a verifier that
-refreshes the VL (§8) needs the surplus to re-establish quorum under a changed
-signing-key view.
+the anchor ledger, not merely the minimum that reaches quorum, and including
+validations signed with keys newer than the embedded list's manifests: a
+verifier that resolves a different view (§1.3) needs the surplus to establish
+quorum under its signing keys.
 
-A proof whose embedded VL snapshot is stale remains valid as long as that snapshot
-yields quorum for the included validations. Quorum MUST be assessed against one
-coherent trust snapshot; a verifier MUST NOT combine an embedded snapshot with a
-refreshed one, since mixing views allows quorum to be assembled from validators
-that were never simultaneously trusted.
+Quorum MUST be assessed against one resolved trust view (§1.3): membership from
+exactly one primary list, delegations from the highest-sequence manifests the
+verifier holds for those members. A verifier MUST NOT take membership from more
+than one list, since mixing memberships allows quorum to be assembled from
+validators that were never simultaneously trusted. A proof whose embedded
+snapshot is stale still verifies for an embedded-only verifier as long as that
+snapshot yields quorum; a verifier holding newer manifests may reject it
+(§1.3, Staleness).
 
 ### 2.2 Ledger Header Step
 
@@ -468,8 +575,8 @@ Omitting `0x05` is the point of the split, and it serves two distinct cases:
   and finish without ever receiving the blob.
 
 A verifier that receives a proof without `0x05` MUST resolve the UNL from its own
-configured or cached trust for the proof's publisher key, and MUST reject the
-proof if it cannot. It MUST NOT treat an absent `0x05` as an absent trust
+configured or cached trust for the proof's publisher key (§1.3), and MUST reject
+the proof if it cannot. It MUST NOT treat an absent `0x05` as an absent trust
 requirement: the anchor's validations still have to reach quorum against a
 verified UNL, and the publisher key still has to be one the verifier trusts
 (§8). An absent `0x05` changes where the UNL comes from, never whether one is
@@ -763,17 +870,21 @@ function verify(chain, trusted_publisher_keys):
             //      MAN\0 + manifest fields without Signature/MasterSignature
             // 3. Use the manifest's SigningPubKey to verify unl.signature
             //    over unl.blob
-            // 4. Decode unl.blob → validator entries
-            // 5. Verify each validator manifest the same way and build the
-            //    signing_key → master_key map
+            // 4. Decode unl.blob → validator entries: the primary list's
+            //    membership (§1.3), N = number of masters
+            // 5. Verify each validator manifest the same way, then resolve
+            //    each master's delegation from its highest-sequence verified
+            //    manifest among the list's and any others held (§1.3), and
+            //    build the signing_key → master_key map from the result
             // 6. For each validation:
             //      deserialize STValidation
             //      verify LedgerHash == anchor.ledger_hash
             //      verify VAL\0 signing data signature using SigningPubKey
-            //      verify SigningPubKey maps to a verified UNL validator
+            //      verify SigningPubKey maps to a resolved delegation
             //      SHOULD: verify LedgerSequence == anchor.ledger_index
-            // 7. Quorum: >= ceil(0.8 × UNL size) distinct UNL validators,
-            //    each validator counted at most once (by master key)
+            // 7. Quorum: >= ceil(0.8 × N) distinct masters, each counted at
+            //    most once and only through its resolved signing key
+            list_effective, list_expiration = the primary list's interval
             trusted_ledger_hashes.add(step.ledger_hash)
 
         elif step is ledger_header:
@@ -807,6 +918,12 @@ function verify(chain, trusted_publisher_keys):
                         supported = true
                         break
             assert supported
+
+            // The header the anchor hash authenticates must have closed
+            // inside the primary list's validity interval:
+            // effective <= close_time < expiration (effective defaults to 0).
+            if computed_hash == anchor.ledger_hash:
+                assert list_effective <= step.header.close_time < list_expiration
 
             trusted_ledger_hashes.add(step.header.parent_hash)
             trusted_tx_roots.add(step.header.transaction_hash)
@@ -1140,6 +1257,14 @@ At minimum, verifier output SHOULD expose:
 - Reference verifiers should support both an offline mode that trusts only the
   embedded VL snapshot and an online mode that can refresh the latest VL before
   assessing the included anchor validations.
+- Sources of trust material (§1.3) are channels for evidence, not trust roots:
+  a source can withhold a newer manifest, but it cannot make an unverified one
+  count. A verifier that keeps material between runs SHOULD keep each master's
+  highest manifest sequence, so that a restart or an older bundle cannot return
+  signing to a key the validator has rotated away from.
+- Holding the newest manifests is not provable offline. A verifier SHOULD
+  report the view it used, so a consumer can judge whether it was current
+  enough.
 
 ## 9. Registries, MIME Types, and File Extensions
 
@@ -1190,6 +1315,9 @@ The current C++ and Python reference verifiers implement capability-based
 verification of the parent-before-child DAG model. They keep authenticated
 ledger hashes and tree roots alive across sibling fan-out, and may emit warnings
 for non-canonical duplication or ordering while still accepting a valid proof.
+
+Trust resolution with material beyond the proof (§1.3) is not yet implemented:
+both reference verifiers resolve the view from the embedded list alone.
 
 Progressive verification with a cached UNL is not implemented in the reference
 verifiers. The `0x05` anchor UNL record is OPTIONAL (§3.3) and both reference
