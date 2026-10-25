@@ -475,5 +475,54 @@ class ProofBindingTests(unittest.TestCase):
         )
 
 
+def _der(r: int, s: int) -> bytes:
+    def integer(x: int) -> bytes:
+        body = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
+        if body[0] & 0x80:
+            body = b"\x00" + body
+        return b"\x02" + bytes([len(body)]) + body
+
+    seq = integer(r) + integer(s)
+    return b"\x30" + bytes([len(seq)]) + seq
+
+
+def _der_parts(sig: bytes) -> tuple[int, int]:
+    rlen = sig[3]
+    r = int.from_bytes(sig[4 : 4 + rlen], "big")
+    slen = sig[5 + rlen]
+    s = int.from_bytes(sig[6 + rlen : 6 + rlen + slen], "big")
+    return r, s
+
+
+class SignatureCanonicalityTests(unittest.TestCase):
+    """Python must refuse what libsecp256k1 refuses in the C++ verifier."""
+
+    def setUp(self) -> None:
+        seed = generate_seed(entropy="ab" * 16, algorithm=CryptoAlgorithm.SECP256K1)
+        self.public, self.private = derive_keypair(seed)
+        self.data = b"VAL\x00" + b"xprv canonicality"
+        self.low = unhexlify(sign(self.data, self.private))
+
+    def test_low_s_signature_verifies(self) -> None:
+        r, s = _der_parts(self.low)
+        self.assertLessEqual(s, v.SECP256K1_ORDER // 2)
+        self.assertTrue(v.verify_signature(self.data, self.low, self.public))
+
+    def test_high_s_twin_is_refused(self) -> None:
+        r, s = _der_parts(self.low)
+        high = _der(r, v.SECP256K1_ORDER - s)
+        self.assertFalse(v.secp256k1_signature_is_canonical(high))
+        self.assertFalse(v.verify_signature(self.data, high, self.public))
+
+    def test_non_minimal_der_is_refused(self) -> None:
+        r, s = _der_parts(self.low)
+        canonical = _der(r, s)
+        padded_r = b"\x02" + bytes([canonical[3] + 1]) + b"\x00" + canonical[4 : 4 + canonical[3]]
+        rest = canonical[4 + canonical[3] :]
+        body = padded_r + rest
+        self.assertFalse(v.secp256k1_signature_is_canonical(b"\x30" + bytes([len(body)]) + body))
+        self.assertFalse(v.secp256k1_signature_is_canonical(canonical + b"\x00"))
+
+
 if __name__ == "__main__":
     unittest.main()

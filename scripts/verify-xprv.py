@@ -697,9 +697,55 @@ def is_properly_formed_toml_domain(domain: bytes) -> bool:
     return len(labels[-1]) >= 2
 
 
+SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+
+def _der_integer(sig: bytes, pos: int) -> tuple[int, int] | None:
+    """Parse one strict-DER INTEGER at pos; return (value, next_pos)."""
+    if pos + 2 > len(sig) or sig[pos] != 0x02:
+        return None
+    length = sig[pos + 1]
+    body = sig[pos + 2 : pos + 2 + length]
+    if length == 0 or len(body) != length or body[0] & 0x80:
+        return None
+    if length > 1 and body[0] == 0 and not body[1] & 0x80:
+        return None  # unnecessary leading zero
+    return int.from_bytes(body, "big"), pos + 2 + length
+
+
+def secp256k1_signature_is_canonical(sig: bytes) -> bool:
+    """Strict DER with 0 < r < n and 0 < s <= n/2 (low-S).
+
+    The C++ verifier gets this from libsecp256k1, which parses strict DER and
+    refuses high-S signatures. Without it the two verifiers disagree on the
+    same bytes, and a high-S copy is a second valid encoding of one signature.
+    """
+    if not 8 <= len(sig) <= 72 or sig[0] != 0x30 or sig[1] != len(sig) - 2:
+        return False
+    r = _der_integer(sig, 2)
+    if r is None:
+        return False
+    s_ = _der_integer(sig, r[1])
+    if s_ is None or s_[1] != len(sig):
+        return False
+    return 0 < r[0] < SECP256K1_ORDER and 0 < s_[0] <= SECP256K1_ORDER // 2
+
+
+def verify_signature(data: bytes, signature: bytes, key_hex: str) -> bool:
+    """The one signature check for every XRPL signature this verifier sees."""
+    try:
+        if not key_hex.upper().startswith("ED") and not secp256k1_signature_is_canonical(
+            signature
+        ):
+            return False
+        return xrpl.core.keypairs.is_valid_message(data, signature, key_hex)
+    except Exception:
+        return False
+
+
 def _signature_ok(data: bytes, signature_hex: str, key_hex: str) -> bool:
     try:
-        return xrpl.core.keypairs.is_valid_message(data, unhexlify(signature_hex), key_hex)
+        return verify_signature(data, unhexlify(signature_hex), key_hex)
     except Exception:
         return False
 
@@ -825,9 +871,7 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
         return AnchorResult(ok=False, message="no blob or signature")
     try:
         blob_bytes = unhexlify(blob_hex)
-        blob_ok = xrpl.core.keypairs.is_valid_message(
-            blob_bytes, unhexlify(sig_hex), signing_key
-        )
+        blob_ok = verify_signature(blob_bytes, unhexlify(sig_hex), signing_key)
     except Exception:
         blob_ok = False
     if not blob_ok:
@@ -915,12 +959,7 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
             )
         if parsed.ledger_hash != anchor_hash:
             continue
-        try:
-            if not xrpl.core.keypairs.is_valid_message(
-                parsed.signing_data, parsed.signature, parsed.signing_key
-            ):
-                continue
-        except Exception:
+        if not verify_signature(parsed.signing_data, parsed.signature, parsed.signing_key):
             continue
 
         verified += 1
