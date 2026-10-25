@@ -149,14 +149,23 @@ public:
     apply_peer_manifests(std::vector<catl::vl::Manifest> manifests);
 
     /// The §1.3 material this server holds, for verifiers on this server:
-    /// per listed master, the newest manifest from the current list or a peer
-    /// (so a list-borne revocation reaches them too), plus the one conflicting
-    /// pair for each equivocated master (so they drop the same validator).
+    /// per master, the newest manifest from the current list or a peer (so a
+    /// list-borne revocation reaches them too), plus the one conflicting pair
+    /// for each equivocated master (so they drop the same validator).
+    /// Not filtered by the current list: an older proof's own primary list
+    /// can still name a master the current list dropped, and a verifier's
+    /// rule 1 already filters by that proof's list (codex F8). Peers' manifests
+    /// are only stored for masters that were listed, so this stays bounded.
     std::vector<std::vector<uint8_t>>
     held_manifest_bytes() const
     {
+        std::set<std::string> masters(unl_master_keys_);
+        for (auto const& [master, _] : peer_manifests_by_master_)
+            masters.insert(master);
+        for (auto const& [master, _] : equivocation_evidence_)
+            masters.insert(master);
         std::vector<std::vector<uint8_t>> out;
-        for (auto const& master : unl_master_keys_)
+        for (auto const& master : masters)
         {
             auto const vl_seq = vl_manifest_sequence_by_master_.find(master);
             auto const vl_raw = vl_manifest_raw_by_master_.find(master);

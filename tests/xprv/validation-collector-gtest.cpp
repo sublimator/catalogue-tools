@@ -826,3 +826,23 @@ TEST(ValidationCollector, SameKeyReissueAdvancesButForeignKeyIsRefused)
     collector.apply_peer_manifests({stolen});
     EXPECT_FALSE(contains(collector.held_manifest_bytes(), stolen.raw));
 }
+
+
+// codex F8: a revocation the server holds for a master must stay in the
+// snapshot after a newer list drops that master, because an older proof's own
+// primary list can still name it.
+TEST(ValidationCollector, HeldRevocationSurvivesTheMasterLeavingTheList)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    auto const dropped = fake_manifest(0x02, 0x03, 1, 0xA0);
+    auto const stays = fake_manifest(0x04, 0x05, 1, 0xB0);
+    collector.set_unl({dropped, stays});
+    auto const revocation =
+        fake_manifest(0x02, 0, std::numeric_limits<uint32_t>::max(), 0xC0);
+    collector.apply_peer_manifests({revocation});
+    ASSERT_TRUE(contains(collector.held_manifest_bytes(), revocation.raw));
+
+    collector.set_unl({stays});  // the newer list drops master 0x02
+    EXPECT_TRUE(contains(collector.held_manifest_bytes(), revocation.raw));
+}
