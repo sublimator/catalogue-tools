@@ -500,6 +500,18 @@ class TrustViewOverlayTests(unittest.TestCase):
             self.verify(f.anchor(), f.trusted_key, [newer]), "superseded publisher key"
         )
 
+    def test_held_publisher_revocation_rejects_the_list(self) -> None:
+        # Same laws for the publisher as for validators (Nicholas): a
+        # revoked publisher key signs nothing.
+        f = self.f
+        revocation = sign_manifest(
+            {"Sequence": v.MANIFEST_REVOKED, "PublicKey": f.publisher[0]}, f.publisher, None
+        )
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key, []).ok)
+        self.assertRejected(
+            self.verify(f.anchor(), f.trusted_key, [revocation]), "publisher is revoked"
+        )
+
 
 class ManifestTemplateTests(unittest.TestCase):
     """Validly signed manifests whose shape the C++ verifier rejects."""

@@ -253,6 +253,17 @@ remember_validator_manifests(
 }
 
 bool
+is_verified_publisher_revocation(
+    catl::vl::Manifest const& manifest,
+    std::string const& trusted_key_hex,
+    catl::xdata::Protocol const& protocol)
+{
+    return manifest.is_revocation() && !trusted_key_hex.empty() &&
+        lower(manifest.master_key_hex()) == lower(trusted_key_hex) &&
+        verify_manifest(manifest, protocol);
+}
+
+bool
 verify_fetched_vl(
     catl::vl::ValidatorList const& vl,
     std::string const& trusted_key_hex,

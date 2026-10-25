@@ -22,9 +22,11 @@
 #include <new>
 #include <ostream>
 #include <streambuf>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace catl::vl {
 
@@ -1004,6 +1006,90 @@ TEST(VlCacheShutdown, StopReceiptsCanceledRetryHandler)
 
     scheduler.run_until_idle();
     EXPECT_NO_THROW(stopped.get());
+}
+
+// Same laws for the publisher as for validators (Nicholas): a verified
+// revocation of the pinned publisher key is final. The list is dropped, reads
+// throw, and a site still serving a good list afterwards is refused.
+TEST(VlCachePublisherRevocation, VerifiedRevocationIsFinal)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    // Zero interval: each terminal arms an immediately due refresh, so the
+    // fetch after the revocation runs without waiting 15 minutes.
+    cache->set_refresh_interval(std::chrono::seconds(0));
+    catl::vl::VlCallback pending;
+    std::size_t fetches = 0;
+    std::size_t refreshes = 0;
+    std::vector<std::vector<std::uint8_t>> revoked;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending, &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            pending = std::move(callback);
+        });
+    cache->set_on_refresh(
+        [&refreshes](catl::vl::ValidatorList const&) { ++refreshes; });
+    std::vector<std::uint8_t> const revocation_raw{0xEE};
+    cache->set_publisher_revocation(
+        [&revocation_raw](catl::vl::Manifest const& m) {
+            return m.raw == revocation_raw;
+        },
+        [&revoked](catl::vl::Manifest const& m) { revoked.push_back(m.raw); });
+
+    cache->start();
+    scheduler.run_until_idle();
+    ASSERT_TRUE(pending);
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+    ASSERT_EQ(refreshes, 1u);
+    ASSERT_EQ(fetches, 2u) << "the zero-interval refresh fetch is pending";
+
+    auto revoked_result = successful_vl_result();
+    revoked_result.vl.sequence = 2;
+    revoked_result.vl.publisher_manifest.sequence =
+        std::numeric_limits<std::uint32_t>::max();
+    revoked_result.vl.publisher_manifest.raw = revocation_raw;
+    pending(revoked_result);
+    scheduler.run_until_idle();
+    EXPECT_EQ(revoked.size(), 1u);
+    EXPECT_EQ(refreshes, 1u);
+
+    auto read = [&] {
+        auto got =
+            boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+        scheduler.run_until_idle();
+        try
+        {
+            got.get();
+            return std::string("served a list");
+        }
+        catch (std::runtime_error const& e)
+        {
+            return std::string(e.what());
+        }
+    };
+    EXPECT_EQ(read(), VlCache::kPublisherRevoked);
+
+    ASSERT_EQ(fetches, 3u) << "the refresh after the revocation is pending";
+    auto good = successful_vl_result();
+    good.vl.sequence = 3;
+    pending(good);
+    scheduler.run_until_idle();
+    EXPECT_EQ(refreshes, 1u) << "a good list after a revocation is refused";
+    EXPECT_EQ(revoked.size(), 1u) << "the revoked callback runs once";
+    EXPECT_EQ(read(), VlCache::kPublisherRevoked);
+
+    // The zero interval leaves one more fetch in flight; stop joins it.
+    ASSERT_EQ(fetches, 4u);
+    auto stopped =
+        boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(refreshes, 1u);
 }
 
 TEST(VlCacheShutdown, SuccessfulInitialLoadStopsWithoutStartingRefreshFetch)

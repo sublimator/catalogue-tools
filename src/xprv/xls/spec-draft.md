@@ -1436,10 +1436,12 @@ stays after a later list drops that master), plus the conflicting pair for any
 validator it has seen equivocate. It does not filter by its current list,
 because an older proof's own primary list may name a master the current list
 dropped; the verifier's rule 1 filters by the proof's list. It also passes the
-newest publisher manifest from the lists it has loaded, so it refuses a proof
-whose list was signed under a publisher key since superseded. A publisher
-revocation is not held: the server's list loader refuses a list whose publisher
-manifest carries no signing key, and keeps the last list it accepted.
+newest publisher manifest it has seen in a list response, whatever that list's
+sequence, so it refuses a proof whose list was signed under a publisher key since
+superseded. A verified revocation of the publisher key is final, as a validator's
+is: the server drops its list, refuses every later list, serves no proof (cached
+ones included), and passes the revocation, so `/verify` refuses every proof under
+that publisher.
 The server counts its proof quorum under the same view and attaches one
 validation per listed master, signed under that master's current key; a
 validation under a superseded key, from a validator caught mid-rotation, is not

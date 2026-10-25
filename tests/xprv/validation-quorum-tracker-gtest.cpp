@@ -2546,3 +2546,143 @@ TEST(ProofQuorumAt80, SpawnedListSyncOwnsTemporaryArguments)
     io.run();
     future.get();
 }
+
+namespace {
+
+struct OverlayFixtureCase
+{
+    boost::json::object anchor;
+    std::string key;
+    catl::vl::Manifest embedded;
+    std::vector<std::vector<uint8_t>> extras;
+};
+
+OverlayFixtureCase
+load_overlay_case(char const* name)
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) +
+        "tests/xprv/fixture/trust-view-overlay.json");
+    if (!in)
+        throw std::runtime_error("cannot open trust-view-overlay fixture");
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto const fixture = boost::json::parse(buffer.str());
+    auto const& c = fixture.at("cases").at(name);
+    OverlayFixtureCase out;
+    out.anchor = c.at("anchor").as_object();
+    out.key = std::string(fixture.at("trusted_key").as_string());
+    out.embedded = catl::vl::parse_manifest(catl::vl::decode_hex(
+        std::string(out.anchor.at("unl").at("manifest").as_string())));
+    for (auto const& e : c.at("extras").as_array())
+        out.extras.push_back(catl::base64_decode(std::string(e.as_string())));
+    return out;
+}
+
+std::string
+held_verdict(
+    OverlayFixtureCase const& c,
+    std::shared_ptr<std::vector<std::vector<uint8_t>> const> const& held)
+{
+    auto const xrpl = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    std::vector<std::string> narrative;
+    auto const r =
+        xprv::AnchorVerifier::verify(c.anchor, c.key, xrpl, narrative, *held);
+    return r.verified ? std::string("verified") : r.error;
+}
+
+}  // namespace
+
+// codex F9: a publisher can re-issue its manifest for an unchanged list. The
+// newer manifest reaches the held set through both hand-offs, at an equal and
+// at an older list sequence, without the list itself being re-applied.
+TEST(ProofQuorumAt80, PublisherAdvanceIsHeldWhateverTheListSequence)
+{
+    auto const c = load_overlay_case("publisher-superseded");
+    auto const newer = catl::vl::parse_manifest(c.extras.at(0));
+    std::string const superseded =
+        "validator list is signed by a superseded publisher key";
+
+    asio::io_context io;
+    auto protocol = test_protocol();
+    auto via_set = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    via_set->set_unl({}, 7, c.embedded);
+    io.run();
+    io.restart();
+    EXPECT_EQ(held_verdict(c, via_set->held_manifests()), "verified");
+    via_set->set_unl({}, 7, newer);  // same list sequence
+    io.run();
+    io.restart();
+    EXPECT_EQ(held_verdict(c, via_set->held_manifests()), superseded);
+
+    auto via_sync = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    auto sync = [&](uint32_t sequence, catl::vl::Manifest const& publisher) {
+        auto f = asio::co_spawn(
+            io,
+            via_sync->co_sync_unl({}, sequence, publisher),
+            asio::use_future);
+        io.run();
+        io.restart();
+        return f.get();
+    };
+    EXPECT_TRUE(sync(7, c.embedded));
+    EXPECT_TRUE(sync(7, newer));  // equal: true, and the publisher advances
+    EXPECT_EQ(held_verdict(c, via_sync->held_manifests()), superseded);
+
+    auto via_older = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    auto f7 = asio::co_spawn(
+        io, via_older->co_sync_unl({}, 7, c.embedded), asio::use_future);
+    io.run();
+    io.restart();
+    EXPECT_TRUE(f7.get());
+    auto f6 = asio::co_spawn(
+        io, via_older->co_sync_unl({}, 6, newer), asio::use_future);
+    io.run();
+    io.restart();
+    EXPECT_FALSE(f6.get());  // older list: false, but the publisher advances
+    EXPECT_EQ(held_verdict(c, via_older->held_manifests()), superseded);
+
+    for (auto const& t : {via_set, via_sync, via_older})
+    {
+        auto stopped = asio::co_spawn(io, t->co_stop(), asio::use_future);
+        io.run();
+        io.restart();
+        stopped.get();
+    }
+}
+
+// Same laws for the publisher (Nicholas): a verified publisher revocation
+// handed to the tracker reaches the held set, a later list can't displace it,
+// and /verify then refuses every proof under that publisher.
+TEST(ProofQuorumAt80, PublisherRevocationReachesHeldManifests)
+{
+    auto const c = load_overlay_case("publisher-revoked");
+    auto const revocation = catl::vl::parse_manifest(c.extras.at(0));
+    ASSERT_TRUE(revocation.is_revocation());
+
+    asio::io_context io;
+    auto protocol = test_protocol();
+    auto tracker = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    tracker->set_unl({}, 7, c.embedded);
+    io.run();
+    io.restart();
+    EXPECT_EQ(held_verdict(c, tracker->held_manifests()), "verified");
+
+    tracker->note_publisher_manifest(revocation);
+    io.run();
+    io.restart();
+    EXPECT_EQ(
+        held_verdict(c, tracker->held_manifests()),
+        "the validator list publisher is revoked");
+
+    tracker->set_unl({}, 8, c.embedded);
+    io.run();
+    io.restart();
+    EXPECT_EQ(
+        held_verdict(c, tracker->held_manifests()),
+        "the validator list publisher is revoked");
+
+    auto future = asio::co_spawn(io, tracker->co_stop(), asio::use_future);
+    io.run();
+    future.get();
+}

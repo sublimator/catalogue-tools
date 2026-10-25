@@ -62,4 +62,12 @@ verify_fetched_vl(
     catl::xdata::Protocol const& protocol,
     std::string& error);
 
+/// True when `manifest` revokes the trusted publisher key: a revocation whose
+/// master is that key, with a valid master signature (§1.3, D8).
+bool
+is_verified_publisher_revocation(
+    catl::vl::Manifest const& manifest,
+    std::string const& trusted_key_hex,
+    catl::xdata::Protocol const& protocol);
+
 }  // namespace xprv

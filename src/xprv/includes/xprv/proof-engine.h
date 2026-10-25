@@ -432,6 +432,8 @@ private:
     CacheList cache_lru_;  // front = most recently used
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
     std::atomic<bool> cache_enabled_{true};
+    // Set once by on_publisher_revoked(); final for the process.
+    std::atomic<bool> publisher_revoked_{false};
     size_t node_cache_size_ = 65536;
     std::chrono::milliseconds fetch_timeout_{1500};
     int max_walk_peer_retries_ = 3;
@@ -546,6 +548,12 @@ private:
 
     void
     invalidate_anchor_cache();
+
+    // A verified revocation of the publisher key arrived (VlCache strand):
+    // refuse every later prove, drop cached proofs and anchors, and hold the
+    // revocation for /verify.
+    void
+    on_publisher_revoked(catl::vl::Manifest const& revocation);
 
     // Mutex-held invalidation commit. Callers that already hold
     // cache_mutex_ must publish retained_signal wakes only after releasing

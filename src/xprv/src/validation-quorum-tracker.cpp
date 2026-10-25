@@ -888,6 +888,21 @@ ValidationQuorumTracker::set_unl(
         schedule_validation_drain();
 }
 
+void
+ValidationQuorumTracker::note_publisher_manifest(catl::vl::Manifest manifest)
+{
+    auto self = shared_from_this();
+    asio::post(strand_, [self, manifest = std::move(manifest)]() {
+        std::lock_guard publication_lock(self->publication_mutex_);
+        {
+            std::lock_guard admission_lock(self->admission_mutex_);
+            if (self->stopped_)
+                return;
+        }
+        self->note_publisher_manifest_locked(manifest);
+    });
+}
+
 asio::awaitable<bool>
 ValidationQuorumTracker::co_sync_unl(
     std::vector<catl::vl::Manifest> validators,
@@ -931,16 +946,16 @@ ValidationQuorumTracker::co_sync_unl_on_strand(
         if (stopped_ || pending_unl_updates_ != 0)
             co_return false;
     }
-    if (vl_sequence_ && *vl_sequence_ > vl_sequence)
-        co_return false;
-    if (!vl_sequence_ || *vl_sequence_ < vl_sequence)
+    if (vl_sequence_ && *vl_sequence_ >= vl_sequence)
     {
-        {
-            std::lock_guard admission_lock(admission_mutex_);
-            ++trust_admission_generation_;
-        }
-        apply_unl_locked(*update, vl_sequence, true);
+        note_publisher_manifest_locked(update->publisher_manifest);
+        co_return *vl_sequence_ == vl_sequence;
     }
+    {
+        std::lock_guard admission_lock(admission_mutex_);
+        ++trust_admission_generation_;
+    }
+    apply_unl_locked(*update, vl_sequence, true);
     co_return true;
 }
 
@@ -952,6 +967,7 @@ ValidationQuorumTracker::apply_unl_locked(
 {
     if (vl_sequence_ && vl_sequence <= *vl_sequence_)
     {
+        note_publisher_manifest_locked(update.publisher_manifest);
         if (publish)
             publish_trust_state_locked();
         return false;

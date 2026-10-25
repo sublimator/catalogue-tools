@@ -254,6 +254,18 @@ TEST(AnchorVerifier, HeldManifestCollisionsAndSupersededPublisherReject)
         "validator list is signed by a superseded publisher key");
 }
 
+TEST(AnchorVerifier, HeldPublisherRevocationRejectsTheList)
+{
+    // A revoked publisher key signs nothing, as a revoked validator key
+    // votes for nothing (Nicholas: same laws for the publisher).
+    auto const [key, cases] = load_overlay_fixture();
+    auto const& c = cases.at("publisher-revoked");
+    EXPECT_TRUE(verify_with(c, key, false).verified);
+    EXPECT_EQ(
+        verify_with(c, key, true).error,
+        "the validator list publisher is revoked");
+}
+
 TEST(AnchorVerifier, NewerPublisherManifestWithTheSameKeyKeepsTheList)
 {
     // codex batch-2 F2: a re-issued publisher manifest naming the same signing

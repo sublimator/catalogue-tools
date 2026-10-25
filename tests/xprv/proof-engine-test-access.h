@@ -48,6 +48,21 @@ public:
     }
 
     static void
+    publisher_revoked(ProofEngine& engine, catl::vl::Manifest const& revocation)
+    {
+        engine.on_publisher_revoked(revocation);
+    }
+
+    static void
+    seed_proof_cache(
+        ProofEngine& engine,
+        std::string const& tx_hash,
+        ProofEngine::ProveResult const& result)
+    {
+        engine.cache_put(tx_hash, result);
+    }
+
+    static void
     set_node_cache(
         ProofEngine& engine,
         std::shared_ptr<catl::peer_client::NodeCache> node_cache)

@@ -48,7 +48,8 @@ public:
     /// Keep the newest manifest of a publisher whose list was loaded, for
     /// held_manifest_bytes(). A list from a site serving an older publisher
     /// manifest doesn't replace a newer one. Empty raw bytes are ignored.
-    void
+    /// Returns true when the held manifest changed.
+    bool
     note_publisher_manifest(catl::vl::Manifest const& manifest);
 
     /// Call from unsolicited handler. Filters for type 41 (validation).

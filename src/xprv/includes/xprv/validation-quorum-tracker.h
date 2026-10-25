@@ -116,6 +116,11 @@ public:
         uint32_t vl_sequence,
         catl::vl::Manifest const& publisher_manifest = catl::vl::Manifest());
 
+    /// Hold a publisher manifest that arrived without a list to apply, such as
+    /// a verified publisher revocation, so held_manifests() carries it.
+    void
+    note_publisher_manifest(catl::vl::Manifest manifest);
+
     /// Apply the list on the validation strand, or report that a newer list is
     /// already active. Returning true guarantees subsequent quorum reads use
     /// this list sequence. The arguments are taken by value: the coroutine
@@ -324,6 +329,19 @@ private:
 
     void
     publish_trust_state_locked();
+
+    // Hold a newer publisher manifest and republish the snapshot (owner
+    // strand, publication_mutex_ held). Independent of the list sequence: a
+    // publisher can re-issue its manifest for an unchanged list (codex F9).
+    // clang-format off
+    //@@audit-ack unannotated_authority_candidate reason="records a verified publisher manifest in the collector's held set and republishes the read-only snapshot, as refresh_held_manifests_locked does; it grants and revokes nothing itself, and its callers are the list hand-offs and note_publisher_manifest on the owner strand"
+    // clang-format on
+    void
+    note_publisher_manifest_locked(catl::vl::Manifest const& manifest)
+    {
+        if (collector_.note_publisher_manifest(manifest))
+            refresh_held_manifests_locked();
+    }
 
     void
     start_manifest_packet(std::shared_ptr<std::vector<uint8_t>> data);

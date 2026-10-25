@@ -8,6 +8,8 @@
 
 #include <xprv/network-config.h>
 #include <xprv/proof-engine.h>
+#include <xprv/validation-quorum-tracker.h>
+#include <xprv/vl-cache.h>
 
 #include "proof-engine-test-access.h"
 
@@ -22,10 +24,12 @@
 #include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -422,4 +426,46 @@ TEST(ProofEngineAnchorWait0074, ParentCancellationIsLocal)
     EXPECT_EQ(failure.detail, "anchor bundle waiter was cancelled");
     EXPECT_TRUE(harness.in_flight())
         << "one canceled subscriber must not poison the shared operation";
+}
+
+// Same laws for the publisher (Nicholas): once the publisher key is revoked the
+// engine serves no proof under it, not even one already cached, and the
+// tracker holds the revocation for /verify.
+TEST(ProofEnginePublisherRevocation, ProveRefusesCachedAndNewProofs)
+{
+    asio::io_context io;
+    auto engine =
+        xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+    auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    auto tracker = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    ProofEngineTestAccess::set_validation_quorum_tracker(*engine, tracker);
+    std::string const tx(64, 'A');
+    ProofEngineTestAccess::seed_proof_cache(
+        *engine, tx, xprv::ProofEngine::ProveResult{{}, 1000, "ED"});
+
+    catl::vl::Manifest revocation;
+    revocation.master_public_key = std::vector<uint8_t>(33, 0xED);
+    revocation.sequence = std::numeric_limits<uint32_t>::max();
+    revocation.raw = std::vector<uint8_t>(40, 0xEE);
+    ProofEngineTestAccess::publisher_revoked(*engine, revocation);
+
+    auto proved = asio::co_spawn(io, engine->prove(tx), asio::use_future);
+    io.run();
+    io.restart();
+    try
+    {
+        proved.get();
+        ADD_FAILURE() << "prove served a proof under a revoked publisher";
+    }
+    catch (std::runtime_error const& e)
+    {
+        EXPECT_STREQ(e.what(), xprv::VlCache::kPublisherRevoked);
+    }
+    auto const held = tracker->held_manifests();
+    EXPECT_NE(
+        std::find(held->begin(), held->end(), revocation.raw), held->end());
+
+    auto stopped = asio::co_spawn(io, tracker->co_stop(), asio::use_future);
+    io.run();
+    stopped.get();
 }

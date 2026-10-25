@@ -47,15 +47,17 @@ ValidationCollector::ValidationCollector(
 {
 }
 
-void
+bool
 ValidationCollector::note_publisher_manifest(catl::vl::Manifest const& manifest)
 {
     auto const master_key_hex = manifest.master_key_hex();
     if (manifest.raw.empty() || master_key_hex.empty())
-        return;
+        return false;
     auto& seen = publisher_manifests_seen_[master_key_hex];
-    if (seen.second.empty() || manifest.sequence > seen.first)
-        seen = {manifest.sequence, manifest.raw};
+    if (!seen.second.empty() && manifest.sequence <= seen.first)
+        return false;
+    seen = {manifest.sequence, manifest.raw};
+    return true;
 }
 
 void

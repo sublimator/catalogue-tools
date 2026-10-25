@@ -102,6 +102,26 @@ public:
         verify_ = std::move(cb);
     }
 
+    /// Optional check, run on a fetched list's publisher manifest when it is a
+    /// revocation: true when it is a verified revocation of the pinned
+    /// publisher key. Such a revocation is final for this cache (§1.3, D8):
+    /// the list is dropped, co_get() and co_refresh() throw, every later fetch
+    /// is refused, and the revoked callback runs once. Set before start().
+    using RevocationCheck = std::function<bool(catl::vl::Manifest const&)>;
+    using RevokedCallback = std::function<void(catl::vl::Manifest const&)>;
+    // clang-format off
+    //@@audit-ack unannotated_authority_candidate reason="pre-start wiring setter, like set_verifier and set_on_refresh; it installs callbacks before start() and decides nothing itself"
+    // clang-format on
+    void
+    set_publisher_revocation(RevocationCheck check, RevokedCallback on_revoked)
+    {
+        revocation_check_ = std::move(check);
+        on_publisher_revoked_ = std::move(on_revoked);
+    }
+
+    static constexpr char const* kPublisherRevoked =
+        "validator list publisher key revoked";
+
 private:
     VlCache(boost::asio::io_context& io, std::string vl_host, uint16_t vl_port);
 
@@ -194,6 +214,10 @@ private:
     ValidatorManifestHistory validator_manifest_history_;
     RefreshCallback on_refresh_;
     VerifyCallback verify_;
+    RevocationCheck revocation_check_;
+    RevokedCallback on_publisher_revoked_;
+    // The verified revocation of the pinned publisher key, once seen. Final.
+    std::optional<catl::vl::Manifest> publisher_revocation_;
 
     /// Deterministic test seam. Production constructs VlClient directly.
     std::function<void(catl::vl::VlCallback)> fetch_for_test_;

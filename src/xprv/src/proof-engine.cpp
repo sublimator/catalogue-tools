@@ -75,6 +75,11 @@ ProofEngine::start()
         throw std::logic_error("ProofEngine::start may be called only once");
     start_called_ = true;
 
+    // Validation quorum tracker. Created before the VL cache starts, so a
+    // publisher revocation from the first fetch can reach it.
+    quorum_tracker_ =
+        ValidationQuorumTracker::create(io_, protocol_, config_.network_id);
+
     // VL cache
     vl_cache_ = VlCache::create(io_, config_.vl_host, config_.vl_port);
     // Authenticate list contents against the pinned publisher key independently
@@ -93,11 +98,21 @@ ProofEngine::start()
             return verify_fetched_vl(
                 vl, self->config_.publisher_key, self->protocol_, err);
         });
+    // A verified revocation of the publisher key is final (§1.3, D8).
+    vl_cache_->set_publisher_revocation(
+        [weak = std::weak_ptr<ProofEngine>(shared_from_this())](
+            catl::vl::Manifest const& manifest) -> bool {
+            auto self = weak.lock();
+            return self &&
+                is_verified_publisher_revocation(
+                       manifest, self->config_.publisher_key, self->protocol_);
+        },
+        [weak = std::weak_ptr<ProofEngine>(shared_from_this())](
+            catl::vl::Manifest const& manifest) {
+            if (auto self = weak.lock())
+                self->on_publisher_revoked(manifest);
+        });
     vl_cache_->start();
-
-    // Validation quorum tracker
-    quorum_tracker_ =
-        ValidationQuorumTracker::create(io_, protocol_, config_.network_id);
 
     // Wire VL → quorum tracker: when VL loads, push UNL keys
     // We do this via a one-shot fetch, then the refresh will re-push.
@@ -577,6 +592,10 @@ ProofEngine::prove(
     co_await asio::this_coro::reset_cancellation_state(
         asio::enable_total_cancellation());
 
+    // No proofs, cached or new, under a revoked publisher key.
+    if (publisher_revoked_)
+        throw std::runtime_error(VlCache::kPublisherRevoked);
+
     // Check cache first — returns by value, safe across co_await
     if (cache_enabled_)
     {
@@ -680,6 +699,8 @@ ProofEngine::prove(
         result.tx_ledger_seq,
         result.publisher_key_hex};
 
+    if (publisher_revoked_)
+        throw std::runtime_error(VlCache::kPublisherRevoked);
     if (cache_enabled_)
     {
         cache_put(tx_hash, prove_result);
@@ -738,6 +759,23 @@ ProofEngine::lookup_tx(std::string const& tx_hash)
 // ═══════════════════════════════════════════════════════════════════════
 // Proof cache
 // ═══════════════════════════════════════════════════════════════════════
+
+// clang-format off
+//@@audit-ack unannotated_authority_candidate reason="terminal latch set once from the VlCache strand after a verified publisher revocation; prove reads the atomic, the proof cache is cleared under cache_mutex_, and the anchor cache through the annotated invalidate_anchor_cache; its trust effect is modelled as a held manifest, not as a new engine state, and that choice is open to review"
+// clang-format on
+void
+ProofEngine::on_publisher_revoked(catl::vl::Manifest const& revocation)
+{
+    publisher_revoked_ = true;
+    {
+        std::lock_guard lock(cache_mutex_);
+        cache_map_.clear();
+        cache_lru_.clear();
+    }
+    invalidate_anchor_cache();
+    if (quorum_tracker_)
+        quorum_tracker_->note_publisher_manifest(revocation);
+}
 
 void
 ProofEngine::cache_put(std::string const& tx_hash, ProveResult const& result)

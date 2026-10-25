@@ -215,6 +215,53 @@ VlCache::do_fetch()
                     return;
                 }
 
+                // A revoked publisher stays revoked (§1.3, D8): refuse every
+                // fetch after a verified revocation, whatever a site serves.
+                if (self->publisher_revocation_)
+                {
+                    result.success = false;
+                    result.error = kPublisherRevoked;
+                }
+                else if (
+                    result.success &&
+                    result.vl.publisher_manifest.is_revocation() &&
+                    self->revocation_check_)
+                {
+                    bool revoked = false;
+                    try
+                    {
+                        revoked = self->revocation_check_(
+                            result.vl.publisher_manifest);
+                    }
+                    catch (...)
+                    {
+                    }
+                    if (revoked)
+                    {
+                        self->publisher_revocation_ =
+                            result.vl.publisher_manifest;
+                        self->vl_.reset();
+                        result.success = false;
+                        result.error = kPublisherRevoked;
+                        PLOGE(
+                            VlCache::log_,
+                            "VL publisher key revoked by a verified manifest; "
+                            "the list is dropped and no later list is "
+                            "accepted");
+                        if (self->on_publisher_revoked_)
+                        {
+                            try
+                            {
+                                self->on_publisher_revoked_(
+                                    *self->publisher_revocation_);
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                    }
+                }
+
                 // Verify fetched content against the pinned publisher key
                 // before storing it. Treat rejection like a failed fetch so
                 // the previous list remains available.
@@ -305,7 +352,8 @@ VlCache::do_fetch()
                     PLOGE(VlCache::log_, "VL fetch failed: ", result.error);
                     self->publish_fetch_wait_change();
 
-                    if (!self->vl_.has_value() || !is_active(*self->vl_))
+                    if (!self->publisher_revocation_ &&
+                        (!self->vl_.has_value() || !is_active(*self->vl_)))
                     {
                         // Never loaded — retry aggressively
                         auto delay = self->initial_retry_;
@@ -734,6 +782,8 @@ VlCache::co_get_on_strand()
 
     if (phase_ != Phase::running)
         throw boost::system::system_error(asio::error::operation_aborted);
+    if (publisher_revocation_)
+        throw std::runtime_error(kPublisherRevoked);
 
     if (vl_ && is_active(*vl_))
     {
@@ -803,6 +853,8 @@ VlCache::co_refresh_on_strand()
 
     if (phase_ != Phase::running)
         throw boost::system::system_error(asio::error::operation_aborted);
+    if (publisher_revocation_)
+        throw std::runtime_error(kPublisherRevoked);
 
     try
     {
