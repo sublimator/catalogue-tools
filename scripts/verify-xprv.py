@@ -137,6 +137,7 @@ class ParsedValidation:
     signing_key: str  # uppercase hex
     signature: bytes  # raw DER signature
     signing_data: bytes  # VAL\0 + serialized fields (sans sfSignature)
+    full: bool  # vfFullValidation set; only full validations count to quorum
 
 
 @dataclass
@@ -218,6 +219,7 @@ PREFIX_TX_LEAF = b"SND\x00"  # transaction + metadata leaf
 PREFIX_STATE_LEAF = b"MLN\x00"  # account state (SLE) leaf
 PREFIX_VALIDATION = b"VAL\x00"  # STValidation signing data
 PREFIX_MANIFEST = b"MAN\x00"  # manifest signing data
+FULL_VALIDATION_FLAG = 0x00000001  # rippled vfFullValidation
 PREFIX_TX_SIGNING = b"STX\x00"  # STObject signing (swapped to VAL for validations)
 
 # Default XRPL mainnet VL publisher key
@@ -646,6 +648,8 @@ def parse_validation(val_hex: str) -> ParsedValidation | None:
         signing_key=signing_key.upper(),
         signature=unhexlify(signature),
         signing_data=signing_bytes,
+        full=isinstance(decoded.get("Flags"), int)
+        and bool(decoded["Flags"] & FULL_VALIDATION_FLAG),
     )
 
 
@@ -894,6 +898,7 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
     anchor_hash = _upper_hex(anchor.get("ledger_hash"))
 
     verified = 0
+    partial = 0
     matched_unl = 0
     counted_masters: set[str] = set()
 
@@ -919,12 +924,20 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
             continue
 
         verified += 1
+        # rippled counts only full validations toward quorum (§5).
+        if not parsed.full:
+            partial += 1
+            continue
         master = signing_to_master.get(parsed.signing_key)
         if master is not None and master not in counted_masters:
             counted_masters.add(master)
             matched_unl += 1
 
-    print(f"    A5: {verified} sigs verified, {matched_unl}/{unl_size} UNL validators")
+    partial_note = f", {partial} partial (not counted)" if partial else ""
+    print(
+        f"    A5: {verified} sigs verified{partial_note}, "
+        f"{matched_unl}/{unl_size} UNL validators"
+    )
 
     # Step 6: quorum check, ceil(80%) as in the C++ verifier
     quorum = (unl_size * 4 + 4) // 5

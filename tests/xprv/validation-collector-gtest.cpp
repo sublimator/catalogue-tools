@@ -576,3 +576,51 @@ TEST(ValidationCollector, OneValidatorCannotFillLedgerRetention)
                 entry.ledger_seq == 100;
         }));
 }
+
+TEST(ValidationCollector, DropsPartialValidations)
+{
+    auto const xrpl_protocol = test_protocol();
+    std::ifstream in(
+        std::string(PROJECT_ROOT) +
+        "tests/xprv/fixture/partial-validations.json");
+    ASSERT_TRUE(in.is_open());
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto const fixture = boost::json::parse(buffer.str()).as_object();
+    auto const& anchor =
+        fixture.at("anchors").at("four-full-one-partial").as_object();
+
+    auto const blob_hex =
+        std::string(anchor.at("unl").at("blob").as_string());
+    std::string blob_json;
+    for (std::size_t i = 0; i + 1 < blob_hex.size(); i += 2)
+        blob_json.push_back(
+            static_cast<char>(std::stoi(blob_hex.substr(i, 2), nullptr, 16)));
+    auto const blob = boost::json::parse(blob_json);
+    std::vector<catl::vl::Manifest> manifests;
+    for (auto const& entry : blob.at("validators").as_array())
+    {
+        manifests.push_back(catl::vl::parse_manifest(catl::base64_decode(
+            std::string(entry.at("manifest").as_string()))));
+    }
+
+    xprv::ValidationCollector collector(xrpl_protocol, 0);
+    collector.set_unl(manifests);
+
+    auto const validation_type = static_cast<uint16_t>(
+        catl::peer_client::packet_type::validation);
+    for (auto const& kv : anchor.at("validations").as_object())
+    {
+        auto const hex = std::string(kv.value().as_string());
+        std::vector<uint8_t> bytes;
+        for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+            bytes.push_back(
+                static_cast<uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        collector.on_packet(validation_type, wrap_validation(bytes));
+    }
+
+    std::size_t stored = 0;
+    for (auto const& [hash, entries] : collector.by_ledger)
+        stored += entries.size();
+    EXPECT_EQ(stored, 4u) << "the one partial validation must not be stored";
+}

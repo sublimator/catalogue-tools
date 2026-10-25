@@ -82,6 +82,48 @@ TEST(AnchorVerifier, RejectsValidationMapKeyMismatch)
     EXPECT_EQ(result.error, "validation map key does not match SigningPubKey");
 }
 
+namespace {
+
+boost::json::object
+load_partial_fixture()
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) +
+        "tests/xprv/fixture/partial-validations.json");
+    if (!in)
+        throw std::runtime_error("cannot open partial-validations fixture");
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    return boost::json::parse(buffer.str()).as_object();
+}
+
+}  // namespace
+
+TEST(AnchorVerifier, PartialValidationsDoNotCountTowardQuorum)
+{
+    auto const fixture = load_partial_fixture();
+    auto const key = std::string(fixture.at("trusted_key").as_string());
+    auto const& anchors = fixture.at("anchors").as_object();
+
+    auto const all_partial = verify(anchors.at("all-partial").as_object(), key);
+    EXPECT_FALSE(all_partial.verified);
+    EXPECT_EQ(all_partial.error, "quorum not met");
+    EXPECT_EQ(all_partial.validations_verified, 5);
+    EXPECT_EQ(all_partial.validations_partial, 5);
+    EXPECT_EQ(all_partial.validations_matched_unl, 0);
+
+    auto const three_full =
+        verify(anchors.at("three-full-two-partial").as_object(), key);
+    EXPECT_FALSE(three_full.verified);
+    EXPECT_EQ(three_full.validations_matched_unl, 3);
+
+    auto const four_full =
+        verify(anchors.at("four-full-one-partial").as_object(), key);
+    EXPECT_TRUE(four_full.verified);
+    EXPECT_EQ(four_full.validations_partial, 1);
+    EXPECT_EQ(four_full.validations_matched_unl, 4);
+}
+
 TEST(AnchorVerifier, RejectsListExpiredAtAnchorCloseTime)
 {
     EXPECT_TRUE(xprv::validator_list_active_at(50, 100, 99));

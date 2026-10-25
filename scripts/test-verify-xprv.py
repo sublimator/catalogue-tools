@@ -54,9 +54,9 @@ def make_manifest(master: tuple[str, str], signing: tuple[str, str], seq: int = 
     return sign_manifest(fields, master, signing)
 
 
-def make_validation(signing: tuple[str, str], ledger_hash: str) -> str:
+def make_validation(signing: tuple[str, str], ledger_hash: str, *, full: bool = True) -> str:
     fields = {
-        "Flags": 0x80000001,
+        "Flags": 0x80000001 if full else 0x80000000,
         "LedgerSequence": 1000,
         "SigningTime": 800000000,
         "LedgerHash": ledger_hash,
@@ -98,6 +98,7 @@ class Fixture:
             for m, s in zip(self.masters, self.signers)
         ]
         self.voters = list(self.signers)
+        self.partial_voters: list[tuple[str, str]] = []
 
     @property
     def trusted_key(self) -> str:
@@ -117,7 +118,10 @@ class Fixture:
                 "blob": hexlify(blob).decode(),
                 "signature": sign(blob, publisher_signing[1]),
             },
-            "validations": {s[0]: make_validation(s, ANCHOR_HASH) for s in self.voters},
+            "validations": {
+                **{s[0]: make_validation(s, ANCHOR_HASH) for s in self.voters},
+                **{s[0]: make_validation(s, ANCHOR_HASH, full=False) for s in self.partial_voters},
+            },
         }
 
     def proof(self, network_id: int = 0, header: dict | None = None, **anchor_kw) -> dict:
@@ -307,6 +311,15 @@ class AnchorVerificationTests(unittest.TestCase):
         f.voters = f.signers[:3]
         self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 3/5 (need 4)")
         f.voters = f.signers[:4]
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
+
+    def test_partial_validations_do_not_count_toward_quorum(self) -> None:
+        f = Fixture()
+        f.voters, f.partial_voters = [], list(f.signers)
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 0/5 (need 4)")
+        f.voters, f.partial_voters = f.signers[:3], f.signers[3:]
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 3/5 (need 4)")
+        f.voters, f.partial_voters = f.signers[:4], f.signers[4:]
         self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
 
     def test_quorum_rounds_up_when_eighty_percent_is_fractional(self) -> None:

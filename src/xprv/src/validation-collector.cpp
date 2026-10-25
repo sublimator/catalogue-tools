@@ -1,4 +1,5 @@
 #include "xprv/validation-collector.h"
+#include "xprv/anchor-verifier.h"
 #include "xprv/hex-utils.h"
 #include "xprv/manifest-utils.h"
 #include "xprv/network-config.h"
@@ -254,6 +255,7 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     struct Visitor
     {
         Entry& e;
+        std::optional<uint32_t> flags;
         // STValidation is flat; only the top-level leaf fields are needed.
         void
         visit_field(
@@ -262,7 +264,14 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
         {
             if (path.size() != 1)
                 return;
-            if (fs.field->code == sf::LedgerHash && fs.data.size() == 32)
+            if (fs.field->code == sf::Flags && fs.data.size() == 4)
+            {
+                flags = (static_cast<uint32_t>(fs.data.data()[0]) << 24) |
+                    (static_cast<uint32_t>(fs.data.data()[1]) << 16) |
+                    (static_cast<uint32_t>(fs.data.data()[2]) << 8) |
+                    static_cast<uint32_t>(fs.data.data()[3]);
+            }
+            else if (fs.field->code == sf::LedgerHash && fs.data.size() == 32)
             {
                 e.ledger_hash = Hash256(fs.data.data());
             }
@@ -288,16 +297,25 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
         }
     };
 
+    Visitor visitor{entry};
     try
     {
         Slice slice(entry.raw.data(), entry.raw.size());
         catl::xdata::SliceCursor cursor{slice, 0};
         catl::xdata::ParserContext ctx{cursor};
-        Visitor visitor{entry};
         catl::xdata::parse_with_visitor(ctx, protocol_, visitor);
     }
     catch (...)
     {
+        return;
+    }
+
+    // rippled counts only full validations toward a ledger's quorum; a partial
+    // one (vfFullValidation clear) is a validator's signature without its
+    // full-validation claim. Keep it out of quorum and out of proofs.
+    if (!visitor.flags || !(*visitor.flags & kFullValidationFlag))
+    {
+        PLOGD(log_, "[", net_label_, "] dropping partial validation");
         return;
     }
 

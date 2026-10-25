@@ -17,10 +17,16 @@
 #include <catl/xdata/protocol.h>
 
 #include <boost/json.hpp>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace xprv {
+
+/// rippled's vfFullValidation. Only validations with this flag count toward a
+/// ledger's quorum; a partial validation never does.
+inline constexpr uint32_t kFullValidationFlag = 0x00000001;
 
 bool
 validator_list_active_at(
@@ -34,6 +40,7 @@ struct AnchorVerifyResult
     int unl_size = 0;
     int validations_total = 0;
     int validations_verified = 0;
+    int validations_partial = 0;
     int validations_matched_unl = 0;
     uint32_t vl_sequence = 0;
     uint32_t vl_effective = 0;
@@ -64,6 +71,7 @@ private:
         std::vector<uint8_t> signing_key;
         std::vector<uint8_t> signature;
         std::vector<uint8_t> without_signature;  // raw bytes sans sfSignature
+        std::optional<uint32_t> flags;           // sfFlags, if present
         bool valid = false;
     };
 

@@ -165,8 +165,16 @@ AnchorVerifier::parse_validation(std::vector<uint8_t> const& raw)
             goto done;
 
         // Extract specific fields
+        // sfFlags: type=2 (UInt32), field=2 → header byte 0x22
+        if (type_code == 2 && field_code == 2)
+        {
+            result.flags = (static_cast<uint32_t>(raw[pos]) << 24) |
+                (static_cast<uint32_t>(raw[pos + 1]) << 16) |
+                (static_cast<uint32_t>(raw[pos + 2]) << 8) |
+                static_cast<uint32_t>(raw[pos + 3]);
+        }
         // sfLedgerHash: type=5 (Hash256), field=1 → header byte 0x51
-        if (type_code == 5 && field_code == 1)
+        else if (type_code == 5 && field_code == 1)
         {
             result.ledger_hash = Hash256(raw.data() + pos);
         }
@@ -506,6 +514,7 @@ AnchorVerifier::verify(
 
     int total = 0;
     int verified = 0;
+    int partial = 0;
     int matched_unl = 0;
     std::set<std::string> counted_masters;  // one vote per validator identity
 
@@ -565,6 +574,14 @@ AnchorVerifier::verify(
 
         verified++;
 
+        // rippled counts only full validations toward quorum (§5).
+        if (!parsed.flags || !(*parsed.flags & kFullValidationFlag))
+        {
+            partial++;
+            PLOGD(log_, "  Validation ", total, ": partial, not counted");
+            continue;
+        }
+
         // Check if signing key is in UNL
         auto const member = signing_to_master.find(parsed_key_hex);
         if (member != signing_to_master.end() &&
@@ -576,6 +593,7 @@ AnchorVerifier::verify(
 
     result.validations_total = total;
     result.validations_verified = verified;
+    result.validations_partial = partial;
     result.validations_matched_unl = matched_unl;
 
     PLOGI(
@@ -594,8 +612,11 @@ AnchorVerifier::verify(
         "   Step A5: " + std::to_string(total) +
         " validation messages in proof. " + std::to_string(verified) +
         " signatures cryptographically verified (VAL\\0 + signing data). " +
+        (partial > 0 ? std::to_string(partial) +
+                 " are partial validations and do not count. "
+                     : std::string{}) +
         std::to_string(matched_unl) + "/" + std::to_string(result.unl_size) +
-        " are from UNL validators.");
+        " full validations are from UNL validators.");
 
     // ── Step 6: Quorum check ────────────────────────────────────
     int threshold = (result.unl_size * 4 + 4) / 5;  // ceil(80%)
