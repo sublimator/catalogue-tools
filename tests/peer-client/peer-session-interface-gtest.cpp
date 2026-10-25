@@ -9762,12 +9762,14 @@ TEST(
 static void
 drain_stop_completion(asio::io_context& io, bool const& stopped)
 {
-    auto const deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (!stopped)
+    // The stop completion waits on a real steady_timer cancellation, outside
+    // DeterministicScheduler's virtual time. Run handlers until it publishes.
+    // Steps bound the loop; the per-step wait only guards against a hang. A
+    // shared 1 s deadline here flaked under parallel CTest load (issue 2054).
+    for (int step = 0; !stopped && step < 100000; ++step)
     {
         io.restart();
-        if (io.run_one_until(deadline) == 0)
+        if (io.run_one_for(std::chrono::seconds(30)) == 0)
             break;
     }
 }
