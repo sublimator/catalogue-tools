@@ -18,6 +18,7 @@
 
 #include <boost/asio/redirect_error.hpp>
 #include <algorithm>
+#include <cctype>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <optional>
@@ -459,8 +460,17 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         anchor.blob = vl_data.blob_bytes;
         anchor.blob_signature = vl_data.blob_signature;
 
+        // §2.1: the map key is the SigningPubKey as uppercase hex; the
+        // collector keys its entries in lowercase.
         for (auto const& v : anchor_validations)
-            anchor.validations[v.signing_key_hex] = v.raw;
+        {
+            auto key = v.signing_key_hex;
+            std::transform(key.begin(), key.end(), key.begin(), [](char c) {
+                return static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(c)));
+            });
+            anchor.validations[key] = v.raw;
+        }
 
         co_await emit_step(std::move(anchor));
     }
