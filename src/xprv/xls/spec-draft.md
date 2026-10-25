@@ -259,10 +259,15 @@ XPRV defines no wrapper for discrete material; it uses the formats XRPL nodes
 already exchange:
 
 - **A validator list** is the publisher's signed list document, the one rippled
-  fetches from its configured list sites: `public_key`, `manifest` and either
-  `blob` with `signature` (version 1) or `blobs_v2` (version 2). Each `blob` is
-  one candidate list. Its contents are those of the anchor's `unl` object
-  (§2.1).
+  fetches from its configured list sites. It is not itself a `unl` object, but
+  each candidate list it carries maps onto one (§2.1):
+  - version 1 (`public_key`, `manifest`, `blob`, `signature`, `version`): one
+    candidate, whose `unl` members are those four fields, with `version`
+    dropped;
+  - version 2 (`public_key`, `manifest`, `blobs_v2`, `version`): one candidate
+    per `blobs_v2` entry, with that entry's `blob` and `signature`, the
+    document's `public_key`, and the entry's own `manifest` if it has one, else
+    the document's.
 - **A validator manifest** is its raw serialized STObject, the bytes carried
   in a list entry and in peer manifest messages, and returned base64-encoded by
   rippled's `manifest` RPC.
