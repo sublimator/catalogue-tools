@@ -40,12 +40,18 @@ def keypair(n: int) -> tuple[str, str]:
     return derive_keypair(seed)
 
 
-def make_manifest(master: tuple[str, str], signing: tuple[str, str], seq: int = 1) -> bytes:
-    fields = {"Sequence": seq, "PublicKey": master[0], "SigningPubKey": signing[0]}
+def sign_manifest(fields: dict, master: tuple[str, str], signing: tuple[str, str] | None) -> bytes:
+    """Sign arbitrary manifest fields; validly signed even when the shape is not."""
     data = v.manifest_signing_data(fields)
-    fields["Signature"] = sign(data, signing[1])
+    if signing is not None:
+        fields["Signature"] = sign(data, signing[1])
     fields["MasterSignature"] = sign(data, master[1])
     return unhexlify(encode(fields))
+
+
+def make_manifest(master: tuple[str, str], signing: tuple[str, str], seq: int = 1) -> bytes:
+    fields = {"Sequence": seq, "PublicKey": master[0], "SigningPubKey": signing[0]}
+    return sign_manifest(fields, master, signing)
 
 
 def make_validation(signing: tuple[str, str], ledger_hash: str) -> str:
@@ -116,6 +122,7 @@ class Fixture:
 
     def proof(self, network_id: int = 0, header: dict | None = None, **anchor_kw) -> dict:
         return {
+            "format_version": v.FORMAT_VERSION,
             "network_id": network_id,
             "steps": [
                 self.anchor(**anchor_kw),
@@ -302,10 +309,79 @@ class AnchorVerificationTests(unittest.TestCase):
         f.voters = f.signers[:4]
         self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
 
+    def test_quorum_rounds_up_when_eighty_percent_is_fractional(self) -> None:
+        f = Fixture(validators=6)  # 80% of 6 is 4.8: floor would accept 4
+        f.voters = f.signers[:4]
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 4/6 (need 5)")
+        f.voters = f.signers[:5]
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
+
     def test_rejects_invalid_validity_interval(self) -> None:
         f = Fixture()
         f.blob_fields = {"sequence": 1, "effective": 10, "expiration": 5}
         self.assertRejected(self.verify(f.anchor(), f.trusted_key), "validity interval is invalid")
+
+
+class ManifestTemplateTests(unittest.TestCase):
+    """Validly signed manifests whose shape the C++ verifier rejects."""
+
+    def assertValidatorManifestRejected(self, manifest: bytes) -> None:
+        f = Fixture()
+        f.entries[0]["manifest"] = base64.b64encode(manifest).decode()
+        result = quietly(v.verify_anchor, f.anchor(), f.trusted_key)
+        self.assertFalse(result.ok)
+        self.assertIn("invalid validator manifest", result.message)
+
+    def fields(self, f: Fixture, **extra) -> dict:
+        return {"Sequence": 1, "PublicKey": f.masters[0][0], "SigningPubKey": f.signers[0][0], **extra}
+
+    def test_rejects_missing_signing_signature(self) -> None:
+        f = Fixture()
+        self.assertValidatorManifestRejected(sign_manifest(self.fields(f), f.masters[0], None))
+
+    def test_rejects_missing_sequence(self) -> None:
+        f = Fixture()
+        fields = self.fields(f)
+        del fields["Sequence"]
+        self.assertValidatorManifestRejected(sign_manifest(fields, f.masters[0], f.signers[0]))
+
+    def test_rejects_nonzero_version(self) -> None:
+        f = Fixture()
+        self.assertValidatorManifestRejected(
+            sign_manifest(self.fields(f, Version=1), f.masters[0], f.signers[0])
+        )
+
+    def test_rejects_revocation_carrying_signing_fields(self) -> None:
+        f = Fixture()
+        self.assertValidatorManifestRejected(
+            sign_manifest(self.fields(f, Sequence=0xFFFFFFFF), f.masters[0], f.signers[0])
+        )
+
+    def test_rejects_field_outside_template(self) -> None:
+        f = Fixture()
+        self.assertValidatorManifestRejected(
+            sign_manifest(self.fields(f, LedgerSequence=1000), f.masters[0], f.signers[0])
+        )
+
+    def test_rejects_malformed_domain(self) -> None:
+        f = Fixture()
+        domain = hexlify(b"nodot").decode().upper()
+        self.assertValidatorManifestRejected(
+            sign_manifest(self.fields(f, Domain=domain), f.masters[0], f.signers[0])
+        )
+
+    def test_accepts_well_formed_domain(self) -> None:
+        f = Fixture()
+        domain = hexlify(b"validator.example.com").decode().upper()
+        manifest = sign_manifest(self.fields(f, Domain=domain), f.masters[0], f.signers[0])
+        f.entries[0]["manifest"] = base64.b64encode(manifest).decode()
+        self.assertTrue(quietly(v.verify_anchor, f.anchor(), f.trusted_key).ok)
+
+    def test_rejects_publisher_signing_key_equal_to_master(self) -> None:
+        f = Fixture()
+        result = quietly(v.verify_anchor, f.anchor(publisher_signing=f.publisher), f.trusted_key)
+        self.assertFalse(result.ok)
+        self.assertIn("signing key equals its master key", result.message)
 
 
 class ProofBindingTests(unittest.TestCase):
@@ -335,11 +411,41 @@ class ProofBindingTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any("belongs to network 21337" in e for e in result.errors))
 
-    def test_warns_when_custom_key_has_no_configured_network(self) -> None:
+    def assertFailsWith(self, result, reason: str) -> None:
+        self.assertFalse(result.ok)
+        self.assertTrue(any(reason in e for e in result.errors), result.errors)
+
+    def test_custom_key_without_network_defaults_to_xrpl(self) -> None:
         f = Fixture()
-        result = self.verify(f.proof(), f.trusted_key, None)
-        self.assertTrue(result.ok, result.errors)
-        self.assertTrue(any("network binding not checked" in w for w in result.warnings))
+        self.assertTrue(self.verify(f.proof(), f.trusted_key, None).ok)
+        self.assertFailsWith(
+            self.verify(f.proof(network_id=21337), f.trusted_key, None),
+            "does not match configured network 0",
+        )
+
+    def test_rejects_missing_or_boolean_network_id(self) -> None:
+        f = Fixture()
+        proof = f.proof()
+        del proof["network_id"]
+        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "network_id must be an integer")
+        proof["network_id"] = False
+        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "network_id must be an integer")
+
+    def test_rejects_missing_or_unknown_format_version(self) -> None:
+        f = Fixture()
+        proof = f.proof()
+        del proof["format_version"]
+        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "unsupported format_version")
+        proof["format_version"] = 999
+        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "unsupported format_version")
+
+    def test_bare_step_list_belongs_to_network_zero(self) -> None:
+        f = Fixture()
+        steps = f.proof()["steps"]
+        self.assertTrue(self.verify(steps, f.trusted_key, 0).ok)
+        self.assertFailsWith(
+            self.verify(steps, f.trusted_key, 21337), "does not match configured network 21337"
+        )
 
 
 if __name__ == "__main__":

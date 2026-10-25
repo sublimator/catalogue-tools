@@ -661,39 +661,97 @@ def manifest_signing_data(manifest_dict: dict[str, Any]) -> bytes:
     return PREFIX_MANIFEST + signing_bytes[4:]
 
 
+MANIFEST_FIELDS = {
+    "Version",
+    "Sequence",
+    "PublicKey",
+    "SigningPubKey",
+    "Signature",
+    "Domain",
+    "MasterSignature",
+}
+MANIFEST_REVOKED = 0xFFFFFFFF
+
+
+def is_properly_formed_toml_domain(domain: bytes) -> bool:
+    """Port of catl::vl::is_properly_formed_toml_domain (vl-client.cpp)."""
+    if not 4 <= len(domain) <= 128:
+        return False
+    labels = domain.split(b".")
+    if len(labels) < 2:
+        return False
+    for i, label in enumerate(labels):
+        if not 1 <= len(label) <= 63 or label[:1] == b"-" or label[-1:] == b"-":
+            return False
+        is_tld = i == len(labels) - 1
+        for c in label:
+            alpha = 65 <= c <= 90 or 97 <= c <= 122
+            if is_tld and not alpha:
+                return False
+            if not is_tld and not (alpha or 48 <= c <= 57 or c == 45):
+                return False
+    return len(labels[-1]) >= 2
+
+
+def _signature_ok(data: bytes, signature_hex: str, key_hex: str) -> bool:
+    try:
+        return xrpl.core.keypairs.is_valid_message(data, unhexlify(signature_hex), key_hex)
+    except Exception:
+        return False
+
+
 def verify_manifest(manifest_bytes: bytes) -> tuple[bool, str, dict[str, Any]]:
-    """Verify a manifest's signing-key and master-key signatures."""
+    """Verify a manifest's template and signatures.
+
+    Mirrors catl::vl::parse_manifest plus xprv::verify_manifest: only the
+    version-zero manifest fields, canonical encoding, a required Sequence, and
+    for a revocation no signing key or signature at all.
+    """
     parsed = parse_manifest(manifest_bytes)
 
-    master_key = parsed.get("PublicKey", "").upper()
-    signing_key = parsed.get("SigningPubKey", "").upper()
+    extra = set(parsed) - MANIFEST_FIELDS
+    if extra:
+        return False, f"manifest has fields outside the template: {sorted(extra)}", parsed
+    if encode(parsed).upper() != hexlify(manifest_bytes).decode().upper():
+        return False, "manifest encoding is not canonical", parsed
+
+    sequence = parsed.get("Sequence")
+    version = parsed.get("Version")
+    master_key = _upper_hex(parsed.get("PublicKey"))
+    signing_key = _upper_hex(parsed.get("SigningPubKey"))
     signature_hex = parsed.get("Signature", "")
     master_sig_hex = parsed.get("MasterSignature", "")
-    sequence = parsed.get("Sequence")
 
-    if not master_key:
-        return False, "manifest missing PublicKey", parsed
+    if not isinstance(sequence, int):
+        return False, "manifest missing Sequence", parsed
+    if version is not None and version != 0:
+        return False, f"unsupported manifest Version {version}", parsed
+    if len(master_key) != 66:
+        return False, "manifest PublicKey is not 33 bytes", parsed
     if not master_sig_hex:
         return False, "manifest missing MasterSignature", parsed
-
-    is_revocation = sequence == 0xFFFFFFFF
-    if not is_revocation and not signing_key:
-        return False, "manifest missing SigningPubKey", parsed
+    if "Domain" in parsed and not is_properly_formed_toml_domain(
+        bytes.fromhex(parsed["Domain"])
+    ):
+        return False, "manifest Domain is not a well-formed domain", parsed
 
     signing_data = manifest_signing_data(parsed)
-
-    if signature_hex:
-        sig_bytes = unhexlify(signature_hex)
-        if not signing_key:
-            return False, "manifest has Signature but no SigningPubKey", parsed
-        if not xrpl.core.keypairs.is_valid_message(signing_data, sig_bytes, signing_key):
-            return False, "signing key signature invalid", parsed
-
-    master_sig_bytes = unhexlify(master_sig_hex)
-    if not xrpl.core.keypairs.is_valid_message(
-        signing_data, master_sig_bytes, master_key
-    ):
+    if not _signature_ok(signing_data, master_sig_hex, master_key):
         return False, "master key signature invalid", parsed
+
+    if sequence == MANIFEST_REVOKED:
+        if signing_key or signature_hex:
+            return False, "revocation carries a signing key or signature", parsed
+        return True, "ok", parsed
+
+    if len(signing_key) != 66:
+        return False, "manifest SigningPubKey is not 33 bytes", parsed
+    if not signature_hex:
+        return False, "manifest missing Signature", parsed
+    if signing_key == master_key:
+        return False, "manifest signing key equals its master key", parsed
+    if not _signature_ok(signing_data, signature_hex, signing_key):
+        return False, "signing key signature invalid", parsed
 
     return True, "ok", parsed
 
@@ -898,48 +956,46 @@ def verify(
 
     `network_id` is the configured network. It defaults to the network of a
     known `trusted_key`, else to XRPL mainnet (0), and the proof's own
-    `network_id` must match it (spec §8).
+    `network_id` must match it (spec §8). A bare step list is the legacy
+    form and, as in the C++ loader, belongs to network 0.
     """
+    result = VerifyResult()
+    error = None
     if isinstance(proof, list):
         steps: list[dict[str, Any]] = proof
-        proof_network = None
+        proof_network: Any = 0
     else:
         steps = proof.get("steps", [])
         proof_network = proof.get("network_id")
-    result = VerifyResult()
+        version = proof.get("format_version")
+        if isinstance(version, bool) or version != FORMAT_VERSION:
+            error = f"unsupported format_version {version!r} (expected {FORMAT_VERSION})"
+        elif isinstance(proof_network, bool) or not isinstance(proof_network, int):
+            error = f"proof network_id must be an integer, got {proof_network!r}"
+
+    if network_id is None:
+        network_id = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper(), 0) if trusted_key else 0
+    if not trusted_key:
+        trusted_key = PUBLISHER_KEY_BY_NETWORK.get(network_id)
+    key_network = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper()) if trusted_key else None
+
+    if error:
+        pass
+    elif not trusted_key:
+        error = f"no trusted publisher key configured for network {network_id}"
+    elif key_network is not None and key_network != network_id:
+        error = f"trusted key belongs to network {key_network}, not configured network {network_id}"
+    elif proof_network != network_id:
+        error = f"proof network_id {proof_network} does not match configured network {network_id}"
+    if error:
+        print(f"\n  FAIL: {error}")
+        result.ok = False
+        result.errors.append(error)
+        return result
 
     if not steps:
         result.ok = False
         result.errors.append("proof has no steps")
-        return result
-
-    if network_id is None:
-        network_id = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper()) if trusted_key else 0
-    if not trusted_key and network_id is not None:
-        trusted_key = PUBLISHER_KEY_BY_NETWORK.get(network_id)
-    key_network = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper()) if trusted_key else None
-
-    binding_error = None
-    if not trusted_key:
-        binding_error = f"no trusted publisher key configured for network {network_id}"
-    elif key_network is not None and network_id is not None and key_network != network_id:
-        binding_error = (
-            f"trusted key belongs to network {key_network}, not configured network {network_id}"
-        )
-    elif network_id is None:
-        result.warnings.append(
-            "network binding not checked: custom trusted key and no configured network"
-        )
-    elif isinstance(proof, list):
-        result.warnings.append("network binding not checked: bare step list has no network_id")
-    elif proof_network != network_id:
-        binding_error = (
-            f"proof network_id {proof_network} does not match configured network {network_id}"
-        )
-    if binding_error:
-        print(f"\n  FAIL: {binding_error}")
-        result.ok = False
-        result.errors.append(binding_error)
         return result
 
     anchor_count = sum(1 for step in steps if step.get("type") == "anchor")
@@ -1569,7 +1625,7 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
                 }
             )
 
-    return {"network_id": network_id, "steps": steps}
+    return {"format_version": version, "network_id": network_id, "steps": steps}
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────
