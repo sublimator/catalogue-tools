@@ -3,6 +3,7 @@
 #include "proof-chain.h"
 
 #include <boost/json.hpp>
+#include <string_view>
 
 namespace xprv {
 
@@ -15,11 +16,17 @@ to_json(ProofChain const& chain);
 boost::json::object
 step_to_json(ChainStep const& step);
 
-/// Deserialize JSON into a ProofChain.
+/// Deserialize an already unambiguous JSON DOM into a ProofChain.
+/// Untrusted text must enter through from_json_text before duplicate members
+/// can be discarded by a general-purpose DOM parser.
 /// Accepts both the new object format
 /// {"format_version":..., "network_id":..., "steps":[...]}
 /// and the legacy bare array format.
 ProofChain
 from_json(boost::json::value const& json);
+
+/// Load untrusted JSON text, rejecting repeated members before DOM parsing.
+ProofChain
+from_json_text(std::string_view text);
 
 }  // namespace xprv

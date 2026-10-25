@@ -2,6 +2,7 @@
 #include "xprv/hex-utils.h"
 
 #include <catl/shamap/binary-trie.h>
+#include <catl/shamap/json-trie.h>
 
 #include <catl/core/base64.h>
 #include <catl/xdata/json-visitor.h>
@@ -17,6 +18,7 @@
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <set>
@@ -355,6 +357,10 @@ encode_anchor_core(AnchorData const& a)
         catl::xdata::ParserContext ctx(slice);
         catl::xdata::parse_with_visitor(ctx, protocol, visitor);
         auto result = visitor.get_result();
+        if (catl::xdata::codecs::serialize_object(
+                result.as_object(), protocol) != val_bytes)
+            throw std::runtime_error(
+                "binary proof: validation does not round-trip exactly");
         parsed.emplace_back(key_hex, result.as_object());
     }
 
@@ -610,6 +616,7 @@ encode_tlv_body(
                     }
                     else if (!data.trie_json.is_null() && protocol)
                     {
+                        catl::shamap::validate_json_trie(data.trie_json);
                         std::vector<uint8_t> encoded;
                         encode_trie_json_node(
                             encoded,
@@ -761,6 +768,12 @@ decode_anchor_core(std::span<const uint8_t> payload)
     if (pos != payload.size())
         throw std::runtime_error(
             "binary proof: trailing bytes in anchor core payload");
+
+    auto canonical = encode_anchor_core(a);
+    if (!std::equal(
+            payload.begin(), payload.end(), canonical.begin(), canonical.end()))
+        throw std::runtime_error(
+            "binary proof: non-canonical anchor core decomposition");
 
     return a;
 }

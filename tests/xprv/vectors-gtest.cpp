@@ -379,6 +379,12 @@ TEST(XprvVectors, JsonFormNegativeVectorsAreRejected)
             << std::string(obj.at("violates").as_string())
             << "): forged proof was ACCEPTED — this is a hole, not a test "
                "failure";
+        if (rejected)
+            EXPECT_NE(
+                how.find(std::string(
+                    obj.at("expect").at("reason_contains").as_string())),
+                std::string::npos)
+                << path.filename() << ": wrong rejection reason: " << how;
     }
     EXPECT_GT(checked, 0u)
         << "no JSON-form negative vectors found; the corpus is blind to "
@@ -434,5 +440,11 @@ TEST(XprvVectors, NegativeVectorsAreRejected)
             << path.filename() << " (" << obj.at("violates").as_string()
             << "): mutated proof was ACCEPTED — this is a hole, not a test "
                "failure";
+        if (rejected)
+            EXPECT_NE(
+                how.find(std::string(
+                    obj.at("expect").at("reason_contains").as_string())),
+                std::string::npos)
+                << path.filename() << ": wrong rejection reason: " << how;
     }
 }

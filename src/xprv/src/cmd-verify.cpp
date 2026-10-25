@@ -40,7 +40,6 @@ cmd_verify(
     {
         try
         {
-            auto jv = boost::json::parse(file_data);
             PLOGI(
                 log_,
                 "Loaded JSON proof from ",
@@ -48,7 +47,7 @@ cmd_verify(
                 " (",
                 file_data.size(),
                 " bytes)");
-            proof = xprv::from_json(jv);
+            proof = xprv::from_json_text(file_data);
         }
         catch (std::exception const& e)
         {

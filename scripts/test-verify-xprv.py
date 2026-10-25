@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import copy
 import importlib.util
 import io
 import json
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from binascii import hexlify, unhexlify
 from pathlib import Path
 
@@ -689,6 +692,136 @@ class BinaryLeafAuthenticationTests(unittest.TestCase):
         result = self.verify(proof, f.trusted_key)
         self.assertFalse(result.ok)
         self.assertTrue(any("no leaves" in e for e in result.errors), result.errors)
+
+
+
+class StrictParsingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        vector = json.loads((Path(__file__).parents[1] / "tests/xprv/vectors/positive-tx-skiplist.json").read_text())
+        cls.proof = vector["form"]["json"]
+        cls.raw = bytes.fromhex(vector["form"]["binary_hex"])
+        cls.records = v.parse_tlv_records(cls.raw[10:])
+
+    @staticmethod
+    def leb(value):
+        result = bytearray()
+        while value >= 128:
+            result.append((value & 127) | 128)
+            value >>= 7
+        return bytes(result + bytes([value]))
+
+    def packed(self, records):
+        return self.raw[:10] + b"".join(bytes([t]) + self.leb(len(p)) + p for t, p in records)
+
+    def test_rejects_payload_trailers(self):
+        for index, (kind, payload) in enumerate(self.records):
+            with self.subTest(kind=kind):
+                changed = list(self.records)
+                changed[index] = kind, payload + b"\x00"
+                with self.assertRaises(ValueError):
+                    v.binary_to_proof(self.packed(changed))
+
+    def test_rejects_reserved_shape_bits(self):
+        index = next(i for i, (t, _) in enumerate(self.records) if t == 5)
+        payload = self.records[index][1]
+        _, pos = v.read_vl(payload, 0)
+        _, pos = v.read_vl(payload, pos)
+        for bit in [0x10, 0x80]:
+            with self.subTest(bit=bit):
+                changed = list(self.records)
+                value = bytearray(payload)
+                value[pos] |= bit
+                changed[index] = 5, bytes(value)
+                with self.assertRaisesRegex(ValueError, "shape"):
+                    v.binary_to_proof(self.packed(changed))
+
+    def test_rejects_truncated_vl_data(self):
+        with self.assertRaises(ValueError):
+            v.read_vl(b"\x05x", 0)
+
+    def test_rejects_extra_leaf_element(self):
+        with self.assertRaises(ValueError):
+            v.hash_trie(["A" * 64, {}, "ignored"], is_tx=False)
+
+    def cli_ok(self, text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "proof.json"
+            path.write_text(text)
+            with mock.patch.object(sys, "argv", ["verify-xprv", str(path)]), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    v.main()
+                except SystemExit as exc:
+                    return exc.code == 0
+                except ValueError:
+                    return False
+        return True
+
+    def test_rejects_duplicate_raw_branches(self):
+        text = json.dumps(self.proof)
+        self.assertTrue(self.cli_ok(text))
+        trie = next(s["trie"] for s in self.proof["steps"] if s["type"] == "map_proof")
+        key = next(k for k in trie if len(k) == 1)
+        changed = text.replace('"trie": {', '"trie": {' + json.dumps(key) + ': "' + "0" * 64 + '", ', 1)
+        self.assertFalse(self.cli_ok(changed))
+
+    def test_rejects_duplicate_raw_validations(self):
+        key = next(iter(self.proof["steps"][0]["validations"]))
+        changed = json.dumps(self.proof).replace('"validations": {', '"validations": {' + json.dumps(key) + ': "00", ', 1)
+        self.assertFalse(self.cli_ok(changed))
+
+    def test_rejects_lowercase_validation_keys(self):
+        proof = copy.deepcopy(self.proof)
+        proof["steps"][0]["validations"] = {k.lower(): value for k, value in proof["steps"][0]["validations"].items()}
+        self.assertFalse(quietly(v.verify, proof).ok)
+
+    def test_rejects_unknown_tree(self):
+        proof = copy.deepcopy(self.proof)
+        next(s for s in proof["steps"] if s["type"] == "map_proof")["tree"] = "banana"
+        self.assertFalse(quietly(v.verify, proof).ok)
+
+    def core_mutation(self, mutation):
+        core = next(payload for kind, payload in self.records if kind == 1)
+        count, count_end = v.leb128_read(core, 69)
+        _, names_start = v.read_vl(core, count_end)
+        name_count, pos = v.leb128_read(core, names_start)
+        names = []
+        for _ in range(name_count):
+            name, pos = v.read_vl(core, pos)
+            names.append(name)
+        names_end = pos
+        records = []
+        for _ in range(count):
+            start = pos
+            _, pos = v.read_vl(core, pos + 33)
+            records.append(core[start:pos])
+        if mutation == "unknown-name":
+            names[0] = b"Z" * len(names[0])
+        elif mutation == "name-order":
+            names.reverse()
+        elif mutation == "record-order":
+            records.reverse()
+        else:
+            records.append(records[0])
+        return (core[:69] + self.leb(len(records)) + core[count_end:names_start]
+            + self.leb(len(names)) + b"".join(self.leb(len(n)) + n for n in names)
+            + b"".join(records))
+
+    def test_rejects_unknown_decomposition_name(self):
+        with self.assertRaises(ValueError):
+            v.decode_anchor_core(self.core_mutation("unknown-name"))
+
+    def test_rejects_unsorted_decomposition_names(self):
+        with self.assertRaises(ValueError):
+            v.decode_anchor_core(self.core_mutation("name-order"))
+
+    def test_rejects_unsorted_validation_records(self):
+        with self.assertRaises(ValueError):
+            v.decode_anchor_core(self.core_mutation("record-order"))
+
+    def test_rejects_duplicate_validation_records(self):
+        with self.assertRaises(ValueError):
+            v.decode_anchor_core(self.core_mutation("duplicate"))
 
 
 if __name__ == "__main__":

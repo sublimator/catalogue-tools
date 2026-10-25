@@ -159,12 +159,12 @@ def derive_intermediates(proof: dict[str, Any]) -> dict[str, Any]:
 # ─── verdicts ────────────────────────────────────────────────────────
 
 
-def python_verdict(raw: bytes) -> tuple[bool, str]:
+def python_verdict(raw: bytes, *, binary: bool = False) -> tuple[bool, str]:
     """Run the reference Python verifier, capturing its narrative output."""
     buf = io.StringIO()
     try:
         with redirect_stdout(buf):
-            proof = V.binary_to_proof(raw) if V.is_binary_proof(raw) else json.loads(raw)
+            proof = V.binary_to_proof(raw) if binary or V.is_binary_proof(raw) else V.load_json_proof(raw)
             res = V.verify(proof)
         return bool(res.ok), "; ".join(res.errors) or "ok"
     except Exception as exc:  # a parse refusal is a legitimate reject
@@ -204,16 +204,13 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
         [{"at": 5, "set_hex": "02"}],
         "flag",
     )
-    # Not a §3.8 rule: without XPRV magic the file is not a binary proof at all,
-    # so a verifier falls through to the JSON path and fails there. Recorded
-    # because "unrecognised container is refused" is still worth pinning, but the
-    # expected reason reflects what actually happens rather than a rule invented
-    # for the occasion.
+    # This is a binary-form negative: force binary parsing so the magic check,
+    # rather than an incidental JSON/UTF-8 refusal, is the tested oracle.
     mut(
         "bad-magic",
         "spec §3.1: magic identifies the binary container",
         [{"at": 0, "set_hex": "59"}],
-        "codec",
+        "magic",
     )
 
     # Offsets below depend on the first TLV record, which starts at byte 10.
@@ -355,7 +352,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     written = 0
     for neg in negative_family(raw):
         mutated = apply_mutations(raw, neg["mutations"])
-        ok, reason = python_verdict(mutated)
+        ok, reason = python_verdict(mutated, binary=True)
         if ok:
             LOG.error("mutation %r was ACCEPTED by the reference verifier — "
                       "either the mutation does not land or there is a real "
@@ -417,7 +414,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             raw = apply_mutations(
                 bytes.fromhex(base["form"]["binary_hex"]), vec["mutations"]
             )
-            ok, reason = python_verdict(raw)
+            ok, reason = python_verdict(raw, binary=True)
             if ok:
                 failures.append(f"{name}: expected reject, got accept")
             elif (want := expect.get("reason_contains")) and \

@@ -1,8 +1,10 @@
 #include "xprv/proof-chain-json.h"
+#include "json-proof-loader.h"
 #include "xprv/hex-utils.h"
 #include "xprv/network-config.h"
 
 #include <catl/shamap/binary-trie.h>
+#include <catl/shamap/json-trie.h>
 #include <catl/xdata/parse_leaf.h>
 #include <catl/xdata/parse_transaction.h>
 #include <catl/xdata/serialize.h>
@@ -323,7 +325,10 @@ anchor_from_json(boost::json::object const& obj)
     for (auto const& kv : validations)
     {
         auto const key = std::string(kv.key());
-        if (from_hex(key).size() != 33 || !kv.value().is_string())
+        if (from_hex(key).size() != 33 || !kv.value().is_string() ||
+            !std::all_of(key.begin(), key.end(), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+            }))
             throw std::runtime_error(
                 "proof JSON: malformed validation key or value");
         a.validations[key] =
@@ -379,6 +384,7 @@ trie_from_json(boost::json::object const& obj)
         t.tree = TrieData::TreeType::tx;
     else
         throw std::runtime_error("proof JSON: unknown map tree type");
+    catl::shamap::validate_json_trie(obj.at("trie"));
     t.trie_json = obj.at("trie");
     return t;
 }
@@ -443,6 +449,12 @@ from_json(boost::json::value const& json)
     }
 
     throw std::runtime_error("proof JSON: expected object or array");
+}
+
+ProofChain
+from_json_text(std::string_view text)
+{
+    return from_json(detail::parse_unique_json(text));
 }
 
 }  // namespace xprv

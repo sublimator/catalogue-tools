@@ -47,7 +47,8 @@ target_sources(
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-quorum-tracker.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)
 
-add_dependencies(xprv-gtest xprv_web_assets)
+add_dependencies(xprv-gtest xprv_web_assets xprv)
+target_compile_definitions(xprv-gtest PRIVATE XPRV_TEST_EXECUTABLE="$<TARGET_FILE:xprv>")
 
 # Share format version with the xprv target
 file(READ ${CMAKE_SOURCE_DIR}/src/xprv/VERSION XPRV_FORMAT_VERSION)

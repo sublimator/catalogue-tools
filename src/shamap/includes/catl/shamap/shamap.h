@@ -12,6 +12,7 @@
 
 #include "catl/core/logger.h"
 #include "catl/core/types.h"
+#include "catl/shamap/json-trie.h"
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
@@ -367,6 +368,7 @@ public:
         LeafFromJsonCallback on_leaf)
         requires(has_placeholders_v<Traits>)
     {
+        validate_json_trie(trie);
         SHAMapOptions opts;
         opts.tree_collapse_impl = TreeCollapseImpl::leafs_only;
         opts.reference_hash_impl = ReferenceHashImpl::recursive_simple;
@@ -415,7 +417,7 @@ public:
                 // past the 32-byte child_path stack buffer below. Throw on
                 // untrusted input (matches from_trie_binary) rather than
                 // silently returning a truncated tree that could mis-verify.
-                if (depth >= 64)
+                if (depth >= 64 && node.is_object())
                     throw std::runtime_error(
                         "json trie: depth exceeds maximum (64)");
                 if (node.is_string())

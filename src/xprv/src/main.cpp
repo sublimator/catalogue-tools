@@ -541,8 +541,8 @@ main(int argc, char* argv[])
         {
             xprv::ProofChain chain = in_is_binary
                 ? xprv::from_binary(raw)
-                : xprv::from_json(boost::json::parse(std::string(
-                      reinterpret_cast<char const*>(raw.data()), raw.size())));
+                : xprv::from_json_text(std::string_view(
+                      reinterpret_cast<char const*>(raw.data()), raw.size()));
 
             std::ofstream out(out_path, std::ios::binary);
             if (!out)

@@ -819,9 +819,8 @@ ProofEngine::verify(
         }
         else
         {
-            auto json = boost::json::parse(std::string_view(
+            chain = from_json_text(std::string_view(
                 reinterpret_cast<const char*>(data.data()), data.size()));
-            chain = from_json(json);
         }
 
         // Use the proof's embedded network_id to select protocol and

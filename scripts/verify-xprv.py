@@ -420,6 +420,8 @@ def trie_branches(node: dict[str, Any], depth: int) -> dict[int, Any]:
 
 def hash_trie(node: TrieNode, *, is_tx: bool, depth: int = 0) -> Hash256:
     """Recursively hash a JSON trie node (placeholder / leaf / inner)."""
+    if depth == 0:
+        validate_json_trie(node)
     if isinstance(node, str):
         return bytes.fromhex(node)
     if isinstance(node, list):
@@ -435,6 +437,8 @@ def hash_trie(node: TrieNode, *, is_tx: bool, depth: int = 0) -> Hash256:
 
 def count_nodes(node: TrieNode, depth: int = 0) -> TrieStats:
     """Count trie node types recursively."""
+    if depth == 0:
+        validate_json_trie(node)
     if isinstance(node, str):
         return TrieStats(placeholders=1, max_depth=depth)
     if isinstance(node, list):
@@ -468,6 +472,7 @@ def first_source(store: dict[str, list[str]], key_hex: str) -> str | None:
 
 def collect_json_leaves(node: Any) -> list[tuple[str, dict[str, Any]]]:
     """Collect all leaves from a JSON trie."""
+    validate_json_trie(node)
     leaves: list[tuple[str, dict[str, Any]]] = []
 
     def walk(cur: Any, depth: int) -> None:
@@ -1019,6 +1024,52 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
 # ─── Main verifier ──────────────────────────────────────────────────
 
 
+def validate_json_trie(node: Any, depth: int = 0) -> None:
+    """Enforce the same node grammar before hashing, enumeration or display."""
+    if isinstance(node, str):
+        if len(node) != 64 or any(c not in "0123456789abcdefABCDEF" for c in node):
+            raise ValueError("trie placeholder must be a 32-byte hex hash")
+    elif isinstance(node, list):
+        if len(node) != 2 or not isinstance(node[0], str):
+            raise ValueError("trie leaf must be exactly [key, data]")
+        if len(node[0]) != 64 or any(c not in "0123456789abcdefABCDEF" for c in node[0]):
+            raise ValueError("trie leaf key must be a 32-byte hex hash")
+        if not isinstance(node[1], (dict, str)):
+            raise ValueError("trie leaf data must be an object or hex string")
+    elif isinstance(node, dict):
+        if depth >= 64:
+            raise ValueError("trie depth exceeds maximum (64)")
+        for child in trie_branches(node, depth).values():
+            validate_json_trie(child, depth + 1)
+    else:
+        raise ValueError(f"unexpected trie node: {type(node)}")
+
+
+def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:
+    """Reject repeated members before a normal dict could discard their tokens."""
+    def object_members(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError(f"duplicate JSON member {key!r}")
+            obj[key] = value
+        return obj
+    return json.loads(raw, object_pairs_hook=object_members)
+
+
+def validate_json_steps(steps: list[Any]) -> None:
+    for step in steps:
+        if step.get("type") == "anchor":
+            for key in step.get("validations", {}):
+                if len(key) != 66 or any(c not in "0123456789ABCDEF" for c in key):
+                    raise ValueError("validation map keys must be uppercase 33-byte hex")
+        elif step.get("type") == "map_proof":
+            if step.get("tree") not in ("state", "tx"):
+                raise ValueError("unknown map tree type")
+            if "trie" in step:
+                validate_json_trie(step["trie"])
+
+
 def verify(
     proof: Proof | dict[str, Any] | list[Any],
     trusted_key: str | None = None,
@@ -1059,6 +1110,11 @@ def verify(
         error = f"trusted key belongs to network {key_network}, not configured network {network_id}"
     elif proof_network != network_id:
         error = f"proof network_id {proof_network} does not match configured network {network_id}"
+    if not error:
+        try:
+            validate_json_steps(steps)
+        except ValueError as exc:
+            error = str(exc)
     if error:
         print(f"\n  FAIL: {error}")
         result.ok = False
@@ -1382,7 +1438,15 @@ def leb128_read(data: bytes, pos: int) -> tuple[int, int]:
 def read_vl(data: bytes, pos: int) -> tuple[bytes, int]:
     """Read a VL-prefixed blob (LEB128 length + bytes)."""
     length, pos = leb128_read(data, pos)
+    if length > len(data) - pos:
+        raise ValueError("binary proof: truncated VL data")
     return data[pos : pos + length], pos + length
+
+
+def read_fixed(data: bytes, pos: int, length: int) -> tuple[bytes, int]:
+    if pos > len(data) or length > len(data) - pos:
+        raise ValueError("binary proof: truncated fixed-size data")
+    return data[pos:pos + length], pos + length
 
 
 def is_binary_proof(data: bytes) -> bool:
@@ -1465,8 +1529,8 @@ def parse_tlv_records(body: bytes) -> list[tuple[int, bytes]]:
 
 def decode_bin_header(payload: bytes) -> dict[str, Any]:
     """Decode a 118-byte ledger header TLV payload to dict."""
-    if len(payload) < 118:
-        raise ValueError(f"header payload too short: {len(payload)}")
+    if len(payload) != 118:
+        raise ValueError("ledger header payload must be exactly 118 bytes")
     seq = struct.unpack_from(">I", payload, 0)[0]
     drops = struct.unpack_from(">Q", payload, 4)[0]
     parent_hash = hexlify(payload[12:44]).decode().upper()
@@ -1504,6 +1568,8 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
 
     validations: dict[str, str] = {}
     if val_count == 0:
+        if pos != len(payload):
+            raise ValueError("trailing bytes in anchor core payload")
         return {
             "type": "anchor",
             "ledger_hash": ledger_hash,
@@ -1516,27 +1582,53 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
     common_bytes, pos = read_vl(payload, pos)
     common_hex = hexlify(common_bytes).decode()
     common_fields = decode(common_hex) if common_hex else {}
+    if bytes.fromhex(encode(common_fields)) != common_bytes:
+        raise ValueError("non-canonical common STObject")
 
     # Read unique field names
     num_unique, pos = leb128_read(payload, pos)
     unique_names: list[str] = []
     for _ in range(num_unique):
         name_len, pos = leb128_read(payload, pos)
-        unique_names.append(payload[pos : pos + name_len].decode("utf-8"))
-        pos += name_len
+        name, pos = read_fixed(payload, pos, name_len)
+        unique_names.append(name.decode("utf-8"))
+    if unique_names != sorted(set(unique_names)):
+        raise ValueError("non-canonical anchor core field names")
 
     # Read each validator's key + unique fields, merge with common
+    all_fields = []
+    previous_key = b""
     for _ in range(val_count):
-        vkey = hexlify(payload[pos : pos + 33]).decode().upper()
-        pos += 33
+        key_bytes, pos = read_fixed(payload, pos, 33)
+        if key_bytes <= previous_key:
+            raise ValueError("anchor core validation keys must be distinct and sorted")
+        previous_key = key_bytes
+        vkey = key_bytes.hex().upper()
         unique_bytes, pos = read_vl(payload, pos)
         unique_hex = hexlify(unique_bytes).decode()
         unique_fields = decode(unique_hex) if unique_hex else {}
+        if bytes.fromhex(encode(unique_fields)) != unique_bytes:
+            raise ValueError("non-canonical unique STObject")
+        if common_fields.keys() & unique_fields.keys():
+            raise ValueError("common and unique validation fields overlap")
 
         merged = dict(common_fields)
         merged.update(unique_fields)
+        if merged.get("SigningPubKey", "").upper() != vkey:
+            raise ValueError("binary validation key does not match SigningPubKey")
+        all_fields.append(merged)
         full_hex = encode(merged)
         validations[vkey] = full_hex
+
+    if pos != len(payload):
+        raise ValueError("trailing bytes in anchor core payload")
+    union = set().union(*(fields.keys() for fields in all_fields))
+    expected_common = {
+        key: all_fields[0][key] for key in union
+        if key in all_fields[0] and all(key in fields and fields[key] == all_fields[0][key] for fields in all_fields)
+    }
+    if common_fields != expected_common or unique_names != sorted(union - expected_common.keys()):
+        raise ValueError("non-canonical anchor core decomposition")
 
     return {
         "type": "anchor",
@@ -1557,11 +1649,13 @@ def decode_anchor_unl(payload: bytes, anchor: dict[str, Any]) -> None:
     anchor["unl"]["signature"] = hexlify(sig_bytes).decode().upper()
 
     if pos >= len(payload):
-        return
+        raise ValueError("missing anchor UNL shape")
 
     # Reconstruct blob JSON with exact key ordering
     shape = payload[pos]
     pos += 1
+    if shape & 0xF0 or (shape & 7) > 5:
+        raise ValueError("invalid anchor UNL shape")
     top_perm = PERMS_3[shape & 0x07]
     val_perm = PERMS_2[(shape >> 3) & 0x01]
 
@@ -1573,11 +1667,13 @@ def decode_anchor_unl(payload: bytes, anchor: dict[str, Any]) -> None:
 
     validators: list[tuple[str, str]] = []
     for _ in range(validator_count):
-        vpk = hexlify(payload[pos : pos + 33]).decode().upper()
-        pos += 33
+        key_bytes, pos = read_fixed(payload, pos, 33)
+        vpk = key_bytes.hex().upper()
         m_bytes, pos = read_vl(payload, pos)
         m_b64 = base64.b64encode(m_bytes).decode()
         validators.append((vpk, m_b64))
+    if pos != len(payload):
+        raise ValueError("trailing bytes in anchor UNL payload")
 
     # Build blob JSON string with exact key ordering for sig verification
     values = {
@@ -1606,13 +1702,15 @@ def decode_anchor_unl(payload: bytes, anchor: dict[str, Any]) -> None:
     anchor["unl"]["blob"] = hexlify(blob_str.encode()).decode().upper()
 
 
-def hash_binary_trie(data: bytes, pos: int, *, is_tx: bool) -> tuple[Hash256, int]:
+def hash_binary_trie(data: bytes, pos: int, *, is_tx: bool, depth: int = 0) -> tuple[Hash256, int]:
     """Recursively hash a binary trie. Returns (hash, new_pos).
 
     Binary trie format: uint32 LE header (16 branches × 2 bits),
     then depth-first children. Branch types: 00=empty, 01=leaf,
     10=inner (recurse), 11=hash (32-byte placeholder).
     """
+    if depth >= 64:
+        raise ValueError("binary trie: depth exceeds maximum (64)")
     if pos + 4 > len(data):
         raise ValueError("binary trie: unexpected end reading header")
     header = struct.unpack_from("<I", data, pos)[0]
@@ -1624,18 +1722,15 @@ def hash_binary_trie(data: bytes, pos: int, *, is_tx: bool) -> tuple[Hash256, in
         if btype == BR_EMPTY:
             continue
         elif btype == BR_LEAF:
-            key = data[pos : pos + 32]
-            pos += 32
+            key, pos = read_fixed(data, pos, 32)
             data_len, pos = leb128_read(data, pos)
-            leaf_data = data[pos : pos + data_len]
-            pos += data_len
+            leaf_data, pos = read_fixed(data, pos, data_len)
             prefix = PREFIX_TX_LEAF if is_tx else PREFIX_STATE_LEAF
             children[branch] = sha512half(prefix + leaf_data + key)
         elif btype == BR_INNER:
-            children[branch], pos = hash_binary_trie(data, pos, is_tx=is_tx)
+            children[branch], pos = hash_binary_trie(data, pos, is_tx=is_tx, depth=depth + 1)
         elif btype == BR_HASH:
-            children[branch] = data[pos : pos + 32]
-            pos += 32
+            children[branch], pos = read_fixed(data, pos, 32)
 
     return hash_inner(children), pos
 
@@ -1687,7 +1782,9 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
         elif tlv_type in (TLV_MAP_TX, TLV_MAP_STATE):
             tree = "tx" if tlv_type == TLV_MAP_TX else "state"
             is_tx = tree == "tx"
-            root_hash, _ = hash_binary_trie(payload, 0, is_tx=is_tx)
+            root_hash, end = hash_binary_trie(payload, 0, is_tx=is_tx)
+            if end != len(payload):
+                raise ValueError("binary trie: trailing bytes")
             # Store the computed root hash and tree type.
             # We can't convert binary trie to JSON trie easily, so we
             # store __binary_root__ for the verifier to check directly.
@@ -1729,7 +1826,7 @@ def main() -> None:
         proof = binary_to_proof(raw)
     else:
         print("Format: JSON")
-        proof = json.loads(raw)
+        proof = load_json_proof(raw)
 
     r = verify(proof, args.trusted_key, args.network)
     sys.exit(0 if r.ok else 1)
