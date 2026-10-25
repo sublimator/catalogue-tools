@@ -450,6 +450,17 @@ decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a);
 static std::vector<uint8_t>
 encode_anchor_unl(AnchorData const& a)
 {
+    // An anchor without its list omits 0x05 entirely (spec §3.3); the
+    // verifier takes the list from trust material it already holds.
+    if (a.blob.empty())
+    {
+        if (!a.publisher_manifest.empty() || !a.blob_signature.empty())
+            throw std::runtime_error(
+                "binary proof: anchor UNL has a manifest or signature but "
+                "no validator list blob");
+        return {};
+    }
+
     std::vector<uint8_t> payload;
 
     // Publisher manifest (raw binary STObject)

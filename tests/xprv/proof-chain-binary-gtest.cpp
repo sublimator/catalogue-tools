@@ -322,6 +322,53 @@ TEST(ProofChainBinary, RejectsValidatorListBlobThatCannotRoundTripExactly)
     EXPECT_THROW(to_binary(chain), std::runtime_error);
 }
 
+// An anchor without its list encodes with no 0x05 record at all (§3.3).
+TEST(ProofChainBinary, AnchorWithoutListOmitsUnlRecord)
+{
+    ProofChain chain;
+    AnchorData a;
+    a.ledger_hash = make_hash(0x11);
+    a.ledger_index = 100000;
+    a.publisher_key_hex = "ED" + std::string(64, 'A');
+    chain.steps.push_back(a);
+
+    auto binary = to_binary(chain);
+
+    // The body is exactly one TLV record, the 0x01 anchor core.
+    ASSERT_GT(binary.size(), 11u);
+    EXPECT_EQ(binary[10], 0x01);
+    std::size_t pos = 11;
+    std::size_t length = 0;
+    for (int shift = 0;; shift += 7)
+    {
+        ASSERT_LT(pos, binary.size());
+        auto const byte = binary[pos++];
+        length |= static_cast<std::size_t>(byte & 0x7F) << shift;
+        if (!(byte & 0x80))
+            break;
+    }
+    EXPECT_EQ(pos + length, binary.size());
+
+    auto decoded = from_binary(binary);
+    ASSERT_EQ(decoded.steps.size(), 1u);
+    auto const& da = std::get<AnchorData>(decoded.steps[0]);
+    EXPECT_EQ(da.ledger_hash, a.ledger_hash);
+    EXPECT_EQ(da.publisher_key_hex, a.publisher_key_hex);
+    EXPECT_TRUE(da.blob.empty());
+    EXPECT_TRUE(da.publisher_manifest.empty());
+    EXPECT_TRUE(da.blob_signature.empty());
+}
+
+TEST(ProofChainBinary, RejectsListMaterialWithoutBlob)
+{
+    ProofChain chain;
+    AnchorData a;
+    a.publisher_key_hex = "ED" + std::string(64, 'A');
+    a.publisher_manifest = make_bytes(8, 1);
+    chain.steps.push_back(a);
+    EXPECT_THROW(to_binary(chain), std::runtime_error);
+}
+
 // ─── TrieData round-trip ────────────────────────────────────────
 
 TEST(ProofChainBinary, TrieRoundTrip)
