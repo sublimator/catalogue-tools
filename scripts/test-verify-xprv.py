@@ -531,6 +531,22 @@ def _der_parts(sig: bytes) -> tuple[int, int]:
 
 
 class DecompressionBoundTests(unittest.TestCase):
+    def test_truncated_zlib_body_is_refused(self) -> None:
+        # Witness for the EOF guard (codex, batch-1 review F1): an intact
+        # recompressed vector parses; the same stream missing its trailer does not.
+        import json as _json
+        import zlib
+        vec = _json.loads(
+            (Path(__file__).parent.parent / "tests/xprv/vectors/positive-tx-skiplist.json").read_text()
+        )
+        raw = bytes.fromhex(vec["form"]["binary_hex"])
+        header, body = bytearray(raw[:10]), raw[10:]
+        header[5] = 1  # zlib flag
+        packed = bytes(header) + zlib.compress(body, 9)
+        v.binary_to_proof(packed)
+        with self.assertRaisesRegex(ValueError, "truncated zlib body"):
+            v.binary_to_proof(packed[:-1])
+
     def test_zlib_body_over_the_cap_is_refused(self) -> None:
         import zlib
         bomb = zlib.compress(b"\x00" * (v.MAX_DECOMPRESSED_PROOF_SIZE + 1), 9)
