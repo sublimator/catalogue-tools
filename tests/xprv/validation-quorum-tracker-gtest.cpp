@@ -1,4 +1,5 @@
 #include "xprv/proof-chain-json.h"
+#include "xprv/proof-resolver.h"
 #include "xprv/validation-collector.h"
 #include "xprv/validation-quorum-tracker.h"
 
@@ -14,10 +15,12 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <gtest/gtest.h>
 
@@ -2052,5 +2055,334 @@ TEST(ValidationQuorumTracker, AdmissionSealWinsBeforeHeartbeatEffect)
         EXPECT_EQ(sealed_status, std::future_status::ready);
         EXPECT_EQ(crossed_status, std::future_status::ready);
         EXPECT_EQ(effects.load(std::memory_order_relaxed), 0u);
+    }
+}
+
+// ─── Proof quorum at 80% (review controls) ─────────────────────────
+//
+// Proof anchors need ceil(80%) of the embedded list, matching the reference
+// verifiers; live tracking stays at 90% and the full cache at 100%. These
+// fail if the proof selectors fall back to the live 90%.
+
+namespace {
+
+using namespace std::chrono_literals;
+
+struct ProofQuorumHarness
+{
+    static constexpr uint32_t kVlSequence = 7;
+
+    asio::io_context io;
+    catl::xdata::Protocol protocol = test_protocol();
+    std::shared_ptr<xprv::ValidationQuorumTracker> tracker =
+        xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    std::vector<catl::vl::Manifest> members;
+
+    ProofQuorumHarness()
+    {
+        for (unsigned i = 1; i <= 35; ++i)
+        {
+            catl::vl::Manifest m;
+            m.master_public_key = std::vector<uint8_t>(33, 0);
+            m.master_public_key.front() = 0x02;
+            m.master_public_key.back() = static_cast<uint8_t>(i);
+            m.signing_public_key = m.master_public_key;
+            m.signing_public_key.back() = static_cast<uint8_t>(i + 100);
+            members.push_back(std::move(m));
+        }
+        tracker->set_unl(members, kVlSequence);
+        io.run();
+        io.restart();
+    }
+
+    static Hash256
+    ledger_hash(uint8_t marker)
+    {
+        std::array<uint8_t, 32> bytes{};
+        bytes.back() = marker;
+        return Hash256(bytes);
+    }
+
+    asio::awaitable<void>
+    vote(unsigned member, uint32_t seq = 1000, uint8_t marker = 1)
+    {
+        xprv::ValidationCollector::Entry e;
+        e.ledger_hash = ledger_hash(marker);
+        e.ledger_seq = seq;
+        e.signing_key_hex = members.at(member).signing_key_hex();
+        EXPECT_TRUE(co_await tracker->co_insert_validation_for_test(
+            std::move(e)));
+    }
+
+    asio::awaitable<void>
+    votes(unsigned count)
+    {
+        for (unsigned i = 0; i < count; ++i)
+            co_await vote(i);
+    }
+
+    void
+    run(asio::awaitable<void> op)
+    {
+        auto future = asio::co_spawn(io, std::move(op), asio::use_future);
+        io.run();
+        future.get();
+        io.restart();
+    }
+};
+
+xprv::ProofChain
+load_chain_fixture()
+{
+    std::ifstream input(
+        std::string(PROJECT_ROOT) + "tests/xprv/fixture/proof.json");
+    std::stringstream buffer;
+    buffer << input.rdbuf();
+    return xprv::from_json(boost::json::parse(buffer.str()));
+}
+
+std::vector<catl::vl::Manifest>
+list_members(xprv::AnchorData const& anchor)
+{
+    std::vector<catl::vl::Manifest> result;
+    auto const blob =
+        boost::json::parse(std::string(anchor.blob.begin(), anchor.blob.end()))
+            .as_object();
+    for (auto const& entry : blob.at("validators").as_array())
+    {
+        result.push_back(catl::vl::parse_manifest(catl::base64_decode(
+            std::string(entry.as_object().at("manifest").as_string()))));
+    }
+    return result;
+}
+
+asio::awaitable<void>
+await_stats(
+    std::shared_ptr<xprv::ValidationQuorumTracker> const& tracker,
+    std::function<bool(xprv::ValidationQuorumTracker::Stats const&)> done)
+{
+    auto const deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (done(co_await tracker->co_stats()))
+            co_return;
+        co_await asio::post(asio::use_awaitable);
+    }
+    ADD_FAILURE() << "tracker did not reach the expected state in time";
+}
+
+}  // namespace
+
+TEST(ProofQuorumAt80, Boundary27Fails28PassesLiveStays90FullStays100)
+{
+    ProofQuorumHarness h;
+    constexpr auto vl = ProofQuorumHarness::kVlSequence;
+    h.run([&]() -> asio::awaitable<void> {
+        EXPECT_EQ(xprv::ValidationQuorumTracker::proof_quorum_threshold(35), 28u);
+        co_await h.votes(27);
+        EXPECT_FALSE(co_await h.tracker->co_latest_quorum_at_or_before(1000, vl));
+        auto below = co_await h.tracker->co_wait_best_quorum(0s, vl);
+        EXPECT_TRUE(below.quorum.validations.empty());
+
+        co_await h.vote(27);
+        auto selected = co_await h.tracker->co_latest_quorum_at_or_before(1000, vl);
+        EXPECT_TRUE(selected.has_value());
+        if (!selected)
+            co_return;
+        EXPECT_EQ(selected->validations.size(), 28u);
+        EXPECT_FALSE(co_await h.tracker->co_latest_quorum());
+        auto waited = co_await h.tracker->co_wait_best_quorum(0s, vl);
+        EXPECT_EQ(waited.quorum.validations.size(), 28u);
+
+        for (unsigned i = 28; i < 32; ++i)
+            co_await h.vote(i);
+        EXPECT_TRUE(co_await h.tracker->co_latest_quorum());
+        EXPECT_FALSE(co_await h.tracker->co_last_full_quorum(10s, vl));
+
+        for (unsigned i = 32; i < 35; ++i)
+            co_await h.vote(i);
+        auto full = co_await h.tracker->co_last_full_quorum(10s, vl);
+        EXPECT_TRUE(full.has_value());
+        if (full)
+            EXPECT_EQ(full->validations.size(), 35u);
+    }());
+}
+
+TEST(ProofQuorumAt80, ColdWaiterLocks30ThenCompletesOnNextLedger)
+{
+    ProofQuorumHarness h;
+    constexpr auto vl = ProofQuorumHarness::kVlSequence;
+    auto waiter = asio::co_spawn(
+        h.io, h.tracker->co_wait_best_quorum(1s, vl), asio::use_future);
+    h.run([&]() -> asio::awaitable<void> {
+        while ((co_await h.tracker->co_stats()).pending_callbacks == 0)
+            co_await asio::post(asio::use_awaitable);
+        co_await h.votes(30);
+        EXPECT_EQ((co_await h.tracker->co_stats()).pending_callbacks, 1u);
+        EXPECT_FALSE(co_await h.tracker->co_latest_quorum());
+        co_await h.vote(0, 1001, 2);
+    }());
+    auto result = waiter.get();
+    EXPECT_EQ(result.stop_reason, xprv::QuorumCollectStopReason::next_ledger);
+    EXPECT_EQ(result.quorum.validations.size(), 30u);
+    EXPECT_EQ(result.quorum.ledger_seq, 1000u);
+    EXPECT_EQ(result.quorum.vl_sequence, vl);
+}
+
+TEST(ProofQuorumAt80, WarmWaiterReturns30OnTimeoutOrSeenNextLedger)
+{
+    ProofQuorumHarness h;
+    constexpr auto vl = ProofQuorumHarness::kVlSequence;
+    h.run([&]() -> asio::awaitable<void> {
+        co_await h.votes(30);
+        auto timed = co_await h.tracker->co_wait_best_quorum(0s, vl);
+        EXPECT_EQ(timed.stop_reason, xprv::QuorumCollectStopReason::timeout);
+        EXPECT_EQ(timed.quorum.validations.size(), 30u);
+
+        co_await h.vote(0, 1001, 2);
+        auto next = co_await h.tracker->co_wait_best_quorum(0s, vl);
+        EXPECT_EQ(next.stop_reason, xprv::QuorumCollectStopReason::next_ledger);
+        EXPECT_EQ(next.quorum.validations.size(), 30u);
+        EXPECT_FALSE(co_await h.tracker->co_latest_quorum_at_or_before(999, vl));
+        EXPECT_FALSE(
+            co_await h.tracker->co_latest_quorum_at_or_before(1000, vl + 1));
+    }());
+}
+
+// Thirty real signed validations, admitted through on_packet under the
+// fixture's 35-member list, give a 30-vote anchor that verifies.
+TEST(ProofQuorumAt80, ThirtyRealSignedValidationsGiveAVerifiableAnchor)
+{
+    auto chain = load_chain_fixture();
+    auto& anchor = std::get<xprv::AnchorData>(chain.steps.front());
+    auto members = list_members(anchor);
+    ASSERT_EQ(members.size(), 35u);
+    ASSERT_GE(anchor.validations.size(), 30u);
+    while (anchor.validations.size() > 30)
+        anchor.validations.erase(std::prev(anchor.validations.end()));
+
+    asio::io_context io;
+    auto protocol = test_protocol();
+    auto tracker = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    tracker->set_unl(members, 7);
+    io.run();
+    io.restart();
+    for (auto const& [_, raw] : anchor.validations)
+    {
+        tracker->on_packet(
+            static_cast<uint16_t>(catl::peer_client::packet_type::validation),
+            wrap_validation(raw));
+    }
+
+    auto future = asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            co_await await_stats(tracker, [](auto const& s) {
+                return s.validation_packets_processed == 30 &&
+                    s.queued_validations == 0;
+            });
+            auto q = co_await tracker->co_latest_quorum_at_or_before(
+                anchor.ledger_index, 7);
+            EXPECT_TRUE(q.has_value());
+            if (q)
+                EXPECT_EQ(q->validations.size(), 30u);
+            auto collected = co_await tracker->co_wait_best_quorum(0s, 7);
+            EXPECT_EQ(collected.quorum.validations.size(), 30u);
+            co_await tracker->co_stop();
+        },
+        asio::use_future);
+    io.run();
+    future.get();
+    EXPECT_TRUE(
+        xprv::resolve_proof_chain(chain, protocol, anchor.publisher_key_hex));
+}
+
+// The live-only diagnostic reports a live quorum without a proof quorum only
+// when proof-eligible votes fall below 80%: false at 30 of 35, true at 27.
+TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
+{
+    auto const chain = load_chain_fixture();
+    auto const& anchor = std::get<xprv::AnchorData>(chain.steps.front());
+    auto const members = list_members(anchor);
+    ASSERT_EQ(members.size(), 35u);
+
+    std::vector<unsigned> voted;
+    for (unsigned i = 0; i < members.size(); ++i)
+    {
+        auto const signing = members[i].signing_key_hex();
+        if (std::any_of(
+                anchor.validations.begin(),
+                anchor.validations.end(),
+                [&](auto const& entry) {
+                    return lower_ascii(entry.first) == signing;
+                }))
+        {
+            voted.push_back(i);
+        }
+    }
+    ASSERT_GE(voted.size(), 32u);
+    ASSERT_EQ(voted.size(), anchor.validations.size());
+
+    for (unsigned proof_votes : {30u, 27u})
+    {
+        // Rotate members out of the list's view: the list keeps an older,
+        // keyless manifest and peers relay the real (newer) one.
+        auto stale = members;
+        protocol::TMManifests relayed;
+        for (unsigned j = 0; j < voted.size() - proof_votes; ++j)
+        {
+            auto const i = voted[j];
+            ASSERT_GT(stale[i].sequence, 0u);
+            stale[i].signing_public_key.clear();
+            --stale[i].sequence;
+            relayed.add_list()->set_stobject(
+                std::string(members[i].raw.begin(), members[i].raw.end()));
+        }
+        std::string relayed_bytes;
+        ASSERT_TRUE(relayed.SerializeToString(&relayed_bytes));
+
+        asio::io_context io;
+        auto protocol = test_protocol();
+        auto tracker = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+        tracker->set_unl(stale, 7);
+        io.run();
+        io.restart();
+        tracker->on_packet(
+            static_cast<uint16_t>(catl::peer_client::packet_type::manifests),
+            std::vector<uint8_t>(relayed_bytes.begin(), relayed_bytes.end()));
+
+        auto future = asio::co_spawn(
+            io,
+            [&]() -> asio::awaitable<void> {
+                co_await await_stats(tracker, [](auto const& s) {
+                    return s.manifest_packets_processed == 1 &&
+                        !s.manifest_in_flight && !s.manifest_pending;
+                });
+                for (auto const& [_, raw] : anchor.validations)
+                {
+                    tracker->on_packet(
+                        static_cast<uint16_t>(
+                            catl::peer_client::packet_type::validation),
+                        wrap_validation(raw));
+                }
+                auto const expected = anchor.validations.size();
+                co_await await_stats(tracker, [expected](auto const& s) {
+                    return s.validation_packets_processed == expected &&
+                        s.queued_validations == 0;
+                });
+                EXPECT_TRUE(co_await tracker->co_latest_quorum());
+                EXPECT_EQ(
+                    co_await tracker->co_has_live_only_quorum(),
+                    proof_votes == 27);
+                auto proof = co_await tracker->co_latest_quorum_at_or_before(
+                    anchor.ledger_index, 7);
+                EXPECT_EQ(proof.has_value(), proof_votes == 30);
+                if (proof)
+                    EXPECT_EQ(proof->validations.size(), 30u);
+                co_await tracker->co_stop();
+            },
+            asio::use_future);
+        io.run();
+        future.get();
     }
 }
