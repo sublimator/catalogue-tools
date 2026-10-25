@@ -181,7 +181,8 @@ parts:
 
 - **Membership.** The validator master keys, and their count N, come from
   exactly one signed Validator List: the **primary list**, published under a
-  configured publisher key and valid at the anchor ledger (§5).
+  configured publisher key. Its validity interval is checked against the
+  close time of the header whose hash is the anchor hash (§5).
 - **Delegations.** For each master in the primary list, the signing key that
   counts is the one named by the highest-sequence manifest that verifies under
   that master. The candidates are the master's manifest inside the primary list
@@ -192,9 +193,10 @@ Resolution rules:
 1. A manifest is a candidate only if it verifies (§5.1) and its `PublicKey` is
    a master in the primary list. A manifest for any other master grants
    nothing.
-2. The highest `Sequence` wins. Two different candidates with the same master
-   and the same `Sequence` make the view unresolvable, and the anchor MUST be
-   rejected.
+2. The highest `Sequence` wins. Two candidates with the same master and the
+   same `Sequence` but different raw manifest bytes make the view
+   unresolvable, and the anchor MUST be rejected. Byte-identical candidates are
+   one candidate.
 3. If the winning manifest is a revocation (`Sequence` `0xFFFFFFFF`), that
    master has no signing key. N does not change.
 4. If a resolved signing key is also another master's resolved key, or equals
@@ -267,7 +269,9 @@ replaces only the anchor, the anchor ledger's header and its long-list
 A renewed proof is a different proof, with a different identity (§1.2).
 Separately, a verdict depends on the trust view as well as on the proof bytes:
 two verifiers holding different manifests can reach different verdicts on
-identical bytes. A cached verdict MUST therefore be keyed by both.
+identical bytes. A cached verdict MUST therefore be keyed by both: the proof's
+§1.2 identity, and the material that resolved the view, namely the primary
+list's signed blob bytes and the raw bytes of each master's winning manifest.
 
 Renewal produces an ordinary v6 proof. A tail without an anchor is not a v6
 proof; carrying tails or anchors as standalone objects would need a new format
@@ -1317,7 +1321,10 @@ ledger hashes and tree roots alive across sibling fan-out, and may emit warnings
 for non-canonical duplication or ordering while still accepting a valid proof.
 
 Trust resolution with material beyond the proof (§1.3) is not yet implemented:
-both reference verifiers resolve the view from the embedded list alone.
+both reference verifiers resolve the view from the embedded list alone. They
+also deviate from §1.3 rule 3 for that list: an embedded validator entry whose
+manifest is a revocation fails the anchor, where rule 3 keeps the master in N
+with no signing key.
 
 Progressive verification with a cached UNL is not implemented in the reference
 verifiers. The `0x05` anchor UNL record is OPTIONAL (§3.3) and both reference
