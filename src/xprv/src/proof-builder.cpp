@@ -14,8 +14,10 @@
 #include <catl/shamap/shamap.h>
 #include <catl/xdata/parse_leaf.h>
 #include <catl/xdata/parse_transaction.h>
+#include <catl/xdata/serialize.h>
 
 #include <boost/asio/redirect_error.hpp>
+#include <algorithm>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <optional>
@@ -70,8 +72,7 @@ require_walk_transport(WalkResult result)
     throw PeerClientException(Error::ParseError, "unknown tree-walk terminal");
 }
 
-/// Build a proof-format on_leaf callback for trie_json.
-static catl::shamap::LeafJsonCallback
+catl::shamap::LeafJsonCallback
 make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
 {
     return [&protocol, is_tx_tree](MmapItem const& item) -> boost::json::value {
@@ -112,13 +113,35 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
                 obj->erase("hash");
                 obj->erase("blob");
             }
+
+            // What the verifier hashes is this object re-serialized, so it has
+            // to reproduce the leaf's exact bytes, or the JSON proof would
+            // never verify. JSON leaves are decoded only (2055): a leaf that
+            // doesn't round-trip means this trie has no JSON form.
+            auto const* obj = decoded.if_object();
+            if (!obj)
+                throw std::runtime_error("decoded leaf is not an object");
+            auto const reencoded = is_tx_tree
+                ? catl::xdata::serialize_transaction(*obj, protocol)
+                : catl::xdata::serialize_leaf(*obj, protocol);
+            if (!std::equal(
+                    reencoded.begin(),
+                    reencoded.end(),
+                    item.slice().data(),
+                    item.slice().data() + item.slice().size()))
+            {
+                throw std::runtime_error(
+                    "decoded leaf does not re-encode to its ledger bytes");
+            }
             arr.emplace_back(std::move(decoded));
         }
-        catch (std::exception const&)
+        catch (std::exception const& e)
         {
-            std::string hex;
-            slice_hex(item.slice(), hex);
-            arr.emplace_back(hex);
+            throw JsonFormUnavailable(
+                std::string(is_tx_tree ? "tx" : "state") + " leaf " +
+                upper_hex(item.key().to_hash()) +
+                " can't be decoded with this server's field definitions (" +
+                e.what() + ")");
         }
 
         return arr;
@@ -410,8 +433,18 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         trie.tree = tree_type;
         catl::shamap::TrieJsonOptions trie_opts;
         trie_opts.on_leaf = make_proof_leaf_callback(ctx->protocol, is_tx);
-        trie.trie_json =
-            tree.get_root()->trie_json(trie_opts, tree.get_options());
+        try
+        {
+            trie.trie_json =
+                tree.get_root()->trie_json(trie_opts, tree.get_options());
+        }
+        catch (JsonFormUnavailable const& e)
+        {
+            // The binary trie below is unaffected; only JSON is refused.
+            PLOGW(log_, "  ", e.reason());
+            trie.trie_json = nullptr;
+            trie.json_unavailable = e.reason();
+        }
         trie.trie_binary = tree.trie_binary();
         return trie;
     };

@@ -13,7 +13,9 @@
 #include <boost/json.hpp>
 #include <cstdint>
 #include <map>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -71,6 +73,38 @@ struct TrieData
     //   needed for hash verification).
     boost::json::value trie_json;
     std::vector<uint8_t> trie_binary;
+
+    // Non-empty when a leaf could not be decoded and re-encoded to its exact
+    // bytes with this server's field definitions. JSON leaves are decoded only
+    // (2055), so such a trie has no JSON form; trie_binary is still complete.
+    std::string json_unavailable;
+};
+
+/// A proof asked for in JSON form has a trie with no JSON form (see
+/// TrieData::json_unavailable). The binary form carries the same proof.
+class JsonFormUnavailable : public std::runtime_error
+{
+public:
+    explicit JsonFormUnavailable(std::string reason)
+        : std::runtime_error(
+              "proof has no JSON form: " + reason + ". " + std::string(hint))
+        , reason_(std::move(reason))
+    {
+    }
+
+    std::string const&
+    reason() const
+    {
+        return reason_;
+    }
+
+    static constexpr std::string_view hint =
+        "Request the binary proof instead (format=bin): its leaves are the "
+        "exact ledger bytes, so it needs no field definitions to build or "
+        "verify";
+
+private:
+    std::string reason_;
 };
 
 //------------------------------------------------------------------------------

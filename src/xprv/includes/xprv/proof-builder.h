@@ -17,6 +17,7 @@
 #include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
 #include <catl/rpc-client/rpc-client-coro.h>
+#include <catl/shamap/shamap-options.h>
 #include <catl/vl-client/vl-client.h>
 #include <catl/xdata/protocol.h>
 #include <atomic>
@@ -92,6 +93,12 @@ struct BuildServices
 /// Build using shared services (ProofEngine path).
 boost::asio::awaitable<BuildResult>
 build_proof(BuildServices svc, std::string const& tx_hash_str);
+
+/// The trie_json on_leaf callback for proofs: renders a leaf as
+/// [key, decoded object]. Throws JsonFormUnavailable when the leaf can't be
+/// decoded with `protocol` and re-encoded to its exact bytes (2055).
+catl::shamap::LeafJsonCallback
+make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree);
 
 // Legacy self-contained build_proof removed — all callers use
 // build_proof(BuildServices) via ProofEngine.

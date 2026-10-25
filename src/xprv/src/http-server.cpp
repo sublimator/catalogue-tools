@@ -2102,6 +2102,7 @@ HttpServer::handle_session(
                         {
                             std::optional<uint32_t> done_network_id;
                             std::string sse_error;
+                            std::string sse_hint;
                             try
                             {
                                 //@@authority transition=prv.T0035
@@ -2161,6 +2162,15 @@ HttpServer::handle_session(
                                         "prove");
                                 }
                             }
+                            catch (JsonFormUnavailable const& e)
+                            {
+                                if (!cancel_token->load())
+                                {
+                                    sse_error =
+                                        "proof has no JSON form: " + e.reason();
+                                    sse_hint = JsonFormUnavailable::hint;
+                                }
+                            }
                             catch (std::exception const& e)
                             {
                                 if (!cancel_token->load())
@@ -2203,6 +2213,8 @@ HttpServer::handle_session(
                                 boost::json::object err;
                                 err["type"] = "error";
                                 err["error"] = std::move(sse_error);
+                                if (!sse_hint.empty())
+                                    err["hint"] = std::move(sse_hint);
                                 co_await enqueue_sse(
                                     boost::json::serialize(err));
                             }
@@ -2646,6 +2658,19 @@ HttpServer::handle_session(
         {
             PLOGW(log_, "Peer error: ", e.what());
             caught_error = error_response(504, e.what(), version, keep_alive);
+        }
+        catch (JsonFormUnavailable const& e)
+        {
+            // The server's field definitions are behind the ledger (2056);
+            // the binary proof doesn't depend on them.
+            PLOGW(log_, "JSON proof refused: ", e.reason());
+            caught_error = json_response(
+                500,
+                {{"error", "internal error"},
+                 {"message", "proof has no JSON form: " + e.reason()},
+                 {"hint", std::string(JsonFormUnavailable::hint)}},
+                version,
+                keep_alive);
         }
         catch (std::exception const& e)
         {

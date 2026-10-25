@@ -65,6 +65,8 @@ header_to_json(HeaderData const& h)
 static boost::json::object
 trie_to_json(TrieData const& t)
 {
+    if (!t.json_unavailable.empty())
+        throw JsonFormUnavailable(t.json_unavailable);
     boost::json::object obj;
     obj["type"] = "map_proof";
     obj["tree"] = (t.tree == TrieData::TreeType::state) ? "state" : "tx";
