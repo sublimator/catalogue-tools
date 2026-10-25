@@ -6,7 +6,7 @@ add_library(nudb_core INTERFACE)
 target_include_directories(
   nudb_core INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
                       $<INSTALL_INTERFACE:include>)
-target_link_libraries(nudb_core INTERFACE Boost::thread Boost::system)
+target_link_libraries(nudb_core INTERFACE Boost::thread Boost::headers)
 # this is the min std required to use NuDB - should it be 11 or 14?
 target_compile_features(nudb_core INTERFACE cxx_std_11)
 add_library(NuDB::nudb ALIAS nudb_core)

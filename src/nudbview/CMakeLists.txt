@@ -15,12 +15,12 @@ target_compile_definitions(
             NUDB_DEBUG_ARENA=0
             NUDB_DEBUG_LOG=0)
 
-# NuDB requires Boost (filesystem, system, thread)
+# NuDB requires Boost (filesystem, system, thread). Boost.System is
+# header-only since 1.89 and has no CMake component; Boost::boost covers it.
 target_link_libraries(
   nudbview
   INTERFACE Boost::boost
             Boost::filesystem
-            Boost::system
             Boost::thread)
 
 # Require C++14 minimum (NuDB's requirement)
