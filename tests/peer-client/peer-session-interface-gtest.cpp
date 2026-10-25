@@ -1,3 +1,4 @@
+#include <boost/asio/bind_executor.hpp>
 #include "peer-client-test-access.h"
 #include "peer-set-test-access.h"
 #include <catl/peer-client/ledger-fetch-coordinator.h>
@@ -5340,17 +5341,22 @@ TEST(NodeCacheShutdown, CancellingInitiatorDoesNotCancelSharedDriver)
         if (!seal_reported.exchange(true))
             initiator_sealed.set_value();
     });
+    auto caller = asio::make_strand(io);
     asio::co_spawn(
-        io,
+        caller,
         cache->co_stop_nodes(),
-        asio::bind_cancellation_slot(
-            cancellation.slot(), [&initiator_done](std::exception_ptr failure) {
-                initiator_done.set_value(std::move(failure));
-            }));
+        asio::bind_executor(
+            caller,
+            asio::bind_cancellation_slot(
+                cancellation.slot(), [&initiator_done](std::exception_ptr failure) {
+                    initiator_done.set_value(std::move(failure));
+                })));
     ASSERT_EQ(initiator_sealed_future.wait_for(2s), std::future_status::ready);
     auto joiner = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
 
-    cancellation.emit(asio::cancellation_type::all);
+    asio::post(caller, [&cancellation] {
+        cancellation.emit(asio::cancellation_type::all);
+    });
     ASSERT_EQ(initiator_done_future.wait_for(2s), std::future_status::ready);
     auto initiator_failure = initiator_done_future.get();
     ASSERT_TRUE(initiator_failure);
