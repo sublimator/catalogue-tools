@@ -38,6 +38,7 @@ struct AnchorVerifyResult
 {
     bool verified = false;
     int unl_size = 0;
+    int unl_revoked = 0;  // revoked masters: counted in unl_size, never vote
     int validations_total = 0;
     int validations_verified = 0;
     int validations_partial = 0;

@@ -124,6 +124,30 @@ TEST(AnchorVerifier, PartialValidationsDoNotCountTowardQuorum)
     EXPECT_EQ(four_full.validations_matched_unl, 4);
 }
 
+TEST(AnchorVerifier, RevokedMasterStaysInNAndNeverVotes)
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) + "tests/xprv/fixture/revoked-master.json");
+    ASSERT_TRUE(in.is_open());
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto const fixture = boost::json::parse(buffer.str()).as_object();
+    auto const key = std::string(fixture.at("trusted_key").as_string());
+    auto const& anchors = fixture.at("anchors").as_object();
+
+    auto const four = verify(anchors.at("revoked-plus-four-full").as_object(), key);
+    EXPECT_TRUE(four.verified) << four.error;
+    EXPECT_EQ(four.unl_size, 5);
+    EXPECT_EQ(four.unl_revoked, 1);
+    EXPECT_EQ(four.validations_matched_unl, 4);
+
+    auto const three =
+        verify(anchors.at("revoked-signer-votes-plus-three").as_object(), key);
+    EXPECT_FALSE(three.verified);
+    EXPECT_EQ(three.error, "quorum not met");
+    EXPECT_EQ(three.validations_matched_unl, 3);
+}
+
 TEST(AnchorVerifier, RejectsListExpiredAtAnchorCloseTime)
 {
     EXPECT_TRUE(xprv::validator_list_active_at(50, 100, 99));

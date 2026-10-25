@@ -926,8 +926,9 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
             ok, err, m = verify_manifest(base64.b64decode(m_b64, validate=True))
         except Exception as exc:
             ok, err, m = False, str(exc), {}
+        revoked = ok and m.get("Sequence") == MANIFEST_REVOKED
         sk = _upper_hex(m.get("SigningPubKey"))
-        if not ok or not sk:
+        if not ok or (not sk and not revoked):
             return AnchorResult(
                 ok=False, message=f"invalid validator manifest: {err if not ok else 'no signing key'}"
             )
@@ -936,6 +937,11 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
             return AnchorResult(ok=False, message="validator manifest master key mismatch")
         if mk in masters:
             return AnchorResult(ok=False, message="duplicate validator master key")
+        if revoked:
+            # A revoked master stays in N and never votes (§1.3): it has no
+            # signing key, so no validation can map to it.
+            masters.add(mk)
+            continue
         if sk in signing_to_master:
             return AnchorResult(ok=False, message="duplicate validator signing key")
         masters.add(mk)

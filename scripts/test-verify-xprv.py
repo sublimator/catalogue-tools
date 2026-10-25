@@ -322,6 +322,17 @@ class AnchorVerificationTests(unittest.TestCase):
         f.voters, f.partial_voters = f.signers[:4], f.signers[4:]
         self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
 
+    def test_revoked_master_stays_in_n_and_never_votes(self) -> None:
+        f = Fixture()
+        revocation = sign_manifest(
+            {"Sequence": v.MANIFEST_REVOKED, "PublicKey": f.masters[0][0]}, f.masters[0], None
+        )
+        f.entries[0]["manifest"] = base64.b64encode(revocation).decode()
+        f.voters = f.signers[1:]  # 4 of N=5: quorum 4 is still met
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
+        f.voters = f.signers[:4]  # the revoked validator's vote must not count
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 3/5 (need 4)")
+
     def test_quorum_rounds_up_when_eighty_percent_is_fractional(self) -> None:
         f = Fixture(validators=6)  # 80% of 6 is 4.8: floor would accept 4
         f.voters = f.signers[:4]

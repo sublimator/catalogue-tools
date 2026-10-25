@@ -436,7 +436,9 @@ AnchorVerifier::verify(
         auto m_b64 = std::string(vobj.at("manifest").as_string());
         auto m_bytes = catl::base64_decode(m_b64);
         auto verified_manifest = parse_and_verify_manifest(m_bytes, protocol);
-        if (!verified_manifest || verified_manifest->signing_public_key.empty())
+        if (!verified_manifest ||
+            (!verified_manifest->is_revocation() &&
+             verified_manifest->signing_public_key.empty()))
         {
             result.error = "invalid validator manifest";
             narrative.push_back("   FAIL: a validator manifest is invalid.");
@@ -455,7 +457,6 @@ AnchorVerifier::verify(
             return result;
         }
 
-        auto const signing_key = lower(verified_manifest->signing_key_hex());
         if (!unl_masters.insert(manifest_master).second)
         {
             result.error = "duplicate validator master key";
@@ -463,6 +464,14 @@ AnchorVerifier::verify(
                 "   FAIL: UNL contains a duplicate validator master key.");
             return result;
         }
+        // A revoked master stays in N and never votes (§1.3): it has no
+        // signing key, so no validation can map to it.
+        if (verified_manifest->is_revocation())
+        {
+            result.unl_revoked++;
+            continue;
+        }
+        auto const signing_key = lower(verified_manifest->signing_key_hex());
         if (!unl_signing_keys.insert(signing_key).second)
         {
             result.error = "duplicate validator signing key";
@@ -498,7 +507,11 @@ AnchorVerifier::verify(
         " validator manifests from UNL blob");
     narrative.push_back(
         "   Step A4: UNL blob contains " + std::to_string(result.unl_size) +
-        " validator manifests. Each maps a master key to a signing key.");
+        " validator manifests. Each maps a master key to a signing key." +
+        (result.unl_revoked > 0
+             ? " " + std::to_string(result.unl_revoked) +
+                 " are revoked: they count toward N and cannot vote."
+             : std::string{}));
 
     // ── Step 5: Verify each STValidation ────────────────────────
     if (!anchor.contains("validations") ||
