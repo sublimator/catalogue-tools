@@ -1422,9 +1422,14 @@ verification of the parent-before-child DAG model. They keep authenticated
 ledger hashes and tree roots alive across sibling fan-out, and may emit warnings
 for non-canonical duplication or ordering while still accepting a valid proof.
 
-Trust resolution with material beyond the proof (§1.3) is not yet implemented:
-both reference verifiers resolve the view from the embedded list alone, and
-reject a list-less anchor as having no list. Both follow §1.3 rule 3 for the
+Both reference verifiers resolve the §1.3 view from the embedded list plus any
+held manifests passed to them: `xprv verify --manifests FILE` and
+`verify-xprv.py --manifests FILE`, where FILE is a JSON array of base64 raw
+manifests. The reference server's `/verify` passes the newer manifests it holds
+from peers for the proof's network. The server counts its proof quorum under the
+same view and attaches every validation it holds for the anchor ledger. Neither
+verifier fetches a primary list from outside the proof yet, so both reject a
+list-less anchor as having no list. Both follow §1.3 rule 3 for the
 embedded list: a revoked validator stays in N and never votes. The reference
 server applies the same rule to the lists it loads.
 
