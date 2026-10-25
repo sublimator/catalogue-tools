@@ -371,6 +371,73 @@ class AnchorVerificationTests(unittest.TestCase):
         self.assertRejected(self.verify(f.anchor(), f.trusted_key), "validity interval is invalid")
 
 
+class TrustViewOverlayTests(unittest.TestCase):
+    """§1.3: manifests held outside the proof re-point listed masters only."""
+
+    def verify(self, anchor: dict, trusted_key: str, extras: list[bytes]):
+        return quietly(v.verify_anchor, anchor, trusted_key, extras)
+
+    def assertRejected(self, result, fragment: str) -> None:
+        self.assertFalse(result.ok)
+        self.assertIn(fragment, result.message)
+
+    def setUp(self) -> None:
+        self.f = Fixture()
+        self.rotated_key = keypair(300)
+        self.rotation = make_manifest(self.f.masters[0], self.rotated_key, seq=2)
+
+    def test_rotated_validator_counts_only_with_the_newer_manifest(self) -> None:
+        f = self.f
+        f.voters = [self.rotated_key] + f.signers[1:4]  # 4 of 5 if the rotation is known
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key, []), "quorum not met: 3/5")
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [self.rotation]).ok)
+
+    def test_superseded_key_stops_counting(self) -> None:
+        f = self.f
+        f.voters = f.signers[:4]  # validator 0 signs with its listed, now superseded key
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key, []).ok)
+        self.assertRejected(
+            self.verify(f.anchor(), f.trusted_key, [self.rotation]), "quorum not met: 3/5"
+        )
+
+    def test_equal_sequence_conflict_rejects(self) -> None:
+        f = self.f
+        twin = make_manifest(f.masters[0], self.rotated_key, seq=1)  # list has seq 1
+        self.assertRejected(
+            self.verify(f.anchor(), f.trusted_key, [twin]), "conflicting validator manifests"
+        )
+
+    def test_resolved_key_collision_rejects(self) -> None:
+        f = self.f
+        stolen = make_manifest(f.masters[0], f.signers[1], seq=2)
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key, [stolen]), "collides")
+
+    def test_held_revocation_removes_the_vote_and_keeps_n(self) -> None:
+        f = self.f
+        revocation = sign_manifest(
+            {"Sequence": v.MANIFEST_REVOKED, "PublicKey": f.masters[0][0]}, f.masters[0], None
+        )
+        f.voters = f.signers[:4]
+        self.assertRejected(
+            self.verify(f.anchor(), f.trusted_key, [revocation]), "quorum not met: 3/5"
+        )
+
+    def test_manifest_for_an_unlisted_master_grants_nothing(self) -> None:
+        f = self.f
+        stranger = make_manifest(keypair(400), keypair(401), seq=9)
+        f.voters = [keypair(401)] + f.signers[1:4]
+        self.assertRejected(
+            self.verify(f.anchor(), f.trusted_key, [stranger]), "quorum not met: 3/5"
+        )
+
+    def test_newer_publisher_manifest_supersedes_the_list(self) -> None:
+        f = self.f
+        newer = make_manifest(f.publisher, keypair(500), seq=2)
+        self.assertRejected(
+            self.verify(f.anchor(), f.trusted_key, [newer]), "superseded publisher key"
+        )
+
+
 class ManifestTemplateTests(unittest.TestCase):
     """Validly signed manifests whose shape the C++ verifier rejects."""
 

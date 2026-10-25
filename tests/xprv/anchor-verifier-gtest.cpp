@@ -1,11 +1,13 @@
 #include "xprv/anchor-verifier.h"
 
+#include <catl/core/base64.h>
 #include <catl/xdata/protocol.h>
 
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
 
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -158,4 +160,86 @@ TEST(AnchorVerifier, RejectsListNotYetEffectiveAtAnchorCloseTime)
 {
     EXPECT_FALSE(xprv::validator_list_active_at(101, 200, 100));
     EXPECT_TRUE(xprv::validator_list_active_at(100, 200, 100));
+}
+
+// §1.3 trust view: manifests held outside the proof re-point listed masters.
+namespace {
+
+struct OverlayCase
+{
+    boost::json::object anchor;
+    std::vector<std::vector<uint8_t>> extras;
+};
+
+std::pair<std::string, std::map<std::string, OverlayCase>>
+load_overlay_fixture()
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) +
+        "tests/xprv/fixture/trust-view-overlay.json");
+    if (!in)
+        throw std::runtime_error("cannot open trust-view-overlay fixture");
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto const fixture = boost::json::parse(buffer.str()).as_object();
+    std::map<std::string, OverlayCase> cases;
+    for (auto const& kv : fixture.at("cases").as_object())
+    {
+        OverlayCase c;
+        c.anchor = kv.value().at("anchor").as_object();
+        for (auto const& e : kv.value().at("extras").as_array())
+            c.extras.push_back(catl::base64_decode(std::string(e.as_string())));
+        cases.emplace(std::string(kv.key()), std::move(c));
+    }
+    return {std::string(fixture.at("trusted_key").as_string()), cases};
+}
+
+xprv::AnchorVerifyResult
+verify_with(OverlayCase const& c, std::string const& key, bool use_extras)
+{
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    std::vector<std::string> narrative;
+    return xprv::AnchorVerifier::verify(
+        c.anchor,
+        key,
+        protocol,
+        narrative,
+        use_extras ? c.extras : std::vector<std::vector<uint8_t>>{});
+}
+
+}  // namespace
+
+TEST(AnchorVerifier, RotatedValidatorCountsOnlyWithTheNewerManifest)
+{
+    auto const [key, cases] = load_overlay_fixture();
+    auto const& c = cases.at("rotated-signs");
+    EXPECT_FALSE(verify_with(c, key, false).verified);
+    auto const with = verify_with(c, key, true);
+    EXPECT_TRUE(with.verified) << with.error;
+    EXPECT_EQ(with.unl_overlaid, 1);
+    EXPECT_EQ(with.validations_matched_unl, 4);
+}
+
+TEST(AnchorVerifier, SupersededKeyStopsCounting)
+{
+    auto const [key, cases] = load_overlay_fixture();
+    auto const& c = cases.at("superseded-key-signs");
+    EXPECT_TRUE(verify_with(c, key, false).verified);
+    auto const with = verify_with(c, key, true);
+    EXPECT_FALSE(with.verified);
+    EXPECT_EQ(with.validations_matched_unl, 3);
+}
+
+TEST(AnchorVerifier, HeldManifestConflictsAndCollisionsReject)
+{
+    auto const [key, cases] = load_overlay_fixture();
+    EXPECT_EQ(
+        verify_with(cases.at("equal-sequence-conflict"), key, true).error,
+        "conflicting validator manifests at the same sequence");
+    EXPECT_EQ(
+        verify_with(cases.at("key-collision"), key, true).error,
+        "resolved signing key collides with another validator key");
+    EXPECT_EQ(
+        verify_with(cases.at("publisher-superseded"), key, true).error,
+        "validator list is signed by a superseded publisher key");
 }

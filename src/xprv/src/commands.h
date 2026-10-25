@@ -42,7 +42,8 @@ cmd_verify(
     std::string const& proof_path,
     std::string const& trusted_key,
     uint32_t trusted_network_id,
-    catl::xdata::Protocol const& protocol);
+    catl::xdata::Protocol const& protocol,
+    std::string const& manifests_path = std::string());
 
 // cmd_serve takes Config directly — no intermediate ServeOptions.
 // Config has everything: network, peers, cache, server, fd_limit.

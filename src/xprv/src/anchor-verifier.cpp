@@ -220,9 +220,20 @@ AnchorVerifier::verify(
     boost::json::object const& anchor,
     std::string const& trusted_key,
     catl::xdata::Protocol const& protocol,
-    std::vector<std::string>& narrative)
+    std::vector<std::string>& narrative,
+    std::vector<std::vector<uint8_t>> const& extra_manifests)
 {
     AnchorVerifyResult result;
+
+    // Manifests held from outside the proof (§1.3 trust view). One that
+    // doesn't verify grants nothing (rule 1). They only re-point masters the
+    // primary list names; they never add members or change N.
+    std::vector<catl::vl::Manifest> held;
+    for (auto const& raw : extra_manifests)
+    {
+        if (auto m = parse_and_verify_manifest(raw, protocol))
+            held.push_back(std::move(*m));
+    }
 
     // ── Step 1: Publisher key check ─────────────────────────────
     if (!anchor.contains("unl") || !anchor.at("unl").is_object())
@@ -317,6 +328,33 @@ AnchorVerifier::verify(
         PLOGE(log_, "Step 2: Publisher manifest signature verification failed");
         narrative.push_back("   FAIL: publisher manifest is invalid.");
         return result;
+    }
+
+    // §1.3: the publisher's signing key comes from the highest-sequence
+    // publisher manifest held; a list signed by a superseded key can't be
+    // primary.
+    for (auto const& m : held)
+    {
+        if (lower(m.master_key_hex()) != lower(trusted_key))
+            continue;
+        if (m.sequence > publisher_manifest.sequence)
+        {
+            result.error =
+                "validator list is signed by a superseded publisher key";
+            narrative.push_back(
+                "   FAIL: a newer publisher manifest is held, so this list's "
+                "signing key is superseded.");
+            return result;
+        }
+        if (m.sequence == publisher_manifest.sequence &&
+            m.raw != publisher_manifest.raw)
+        {
+            result.error =
+                "conflicting publisher manifests at the same sequence";
+            narrative.push_back(
+                "   FAIL: two different publisher manifests share a sequence.");
+            return result;
+        }
     }
 
     PLOGI(
@@ -423,6 +461,14 @@ AnchorVerifier::verify(
     std::map<std::string, std::string> signing_to_master;
     std::set<std::string> unl_masters;
     std::set<std::string> unl_signing_keys;
+    // Per master, the winning manifest so far (§1.3 delegations).
+    struct Delegation
+    {
+        std::uint32_t sequence = 0;
+        std::vector<uint8_t> raw;
+        std::string signing_key;  // empty when revoked
+    };
+    std::map<std::string, Delegation> best;
     auto const& vals_array = blob_obj.at("validators").as_array();
 
     for (auto const& v : vals_array)
@@ -475,6 +521,12 @@ AnchorVerifier::verify(
                 "   FAIL: UNL contains a duplicate validator master key.");
             return result;
         }
+        best[manifest_master] = Delegation{
+            verified_manifest->sequence,
+            verified_manifest->raw,
+            verified_manifest->is_revocation()
+                ? std::string{}
+                : lower(verified_manifest->signing_key_hex())};
         // A revoked master stays in N and never votes (§1.3): it has no
         // signing key, so no validation can map to it.
         if (verified_manifest->is_revocation())
@@ -502,6 +554,56 @@ AnchorVerifier::verify(
                 "   FAIL: UNL reuses a key across validator roles.");
             return result;
         }
+    }
+
+    // §1.3 delegations: the highest-sequence verified manifest held for each
+    // listed master wins. Membership and N don't change.
+    for (auto const& m : held)
+    {
+        auto const master = lower(m.master_key_hex());
+        auto const it = best.find(master);
+        if (it == best.end())
+            continue;  // rule 1: not a member of the primary list
+        if (m.sequence == it->second.sequence && m.raw != it->second.raw)
+        {
+            result.error = "conflicting validator manifests at the same sequence";
+            narrative.push_back(
+                "   FAIL: two different manifests for one validator share a "
+                "sequence.");
+            return result;  // rule 2
+        }
+        if (m.sequence > it->second.sequence)
+        {
+            it->second = Delegation{
+                m.sequence,
+                m.raw,
+                m.is_revocation() ? std::string{} : lower(m.signing_key_hex())};
+            result.unl_overlaid++;
+        }
+    }
+    if (result.unl_overlaid > 0)
+    {
+        signing_to_master.clear();
+        for (auto const& [master, d] : best)
+        {
+            if (d.signing_key.empty())
+                continue;  // rule 3: revoked, no key, N unchanged
+            if (signing_to_master.count(d.signing_key) ||
+                unl_masters.count(d.signing_key))
+            {
+                result.error =
+                    "resolved signing key collides with another validator key";
+                narrative.push_back(
+                    "   FAIL: a resolved signing key collides with another "
+                    "validator's key.");
+                return result;  // rule 4
+            }
+            signing_to_master.emplace(d.signing_key, master);
+        }
+        narrative.push_back(
+            "   Step A4b: " + std::to_string(result.unl_overlaid) +
+            " delegation(s) updated from manifests held outside the proof "
+            "(§1.3).");
     }
 
     result.unl_size = static_cast<int>(unl_masters.size());

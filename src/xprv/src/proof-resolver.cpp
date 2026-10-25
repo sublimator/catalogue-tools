@@ -287,7 +287,8 @@ resolve_proof_chain_impl(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol,
     std::string const& trusted_publisher_key,
-    bool pretrusted_anchor_for_testing)
+    bool pretrusted_anchor_for_testing,
+    std::vector<std::vector<uint8_t>> const& extra_manifests)
 {
     PLOGI(verify_log, "");
     PLOGI(
@@ -419,7 +420,8 @@ resolve_proof_chain_impl(
                                 steps[0].as_object(),
                                 trusted_publisher_key,
                                 protocol,
-                                av_narrative);
+                                av_narrative,
+                                extra_manifests);
 
                             anchor_step.sub_steps = std::move(av_narrative);
                             anchor_step.publisher_key =
@@ -1102,10 +1104,11 @@ bool
 resolve_proof_chain(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol,
-    std::string const& trusted_publisher_key)
+    std::string const& trusted_publisher_key,
+    std::vector<std::vector<uint8_t>> const& extra_manifests)
 {
     return resolve_proof_chain_impl(
-        chain, protocol, trusted_publisher_key, false);
+        chain, protocol, trusted_publisher_key, false, extra_manifests);
 }
 
 #ifdef XPRV_TESTING
@@ -1114,7 +1117,7 @@ resolve_proof_chain_with_pretrusted_anchor_for_testing(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol)
 {
-    return resolve_proof_chain_impl(chain, protocol, "", true);
+    return resolve_proof_chain_impl(chain, protocol, "", true, {});
 }
 #endif
 

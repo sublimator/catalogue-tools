@@ -445,6 +445,7 @@ main(int argc, char* argv[])
     {
         std::string proof_path;
         std::string explicit_key;
+        std::string manifests_path;
         uint32_t verify_network_id = 0;
 
         std::size_t pos = 0;
@@ -454,6 +455,11 @@ main(int argc, char* argv[])
             if (arg == "--network" && pos + 1 < command_args.size())
             {
                 verify_network_id = std::stoul(command_args[pos + 1]);
+                pos += 2;
+            }
+            else if (arg == "--manifests" && pos + 1 < command_args.size())
+            {
+                manifests_path = command_args[pos + 1];
                 pos += 2;
             }
             else if (arg[0] == '-')
@@ -477,7 +483,7 @@ main(int argc, char* argv[])
         {
             std::cerr
                 << "Usage: xprv verify <proof_file> [publisher_key] "
-                   "[--network N]\n";
+                   "[--network N] [--manifests FILE]\n";
             return 1;
         }
 
@@ -498,7 +504,7 @@ main(int argc, char* argv[])
             xprv::NetworkConfig::for_network(verify_network_id);
         auto protocol = net_config.load_protocol();
         return cmd_verify(
-            proof_path, trusted_key, verify_network_id, protocol);
+            proof_path, trusted_key, verify_network_id, protocol, manifests_path);
     }
 
     // Offline form conversion. Exists so the two representations can be

@@ -860,12 +860,37 @@ def _blob_uint32(value: Any) -> int | None:
     return value if 0 <= value <= 0xFFFFFFFF else None
 
 
-def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
+def verify_anchor(
+    anchor: dict[str, Any],
+    trusted_key: str,
+    extra_manifests: list[bytes] | None = None,
+) -> AnchorResult:
     """Verify anchor: manifest chain + VL blob + validations + quorum.
 
     Mirrors AnchorVerifier::verify (src/xprv/src/anchor-verifier.cpp): a
     malformed or unbound input fails the anchor rather than being skipped.
+
+    `extra_manifests` are raw manifests held from outside the proof (§1.3
+    trust view: peers, the manifest RPC, secondary lists). They only re-point
+    masters the primary list already names; they never add members or change N.
     """
+    # Candidate manifests from outside the proof, verified once. One that
+    # doesn't verify grants nothing (§1.3 rule 1).
+    held: list[tuple[str, int, bytes, str]] = []  # (master, sequence, raw, signing key)
+    for raw in extra_manifests or []:
+        try:
+            ok_x, _, mx = verify_manifest(raw)
+        except Exception:
+            continue
+        if ok_x:
+            held.append(
+                (
+                    _upper_hex(mx.get("PublicKey")),
+                    int(mx.get("Sequence", -1)),
+                    bytes(raw),
+                    _upper_hex(mx.get("SigningPubKey")),
+                )
+            )
     unl = anchor.get("unl")
     if not isinstance(unl, dict):
         return AnchorResult(ok=False, message="no UNL data")
@@ -912,6 +937,20 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
     signing_key = _upper_hex(manifest.get("SigningPubKey"))
     if not signing_key:
         return AnchorResult(ok=False, message="manifest has no SigningPubKey")
+    # §1.3: the publisher's signing key comes from the highest-sequence
+    # publisher manifest held; a list signed by a superseded key can't be primary.
+    publisher_raw = unhexlify(manifest_hex)
+    for master_x, seq_x, raw_x, _ in held:
+        if master_x != trusted:
+            continue
+        if seq_x > int(manifest.get("Sequence", -1)):
+            return AnchorResult(
+                ok=False, message="validator list is signed by a superseded publisher key"
+            )
+        if seq_x == int(manifest.get("Sequence", -1)) and raw_x != publisher_raw:
+            return AnchorResult(
+                ok=False, message="conflicting publisher manifests at the same sequence"
+            )
     print(f"    A2: Publisher manifest VERIFIED, signing key {signing_key[:16]}...")
 
     # Step 3: verify blob signature (raw bytes, signed by publisher signing key)
@@ -952,6 +991,8 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
 
     signing_to_master: dict[str, str] = {}
     masters: set[str] = set()
+    # Per master, the winning manifest so far: (sequence, raw bytes, signing key).
+    best: dict[str, tuple[int, bytes, str]] = {}
     for entry in validators:
         if not isinstance(entry, dict):
             return AnchorResult(ok=False, message="malformed validator entry in UNL blob")
@@ -960,9 +1001,10 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
         if not isinstance(m_b64, str) or not isinstance(advertised, str):
             return AnchorResult(ok=False, message="validator entry missing key or manifest")
         try:
-            ok, err, m = verify_manifest(base64.b64decode(m_b64, validate=True))
+            m_raw = base64.b64decode(m_b64, validate=True)
+            ok, err, m = verify_manifest(m_raw)
         except Exception as exc:
-            ok, err, m = False, str(exc), {}
+            m_raw, ok, err, m = b"", False, str(exc), {}
         revoked = ok and m.get("Sequence") == MANIFEST_REVOKED
         sk = _upper_hex(m.get("SigningPubKey"))
         if not ok or (not sk and not revoked):
@@ -974,6 +1016,7 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
             return AnchorResult(ok=False, message="validator manifest master key mismatch")
         if mk in masters:
             return AnchorResult(ok=False, message="duplicate validator master key")
+        best[mk] = (int(m.get("Sequence", -1)), m_raw, "" if revoked else sk)
         if revoked:
             # A revoked master stays in N and never votes (§1.3): it has no
             # signing key, so no validation can map to it.
@@ -986,6 +1029,32 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
 
     if masters & signing_to_master.keys():
         return AnchorResult(ok=False, message="validator key reused across roles")
+
+    # §1.3 delegations: the highest-sequence verified manifest held for each
+    # listed master wins. Membership and N don't change.
+    overlaid = 0
+    for master_x, seq_x, raw_x, sk_x in held:
+        if master_x not in best:
+            continue  # rule 1: not a member of the primary list
+        seq_b, raw_b, _ = best[master_x]
+        if seq_x == seq_b and raw_x != raw_b:
+            return AnchorResult(
+                ok=False, message="conflicting validator manifests at the same sequence"
+            )  # rule 2
+        if seq_x > seq_b:
+            best[master_x] = (seq_x, raw_x, "" if seq_x == MANIFEST_REVOKED else sk_x)
+            overlaid += 1
+    if overlaid:
+        signing_to_master = {}
+        for master_x, (_, _, sk_x) in best.items():
+            if not sk_x:
+                continue  # rule 3: revoked, no key, N unchanged
+            if sk_x in signing_to_master or sk_x in masters:
+                return AnchorResult(
+                    ok=False, message="resolved signing key collides with another validator key"
+                )  # rule 4
+            signing_to_master[sk_x] = master_x
+        print(f"    A4: {overlaid} delegation(s) updated from manifests held outside the proof")
     unl_size = len(masters)
     if unl_size == 0:
         return AnchorResult(ok=False, message="UNL contains no verified validators")
@@ -1106,6 +1175,7 @@ def verify(
     proof: Proof | dict[str, Any] | list[Any],
     trusted_key: str | None = None,
     network_id: int | None = None,
+    extra_manifests: list[bytes] | None = None,
 ) -> VerifyResult:
     """Verify a proof DAG serialized as a parent-first step list.
 
@@ -1203,7 +1273,7 @@ def verify(
                 f"hash={step.get('ledger_hash', '')[:16]}... ({n_val} validations)"
             )
 
-            ar = verify_anchor(step, trusted_key)
+            ar = verify_anchor(step, trusted_key, extra_manifests)
             if ar.ok:
                 ledger_hash = step["ledger_hash"].upper()
                 add_capability(trusted_ledger_hashes, ledger_hash, "anchor")
@@ -1855,6 +1925,12 @@ def main() -> None:
     ap.add_argument("proof", help="Path to proof file (.json or .bin)")
     ap.add_argument("--trusted-key", default=None, help="VL publisher key (hex)")
     ap.add_argument(
+        "--manifests",
+        default=None,
+        help="JSON file: array of base64 raw validator manifests held from outside the "
+        "proof (spec §1.3); they only update keys of masters the list already names",
+    )
+    ap.add_argument(
         "--network",
         type=int,
         default=None,
@@ -1875,7 +1951,13 @@ def main() -> None:
         print("Format: JSON")
         proof = load_json_proof(raw)
 
-    r = verify(proof, args.trusted_key, args.network)
+    extra: list[bytes] = []
+    if args.manifests:
+        items = json.loads(Path(args.manifests).read_text())
+        if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
+            raise SystemExit("--manifests must be a JSON array of base64 strings")
+        extra = [base64.b64decode(x, validate=True) for x in items]
+    r = verify(proof, args.trusted_key, args.network, extra)
     sys.exit(0 if r.ok else 1)
 
 

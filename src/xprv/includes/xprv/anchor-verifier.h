@@ -39,6 +39,7 @@ struct AnchorVerifyResult
     bool verified = false;
     int unl_size = 0;
     int unl_revoked = 0;  // revoked masters: counted in unl_size, never vote
+    int unl_overlaid = 0;  // delegations updated by manifests held outside
     int validations_total = 0;
     int validations_verified = 0;
     int validations_partial = 0;
@@ -57,12 +58,16 @@ public:
     /// @param trusted_key  Hex string of the trusted VL publisher master key
     /// @param narrative Output: explanation lines appended here
     /// @return Verification result
+    /// @param extra_manifests  Raw manifests held from outside the proof
+    ///        (§1.3). They only update keys of masters the list names.
     static AnchorVerifyResult
     verify(
         boost::json::object const& anchor,
         std::string const& trusted_key,
         catl::xdata::Protocol const& protocol,
-        std::vector<std::string>& narrative);
+        std::vector<std::string>& narrative,
+        std::vector<std::vector<uint8_t>> const& extra_manifests =
+            std::vector<std::vector<uint8_t>>());
 
 private:
     /// Parse a raw STValidation, strip sfSignature, return components.

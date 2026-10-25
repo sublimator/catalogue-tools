@@ -15,6 +15,7 @@
 
 #include <catl/xdata/protocol.h>
 #include <string>
+#include <vector>
 
 namespace xprv {
 
@@ -24,11 +25,15 @@ namespace xprv {
 /// Protocol is needed to serialize leaf JSON back to binary for hash
 /// verification.
 /// Returns true if all verifiable steps pass.
+/// `extra_manifests` are raw validator/publisher manifests held from outside
+/// the proof (§1.3 trust view); they only update keys of listed masters.
 bool
 resolve_proof_chain(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol,
-    std::string const& trusted_publisher_key);
+    std::string const& trusted_publisher_key,
+    std::vector<std::vector<uint8_t>> const& extra_manifests =
+        std::vector<std::vector<uint8_t>>());
 
 #ifdef XPRV_TESTING
 /// Test-only entry point for exercising the post-anchor capability graph.
