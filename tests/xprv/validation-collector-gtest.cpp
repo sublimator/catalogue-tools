@@ -799,3 +799,30 @@ TEST(ValidationCollector, EquivocationEvidenceIsBoundedAndSurvivesListRefresh)
     EXPECT_TRUE(contains(held, a.raw) && contains(held, b.raw))
         << "the pair still proves the conflict after the list moved on";
 }
+
+
+// astra batch-2: a validator re-issuing its own current signing key at a
+// higher sequence is accepted (it is not a collision), so the snapshot stays
+// current. Another validator's key is still refused.
+TEST(ValidationCollector, SameKeyReissueAdvancesButForeignKeyIsRefused)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    auto const mine = fake_manifest(0x02, 0x03, 1, 0xA0);
+    auto const theirs = fake_manifest(0x04, 0x05, 1, 0xB0);
+    collector.set_unl({mine, theirs});
+
+    auto const rotation = fake_manifest(0x02, 0xED, 2, 0xA0);
+    collector.apply_peer_manifests({rotation});
+    for (uint32_t seq = 3; seq <= 5; ++seq)
+    {
+        auto const reissue = fake_manifest(0x02, 0xED, seq, 0xA0);
+        collector.apply_peer_manifests({reissue});
+        EXPECT_TRUE(contains(collector.held_manifest_bytes(), reissue.raw))
+            << "same-key reissue at seq " << seq;
+    }
+
+    auto const stolen = fake_manifest(0x02, 0x05, 6, 0xA0);  // theirs's key
+    collector.apply_peer_manifests({stolen});
+    EXPECT_FALSE(contains(collector.held_manifest_bytes(), stolen.raw));
+}

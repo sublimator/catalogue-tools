@@ -1060,10 +1060,15 @@ ValidationCollector::apply_manifest(
 
         if (!manifest.is_revocation())
         {
+            // Another validator's master or active signing key is a
+            // collision; this master re-issuing its own current key at a
+            // higher sequence is not (astra, batch-2 review).
             auto const signing_key_hex = manifest.signing_key_hex();
+            auto const holder = live_signing_to_master_.find(signing_key_hex);
             if (signing_key_hex.empty() ||
                 unl_master_keys_.count(signing_key_hex) ||
-                live_signing_to_master_.count(signing_key_hex))
+                (holder != live_signing_to_master_.end() &&
+                 holder->second != master_key_hex))
             {
                 return false;
             }
