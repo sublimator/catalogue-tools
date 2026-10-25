@@ -180,9 +180,17 @@ verification begins and holds fixed for the whole proof. The view has two
 parts:
 
 - **Membership.** The validator master keys, and their count N, come from
-  exactly one signed Validator List: the **primary list**, published under a
-  configured publisher key. Its validity interval is checked against the
-  close time of the header whose hash is the anchor hash (§5).
+  exactly one signed Validator List: the **primary list**. Of the lists the
+  verifier holds that verify under the configured publisher key, it is the
+  one with the highest list `sequence`, ignoring pending lists (an `effective`
+  in the future by the verifier's own clock). The list embedded in the proof
+  is one such candidate; a lower-sequence list from the same publisher contributes
+  only its validator manifests, like a secondary list. The publisher's own
+  signing key is resolved the same way as a validator's: from the
+  highest-sequence publisher manifest the verifier holds, so a list signed
+  with a superseded publisher signing key is not a candidate. The primary
+  list's validity interval is checked against the close time of the header
+  whose hash is the anchor hash (§5).
 - **Delegations.** For each master in the primary list, the signing key that
   counts is the one named by the highest-sequence manifest that verifies under
   that master. The candidates are the master's manifest inside the primary list
