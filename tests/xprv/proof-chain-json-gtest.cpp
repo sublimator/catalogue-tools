@@ -504,3 +504,46 @@ TEST(ProofChainJson, HexLeafIsRejectedByBinaryConversion)
     opts.protocol = &protocol;
     EXPECT_THROW(xprv::to_binary(chain, opts), std::runtime_error);
 }
+
+// Binary→JSON conversion is bounded like the JSON grammar: no inner node at
+// depth 64 or deeper (codex, v7 review).
+namespace {
+
+std::vector<uint8_t>
+nested_binary_trie(int inner_nodes)
+{
+    // Each inner node uses branch 0: inner (0b10) for all but the last, whose
+    // branch 0 is a hash placeholder (0b11). Header is a u32 little-endian
+    // with 2 bits per branch.
+    std::vector<uint8_t> out;
+    for (int i = 0; i < inner_nodes; ++i)
+    {
+        uint32_t const header = (i + 1 < inner_nodes) ? 0b10u : 0b11u;
+        for (int b = 0; b < 4; ++b)
+            out.push_back(static_cast<uint8_t>(header >> (8 * b)));
+    }
+    out.insert(out.end(), 32, 0xAB);
+    return out;
+}
+
+xprv::ProofChain
+chain_with_binary_trie(std::vector<uint8_t> trie)
+{
+    xprv::ProofChain chain;
+    chain.network_id = 0;
+    xprv::TrieData t;
+    t.tree = xprv::TrieData::TreeType::state;
+    t.trie_binary = std::move(trie);
+    chain.steps.push_back(t);
+    return chain;
+}
+
+}  // namespace
+
+TEST(ProofChainJson, BinaryTrieConversionIsDepthBounded)
+{
+    EXPECT_NO_THROW(xprv::to_json(chain_with_binary_trie(nested_binary_trie(64))));
+    EXPECT_THROW(
+        xprv::to_json(chain_with_binary_trie(nested_binary_trie(65))),
+        std::runtime_error);
+}

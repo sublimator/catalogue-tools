@@ -170,6 +170,10 @@ binary_trie_to_json(
     bool is_tx,
     catl::xdata::Protocol const& protocol)
 {
+    // Same bound as the JSON grammar (json-trie.h) and §3.8: a SHAMap key has
+    // 64 nibbles, so no inner node sits at depth 64 or deeper.
+    if (depth >= 64)
+        throw std::runtime_error("map proof: binary trie depth exceeds 64");
     auto const header = catl::shamap::read_u32_le(data, pos);
     boost::json::object node;
     node["__depth__"] = depth;
