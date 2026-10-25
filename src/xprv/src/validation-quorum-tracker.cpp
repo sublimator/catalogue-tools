@@ -665,6 +665,15 @@ ValidationQuorumTracker::start_manifest_packet(
                                                     .apply_peer_manifests(
                                                         std::move(
                                                             parsed.manifests));
+                                                auto held = std::make_shared<
+                                                    std::vector<std::vector<
+                                                        uint8_t>> const>(
+                                                    self->collector_
+                                                        .held_peer_manifest_bytes());
+                                                std::lock_guard held_lock(
+                                                    self->held_manifests_mutex_);
+                                                self->held_manifests_ =
+                                                    std::move(held);
                                             }
                                         }
                                         catch (...)

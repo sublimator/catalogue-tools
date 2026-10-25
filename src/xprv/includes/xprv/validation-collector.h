@@ -148,6 +148,21 @@ public:
     void
     apply_peer_manifests(std::vector<catl::vl::Manifest> manifests);
 
+    /// Raw bytes of the newest verified peer manifest held per listed master:
+    /// the §1.3 material beyond the list, for verifiers on this server.
+    std::vector<std::vector<uint8_t>>
+    held_peer_manifest_bytes() const
+    {
+        std::vector<std::vector<uint8_t>> out;
+        out.reserve(peer_manifests_by_master_.size());
+        for (auto const& [master, manifest] : peer_manifests_by_master_)
+        {
+            if (unl_master_keys_.count(master))
+                out.push_back(manifest.raw);
+        }
+        return out;
+    }
+
     // Public state
     std::map<Hash256, std::vector<Entry>> by_ledger;
     std::set<std::string> unl_signing_keys;

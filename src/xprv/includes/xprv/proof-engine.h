@@ -26,6 +26,7 @@
 #include <writ/retained-signal.hpp>
 
 #include <atomic>
+#include <functional>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <chrono>
@@ -244,9 +245,17 @@ public:
         StepCallback on_step = nullptr,
         std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
-    /// Verify a proof chain. Sync pure function — no shared state.
+    /// Held manifests for a network (§1.3 ambient trust material), or null.
+    using HeldManifestsFn = std::function<
+        std::shared_ptr<std::vector<std::vector<uint8_t>> const>(uint32_t)>;
+
+    /// Verify a proof chain. `held_manifests` supplies newer validator
+    /// manifests this server holds for the proof's network (§1.3).
     VerifyResult
-    verify(std::span<const uint8_t> data, std::string const& trusted_key = "");
+    verify(
+        std::span<const uint8_t> data,
+        std::string const& trusted_key = "",
+        HeldManifestsFn const& held_manifests = HeldManifestsFn());
 
     /// Look up which ledger a transaction is in (RPC only, no proof
     /// building). Returns the ledger sequence, or 0 if not found on

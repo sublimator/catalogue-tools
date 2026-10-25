@@ -1096,8 +1096,12 @@ ValidationCollector::entry_key_hex(Entry const& entry, QuorumMode mode) const
     if (unl_master_keys_.empty())
         return entry.signing_key_hex;
 
-    auto const& mapping = mode == QuorumMode::proof ? vl_signing_to_master_
-                                                    : live_signing_to_master_;
+    // Both modes count under the server's best view (spec §1.3): the list's
+    // own delegations, updated by newer verified manifests for listed masters
+    // only. The server cannot know what a verifier holds, so it anchors on what
+    // it knows and attaches every validation (Nicholas, 2026-10-25).
+    (void)mode;
+    auto const& mapping = live_signing_to_master_;
     auto it = mapping.find(entry.signing_key_hex);
     if (it == mapping.end())
         return {};

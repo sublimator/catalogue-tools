@@ -75,7 +75,7 @@ load_anchor_fixture()
 
 }  // namespace
 
-TEST(ValidationCollector, PeerManifestsCanExplainLiveQuorumWithoutProofQuorum)
+TEST(ValidationCollector, PeerManifestsExplainProofQuorumToo)
 {
     auto const xrpl_protocol = test_protocol();
     auto const anchor = load_anchor_fixture();
@@ -164,9 +164,10 @@ TEST(ValidationCollector, PeerManifestsCanExplainLiveQuorumWithoutProofQuorum)
     EXPECT_TRUE(collector.has_stale_vl_manifests());
     EXPECT_TRUE(
         collector.has_quorum(90, xprv::ValidationCollector::QuorumMode::live));
-    // The peer update explains live traffic, but it is not part of the signed
-    // list embedded in a portable proof.
-    EXPECT_FALSE(
+    // Best-effort trust view (§1.3, Nicholas 2026-10-25): newer verified
+    // manifests for listed masters count for proofs too. The server can't
+    // know what a verifier holds, so it anchors on the best view it has.
+    EXPECT_TRUE(
         collector.has_quorum(90, xprv::ValidationCollector::QuorumMode::proof));
 }
 
@@ -303,7 +304,7 @@ TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
     EXPECT_EQ(quorum.size(), static_cast<size_t>(selected_count));
 }
 
-TEST(ValidationCollector, ProofSelectionUsesProofEligibleSequence)
+TEST(ValidationCollector, ProofSelectionFollowsTheOverlayView)
 {
     auto const protocol = test_protocol();
     xprv::ValidationCollector collector(protocol, 0);
@@ -353,19 +354,22 @@ TEST(ValidationCollector, ProofSelectionUsesProofEligibleSequence)
         collector.latest_ledger_sequence(
             current_hash, xprv::ValidationCollector::QuorumMode::live),
         900u);
+    // The peer rotation supersedes the listed key in both views (§1.3), so
+    // the listed key's validations no longer count and proof selection
+    // follows the rotated key.
     EXPECT_EQ(
         collector.latest_ledger_sequence(
             current_hash, xprv::ValidationCollector::QuorumMode::proof),
-        100u);
+        900u);
 
     auto const proof =
         collector.get_quorum(1, xprv::ValidationCollector::QuorumMode::proof);
     ASSERT_EQ(proof.size(), 1u);
-    EXPECT_EQ(proof.front().ledger_hash, newer_hash);
-    EXPECT_EQ(proof.front().ledger_seq, 101u);
+    EXPECT_EQ(proof.front().ledger_hash, current_hash);
+    EXPECT_EQ(proof.front().ledger_seq, 900u);
 }
 
-TEST(ValidationCollector, PruningPreservesProofEligibleLedgers)
+TEST(ValidationCollector, PruningDropsLedgersOnlySupersededKeysSigned)
 {
     auto const protocol = test_protocol();
     xprv::ValidationCollector collector(protocol, 0);
@@ -422,9 +426,11 @@ TEST(ValidationCollector, PruningPreservesProofEligibleLedgers)
 
     collector.prune_ledgers(64);
 
+    // newer_proof_hash carries only the superseded listed key: it can't
+    // anchor under the overlay view, so it is the first ledger evicted.
     EXPECT_EQ(collector.by_ledger.size(), 64u);
     EXPECT_TRUE(collector.by_ledger.contains(mixed_hash));
-    EXPECT_TRUE(collector.by_ledger.contains(newer_proof_hash));
+    EXPECT_FALSE(collector.by_ledger.contains(newer_proof_hash));
 }
 
 TEST(ValidationCollector, QuorumRequiresSequenceAgreement)

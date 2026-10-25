@@ -806,7 +806,8 @@ ProofEngine::cache_stats() const
 VerifyResult
 ProofEngine::verify(
     std::span<const uint8_t> data,
-    std::string const& trusted_key)
+    std::string const& trusted_key,
+    HeldManifestsFn const& held_manifests)
 {
     VerifyResult result;
     try
@@ -830,7 +831,13 @@ ProofEngine::verify(
         auto key =
             trusted_key.empty() ? proof_config.publisher_key : trusted_key;
 
-        result.ok = resolve_proof_chain(chain, protocol, key);
+        std::vector<std::vector<uint8_t>> extra;
+        if (held_manifests)
+        {
+            if (auto held = held_manifests(chain.network_id))
+                extra = *held;
+        }
+        result.ok = resolve_proof_chain(chain, protocol, key, extra);
         if (!result.ok)
             result.error = "verification failed";
     }

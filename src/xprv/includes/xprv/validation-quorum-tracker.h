@@ -158,6 +158,15 @@ public:
     boost::asio::awaitable<bool>
     co_has_live_only_quorum();
 
+    /// Newer verified manifests for listed masters (§1.3), as raw bytes.
+    /// Thread-safe snapshot; for verifying proofs on this server.
+    std::shared_ptr<std::vector<std::vector<uint8_t>> const>
+    held_manifests() const
+    {
+        std::lock_guard lock(held_manifests_mutex_);
+        return held_manifests_;
+    }
+
     struct Stats
     {
         size_t recent_quorums = 0;
@@ -402,6 +411,13 @@ private:
     // blocks ordinary peer ingress.
     std::mutex publication_mutex_;
     std::mutex admission_mutex_;
+
+    // Immutable snapshot of the collector's held peer manifests, republished
+    // on the strand after each manifest packet; read from any thread by
+    // held_manifests(). Leaf lock: never held while taking another.
+    mutable std::mutex held_manifests_mutex_;
+    std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests_ =
+        std::make_shared<std::vector<std::vector<uint8_t>> const>();
 
     // Packet admission is callable from any peer thread. Manifest work and
     // validation ingress are both bounded before they reach the strand. A

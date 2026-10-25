@@ -2546,8 +2546,21 @@ HttpServer::handle_session(
                 {
                     // Use default engine for verify (it's a static
                     // function that auto-detects network from the proof)
+                    // Ambient trust material (§1.3): the engine for the
+                    // proof's network supplies the newer manifests it holds.
                     auto vr = default_engine()->verify(
-                        std::span<const uint8_t>(body.data(), body.size()));
+                        std::span<const uint8_t>(body.data(), body.size()),
+                        "",
+                        [this](uint32_t network_id)
+                            -> std::shared_ptr<
+                                std::vector<std::vector<uint8_t>> const> {
+                            auto const it = engines_.find(network_id);
+                            if (it == engines_.end() || !it->second)
+                                return nullptr;
+                            auto tracker = it->second->quorum_tracker();
+                            return tracker ? tracker->held_manifests()
+                                           : nullptr;
+                        });
 
                     boost::json::object result;
                     result["verified"] = vr.ok;

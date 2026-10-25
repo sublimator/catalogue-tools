@@ -2358,6 +2358,11 @@ TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
                     return s.manifest_packets_processed == 1 &&
                         !s.manifest_in_flight && !s.manifest_pending;
                 });
+                // The relayed manifests are published for verifiers on this
+                // server (§1.3 ambient material).
+                EXPECT_EQ(
+                    tracker->held_manifests()->size(),
+                    voted.size() - proof_votes);
                 for (auto const& [_, raw] : anchor.validations)
                 {
                     tracker->on_packet(
@@ -2371,14 +2376,15 @@ TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
                         s.queued_validations == 0;
                 });
                 EXPECT_TRUE(co_await tracker->co_latest_quorum());
-                EXPECT_EQ(
-                    co_await tracker->co_has_live_only_quorum(),
-                    proof_votes == 27);
+                // Best-effort trust view (§1.3): relayed newer manifests count
+                // for proofs, so there is no live-only gap, and every vote
+                // counts whether or not the list's own keys could explain it.
+                EXPECT_FALSE(co_await tracker->co_has_live_only_quorum());
                 auto proof = co_await tracker->co_latest_quorum_at_or_before(
                     anchor.ledger_index, 7);
-                EXPECT_EQ(proof.has_value(), proof_votes == 30);
+                EXPECT_TRUE(proof.has_value());
                 if (proof)
-                    EXPECT_EQ(proof->validations.size(), 30u);
+                    EXPECT_EQ(proof->validations.size(), voted.size());
                 co_await tracker->co_stop();
             },
             asio::use_future);
