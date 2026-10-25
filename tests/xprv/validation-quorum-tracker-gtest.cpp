@@ -2506,3 +2506,43 @@ TEST(ProofQuorumAt80, LoadedPublisherManifestReachesHeldManifests)
     io.run();
     future.get();
 }
+
+// astra batch-2: co_sync_unl's awaitable can be handed to co_spawn with
+// temporary arguments; it owns them, so the list and its publisher manifest
+// still land. (Run under ASan to catch a regression to reference parameters.)
+TEST(ProofQuorumAt80, SpawnedListSyncOwnsTemporaryArguments)
+{
+    auto make = [](uint8_t master, uint8_t signing, uint8_t tag) {
+        catl::vl::Manifest m;
+        m.master_public_key = std::vector<uint8_t>(33, 0);
+        m.master_public_key.front() = master;
+        m.signing_public_key = std::vector<uint8_t>(33, 0);
+        m.signing_public_key.front() = signing;
+        m.sequence = 1;
+        m.raw = std::vector<uint8_t>(64, tag);
+        return m;
+    };
+
+    asio::io_context io;
+    auto protocol = test_protocol();
+    auto tracker = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    auto synced = asio::co_spawn(
+        io,
+        tracker->co_sync_unl(
+            {make(0x02, 0x03, 0xA0)}, 7, make(0xED, 0x06, 0xD0)),
+        asio::use_future);
+    io.run();
+    io.restart();
+    EXPECT_TRUE(synced.get());
+    auto const held = tracker->held_manifests();
+    EXPECT_NE(
+        std::find(held->begin(), held->end(), std::vector<uint8_t>(64, 0xA0)),
+        held->end());
+    EXPECT_NE(
+        std::find(held->begin(), held->end(), std::vector<uint8_t>(64, 0xD0)),
+        held->end());
+
+    auto future = asio::co_spawn(io, tracker->co_stop(), asio::use_future);
+    io.run();
+    future.get();
+}

@@ -890,15 +890,15 @@ ValidationQuorumTracker::set_unl(
 
 asio::awaitable<bool>
 ValidationQuorumTracker::co_sync_unl(
-    std::vector<catl::vl::Manifest> const& validators,
+    std::vector<catl::vl::Manifest> validators,
     uint32_t vl_sequence,
-    catl::vl::Manifest const& publisher_manifest)
+    catl::vl::Manifest publisher_manifest)
 {
-    auto owned =
-        std::make_shared<UnlUpdate>(UnlUpdate{validators, publisher_manifest});
+    auto owned = std::make_shared<UnlUpdate>(
+        UnlUpdate{std::move(validators), std::move(publisher_manifest)});
     auto self = shared_from_this();
     // clang-format off
-    //@@authority transition=prv.T0353 status=provisional scope=statement bind=co_return_statement@b3aaba5e475bc93a
+    //@@authority transition=prv.T0353 status=provisional scope=statement bind=co_return_statement@e12cb30d5ca8c1a0
     // owner=unresolved owner_hypothesis=validation_quorum_tracker
     // commit=validation_quorum_tracker_strand
     // execution_home=validation_quorum_tracker.strand birth=co_spawn

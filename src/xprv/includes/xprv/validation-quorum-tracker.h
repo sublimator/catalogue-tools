@@ -118,12 +118,14 @@ public:
 
     /// Apply the list on the validation strand, or report that a newer list is
     /// already active. Returning true guarantees subsequent quorum reads use
-    /// this list sequence.
+    /// this list sequence. The arguments are taken by value: the coroutine
+    /// starts lazily, so a reference could outlive a temporary argument when
+    /// the awaitable is handed to co_spawn (astra, batch-2).
     boost::asio::awaitable<bool>
     co_sync_unl(
-        std::vector<catl::vl::Manifest> const& validators,
+        std::vector<catl::vl::Manifest> validators,
         uint32_t vl_sequence,
-        catl::vl::Manifest const& publisher_manifest = catl::vl::Manifest());
+        catl::vl::Manifest publisher_manifest = catl::vl::Manifest());
 
     /// Awaitable: snapshot of latest quorum for health checks.
     boost::asio::awaitable<std::optional<QuorumEntry>>
