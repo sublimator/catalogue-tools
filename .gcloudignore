@@ -4,6 +4,9 @@
 # Source identity is resolved by the submitter and passed as a substitution.
 .git/
 .ai-docs/
+# Agent worktrees and local caches inside the checkout are never build input.
+.codex-worktrees/
+.cache/
 .claude/
 .specstory/
 .idea/
