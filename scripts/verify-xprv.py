@@ -488,7 +488,11 @@ def collect_json_leaves(node: Any) -> list[tuple[str, dict[str, Any]]]:
 
 
 def decode_binary_leaf(leaf_bytes: bytes, *, is_tx: bool) -> dict[str, Any] | None:
-    """Decode a binary trie leaf back to JSON form."""
+    """Decode a binary trie leaf for display. Failure returns None.
+
+    Authentication does not depend on this. A caller that needs a skip link
+    must ignore None: unknown bytes are not a LedgerHashes leaf.
+    """
     try:
         if is_tx:
             pos = 0
@@ -505,9 +509,9 @@ def decode_binary_leaf(leaf_bytes: bytes, *, is_tx: bool) -> dict[str, Any] | No
 
 def collect_binary_leaves(
     data: bytes, *, is_tx: bool
-) -> list[tuple[str, dict[str, Any]]]:
-    """Collect all decodable leaves from a binary trie."""
-    leaves: list[tuple[str, dict[str, Any]]] = []
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """Collect every structural leaf. The dict is display-only and may be None."""
+    leaves: list[tuple[str, dict[str, Any] | None]] = []
 
     def walk(pos: int) -> int:
         header = struct.unpack_from("<I", data, pos)[0]
@@ -523,9 +527,9 @@ def collect_binary_leaves(
                 data_len, pos = leb128_read(data, pos)
                 leaf_bytes = data[pos : pos + data_len]
                 pos += data_len
+                # Decode is display. The leaf is authenticated either way.
                 leaf_data = decode_binary_leaf(leaf_bytes, is_tx=is_tx)
-                if leaf_data is not None:
-                    leaves.append((key_bytes.hex().upper(), leaf_data))
+                leaves.append((key_bytes.hex().upper(), leaf_data))
                 continue
             if branch_type == BR_INNER:
                 pos = walk(pos)
@@ -549,11 +553,14 @@ def is_hash_hex(value: Any) -> bool:
 
 
 def extract_ledger_hashes_leaves(
-    leaves: list[tuple[str, dict[str, Any]]],
+    leaves: list[tuple[str, dict[str, Any] | None]],
 ) -> list[LedgerHashesLeaf]:
     """Recognize well-formed LedgerHashes leaves without granting authority."""
     result: list[LedgerHashesLeaf] = []
     for key_hex, leaf_data in leaves:
+        # Undecoded bytes are not a skip link, whatever their key is.
+        if not isinstance(leaf_data, dict):
+            continue
         if not is_hash_hex(key_hex):
             continue
         if leaf_data.get("LedgerEntryType") != "LedgerHashes":
@@ -609,12 +616,18 @@ def find_ledger_hashes_support(
     return None
 
 
-def describe_tx_leaves(leaves: list[tuple[str, dict[str, Any]]]) -> str:
+def describe_tx_leaves(
+    leaves: list[tuple[str, dict[str, Any] | None]],
+) -> str:
     """Produce a short human-readable summary of tx leaves."""
     if not leaves:
         return "0 tx leaves"
     first = leaves[0][1]
-    tx = first.get("tx", {}) if isinstance(first, dict) else {}
+    if not isinstance(first, dict):
+        if len(leaves) == 1:
+            return "1 tx leaf (authenticated, not decoded)"
+        return f"{len(leaves)} tx leaves (first: authenticated, not decoded)"
+    tx = first.get("tx", {})
     tx_type = tx.get("TransactionType", "?")
     account = tx.get("Account", "?")
     if len(leaves) == 1:
@@ -1226,7 +1239,7 @@ def verify(
                 continue
 
             if not leaves:
-                msg = f"{tree} map proof contains no decodable leaves"
+                msg = f"{tree} map proof contains no leaves"
                 print(f"    [FAIL] {msg}")
                 result.ok = False
                 result.errors.append(f"step {i}: {msg}")
@@ -1234,6 +1247,9 @@ def verify(
 
             print(f"    [PASS] root {root_hex[:16]}... supported by {root_source}")
             print(f"    leaves: {len(leaves)}")
+            for key_hex, leaf_data in leaves:
+                if not isinstance(leaf_data, dict):
+                    print(f"    leaf {key_hex[:16]}... authenticated, decode failed")
 
             root_key = (tree, root_hex)
             if root_key in seen_map_roots:

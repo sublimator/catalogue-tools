@@ -1,4 +1,9 @@
 #include "xprv/proof-chain-json.h"
+#include "xprv/hex-utils.h"
+#include "xprv/network-config.h"
+
+#include <catl/shamap/binary-trie.h>
+#include <catl/xdata/serialize.h>
 
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
@@ -161,4 +166,188 @@ TEST(ProofChainJson, LeafCallbackRefusesUndecodableLeaf)
 
     auto const callback = xprv::make_proof_leaf_callback(protocol, false);
     EXPECT_THROW(callback(*item), xprv::JsonFormUnavailable);
+}
+
+
+namespace {
+
+std::vector<uint8_t>
+one_leaf_trie(int branch, Hash256 const& key, std::vector<uint8_t> const& data)
+{
+    uint32_t header = 0;
+    catl::shamap::set_branch_type(
+        header, branch, catl::shamap::BranchType::leaf);
+    std::vector<uint8_t> out;
+    catl::shamap::write_u32_le(out, header);
+    out.insert(out.end(), key.data(), key.data() + 32);
+    catl::shamap::leb128_encode(out, data.size());
+    out.insert(out.end(), data.begin(), data.end());
+    return out;
+}
+
+xprv::ProofChain
+chain_with_binary_trie(
+    uint32_t network_id,
+    xprv::TrieData::TreeType tree,
+    std::vector<uint8_t> binary)
+{
+    xprv::ProofChain chain;
+    chain.network_id = network_id;
+    xprv::TrieData trie;
+    trie.tree = tree;
+    trie.trie_binary = std::move(binary);
+    chain.steps.emplace_back(std::move(trie));
+    return chain;
+}
+
+boost::json::object
+ledger_hashes_sle()
+{
+    boost::json::object sle;
+    sle["LedgerEntryType"] = "LedgerHashes";
+    sle["Flags"] = 0;
+    sle["LastLedgerSequence"] = 1;
+    boost::json::array hashes;
+    hashes.emplace_back(std::string(64, 'A'));
+    sle["Hashes"] = std::move(hashes);
+    return sle;
+}
+
+}  // namespace
+
+TEST(ProofChainJson, BinaryTrieDecodesToObjectLeaf)
+{
+    auto const protocol = xprv::NetworkConfig::for_network(0).load_protocol();
+    auto const bytes = catl::xdata::serialize_leaf(ledger_hashes_sle(), protocol);
+    auto const key = xprv::hash_from_hex(std::string(64, 'A'));
+    auto chain = chain_with_binary_trie(
+        0,
+        xprv::TrieData::TreeType::state,
+        one_leaf_trie(10, key, bytes));
+
+    auto const proof = xprv::to_json(chain);
+    auto const& trie = proof.at("steps")
+                           .as_array()
+                           .front()
+                           .as_object()
+                           .at("trie")
+                           .as_object();
+    EXPECT_EQ(trie.at("__depth__").as_int64(), 0);
+    auto const& leaf = trie.at("A").as_array();
+    EXPECT_EQ(std::string(leaf.at(0).as_string()), xprv::upper_hex(key));
+    EXPECT_TRUE(leaf.at(1).is_object());
+    EXPECT_FALSE(leaf.at(1).is_string());
+    EXPECT_EQ(
+        std::string(leaf.at(1).as_object().at("LedgerEntryType").as_string()),
+        "LedgerHashes");
+    EXPECT_FALSE(leaf.at(1).as_object().contains("index"));
+    EXPECT_FALSE(leaf.at(1).as_object().contains("blob"));
+}
+
+TEST(ProofChainJson, BinaryTrieUndecodableLeafFails)
+{
+    auto const key = xprv::hash_from_hex(std::string(64, 'B'));
+    std::vector<uint8_t> junk{0xFF, 0x01};
+    auto chain = chain_with_binary_trie(
+        0, xprv::TrieData::TreeType::state, one_leaf_trie(11, key, junk));
+    try
+    {
+        xprv::to_json(chain);
+        FAIL() << "undecodable leaf was written";
+    }
+    catch (std::exception const& e)
+    {
+        auto const message = std::string(e.what());
+        EXPECT_NE(message.find("did not decode"), std::string::npos) << message;
+        EXPECT_EQ(message.find("did not re-encode"), std::string::npos) << message;
+    }
+}
+
+TEST(ProofChainJson, BinaryTrieRoundTripMismatchFails)
+{
+    auto const protocol = xprv::NetworkConfig::for_network(0).load_protocol();
+    auto bytes = catl::xdata::serialize_leaf(ledger_hashes_sle(), protocol);
+    bytes.push_back(0x00);
+    auto const key = xprv::hash_from_hex(std::string(64, 'C'));
+    auto chain = chain_with_binary_trie(
+        0, xprv::TrieData::TreeType::state, one_leaf_trie(12, key, bytes));
+    try
+    {
+        xprv::to_json(chain);
+        FAIL() << "non-canonical leaf was written";
+    }
+    catch (std::exception const& e)
+    {
+        auto const message = std::string(e.what());
+        EXPECT_NE(message.find("did not re-encode"), std::string::npos) << message;
+    }
+}
+
+TEST(ProofChainJson, ExistingJsonTrieIsLeftAlone)
+{
+    xprv::ProofChain chain;
+    xprv::TrieData trie;
+    trie.tree = xprv::TrieData::TreeType::state;
+    trie.trie_json = boost::json::object{{"__depth__", 0}};
+    trie.trie_binary = {0xFF, 0xFF, 0xFF, 0xFF};
+    chain.steps.emplace_back(std::move(trie));
+    auto const proof = xprv::to_json(chain);
+    auto const& node = proof.at("steps")
+                           .as_array()
+                           .front()
+                           .as_object()
+                           .at("trie")
+                           .as_object();
+    EXPECT_EQ(node.at("__depth__").as_int64(), 0);
+    EXPECT_EQ(node.size(), 1u);
+}
+
+TEST(ProofChainJson, XahauBinaryLeafUsesXahauProtocol)
+{
+    auto const xahau = xprv::NetworkConfig::for_network(21337).load_protocol();
+    boost::json::object tx;
+    tx["TransactionType"] = "Invoke";
+    tx["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+    tx["Fee"] = "12";
+    tx["Sequence"] = 1;
+    boost::json::object meta;
+    meta["TransactionIndex"] = 0;
+    meta["TransactionResult"] = "tesSUCCESS";
+    boost::json::object leaf;
+    leaf["tx"] = tx;
+    leaf["meta"] = meta;
+    auto const bytes = catl::xdata::serialize_transaction(leaf, xahau);
+
+    auto const key = xprv::hash_from_hex(std::string(64, 'D'));
+    auto const binary = one_leaf_trie(13, key, bytes);
+
+    auto tx_type = [](xprv::ProofChain& chain) -> boost::json::value {
+        auto const proof = xprv::to_json(chain);
+        return proof.at("steps")
+            .as_array()
+            .front()
+            .as_object()
+            .at("trie")
+            .as_object()
+            .at("D")
+            .as_array()
+            .at(1)
+            .as_object()
+            .at("tx")
+            .as_object()
+            .at("TransactionType");
+    };
+
+    // XRPL definitions have no Invoke name. The same bytes still re-encode,
+    // and the type comes back as its numeric code rather than the name.
+    auto xrpl_chain = chain_with_binary_trie(
+        0, xprv::TrieData::TreeType::tx, binary);
+    auto const xrpl_type = tx_type(xrpl_chain);
+    EXPECT_FALSE(xrpl_type.is_string());
+    EXPECT_EQ(xrpl_type.to_number<int>(), 99);
+
+    auto xahau_chain = chain_with_binary_trie(
+        21337, xprv::TrieData::TreeType::tx, binary);
+    auto const xahau_type = tx_type(xahau_chain);
+    EXPECT_EQ(std::string(xahau_type.as_string()), "Invoke");
 }

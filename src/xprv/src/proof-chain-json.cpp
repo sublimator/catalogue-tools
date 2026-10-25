@@ -1,8 +1,16 @@
 #include "xprv/proof-chain-json.h"
 #include "xprv/hex-utils.h"
+#include "xprv/network-config.h"
+
+#include <catl/shamap/binary-trie.h>
+#include <catl/xdata/parse_leaf.h>
+#include <catl/xdata/parse_transaction.h>
+#include <catl/xdata/serialize.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
+#include <span>
 
 namespace xprv {
 
@@ -62,15 +70,176 @@ header_to_json(HeaderData const& h)
     return obj;
 }
 
+static std::string
+nibble_key(int branch)
+{
+    static constexpr char const* kNibble = "0123456789ABCDEF";
+    return std::string(1, kNibble[branch]);
+}
+
+// Binary trie leaf bytes are the hashed item, with the key stored beside
+// them. The xdata parsers want that key appended and no hash prefix, which
+// is the same arrangement proof building uses. index/hash/blob are parser
+// conveniences, not leaf content (spec §2.3). A leaf that cannot be decoded,
+// or whose decoded object does not serialize back to these exact bytes, is
+// an error: convert must not invent a raw-hex JSON leaf.
+static boost::json::array
+decoded_leaf_json(
+    std::span<const uint8_t> key,
+    std::span<const uint8_t> leaf_bytes,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol)
+{
+    if (key.size() != 32)
+        throw std::runtime_error(
+            "map proof: binary trie leaf key is not 32 bytes");
+    auto const key_hex = upper_hex(Hash256(key.data()));
+
+    std::vector<uint8_t> with_key(leaf_bytes.begin(), leaf_bytes.end());
+    with_key.insert(with_key.end(), key.begin(), key.end());
+    Slice full(with_key.data(), with_key.size());
+
+    catl::xdata::JsonVisitor::Options json_opts;
+    json_opts.ascii_hints = false;
+
+    boost::json::value decoded;
+    try
+    {
+        decoded = is_tx ? catl::xdata::parse_transaction(
+                              full,
+                              protocol,
+                              {.includes_prefix = false, .json_opts = json_opts})
+                        : catl::xdata::parse_leaf(
+                              full,
+                              protocol,
+                              {.includes_prefix = false,
+                               .json_opts = json_opts});
+    }
+    catch (std::exception const& e)
+    {
+        throw std::runtime_error(
+            "map proof: binary trie leaf " + key_hex +
+            " did not decode: " + e.what());
+    }
+    if (!decoded.is_object())
+        throw std::runtime_error(
+            "map proof: binary trie leaf " + key_hex +
+            " did not decode: leaf is not an object");
+
+    auto& obj = decoded.as_object();
+    obj.erase("index");
+    obj.erase("hash");
+    obj.erase("blob");
+
+    std::vector<uint8_t> again;
+    try
+    {
+        again = is_tx ? catl::xdata::serialize_transaction(obj, protocol)
+                      : catl::xdata::serialize_leaf(obj, protocol);
+    }
+    catch (std::exception const& e)
+    {
+        throw std::runtime_error(
+            "map proof: binary trie leaf " + key_hex +
+            " did not re-encode to its exact bytes: " + e.what());
+    }
+    if (again.size() != leaf_bytes.size() ||
+        std::memcmp(again.data(), leaf_bytes.data(), again.size()) != 0)
+        throw std::runtime_error(
+            "map proof: binary trie leaf " + key_hex +
+            " did not re-encode to its exact bytes");
+
+    boost::json::array arr;
+    arr.emplace_back(key_hex);
+    arr.emplace_back(std::move(decoded));
+    return arr;
+}
+
 static boost::json::object
-trie_to_json(TrieData const& t)
+binary_trie_to_json(
+    std::span<const uint8_t> data,
+    size_t& pos,
+    int depth,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol)
+{
+    auto const header = catl::shamap::read_u32_le(data, pos);
+    boost::json::object node;
+    node["__depth__"] = depth;
+
+    for (int branch = 0; branch < 16; ++branch)
+    {
+        auto const type = catl::shamap::get_branch_type(header, branch);
+        if (type == catl::shamap::BranchType::empty)
+            continue;
+
+        auto const branch_key = nibble_key(branch);
+        if (type == catl::shamap::BranchType::leaf)
+        {
+            if (pos + 32 > data.size())
+                throw std::runtime_error("map proof: binary trie truncated");
+            auto const leaf_key = data.subspan(pos, 32);
+            pos += 32;
+            auto const len = catl::shamap::leb128_decode(data, pos);
+            if (pos + len > data.size())
+                throw std::runtime_error("map proof: binary trie truncated");
+            auto const leaf_bytes = data.subspan(pos, len);
+            pos += len;
+            node[branch_key] =
+                decoded_leaf_json(leaf_key, leaf_bytes, is_tx, protocol);
+        }
+        else if (type == catl::shamap::BranchType::inner)
+        {
+            node[branch_key] =
+                binary_trie_to_json(data, pos, depth + 1, is_tx, protocol);
+        }
+        else
+        {
+            if (pos + 32 > data.size())
+                throw std::runtime_error("map proof: binary trie truncated");
+            Hash256 placeholder(data.data() + pos);
+            pos += 32;
+            node[branch_key] = upper_hex(placeholder);
+        }
+    }
+    return node;
+}
+
+static boost::json::object
+json_trie_from_binary(
+    std::span<const uint8_t> data,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol)
+{
+    size_t pos = 0;
+    auto node = binary_trie_to_json(data, pos, 0, is_tx, protocol);
+    if (pos != data.size())
+        throw std::runtime_error("map proof: binary trie has trailing bytes");
+    return node;
+}
+
+static boost::json::object
+trie_to_json(TrieData const& t, uint32_t const* network_id)
 {
     if (!t.json_unavailable.empty())
         throw JsonFormUnavailable(t.json_unavailable);
     boost::json::object obj;
     obj["type"] = "map_proof";
     obj["tree"] = (t.tree == TrieData::TreeType::state) ? "state" : "tx";
-    obj["trie"] = t.trie_json;
+    // A chain loaded from binary has the compact trie and no JSON yet.
+    // step_to_json passes a null network so this stays out of http-server.
+    if (t.trie_json.is_null() && network_id != nullptr &&
+        !t.trie_binary.empty())
+    {
+        auto const protocol =
+            NetworkConfig::for_network(*network_id).load_protocol();
+        bool const is_tx = t.tree == TrieData::TreeType::tx;
+        obj["trie"] = json_trie_from_binary(t.trie_binary, is_tx, protocol);
+    }
+    else
+    {
+        obj["trie"] = t.trie_json;
+    }
     return obj;
 }
 
@@ -93,7 +262,7 @@ steps_to_json(ProofChain const& chain)
                 }
                 else if constexpr (std::is_same_v<T, TrieData>)
                 {
-                    arr.push_back(trie_to_json(data));
+                    arr.push_back(trie_to_json(data, &chain.network_id));
                 }
             },
             s);
@@ -112,7 +281,7 @@ step_to_json(ChainStep const& step)
             else if constexpr (std::is_same_v<T, HeaderData>)
                 return header_to_json(data);
             else
-                return trie_to_json(data);
+                return trie_to_json(data, nullptr);
         },
         step);
 }

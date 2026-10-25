@@ -524,5 +524,161 @@ class SignatureCanonicalityTests(unittest.TestCase):
         self.assertFalse(v.secp256k1_signature_is_canonical(canonical + b"\x00"))
 
 
+
+def leb128(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def vl_prefix(blob: bytes) -> bytes:
+    if len(blob) > 192:
+        raise AssertionError("test blob needs a multi-byte VL prefix")
+    return bytes([len(blob)]) + blob
+
+
+def trie_with_leaves(leaves: list[tuple[bytes, bytes]]) -> bytes:
+    """One inner node. Body order is branch order, which is the binary walk."""
+    by_branch: dict[int, tuple[bytes, bytes]] = {}
+    for key, data in leaves:
+        branch = key[0] >> 4
+        if branch in by_branch:
+            raise AssertionError("two test leaves share a first nibble")
+        by_branch[branch] = (key, data)
+    header = 0
+    body = bytearray()
+    for branch in range(16):
+        item = by_branch.get(branch)
+        if item is None:
+            continue
+        header |= v.BR_LEAF << (branch * 2)
+        key, data = item
+        body += key + leb128(len(data)) + data
+    return header.to_bytes(4, "little") + bytes(body)
+
+
+def proof_over_binary_trie(payload: bytes, *, tree: str) -> tuple[Fixture, dict]:
+    f = Fixture()
+    root, end = v.hash_binary_trie(payload, 0, is_tx=(tree == "tx"))
+    if end != len(payload):
+        raise AssertionError("test trie was not consumed by the hash walk")
+    header = dict(HEADER)
+    root_hex = root.hex().upper()
+    if tree == "tx":
+        header["transaction_hash"] = root_hex
+    else:
+        header["account_hash"] = root_hex
+    ledger_hash = v.hash_header(header).hex().upper()
+    anchor = f.anchor()
+    anchor["ledger_hash"] = ledger_hash
+    anchor["validations"] = {s[0]: make_validation(s, ledger_hash) for s in f.voters}
+    proof = {
+        "format_version": v.FORMAT_VERSION,
+        "network_id": 0,
+        "steps": [
+            anchor,
+            {"type": "ledger_header", "header": header},
+            {
+                "type": "map_proof",
+                "tree": tree,
+                "__binary_root__": root_hex,
+                "__binary_payload__": payload,
+            },
+        ],
+    }
+    return f, proof
+
+
+class BinaryLeafAuthenticationTests(unittest.TestCase):
+    def verify(self, proof: dict, trusted_key: str):
+        return quietly(v.verify, proof, trusted_key, 0)
+
+    def test_undecodable_state_leaf_still_verifies(self) -> None:
+        payload = trie_with_leaves([(b"\x11" * 32, b"\xff\x00")])
+        f, proof = proof_over_binary_trie(payload, tree="state")
+        result = self.verify(proof, f.trusted_key)
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(any("decodable" in e for e in result.errors))
+
+    def test_undecodable_tx_leaf_still_verifies(self) -> None:
+        payload = trie_with_leaves([(b"\x21" * 32, b"\xff\x00")])
+        f, proof = proof_over_binary_trie(payload, tree="tx")
+        result = self.verify(proof, f.trusted_key)
+        self.assertTrue(result.ok, result.errors)
+
+    def test_collect_keeps_an_undecoded_leaf_beside_a_decoded_one(self) -> None:
+        decoded = unhexlify(
+            encode(
+                {
+                    "LedgerEntryType": "AccountRoot",
+                    "Flags": 0,
+                    "Sequence": 1,
+                    "Balance": "1000000",
+                    "Account": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+                }
+            )
+        )
+        payload = trie_with_leaves(
+            [
+                (b"\x11" * 32, b"\xff\x00"),
+                (b"\x22" * 32, decoded),
+            ]
+        )
+        leaves = v.collect_binary_leaves(payload, is_tx=False)
+        self.assertEqual(len(leaves), 2)
+        by_key = {key: data for key, data in leaves}
+        self.assertIsNone(by_key["11" * 32])
+        self.assertIsInstance(by_key["22" * 32], dict)
+        self.assertEqual(by_key["22" * 32]["LedgerEntryType"], "AccountRoot")
+
+    def test_unknown_bytes_do_not_create_a_skip_link(self) -> None:
+        payload = trie_with_leaves([(unhexlify(v.short_skip_key_hex()), b"\xff\x00")])
+        f, proof = proof_over_binary_trie(payload, tree="state")
+        child = dict(HEADER)
+        child["ledger_index"] = 900
+        child["parent_hash"] = "44" * 32
+        proof["steps"].append({"type": "ledger_header", "header": child})
+        result = self.verify(proof, f.trusted_key)
+        self.assertFalse(result.ok)
+        self.assertFalse(any("decodable" in e for e in result.errors), result.errors)
+        self.assertTrue(
+            any("not supported" in e for e in result.errors), result.errors
+        )
+
+    def test_decoded_ledger_hashes_leaf_still_supports_a_header(self) -> None:
+        child = dict(HEADER)
+        child["ledger_index"] = 900
+        child["parent_hash"] = "44" * 32
+        child_hash = v.hash_header(child).hex().upper()
+        leaf = unhexlify(
+            encode(
+                {
+                    "LedgerEntryType": "LedgerHashes",
+                    "Flags": 0,
+                    "LastLedgerSequence": 999,
+                    "Hashes": [child_hash],
+                }
+            )
+        )
+        payload = trie_with_leaves([(unhexlify(v.short_skip_key_hex()), leaf)])
+        f, proof = proof_over_binary_trie(payload, tree="state")
+        proof["steps"].append({"type": "ledger_header", "header": child})
+        result = self.verify(proof, f.trusted_key)
+        self.assertTrue(result.ok, result.errors)
+
+    def test_placeholder_only_trie_has_no_leaves(self) -> None:
+        payload = (v.BR_HASH).to_bytes(4, "little") + (b"\xab" * 32)
+        f, proof = proof_over_binary_trie(payload, tree="state")
+        result = self.verify(proof, f.trusted_key)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("no leaves" in e for e in result.errors), result.errors)
+
+
 if __name__ == "__main__":
     unittest.main()
