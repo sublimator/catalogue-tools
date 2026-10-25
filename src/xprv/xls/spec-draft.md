@@ -188,7 +188,9 @@ parts:
   only its validator manifests, like a secondary list. The publisher's own
   signing key is resolved the same way as a validator's: from the
   highest-sequence publisher manifest the verifier holds, so a list signed
-  with a superseded publisher signing key is not a candidate. The primary
+  with a superseded publisher signing key cannot be the primary list. Its
+  validator manifests remain candidates, since each verifies under its own
+  master. The primary
   list's validity interval is checked against the close time of the header
   whose hash is the anchor hash (§5).
 - **Delegations.** For each master in the primary list, the signing key that
@@ -226,7 +228,7 @@ never trust. Material may be:
 
 and either **discrete** (separate objects, verified and cached on their own) or
 **bundled** with the proof (the anchor's embedded list and `0x05` are the
-bundled form of the primary list). Every combination MUST resolve the same view
+bundled form of one candidate list). Every combination MUST resolve the same view
 from the same material under the same verifier policy. Supplied material never
 lowers what the verifier already holds: an older manifest does not displace a
 newer one it knows.
@@ -874,9 +876,11 @@ function verify(chain, trusted_publisher_keys):
     for each step in chain.steps:
 
         if step is anchor:
-            // The UNL material is the anchor's own (§2.1) or, where the binary
-            // 0x05 record is absent, the verifier's cached trust for this
-            // publisher key (§3.3). Steps 2-5 run over whichever supplied it.
+            // Steps 2-5 run over the primary list selected by §1.3: the
+            // highest-sequence non-pending list held under the trusted
+            // publisher key, of which the anchor's own list (§2.1) is one
+            // candidate. Where the binary 0x05 record is absent, the
+            // candidates come from the verifier's held trust alone (§3.3).
             // 1. Assert unl.public_key is in trusted_publisher_keys
             // 2. Verify publisher manifest signatures:
             //      MAN\0 + manifest fields without Signature/MasterSignature
