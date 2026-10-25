@@ -164,6 +164,13 @@ encoding of §3 — canonical step order per this section, minimal LEB128 (§4),
 the byte layouts of §3.4 through §3.7. That encoding is byte-deterministic, so a
 proof hash is well defined.
 
+Compression is not part of a proof's identity. The canonical form is the
+uncompressed one: the 10-byte header with `flags` zero, followed by the
+uncompressed TLV body. A compressed container (§3.1) is the same proof; to
+compute its identity, decompress it first. zlib output is not byte-deterministic
+across implementations, so the compressed bytes MUST NOT be used as an
+identity.
+
 This specification deliberately does **not** define a byte-canonical JSON form.
 JSON here is the human-readable and debugging representation: object member
 order carries no meaning, whitespace is unconstrained, and the `validations` map
@@ -542,7 +549,7 @@ Offset  Size  Field
   6       4   network_id  big-endian uint32 (0 = XRPL, 21337 = Xahau)
 ```
 
-When flag bit 0 is set, the entire body (all TLV records concatenated) is compressed as a single RFC 1950 zlib stream. The consumer decompresses before parsing TLVs.
+When flag bit 0 is set, the entire body (all TLV records concatenated) is compressed as a single RFC 1950 zlib stream. The consumer decompresses before parsing TLVs. Compression is a container option only; it does not change the proof or its identity (§1.2).
 Flag bits 1-7 are reserved and MUST be zero. Verifiers MUST reject a binary
 proof with any reserved flag bit set.
 
