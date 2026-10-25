@@ -407,6 +407,13 @@ TEST(ProofChainJson, PartlyBundledListIsRejected)
     EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
 }
 
+TEST(ProofChainJson, UnknownUnlMemberIsRejected)
+{
+    auto proof = list_less_fixture();
+    proof.at("steps").as_array().front().at("unl").as_object()["extra"] = "00";
+    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
+}
+
 TEST(ProofChainJson, ListLessAnchorNeedsAnExternalList)
 {
     auto const proof = list_less_fixture();

@@ -333,6 +333,15 @@ class AnchorVerificationTests(unittest.TestCase):
             self.verify(anchor, f.trusted_key), "validator list not bundled and no external list"
         )
 
+    def test_unl_members_are_closed_and_bundled_whole(self) -> None:
+        f = Fixture()
+        anchor = f.anchor()
+        anchor["unl"]["extra"] = "00"
+        self.assertRejected(self.verify(anchor, f.trusted_key), "unknown member in unl")
+        anchor = f.anchor()
+        del anchor["unl"]["blob"], anchor["unl"]["signature"]
+        self.assertRejected(self.verify(anchor, f.trusted_key), "together, or none of them")
+
     def test_revoked_master_stays_in_n_and_never_votes(self) -> None:
         f = Fixture()
         revocation = sign_manifest(

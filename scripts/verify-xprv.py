@@ -852,6 +852,14 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
     unl = anchor.get("unl")
     if not isinstance(unl, dict):
         return AnchorResult(ok=False, message="no UNL data")
+    # §2.1: public_key always; manifest, blob and signature together or not at all.
+    if set(unl) - {"public_key", "manifest", "blob", "signature"}:
+        return AnchorResult(ok=False, message="unknown member in unl")
+    if len({"manifest", "blob", "signature"} & set(unl)) not in (0, 3):
+        return AnchorResult(
+            ok=False,
+            message="unl must carry manifest, blob and signature together, or none of them",
+        )
     trusted = trusted_key.upper()
 
     # Step 1: publisher key matches trusted key
