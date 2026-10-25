@@ -181,9 +181,14 @@ parts:
 
 - **Membership.** The validator master keys, and their count N, come from
   exactly one signed Validator List: the **primary list**. Of the lists the
-  verifier holds that verify under the configured publisher key, it is the
-  one with the highest list `sequence`, ignoring pending lists (an `effective`
-  in the future by the verifier's own clock). The list embedded in the proof
+  verifier holds that verify under the configured primary publisher key, it
+  is the one with the highest list `sequence` among those in effect at the
+  anchor ledger's close time. That close time is the only time reference:
+  verification never consults the verifier's own clock, so for the same trust
+  material the verdict does not depend on when the proof is checked (newer
+  material can still change it; see Staleness below). When the proof has no
+  header whose hash is the anchor hash, there is no close time, and the
+  primary list is simply the highest-sequence list held. The list embedded in the proof
   is one such candidate; a lower-sequence list from the same publisher contributes
   only its validator manifests, like a secondary list. The publisher's own
   signing key is resolved the same way as a validator's: from the
@@ -192,7 +197,12 @@ parts:
   validator manifests remain candidates, since each verifies under its own
   master. The primary
   list's validity interval is checked against the close time of the header
-  whose hash is the anchor hash (§5).
+  whose hash is the anchor hash (§5). A proof without that header (an
+  anchor-only proof) has no close time to check: it establishes only that the
+  anchor hash was validated by a quorum of the primary list, and claims
+  nothing about when. The interval is
+  a consistency check, not a barrier against the list's own validators, who
+  attest the close time themselves.
 - **Delegations.** For each master in the primary list, the signing key that
   counts is the one named by the highest-sequence manifest that verifies under
   that master. The candidates are the master's manifest inside the primary list
@@ -215,7 +225,14 @@ Resolution rules:
 5. Each master contributes at most one vote, and only through its resolved
    signing key. A validation signed by a superseded key does not count.
 6. Quorum is ⌈0.8 × N⌉ masters, N being the number of masters in the primary
-   list.
+   list. N MUST be at least 1; a primary list with no masters makes
+   membership unavailable.
+7. Two different lists under the primary publisher key with the same highest
+   `sequence` make the view unresolvable, and the anchor MUST be rejected, as
+   for manifests under rule 2. Byte-identical lists are one list.
+8. Only full validations count. A validation without `vfFullValidation`
+   (`Flags & 0x00000001`) is a partial validation and never counts toward
+   quorum, as in rippled.
 
 **Sources and packaging.** Lists and validator manifests authenticate
 themselves by signature, so where they come from affects only availability,
@@ -232,6 +249,11 @@ bundled form of one candidate list). Every combination MUST resolve the same vie
 from the same material under the same verifier policy. Supplied material never
 lowers what the verifier already holds: an older manifest does not displace a
 newer one it knows.
+
+**One primary publisher per network.** A verifier is configured with exactly
+one primary publisher key per network. Any other publisher keys it holds for
+that network are secondary publishers. Merging the memberships of several
+publishers is out of scope.
 
 **Secondary lists.** A verifier MAY be configured with secondary list
 publishers. A secondary list contributes only its validator manifests, as
@@ -348,11 +370,18 @@ one, which is a smuggling vector rather than a formatting question.
 |-------|------|-------------|
 | `ledger_hash` | hex string (32 bytes) | Hash of the anchor ledger |
 | `ledger_index` | uint32 | Sequence number of the anchor ledger. **Advisory** — this field itself lies outside every signed preimage. Verifiers MUST NOT report it as authenticated unless cross-checked: the embedded STValidations carry a signed `LedgerSequence` field, and verifiers SHOULD verify it equals `ledger_index` for the validations that form quorum; the `ledger_index` of the `ledger_header` step whose computed hash equals `ledger_hash` is equally authoritative (§1.1). |
-| `unl.public_key` | hex string (33 bytes) | VL publisher's master public key, XRPL format (`0xED` prefix + 32-byte Ed25519 key) |
+| `unl.public_key` | hex string (33 bytes) | VL publisher's master public key, XRPL format (`0xED` prefix + 32-byte Ed25519 key). Always present. |
 | `unl.manifest` | hex string | Publisher manifest (binary STObject) binding master → signing key |
 | `unl.blob` | hex string | Raw UNL blob (JSON validator list) |
 | `unl.signature` | hex string | Signature over blob by manifest's signing key |
 | `validations` | object | Map of signing_key_hex → raw STValidation bytes. The map key MUST be exactly the embedded STValidation `SigningPubKey` encoded as uppercase hex. |
+
+`unl.manifest`, `unl.blob` and `unl.signature` are present together or not at
+all. An anchor whose `unl` carries only `public_key` does not bundle its list:
+it is the JSON counterpart of a binary proof without `0x05` (§3.3), and the
+same rules apply. The verifier resolves the list from trust material it holds
+(§1.3) and MUST reject the proof if it holds none. A `unl` with some but not
+all of the three members, or with any other member, MUST be rejected.
 
 An anchor carries the VL snapshot it was built against, so an offline verifier can
 establish quorum entirely from the proof — or, per §3.3, from equivalent trust it
@@ -432,14 +461,7 @@ The trie is a nested JSON structure. Three JSON types discriminate three node ty
 | **Array** `[key, data]` | Leaf node |
 
 The leaf `key` is a 64-character uppercase hex string (32 bytes). Leaf `data` is
-either a raw hex string or an object.
-
-**Raw form** — an uppercase hex string containing exactly the bytes hashed in
-§5.2. For state leaves this is canonical STObject bytes; for transaction leaves
-`VL(tx) || VL(meta)`. Verifiers MUST hash these bytes directly.
-
-**Decoded form** — an object carrying the leaf's decoded XRPL content, and
-nothing else:
+an object carrying the leaf's decoded XRPL content, and nothing else:
 
 - State tree: the decoded ledger entry, also called a serialized ledger entry
   (SLE) after canonical STObject serialization.
@@ -450,10 +472,11 @@ The verifier re-serializes that content to canonical binary and hashes the resul
 (§5.2): state leaves as canonical STObject bytes, tx leaves as
 `VL(tx) || VL(meta)`.
 
-A leaf MUST NOT mix the two forms. In particular a decoded object MUST NOT carry
-a copy of its own hashed bytes. Producers MUST use raw form whenever the decoded
-object cannot be serialized back to the exact hashed bytes using the referenced
-XRPL codec definitions.
+JSON leaves are decoded only. A leaf whose decoded object does not serialize
+back to its exact hashed bytes under the producer's codec definitions has no
+JSON form: the producer MUST NOT emit that proof as JSON, and SHOULD direct the
+consumer to the binary form, whose leaves are the exact bytes and need no codec
+to verify. A hex string is not leaf data, and verifiers MUST reject it.
 
 Non-XRPL convenience members are not part of a leaf. Some producers have emitted
 `index` or `hash` (duplicating the trie leaf key) or `blob` (duplicating the
@@ -463,17 +486,13 @@ bytes whose hash is already trusted, never because a step asserts it. The
 authenticated leaf key is the trie's `key` element, never a member inside the
 decoded object.
 
-> **Why the leaf carries one form and not both.** What a reader sees must be what
-> the verifier hashed. If a leaf carried both decoded content and its own hashed
-> bytes, and the verifier hashed the bytes, then only those bytes would be
-> authenticated — the decoded members displayed to a human would be
-> unauthenticated assertions, free to disagree with what was actually proven
-> while the proof still verified. Re-serializing the decoded content is precisely
-> what binds the legible form to the authenticated one, so the round-trip
-> requirement is a feature rather than a cost. Raw form is equally honest in the
-> other direction: it displays nothing and hashes bytes, claiming no legibility
-> it cannot back. A leaf that can be neither hashed nor understood has no place
-> in a proof.
+> **Why decoded only.** What a reader sees must be what the verifier hashed.
+> Re-serializing the decoded content is what binds the legible form to the
+> authenticated one. A leaf that also carried its hashed bytes would make only
+> those bytes authenticated, leaving the displayed members as unauthenticated
+> assertions free to disagree with what was proven. The binary form already
+> carries exact bytes for any leaf, including one whose fields a codec doesn't
+> know, so JSON doesn't need a second, opaque leaf form.
 
 At each inner node, ALL non-empty branches MUST be present so the verifier can
 recompute the parent hash. Branches on the proof path are objects (recurse);
@@ -828,8 +847,9 @@ branch by position in a 2-bit field (§3.7), so a branch there cannot be misspel
 or repeated.
 
 Unknown XRPL fields inside decoded SLE, transaction, metadata, manifest, or
-validation objects are not XPRV extension points; if the configured XRPL codec
-cannot round-trip a leaf, producers MUST use the raw leaf form in §2.3.
+validation objects are not XPRV extension points. If the configured XRPL codec
+cannot round-trip a leaf, that proof has no JSON form (§2.3); its binary form,
+whose leaves are exact bytes, is unaffected.
 
 ## 4. LEB128 Varint Encoding
 
@@ -877,10 +897,12 @@ function verify(chain, trusted_publisher_keys):
 
         if step is anchor:
             // Steps 2-5 run over the primary list selected by §1.3: the
-            // highest-sequence non-pending list held under the trusted
-            // publisher key, of which the anchor's own list (§2.1) is one
-            // candidate. Where the binary 0x05 record is absent, the
-            // candidates come from the verifier's held trust alone (§3.3).
+            // highest-sequence list held under the trusted publisher key
+            // that is in effect at the anchor ledger's close time, of which
+            // the anchor's own list (§2.1) is one candidate. Where the list
+            // is not bundled (binary without 0x05, or a JSON unl carrying
+            // only public_key), the candidates come from the verifier's held
+            // trust alone (§3.3).
             // 1. Assert unl.public_key is in trusted_publisher_keys
             // 2. Verify publisher manifest signatures:
             //      MAN\0 + manifest fields without Signature/MasterSignature
@@ -896,6 +918,9 @@ function verify(chain, trusted_publisher_keys):
             //      deserialize STValidation
             //      verify LedgerHash == anchor.ledger_hash
             //      verify VAL\0 signing data signature using SigningPubKey
+            //        (secp256k1: strict DER and low S, §8)
+            //      count it only if Flags has vfFullValidation (0x00000001):
+            //        a partial validation never counts (§1.3 rule 8)
             //      verify SigningPubKey maps to a resolved delegation
             //      SHOULD: verify LedgerSequence == anchor.ledger_index
             // 7. Quorum: >= ceil(0.8 × N) distinct masters, each counted at
@@ -1223,7 +1248,8 @@ A conforming producer:
 - emits a recognized format version;
 - emits canonical proof order (§1.2) when the proof will be hashed, signed,
   cached, compared, or deduplicated;
-- emits raw JSON leaves when decoded leaf JSON cannot be round-tripped exactly;
+- emits no JSON form for a proof whose leaves cannot be round-tripped exactly
+  through its codec, and points the consumer to the binary form;
 - emits binary VL decomposition only when the shaped blob round-trips exactly;
 - does not emit unknown, reserved, or extension values in format v6.
 
@@ -1258,6 +1284,10 @@ At minimum, verifier output SHOULD expose:
   metadata.
 - All hashes use SHA512-Half as specified by the XRPL protocol.
 - The verifier MUST reject chains where any step fails.
+- Every secp256k1 signature a verifier checks (validations, manifests, the list
+  blob) MUST be strict DER with `0 < r < n` and `0 < s <= n/2` (low S), as
+  libsecp256k1 enforces. A high-S twin is a second valid encoding of one
+  signature, and two verifiers that disagree on it disagree on the same bytes.
 - Consumers of compressed binary proofs SHOULD enforce a decompressed-size
   limit before parsing (zlib-bomb protection), and SHOULD bound trie
   recursion depth (a SHAMap key is 64 nibbles, so depth cannot exceed 64).
@@ -1333,10 +1363,11 @@ ledger hashes and tree roots alive across sibling fan-out, and may emit warnings
 for non-canonical duplication or ordering while still accepting a valid proof.
 
 Trust resolution with material beyond the proof (§1.3) is not yet implemented:
-both reference verifiers resolve the view from the embedded list alone. They
-also deviate from §1.3 rule 3 for that list: an embedded validator entry whose
-manifest is a revocation fails the anchor, where rule 3 keeps the master in N
-with no signing key.
+both reference verifiers resolve the view from the embedded list alone, and
+reject a list-less anchor as having no list. Both follow §1.3 rule 3 for the
+embedded list: a revoked validator stays in N and never votes. The reference
+server's list loader is stricter: it refuses to load a list that contains a
+revocation, so it produces no proofs against such a list.
 
 Progressive verification with a cached UNL is not implemented in the reference
 verifiers. The `0x05` anchor UNL record is OPTIONAL (§3.3) and both reference
