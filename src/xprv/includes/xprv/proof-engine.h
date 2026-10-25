@@ -432,7 +432,14 @@ private:
     CacheList cache_lru_;  // front = most recently used
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
     std::atomic<bool> cache_enabled_{true};
-    // Set once by on_publisher_revoked(); final for the process.
+    // Set once by on_publisher_revoked(); final for the process. prove() reads
+    // it before the proof cache, before each streamed step and before it
+    // returns.
+    //@@authority state=prv.S0144 status=provisional scope=field
+    // bind=xprv::ProofEngine::publisher_revoked_@d5c43b134932940d
+    // owner=unresolved owner_hypothesis=proof_engine
+    // observed_home=ProofEngine::publisher_revoked_
+    // label=terminal_publisher_key_revocation_latch
     std::atomic<bool> publisher_revoked_{false};
     size_t node_cache_size_ = 65536;
     std::chrono::milliseconds fetch_timeout_{1500};
@@ -554,6 +561,10 @@ private:
     // revocation for /verify.
     void
     on_publisher_revoked(catl::vl::Manifest const& revocation);
+
+    // Stream one step unless the publisher key has been revoked.
+    boost::asio::awaitable<void>
+    step_unless_publisher_revoked(StepCallback inner, ChainStep const& step);
 
     // Mutex-held invalidation commit. Callers that already hold
     // cache_mutex_ must publish retained_signal wakes only after releasing

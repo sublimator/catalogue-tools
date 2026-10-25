@@ -595,6 +595,16 @@ ProofEngine::prove(
     // No proofs, cached or new, under a revoked publisher key.
     if (publisher_revoked_)
         throw std::runtime_error(VlCache::kPublisherRevoked);
+    // A revocation can land while a step is being streamed (codex F10, astra
+    // A6, grok): stop before the next step, in cached replay and in a fresh
+    // build alike.
+    if (on_step)
+    {
+        on_step = [self = shared_from_this(),
+                   inner = std::move(on_step)](ChainStep const& step) {
+            return self->step_unless_publisher_revoked(inner, step);
+        };
+    }
 
     // Check cache first — returns by value, safe across co_await
     if (cache_enabled_)
@@ -614,6 +624,8 @@ ProofEngine::prove(
                 for (auto const& step : cached->chain.steps)
                     co_await on_step(step);
             }
+            if (publisher_revoked_)
+                throw std::runtime_error(VlCache::kPublisherRevoked);
             co_return *cached;
         }
     }
@@ -760,9 +772,21 @@ ProofEngine::lookup_tx(std::string const& tx_hash)
 // Proof cache
 // ═══════════════════════════════════════════════════════════════════════
 
-// clang-format off
-//@@audit-ack unannotated_authority_candidate reason="terminal latch set once from the VlCache strand after a verified publisher revocation; prove reads the atomic, the proof cache is cleared under cache_mutex_, and the anchor cache through the annotated invalidate_anchor_cache; its trust effect is modelled as a held manifest, not as a new engine state, and that choice is open to review"
-// clang-format on
+asio::awaitable<void>
+ProofEngine::step_unless_publisher_revoked(
+    StepCallback inner,
+    ChainStep const& step)
+{
+    if (publisher_revoked_)
+        throw std::runtime_error(VlCache::kPublisherRevoked);
+    co_await inner(step);
+}
+
+//@@authority transition=prv.T0360 status=provisional scope=function
+// bind=xprv::on_publisher_revoked@a8e6c927216c7ea5
+// owner=unresolved owner_hypothesis=proof_engine commit=atomic
+// touches=prv.S0144
+// label=latch_terminal_publisher_revocation_before_dropping_cached_proofs
 void
 ProofEngine::on_publisher_revoked(catl::vl::Manifest const& revocation)
 {

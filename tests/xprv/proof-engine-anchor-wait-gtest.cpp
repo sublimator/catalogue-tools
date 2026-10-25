@@ -18,6 +18,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -468,4 +469,49 @@ TEST(ProofEnginePublisherRevocation, ProveRefusesCachedAndNewProofs)
     auto stopped = asio::co_spawn(io, tracker->co_stop(), asio::use_future);
     io.run();
     stopped.get();
+}
+
+// codex F10, astra A6, grok: a revocation that lands while a cached proof is
+// being replayed stops the replay before the next step, and the cached proof
+// isn't returned. One step pins the check before return; three pin the check
+// before each step.
+TEST(ProofEnginePublisherRevocation, RevocationDuringCachedReplayStopsTheReplay)
+{
+    for (std::size_t steps : {1u, 3u})
+    {
+        asio::io_context io;
+        auto engine =
+            xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+        std::string const tx(64, 'B');
+        xprv::ProofChain chain;
+        chain.steps.resize(steps);
+        ProofEngineTestAccess::seed_proof_cache(
+            *engine, tx, xprv::ProofEngine::ProveResult{chain, 1000, "ED"});
+
+        catl::vl::Manifest revocation;
+        revocation.master_public_key = std::vector<uint8_t>(33, 0xED);
+        revocation.sequence = std::numeric_limits<uint32_t>::max();
+        revocation.raw = std::vector<uint8_t>(40, 0xEE);
+        std::size_t replayed = 0;
+        auto on_step = [&](xprv::ChainStep const&) -> asio::awaitable<void> {
+            ++replayed;
+            ProofEngineTestAccess::publisher_revoked(*engine, revocation);
+            co_await asio::post(asio::use_awaitable);
+        };
+
+        auto proved = asio::co_spawn(
+            io, engine->prove(tx, nullptr, 0, 0, on_step), asio::use_future);
+        io.run();
+        std::string error = "(returned a proof)";
+        try
+        {
+            proved.get();
+        }
+        catch (std::runtime_error const& e)
+        {
+            error = e.what();
+        }
+        EXPECT_EQ(error, xprv::VlCache::kPublisherRevoked) << steps << " steps";
+        EXPECT_EQ(replayed, 1u) << steps << " steps";
+    }
 }
