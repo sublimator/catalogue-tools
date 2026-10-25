@@ -547,3 +547,18 @@ TEST(ProofChainJson, BinaryTrieConversionIsDepthBounded)
         xprv::to_json(chain_with_binary_trie(nested_binary_trie(65))),
         std::runtime_error);
 }
+
+// Witness for the builder's exact re-encode check (codex, v7 review F2): a
+// leaf that decodes but does not re-encode to its own bytes (here, a trailing
+// byte the codec drops) has no JSON form.
+TEST(ProofChainJson, LeafCallbackRefusesLeafThatDoesNotReencodeExactly)
+{
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    auto bytes = catl::xdata::serialize_leaf(ledger_hashes_sle(), protocol);
+    bytes.push_back(0);
+    auto const key = xprv::hash_from_hex(std::string(64, 'A'));
+    boost::intrusive_ptr<MmapItem> const item(
+        OwnedItem::create(key, Slice(bytes.data(), bytes.size())));
+    auto const callback = xprv::make_proof_leaf_callback(protocol, false);
+    EXPECT_THROW(callback(*item), xprv::JsonFormUnavailable);
+}
