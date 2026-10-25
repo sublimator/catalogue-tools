@@ -57,6 +57,7 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
     vl_signing_to_master_.clear();
     live_signing_to_master_.clear();
     vl_manifest_sequence_by_master_.clear();
+    vl_manifest_raw_by_master_.clear();
     manifest_sequence_by_master_.clear();
     stale_vl_masters_.clear();
     for (auto const& v : validators)
@@ -76,6 +77,7 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
         if (unl_master_keys_.count(master_key_hex))
             (void)apply_manifest(manifest, false);
     }
+    drop_equivocated_mappings();
     PLOGI(
         log_,
         "[",
@@ -978,6 +980,48 @@ ValidationCollector::apply_manifest(
     if (!unl_master_keys_.empty() && !unl_master_keys_.count(master_key_hex))
         return false;
 
+    // §1.3 rule 2: a different manifest at a sequence we already hold for
+    // this master (from the list or a peer) is equivocation. Only the master
+    // key can sign either, so it is misused or compromised: the validator
+    // stops voting (it stays in N) and the evidence is kept.
+    if (!from_vl)
+    {
+        auto const conflicts = [&](std::vector<uint8_t> const& raw) {
+            return !raw.empty() && raw != manifest.raw;
+        };
+        auto const vl_seq = vl_manifest_sequence_by_master_.find(master_key_hex);
+        auto const vl_raw = vl_manifest_raw_by_master_.find(master_key_hex);
+        auto const peer = peer_manifests_by_master_.find(master_key_hex);
+        bool const vl_conflict = vl_seq != vl_manifest_sequence_by_master_.end() &&
+            vl_seq->second == manifest.sequence &&
+            vl_raw != vl_manifest_raw_by_master_.end() &&
+            conflicts(vl_raw->second);
+        bool const peer_conflict = peer != peer_manifests_by_master_.end() &&
+            peer->second.sequence == manifest.sequence &&
+            conflicts(peer->second.raw);
+        if (vl_conflict || peer_conflict)
+        {
+            auto& evidence = equivocation_evidence_[master_key_hex];
+            evidence.push_back(manifest.raw);
+            if (peer_conflict)
+                evidence.push_back(peer->second.raw);
+            if (equivocated_masters_.insert(master_key_hex).second)
+            {
+                PLOGW(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] validator ",
+                    master_key_hex.substr(0, 16),
+                    "... signed two manifests at sequence ",
+                    manifest.sequence,
+                    "; it no longer counts");
+            }
+            drop_equivocated_mappings();
+            return false;
+        }
+    }
+
     if (!from_vl)
     {
         auto const stored = peer_manifests_by_master_.find(master_key_hex);
@@ -1045,12 +1089,14 @@ ValidationCollector::apply_manifest(
     {
         erase_master_mapping(vl_signing_to_master_);
         vl_manifest_sequence_by_master_[master_key_hex] = manifest.sequence;
+        vl_manifest_raw_by_master_[master_key_hex] = manifest.raw;
         stale_vl_masters_.erase(master_key_hex);
     }
 
     manifest_sequence_by_master_[master_key_hex] = manifest.sequence;
 
-    if (!manifest.signing_public_key.empty())
+    if (!manifest.signing_public_key.empty() &&
+        !equivocated_masters_.count(master_key_hex))
     {
         auto const signing_key_hex = manifest.signing_key_hex();
         live_signing_to_master_[signing_key_hex] = master_key_hex;

@@ -1041,7 +1041,7 @@ def verify_anchor(
     # listed master wins. Membership and N don't change.
     # Rule 2, checked over every candidate (the list's and all held), not just
     # the winner: two different manifests at one sequence for one master is
-    # equivocation, and the anchor is rejected.
+    # equivocation, and that master is dropped (in N, no vote).
     seen_at: dict[tuple[str, int], bytes] = {
         (master_b, seq_b): raw_b for master_b, (seq_b, raw_b, _) in best.items()
     }
@@ -1061,7 +1061,8 @@ def verify_anchor(
             best[master_x] = (seq_x, raw_x, "" if seq_x == MANIFEST_REVOKED else sk_x)
             overlaid += 1
     # Rule 2: a master that signed two different manifests at one sequence is
-    # treated as revoked (in N, no vote) until it publishes a sane one.
+    # treated as revoked (in N, no vote) for this verification, whatever
+    # higher manifest is also held.
     for master_x in sorted(equivocated):
         seq_b, raw_b, _ = best[master_x]
         best[master_x] = (seq_b, raw_b, "")

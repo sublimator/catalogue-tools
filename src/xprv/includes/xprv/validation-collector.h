@@ -160,6 +160,13 @@ public:
             if (unl_master_keys_.count(master))
                 out.push_back(manifest.raw);
         }
+        // Equivocation evidence, so a verifier here sees the same conflict
+        // and drops the same validator (§1.3 rule 2).
+        for (auto const& [master, raws] : equivocation_evidence_)
+        {
+            if (unl_master_keys_.count(master))
+                out.insert(out.end(), raws.begin(), raws.end());
+        }
         return out;
     }
 
@@ -176,6 +183,22 @@ public:
     bool continuous = false;
 
 private:
+    // Remove every signing-key mapping of an equivocated master (§1.3 rule 2).
+    void
+    drop_equivocated_mappings()
+    {
+        for (auto* mapping : {&live_signing_to_master_, &vl_signing_to_master_})
+        {
+            for (auto it = mapping->begin(); it != mapping->end();)
+            {
+                if (equivocated_masters_.count(it->second))
+                    it = mapping->erase(it);
+                else
+                    ++it;
+            }
+        }
+    }
+
     catl::xdata::Protocol const& protocol_;
     std::string net_label_;
     std::set<std::string> unl_master_keys_;
@@ -183,6 +206,15 @@ private:
     std::map<std::string, std::string> vl_signing_to_master_;
     std::map<std::string, std::string> live_signing_to_master_;
     std::map<std::string, uint32_t> vl_manifest_sequence_by_master_;
+    // Raw bytes of each master's manifest in the current list, per sequence,
+    // to detect same-sequence equivocation against the list.
+    std::map<std::string, std::vector<uint8_t>> vl_manifest_raw_by_master_;
+    // §1.3 rule 2: masters seen signing two different manifests at one
+    // sequence. They stay in N and never vote again in this process. The
+    // conflicting raw manifests are kept as evidence for local verifiers.
+    std::set<std::string> equivocated_masters_;
+    std::map<std::string, std::vector<std::vector<uint8_t>>>
+        equivocation_evidence_;
     std::map<std::string, uint32_t> manifest_sequence_by_master_;
     std::set<std::string> stale_vl_masters_;
 

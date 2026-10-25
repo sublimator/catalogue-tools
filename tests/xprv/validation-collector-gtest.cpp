@@ -660,3 +660,68 @@ TEST(ValidationCollector, RevokedMemberCountsInNWithoutASigningKey)
     EXPECT_EQ(collector.unl_size, static_cast<int>(members + 1));
     EXPECT_EQ(collector.unl_signing_keys.size(), members);
 }
+
+// §1.3 rule 2 on the server: a peer manifest at the list's sequence with
+// different bytes is equivocation. The validator stops voting, stays in N,
+// and the conflicting manifest is published for local verifiers.
+TEST(ValidationCollector, EquivocatingValidatorStopsVotingAndIsReported)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+
+    auto make_key = [](uint8_t marker) {
+        std::vector<uint8_t> key(33, 0);
+        key.front() = marker;
+        return key;
+    };
+    catl::vl::Manifest listed;
+    listed.master_public_key = make_key(0x02);
+    listed.signing_public_key = make_key(0x03);
+    listed.sequence = 1;
+    listed.raw = {0xA1};
+    catl::vl::Manifest other;
+    other.master_public_key = make_key(0x04);
+    other.signing_public_key = make_key(0x05);
+    other.sequence = 1;
+    other.raw = {0xB1};
+    collector.set_unl({listed, other});
+    ASSERT_EQ(collector.unl_size, 2);
+
+    std::array<uint8_t, 32> bytes{};
+    bytes.back() = 7;
+    Hash256 const hash(bytes);
+    xprv::ValidationCollector::Entry vote;
+    vote.ledger_hash = hash;
+    vote.ledger_seq = 50;
+    vote.signing_key_hex = lower_ascii(listed.signing_key_hex());
+    collector.by_ledger[hash] = {vote};
+    ASSERT_TRUE(collector.latest_ledger_sequence(
+        hash, xprv::ValidationCollector::QuorumMode::proof));
+
+    auto twin = listed;  // same master, same sequence, different bytes
+    twin.signing_public_key = make_key(0xED);
+    twin.raw = {0xA2};
+    collector.apply_peer_manifests({twin});
+
+    EXPECT_EQ(collector.unl_size, 2) << "N is unchanged";
+    EXPECT_FALSE(collector.latest_ledger_sequence(
+        hash, xprv::ValidationCollector::QuorumMode::proof))
+        << "the equivocating validator's vote no longer counts";
+    auto const held = collector.held_peer_manifest_bytes();
+    EXPECT_NE(
+        std::find(held.begin(), held.end(), std::vector<uint8_t>{0xA2}),
+        held.end())
+        << "the conflicting manifest is published as evidence";
+
+    // A list refresh keeps the validator dropped. Re-insert the vote, since
+    // set_unl also filters stored votes, so the check below is the mapping.
+    collector.set_unl({listed, other});
+    collector.by_ledger[hash] = {vote};
+    EXPECT_FALSE(collector.latest_ledger_sequence(
+        hash, xprv::ValidationCollector::QuorumMode::proof));
+    auto control = vote;  // the other validator still counts
+    control.signing_key_hex = lower_ascii(other.signing_key_hex());
+    collector.by_ledger[hash] = {control};
+    EXPECT_TRUE(collector.latest_ledger_sequence(
+        hash, xprv::ValidationCollector::QuorumMode::proof));
+}

@@ -239,8 +239,9 @@ Resolution rules:
    list. N MUST be at least 1; a primary list with no masters makes
    membership unavailable.
 7. Two different lists under the primary publisher key with the same highest
-   `sequence` make the view unresolvable, and the anchor MUST be rejected, as
-   for manifests under rule 2. Byte-identical lists are one list.
+   `sequence` make the view unresolvable, and the anchor MUST be rejected: the
+   publisher itself has equivocated, so there is no membership to fall back
+   on. Byte-identical lists are one list.
 8. Only full validations count. A validation without `vfFullValidation`
    (`Flags & 0x00000001`) is a partial validation and never counts toward
    quorum, as in rippled.
@@ -1429,8 +1430,11 @@ Both reference verifiers resolve the §1.3 view from the embedded list plus any
 held manifests passed to them: `xprv verify --manifests FILE` and
 `verify-xprv.py --manifests FILE`, where FILE is a JSON array of base64 raw
 manifests. The reference server's `/verify` passes the newer manifests it holds
-from peers for the proof's network. The server counts its proof quorum under the
-same view and attaches every validation it holds for the anchor ledger. Neither
+from peers for the proof's network, plus any equivocation evidence it has seen.
+The server counts its proof quorum under the same view and attaches one
+validation per listed master, signed under that master's current key; a
+validation under a superseded key, from a validator caught mid-rotation, is not
+attached. It drops an equivocating validator for the life of the process. Neither
 verifier fetches a primary list from outside the proof yet, so both reject a
 list-less anchor as having no list. Both follow §1.3 rule 3 for the
 embedded list: a revoked validator stays in N and never votes. The reference

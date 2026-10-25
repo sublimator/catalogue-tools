@@ -581,7 +581,7 @@ AnchorVerifier::verify(
     // listed master wins. Membership and N don't change.
     // Rule 2, checked over every candidate (the list's and all held), not just
     // the winner: two different manifests at one sequence for one master is
-    // equivocation, and the anchor is rejected.
+    // equivocation, and that master is dropped (in N, no vote).
     std::map<std::pair<std::string, std::uint32_t>, std::vector<uint8_t>>
         seen_at;
     for (auto const& [master, d] : best)
@@ -613,7 +613,8 @@ AnchorVerifier::verify(
         }
     }
     // Rule 2: a master that signed two different manifests at one sequence is
-    // treated as revoked (in N, no vote) until it publishes a sane one.
+    // treated as revoked (in N, no vote) for this verification, whatever
+    // higher manifest is also held.
     for (auto const& master : equivocated)
     {
         best[master].signing_key.clear();
