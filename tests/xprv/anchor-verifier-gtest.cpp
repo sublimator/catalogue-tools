@@ -289,3 +289,25 @@ TEST(AnchorVerifier, HeldBytesThatAreNotAManifestGrantNothing)
     EXPECT_TRUE(r.verified) << r.error;
     EXPECT_EQ(r.unl_overlaid, 1);
 }
+
+TEST(AnchorVerifier, HeldManifestWithABadSignatureGrantsNothing)
+{
+    // codex batch-2 F5: a rotation whose master signature is broken must not
+    // re-point the master. Skipping held signature checks would make 4/5.
+    auto const [key, cases] = load_overlay_fixture();
+    auto const r =
+        verify_with(cases.at("invalid-signature-grants-nothing"), key, true);
+    EXPECT_FALSE(r.verified);
+    EXPECT_EQ(r.unl_overlaid, 0);
+    EXPECT_EQ(r.validations_matched_unl, 3);
+}
+
+TEST(AnchorVerifier, HighestSequenceWinsNotLastSeen)
+{
+    // codex batch-2 F5: held seq 3 (key A) then seq 2 (key B); A votes. The
+    // highest sequence wins regardless of order, so A counts: 4/5.
+    auto const [key, cases] = load_overlay_fixture();
+    auto const r = verify_with(cases.at("highest-sequence-not-last"), key, true);
+    EXPECT_TRUE(r.verified) << r.error;
+    EXPECT_EQ(r.validations_matched_unl, 4);
+}

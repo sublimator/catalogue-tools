@@ -431,6 +431,25 @@ class TrustViewOverlayTests(unittest.TestCase):
             self.verify(f.anchor(), f.trusted_key, [winner, a, b]), "quorum not met: 3/5"
         )
 
+    def test_held_manifest_with_a_bad_signature_grants_nothing(self) -> None:
+        # codex batch-2 F5: skipping held signature checks would make this 4/5.
+        f = self.f
+        bad = bytearray(self.rotation)
+        bad[-1] ^= 0x01  # MasterSignature is the last field
+        f.voters = [self.rotated_key] + f.signers[1:4]
+        self.assertRejected(
+            self.verify(f.anchor(), f.trusted_key, [bytes(bad)]), "quorum not met: 3/5"
+        )
+
+    def test_highest_sequence_wins_not_last_seen(self) -> None:
+        # codex batch-2 F5: "last wins" would pick seq 2 and make this 3/5.
+        f = self.f
+        key_a, key_b = keypair(310), keypair(311)
+        high = make_manifest(f.masters[0], key_a, seq=3)
+        low = make_manifest(f.masters[0], key_b, seq=2)
+        f.voters = [key_a] + f.signers[1:4]
+        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [high, low]).ok)
+
     def test_resolved_key_collision_rejects(self) -> None:
         f = self.f
         stolen = make_manifest(f.masters[0], f.signers[1], seq=2)
