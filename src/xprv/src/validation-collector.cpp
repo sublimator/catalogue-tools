@@ -1001,10 +1001,15 @@ ValidationCollector::apply_manifest(
             conflicts(peer->second.raw);
         if (vl_conflict || peer_conflict)
         {
+            // Keep the first conflicting pair only: both sides, so the pair
+            // alone proves the conflict even after the list moves on.
             auto& evidence = equivocation_evidence_[master_key_hex];
-            evidence.push_back(manifest.raw);
-            if (peer_conflict)
-                evidence.push_back(peer->second.raw);
+            if (evidence.empty())
+            {
+                evidence.push_back(
+                    vl_conflict ? vl_raw->second : peer->second.raw);
+                evidence.push_back(manifest.raw);
+            }
             if (equivocated_masters_.insert(master_key_hex).second)
             {
                 PLOGW(

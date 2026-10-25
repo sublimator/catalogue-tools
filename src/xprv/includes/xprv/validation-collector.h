@@ -148,24 +148,33 @@ public:
     void
     apply_peer_manifests(std::vector<catl::vl::Manifest> manifests);
 
-    /// Raw bytes of the newest verified peer manifest held per listed master:
-    /// the §1.3 material beyond the list, for verifiers on this server.
+    /// The §1.3 material this server holds, for verifiers on this server:
+    /// per listed master, the newest manifest from the current list or a peer
+    /// (so a list-borne revocation reaches them too), plus the one conflicting
+    /// pair for each equivocated master (so they drop the same validator).
     std::vector<std::vector<uint8_t>>
-    held_peer_manifest_bytes() const
+    held_manifest_bytes() const
     {
         std::vector<std::vector<uint8_t>> out;
-        out.reserve(peer_manifests_by_master_.size());
-        for (auto const& [master, manifest] : peer_manifests_by_master_)
+        for (auto const& master : unl_master_keys_)
         {
-            if (unl_master_keys_.count(master))
-                out.push_back(manifest.raw);
-        }
-        // Equivocation evidence, so a verifier here sees the same conflict
-        // and drops the same validator (§1.3 rule 2).
-        for (auto const& [master, raws] : equivocation_evidence_)
-        {
-            if (unl_master_keys_.count(master))
-                out.insert(out.end(), raws.begin(), raws.end());
+            auto const vl_seq = vl_manifest_sequence_by_master_.find(master);
+            auto const vl_raw = vl_manifest_raw_by_master_.find(master);
+            auto const peer = peer_manifests_by_master_.find(master);
+            bool const has_vl = vl_seq != vl_manifest_sequence_by_master_.end() &&
+                vl_raw != vl_manifest_raw_by_master_.end() &&
+                !vl_raw->second.empty();
+            bool const has_peer = peer != peer_manifests_by_master_.end() &&
+                !peer->second.raw.empty();
+            if (has_peer && (!has_vl || peer->second.sequence > vl_seq->second))
+                out.push_back(peer->second.raw);
+            else if (has_vl)
+                out.push_back(vl_raw->second);
+
+            auto const evidence = equivocation_evidence_.find(master);
+            if (evidence != equivocation_evidence_.end())
+                out.insert(
+                    out.end(), evidence->second.begin(), evidence->second.end());
         }
         return out;
     }
@@ -210,8 +219,9 @@ private:
     // to detect same-sequence equivocation against the list.
     std::map<std::string, std::vector<uint8_t>> vl_manifest_raw_by_master_;
     // §1.3 rule 2: masters seen signing two different manifests at one
-    // sequence. They stay in N and never vote again in this process. The
-    // conflicting raw manifests are kept as evidence for local verifiers.
+    // sequence. They stay in N and never vote again in this process. Exactly
+    // one conflicting pair per master is kept (bounded; replays add nothing),
+    // and it survives list refreshes so local verifiers keep dropping it.
     std::set<std::string> equivocated_masters_;
     std::map<std::string, std::vector<std::vector<uint8_t>>>
         equivocation_evidence_;

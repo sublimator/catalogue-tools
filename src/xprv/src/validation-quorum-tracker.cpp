@@ -665,15 +665,7 @@ ValidationQuorumTracker::start_manifest_packet(
                                                     .apply_peer_manifests(
                                                         std::move(
                                                             parsed.manifests));
-                                                auto held = std::make_shared<
-                                                    std::vector<std::vector<
-                                                        uint8_t>> const>(
-                                                    self->collector_
-                                                        .held_peer_manifest_bytes());
-                                                std::lock_guard held_lock(
-                                                    self->held_manifests_mutex_);
-                                                self->held_manifests_ =
-                                                    std::move(held);
+                                                self->refresh_held_manifests_locked();
                                             }
                                         }
                                         catch (...)
@@ -965,6 +957,8 @@ ValidationQuorumTracker::apply_unl_locked(
     auto const old_size = collector_.unl_size;
     collector_.set_unl(validators);
     vl_sequence_ = vl_sequence;
+    // A new list can carry newer manifests (revocations included).
+    refresh_held_manifests_locked();
 
     bool const keys_changed = collector_.unl_signing_keys != old_keys;
     PLOGI(

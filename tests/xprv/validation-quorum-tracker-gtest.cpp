@@ -2358,11 +2358,18 @@ TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
                     return s.manifest_packets_processed == 1 &&
                         !s.manifest_in_flight && !s.manifest_pending;
                 });
-                // The relayed manifests are published for verifiers on this
+                // The newest manifest per listed master, including the
+                // relayed rotations, is published for verifiers on this
                 // server (§1.3 ambient material).
-                EXPECT_EQ(
-                    tracker->held_manifests()->size(),
-                    voted.size() - proof_votes);
+                auto const held = tracker->held_manifests();
+                EXPECT_EQ(held->size(), members.size());
+                for (unsigned j = 0; j < voted.size() - proof_votes; ++j)
+                {
+                    auto const& raw = members[voted[j]].raw;
+                    EXPECT_NE(
+                        std::find(held->begin(), held->end(), raw),
+                        held->end());
+                }
                 for (auto const& [_, raw] : anchor.validations)
                 {
                     tracker->on_packet(
@@ -2391,4 +2398,49 @@ TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
         io.run();
         future.get();
     }
+}
+
+// astra A1: the held-manifest snapshot is republished when a list is applied,
+// not only on peer packets, so a list-borne revocation reaches /verify.
+TEST(ProofQuorumAt80, ListUpdateRepublishesHeldManifests)
+{
+    auto make = [](uint8_t signing, uint32_t sequence, uint8_t tag) {
+        catl::vl::Manifest m;
+        m.master_public_key = std::vector<uint8_t>(33, 0);
+        m.master_public_key.front() = 0x02;
+        if (signing != 0)
+        {
+            m.signing_public_key = std::vector<uint8_t>(33, 0);
+            m.signing_public_key.front() = signing;
+        }
+        m.sequence = sequence;
+        m.raw = {tag};
+        return m;
+    };
+    auto const listed = make(0x03, 1, 0xA0);
+    auto const revocation =
+        make(0, std::numeric_limits<uint32_t>::max(), 0xC0);
+
+    asio::io_context io;
+    auto protocol = test_protocol();
+    auto tracker = xprv::ValidationQuorumTracker::create(io, protocol, 0);
+    tracker->set_unl({listed}, 7);
+    io.run();
+    io.restart();
+    auto held = tracker->held_manifests();
+    EXPECT_NE(
+        std::find(held->begin(), held->end(), listed.raw), held->end());
+
+    tracker->set_unl({revocation}, 8);
+    io.run();
+    io.restart();
+    held = tracker->held_manifests();
+    EXPECT_NE(
+        std::find(held->begin(), held->end(), revocation.raw), held->end());
+    EXPECT_EQ(
+        std::find(held->begin(), held->end(), listed.raw), held->end());
+
+    auto future = asio::co_spawn(io, tracker->co_stop(), asio::use_future);
+    io.run();
+    future.get();
 }

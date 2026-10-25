@@ -416,6 +416,16 @@ private:
     // on the strand after each manifest packet; read from any thread by
     // held_manifests(). Leaf lock: never held while taking another.
     mutable std::mutex held_manifests_mutex_;
+
+    // Republish held_manifests_ from the collector (owner strand only).
+    void
+    refresh_held_manifests_locked()
+    {
+        auto held = std::make_shared<std::vector<std::vector<uint8_t>> const>(
+            collector_.held_manifest_bytes());
+        std::lock_guard lock(held_manifests_mutex_);
+        held_manifests_ = std::move(held);
+    }
     std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests_ =
         std::make_shared<std::vector<std::vector<uint8_t>> const>();
 

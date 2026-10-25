@@ -16,6 +16,7 @@
 #include <cctype>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <sstream>
 
@@ -707,11 +708,12 @@ TEST(ValidationCollector, EquivocatingValidatorStopsVotingAndIsReported)
     EXPECT_FALSE(collector.latest_ledger_sequence(
         hash, xprv::ValidationCollector::QuorumMode::proof))
         << "the equivocating validator's vote no longer counts";
-    auto const held = collector.held_peer_manifest_bytes();
-    EXPECT_NE(
-        std::find(held.begin(), held.end(), std::vector<uint8_t>{0xA2}),
-        held.end())
-        << "the conflicting manifest is published as evidence";
+    auto const held = collector.held_manifest_bytes();
+    auto const has = [&](std::vector<uint8_t> const& raw) {
+        return std::find(held.begin(), held.end(), raw) != held.end();
+    };
+    EXPECT_TRUE(has({0xA2}) && has({0xA1}))
+        << "both sides of the conflict are published as evidence";
 
     // A list refresh keeps the validator dropped. Re-insert the vote, since
     // set_unl also filters stored votes, so the check below is the mapping.
@@ -724,4 +726,76 @@ TEST(ValidationCollector, EquivocatingValidatorStopsVotingAndIsReported)
     collector.by_ledger[hash] = {control};
     EXPECT_TRUE(collector.latest_ledger_sequence(
         hash, xprv::ValidationCollector::QuorumMode::proof));
+}
+
+
+namespace {
+
+catl::vl::Manifest
+fake_manifest(uint8_t master, uint8_t signing, uint32_t sequence, uint8_t tag)
+{
+    catl::vl::Manifest m;
+    m.master_public_key = std::vector<uint8_t>(33, 0);
+    m.master_public_key.front() = master;
+    if (signing != 0)
+    {
+        m.signing_public_key = std::vector<uint8_t>(33, 0);
+        m.signing_public_key.front() = signing;
+    }
+    m.sequence = sequence;
+    m.raw = {tag, static_cast<uint8_t>(sequence & 0xFF)};
+    return m;
+}
+
+bool
+contains(
+    std::vector<std::vector<uint8_t>> const& held,
+    std::vector<uint8_t> const& raw)
+{
+    return std::find(held.begin(), held.end(), raw) != held.end();
+}
+
+}  // namespace
+
+// astra A1: a revocation carried by a newer list must reach the snapshot that
+// local verifiers use, replacing an older peer rotation.
+TEST(ValidationCollector, ListRevocationReplacesAnOlderPeerRotationInTheSnapshot)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    auto const listed = fake_manifest(0x02, 0x03, 1, 0xA0);
+    collector.set_unl({listed});
+    auto const rotation = fake_manifest(0x02, 0xED, 2, 0xB0);
+    collector.apply_peer_manifests({rotation});
+    EXPECT_TRUE(contains(collector.held_manifest_bytes(), rotation.raw));
+
+    auto const revocation =
+        fake_manifest(0x02, 0, std::numeric_limits<uint32_t>::max(), 0xC0);
+    collector.set_unl({revocation});
+    auto const held = collector.held_manifest_bytes();
+    EXPECT_TRUE(contains(held, revocation.raw));
+    EXPECT_FALSE(contains(held, rotation.raw));
+}
+
+// codex F6/F7: the evidence is one bounded pair that still proves the conflict
+// after the list moves the validator to a higher sequence.
+TEST(ValidationCollector, EquivocationEvidenceIsBoundedAndSurvivesListRefresh)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    auto const a = fake_manifest(0x02, 0x03, 1, 0xA0);
+    collector.set_unl({a});
+    auto const b = fake_manifest(0x02, 0xED, 1, 0xB0);  // same seq, other bytes
+    for (int i = 0; i < 33; ++i)
+        collector.apply_peer_manifests({b});
+    auto held = collector.held_manifest_bytes();
+    EXPECT_LE(held.size(), 3u) << "replays must not grow the evidence";
+    EXPECT_TRUE(contains(held, a.raw) && contains(held, b.raw));
+
+    auto const c = fake_manifest(0x02, 0x04, 3, 0xD0);
+    collector.set_unl({c});
+    held = collector.held_manifest_bytes();
+    EXPECT_TRUE(contains(held, c.raw));
+    EXPECT_TRUE(contains(held, a.raw) && contains(held, b.raw))
+        << "the pair still proves the conflict after the list moved on";
 }
