@@ -545,6 +545,15 @@ class SignatureCanonicalityTests(unittest.TestCase):
         self.assertFalse(v.secp256k1_signature_is_canonical(high))
         self.assertFalse(v.verify_signature(self.data, high, self.public))
 
+    def test_ed25519_s_plus_l_twin_is_refused(self) -> None:
+        public, private = keypair(7)
+        sig = unhexlify(sign(self.data, private))
+        self.assertTrue(v.verify_signature(self.data, sig, public))
+        s = int.from_bytes(sig[32:], "little") + v.ED25519_ORDER
+        twin = sig[:32] + s.to_bytes(32, "little")
+        self.assertFalse(v.ed25519_signature_is_canonical(twin))
+        self.assertFalse(v.verify_signature(self.data, twin, public))
+
     def test_non_minimal_der_is_refused(self) -> None:
         r, s = _der_parts(self.low)
         canonical = _der(r, s)

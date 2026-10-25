@@ -717,6 +717,7 @@ def is_properly_formed_toml_domain(domain: bytes) -> bool:
 
 
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493  # L
 
 
 def _der_integer(sig: bytes, pos: int) -> tuple[int, int] | None:
@@ -750,12 +751,24 @@ def secp256k1_signature_is_canonical(sig: bytes) -> bool:
     return 0 < r[0] < SECP256K1_ORDER and 0 < s_[0] <= SECP256K1_ORDER // 2
 
 
+def ed25519_signature_is_canonical(sig: bytes) -> bool:
+    """64 bytes with S < L, as libsodium requires.
+
+    S and S + L verify identically under the group law, so without this the
+    same signature has two encodings and Python accepts one C++ rejects.
+    """
+    return len(sig) == 64 and int.from_bytes(sig[32:], "little") < ED25519_ORDER
+
+
 def verify_signature(data: bytes, signature: bytes, key_hex: str) -> bool:
     """The one signature check for every XRPL signature this verifier sees."""
     try:
-        if not key_hex.upper().startswith("ED") and not secp256k1_signature_is_canonical(
-            signature
-        ):
+        canonical = (
+            ed25519_signature_is_canonical(signature)
+            if key_hex.upper().startswith("ED")
+            else secp256k1_signature_is_canonical(signature)
+        )
+        if not canonical:
             return False
         return xrpl.core.keypairs.is_valid_message(data, signature, key_hex)
     except Exception:
