@@ -1037,13 +1037,30 @@ TEST(VlCachePublisherRevocation, VerifiedRevocationIsFinal)
         },
         [&revoked](catl::vl::Manifest const& m) { revoked.push_back(m.raw); });
 
+    // The refresh timer is a real steady_timer, outside the scheduler's
+    // virtual clock. At a zero interval it is due at once, but the reactor
+    // may report it on a later pass: Linux's epoll delivers it through a
+    // timerfd that one non-blocking poll can miss. So run the reactor until
+    // the fetch the timer starts is seen. The bound only stops a hang.
+    auto await_fetch = [&](std::size_t n) {
+        auto const give_up = std::chrono::steady_clock::now() + 30s;
+        while (fetches < n && std::chrono::steady_clock::now() < give_up)
+        {
+            io.restart();
+            io.run_one_for(10ms);
+            scheduler.run_until_idle();
+        }
+        return fetches;
+    };
+
     cache->start();
     scheduler.run_until_idle();
     ASSERT_TRUE(pending);
     pending(successful_vl_result());
     scheduler.run_until_idle();
     ASSERT_EQ(refreshes, 1u);
-    ASSERT_EQ(fetches, 2u) << "the zero-interval refresh fetch is pending";
+    ASSERT_EQ(await_fetch(2), 2u)
+        << "the zero-interval refresh fetch is pending";
 
     auto revoked_result = successful_vl_result();
     revoked_result.vl.sequence = 2;
@@ -1071,7 +1088,8 @@ TEST(VlCachePublisherRevocation, VerifiedRevocationIsFinal)
     };
     EXPECT_EQ(read(), VlCache::kPublisherRevoked);
 
-    ASSERT_EQ(fetches, 3u) << "the refresh after the revocation is pending";
+    ASSERT_EQ(await_fetch(3), 3u)
+        << "the refresh after the revocation is pending";
     auto good = successful_vl_result();
     good.vl.sequence = 3;
     pending(good);
@@ -1081,7 +1099,7 @@ TEST(VlCachePublisherRevocation, VerifiedRevocationIsFinal)
     EXPECT_EQ(read(), VlCache::kPublisherRevoked);
 
     // The zero interval leaves one more fetch in flight; stop joins it.
-    ASSERT_EQ(fetches, 4u);
+    ASSERT_EQ(await_fetch(4), 4u);
     auto stopped =
         boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
     scheduler.run_until_idle();
