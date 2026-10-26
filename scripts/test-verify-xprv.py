@@ -432,7 +432,7 @@ class TrustViewOverlayTests(unittest.TestCase):
         )
 
     def test_held_manifest_with_a_bad_signature_grants_nothing(self) -> None:
-        # codex batch-2 F5: skipping held signature checks would make this 4/5.
+        # Skipping held signature checks would make this 4/5.
         f = self.f
         bad = bytearray(self.rotation)
         bad[-1] ^= 0x01  # MasterSignature is the last field
@@ -442,7 +442,7 @@ class TrustViewOverlayTests(unittest.TestCase):
         )
 
     def test_highest_sequence_wins_not_last_seen(self) -> None:
-        # codex batch-2 F5: "last wins" would pick seq 2 and make this 3/5.
+        # "Last wins" would pick seq 2 and make this 3/5.
         f = self.f
         key_a, key_b = keypair(310), keypair(311)
         high = make_manifest(f.masters[0], key_a, seq=3)
@@ -474,14 +474,14 @@ class TrustViewOverlayTests(unittest.TestCase):
         )
 
     def test_newer_publisher_manifest_with_the_same_key_keeps_the_list(self) -> None:
-        # codex batch-2 F2: a re-issued publisher manifest naming the same
-        # signing key doesn't invalidate a list that key signed.
+        # A re-issued publisher manifest naming the same signing key doesn't
+        # invalidate a list that key signed.
         f = self.f
         same = make_manifest(f.publisher, f.publisher_signing, seq=2)
         self.assertTrue(self.verify(f.anchor(), f.trusted_key, [same]).ok)
 
     def test_conflict_outcome_is_independent_of_manifest_order(self) -> None:
-        # codex batch-2 F1: the same held set in any order gives one verdict.
+        # The same held set in any order gives one verdict.
         f = self.f
         a = make_manifest(f.masters[0], keypair(301), seq=2)
         b = make_manifest(f.masters[0], keypair(302), seq=2)
@@ -674,8 +674,8 @@ def _der_parts(sig: bytes) -> tuple[int, int]:
 
 class DecompressionBoundTests(unittest.TestCase):
     def test_truncated_zlib_body_is_refused(self) -> None:
-        # Witness for the EOF guard (codex, batch-1 review F1): an intact
-        # recompressed vector parses; the same stream missing its trailer does not.
+        # Witness for the EOF guard: an intact recompressed vector parses; the
+        # same stream missing its trailer does not.
         import json as _json
         import zlib
         vec = _json.loads(

@@ -342,7 +342,7 @@ TEST(DeterministicScheduler, NegativeExpiryClampsAndCannotRegressTime)
     });
 
     // advance(0) fires the already-due timer WITHOUT moving time
-    // backward — the side door Codex's residual named.
+    // backward — the side door a review residual named.
     sched.advance(std::chrono::seconds(0));
     EXPECT_TRUE(fired) << "negative expiry means already due";
     EXPECT_EQ(sched.now(), before) << "virtual time must never regress";

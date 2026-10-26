@@ -595,9 +595,8 @@ ProofEngine::prove(
     // No proofs, cached or new, under a revoked publisher key.
     if (publisher_revoked_)
         throw std::runtime_error(VlCache::kPublisherRevoked);
-    // A revocation can land while a step is being streamed (codex F10, astra
-    // A6, grok): stop before the next step, in cached replay and in a fresh
-    // build alike.
+    // A revocation can land while a step is being streamed: stop before the
+    // next step, in cached replay and in a fresh build alike.
     if (on_step)
     {
         on_step = [self = shared_from_this(),

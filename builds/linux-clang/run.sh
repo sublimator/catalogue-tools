@@ -105,8 +105,8 @@ case "$MODE" in
             --gtest_brief=1
         ;;
     rpc-tsan)
-        # Issue 0077 witness protocol (three steps, mirrors vqt-tsan —
-        # restructured in claude's adversarial review: the previous
+        # Witness protocol (three steps, mirrors vqt-tsan — restructured
+        # in adversarial review: the previous
         # halt_on_error=1 form made a FIRED witness kill the gate under
         # set -e, and a quiet run had no domination control, so it could
         # not distinguish "no race" from a null probe).

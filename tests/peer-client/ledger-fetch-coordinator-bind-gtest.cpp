@@ -1159,7 +1159,7 @@ TEST(LedgerFetchCoordinatorBind, SealArrivingAfterIngressSealIsDropped)
 
 /// 26. Projection accounting cannot be masked by failed initiations.
 ///
-/// THE control Codex asked for, and it fails on the previous pin. The bind
+/// THE control review asked for, and it fails on the previous pin. The bind
 /// initiation failpoint throws BEFORE PeerSet accepts anything, yet the catch
 /// decremented a completion counter anyway. Two failed attempts gave
 /// completed=2, projected=0, and the residue — computed as a saturating
@@ -2050,15 +2050,16 @@ TEST(LedgerFetchCoordinatorPublish, RetainedObligationIsRepairedWhenReceiverReco
 
 /// 43. A row that holds no session RETAINS its obligation. It is not released.
 ///
-/// This control previously asserted the opposite, and Codex was right that the claim
-/// was fiction. `PeerGenerationPin::State` owns a `PeerSessionPtr`, and neither
-/// disconnect nor PeerSet removal nulls it — so `get() == nullptr` means only that
-/// OUR retention was dropped, which nothing in production does while a row is live.
-/// Calling that "the receiver incarnation is gone" dressed a test seam up as a
-/// terminal witness.
+/// This control previously asserted the opposite, and review was right that the
+/// claim was fiction. `PeerGenerationPin::State` owns a `PeerSessionPtr`, and
+/// neither disconnect nor PeerSet removal nulls it — so `get() == nullptr`
+/// means only that OUR retention was dropped, which nothing in production does
+/// while a row is live. Calling that "the receiver incarnation is gone" dressed
+/// a test seam up as a terminal witness.
 ///
-/// A real terminal witness is a generation close, which does not exist until the C11
-/// slice. Until then the honest behaviour is to keep the obligation and say so.
+/// A real terminal witness is a generation close, which does not exist until
+/// the C11 slice. Until then the honest behaviour is to keep the obligation and
+/// say so.
 TEST(LedgerFetchCoordinatorPublish, RowWithoutASessionRetainsTheObligation)
 {
     PublishFixture f{1, /*with_connection=*/true};
@@ -2137,14 +2138,16 @@ TEST(LedgerFetchCoordinatorPublish, RetainedRowSurvivesRealDisconnectAndStillAck
     EXPECT_FALSE(f.coord->accounting_broken());
 }
 
-/// 45. Accepted projection, lost receipt, FENCE, repair tick: the row stays owned
+/// 45. Accepted projection, lost receipt, FENCE, repair tick: the row stays
+/// owned
 ///     and the fence stays pending.
 ///
-/// The exact defect Codex found. `publish_attempts` carried two facts — attempts in
-/// the current round, and whether anything ever reached the receiver — and a repair
-/// round reset it. `begin_publish_on_strand` then read zero as "never published", so
-/// with ingress sealed the FIRST repair tick terminalized the very row being
-/// retained. The obligation was erased by the mechanism meant to preserve it.
+/// The exact defect review found. `publish_attempts` carried two facts —
+/// attempts in the current round, and whether anything ever reached the
+/// receiver — and a repair round reset it. `begin_publish_on_strand` then read
+/// zero as "never published", so with ingress sealed the FIRST repair tick
+/// terminalized the very row being retained. The obligation was erased by the
+/// mechanism meant to preserve it.
 TEST(LedgerFetchCoordinatorBind, RepairUnderAFenceKeepsTheAcceptedObligation)
 {
     CoordFixture f;
@@ -2359,19 +2362,20 @@ TEST(LedgerFetchCoordinatorBind, ObligationHoldsWhileParkedInPublishable)
 
 /// 50. The LAST branch that read `publish_attempts` as history.
 ///
-/// Codex's residual finding on `0924e27`: the null-session branch of
-/// `begin_publish_on_strand` still asked "was anything ever published?" by testing
-/// a per-round counter that a repair round resets to zero. The ingress-seal gate
-/// above it had already been moved onto the sticky fact, and the comments claimed
-/// the sticky fact was the sole historical source — while this branch could still
-/// terminalize a row holding an unresolved accepted projection.
+/// A review residual: the null-session branch of
+/// `begin_publish_on_strand` still asked "was anything ever published?" by
+/// testing a per-round counter that a repair round resets to zero. The
+/// ingress-seal gate above it had already been moved onto the sticky fact, and
+/// the comments claimed the sticky fact was the sole historical source — while
+/// this branch could still terminalize a row holding an unresolved accepted
+/// projection.
 ///
-/// The state is CONSTRUCTED rather than driven, because ordinary sequencing cannot
-/// produce it today: repair checks the pin, then resets the counter, then enters
-/// publication synchronously, so the session cannot die in between. C11's
-/// generation-close/session-invalidation transition is precisely what opens that
-/// window, which is why the branch had to be corrected before that slice rather
-/// than after it inherited the bug.
+/// The state is CONSTRUCTED rather than driven, because ordinary sequencing
+/// cannot produce it today: repair checks the pin, then resets the counter,
+/// then enters publication synchronously, so the session cannot die in between.
+/// C11's generation-close/session-invalidation transition is precisely what
+/// opens that window, which is why the branch had to be corrected before that
+/// slice rather than after it inherited the bug.
 ///
 /// Mutating the predicate back to `row->publish_attempts == 0` must kill this.
 TEST(LedgerFetchCoordinatorPublish, ResetCounterWithNoSessionKeepsTheObligation)

@@ -14,8 +14,7 @@
 //      without popping the row or invoking the handler.
 //
 // The correction treats these as one state machine over six independently lived
-// facts, per `.ai-docs/owned-authority-state-model-lessons.md` ("Operating the
-// model through long agent sessions"):
+// facts:
 //
 //   admission authority + queued logical obligation + active physical resource
 //   lifetime + exactly-once completion authority + successor-pump state +

@@ -163,7 +163,7 @@ public:
     /// loaded (so a superseded publisher key is refused there too).
     /// Not filtered by the current list: an older proof's own primary list
     /// can still name a master the current list dropped, and a verifier's
-    /// rule 1 already filters by that proof's list (codex F8). Peers' manifests
+    /// rule 1 already filters by that proof's list. Peers' manifests
     /// are only stored for masters that were listed, so this stays bounded.
     std::vector<std::vector<uint8_t>>
     held_manifest_bytes() const

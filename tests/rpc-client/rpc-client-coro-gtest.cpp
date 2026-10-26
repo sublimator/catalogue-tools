@@ -342,8 +342,8 @@ TEST(RpcCallbackBridge0077, PublicationFaultReachesExactWaiter)
     }
 }
 
-// Domination control for the TSan cell above (added in claude's
-// adversarial review): a plain unsynchronized read/write pair released
+// Domination control for the TSan cell above (added in adversarial
+// review): a plain unsynchronized read/write pair released
 // from two raw threads through the same std::barrier topology the race
 // cell uses. A -fsanitize=thread build MUST report it; that proves the
 // toolchain catches this defect class in this exact release shape, so a

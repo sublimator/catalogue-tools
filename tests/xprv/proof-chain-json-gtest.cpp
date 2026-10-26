@@ -506,7 +506,7 @@ TEST(ProofChainJson, HexLeafIsRejectedByBinaryConversion)
 }
 
 // Binary→JSON conversion is bounded like the JSON grammar: no inner node at
-// depth 64 or deeper (codex, v7 review).
+// depth 64 or deeper.
 namespace {
 
 std::vector<uint8_t>
@@ -548,9 +548,9 @@ TEST(ProofChainJson, BinaryTrieConversionIsDepthBounded)
         std::runtime_error);
 }
 
-// Witness for the builder's exact re-encode check (codex, v7 review F2): a
-// leaf that decodes but does not re-encode to its own bytes (here, a trailing
-// byte the codec drops) has no JSON form.
+// Witness for the builder's exact re-encode check: a leaf that decodes but does
+// not re-encode to its own bytes (here, a trailing byte the codec drops) has no
+// JSON form.
 TEST(ProofChainJson, LeafCallbackRefusesLeafThatDoesNotReencodeExactly)
 {
     auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();

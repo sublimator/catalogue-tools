@@ -1188,10 +1188,9 @@ TEST(VlCacheShutdown, OrdinaryWaiterTerminatesWhenStopIsRequested)
 // when the revision advances. The late co_get half deliberately claims NO
 // retained-signal role: it returns through co_get_on_strand's immediate
 // active-cached-list path BEFORE revision sampling or registration, so it
-// witnesses the cache-hit short-circuit only (Codex blocker 2026-08-14:
-// the earlier version of this comment falsely claimed
-// retained_fact/retain here). The true retained-completion race control
-// is SynchronousAdmissionCompletion below.
+// witnesses the cache-hit short-circuit only (an earlier version of this
+// comment falsely claimed retained_fact/retain here). The true
+// retained-completion race control is SynchronousAdmissionCompletion below.
 TEST(VlCacheRetainedSignal, CompletionWakesArmedWaiterAndLateGetShortCircuits)
 {
     catl::test::DeterministicScheduler scheduler;

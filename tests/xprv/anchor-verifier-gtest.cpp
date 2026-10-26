@@ -268,8 +268,8 @@ TEST(AnchorVerifier, HeldPublisherRevocationRejectsTheList)
 
 TEST(AnchorVerifier, NewerPublisherManifestWithTheSameKeyKeepsTheList)
 {
-    // codex batch-2 F2: a re-issued publisher manifest naming the same signing
-    // key doesn't invalidate a list that key signed.
+    // A re-issued publisher manifest naming the same signing key doesn't
+    // invalidate a list that key signed.
     auto const [key, cases] = load_overlay_fixture();
     auto const r = verify_with(cases.at("publisher-same-key"), key, true);
     EXPECT_TRUE(r.verified) << r.error;
@@ -277,8 +277,8 @@ TEST(AnchorVerifier, NewerPublisherManifestWithTheSameKeyKeepsTheList)
 
 TEST(AnchorVerifier, ConflictVerdictIsIndependentOfManifestOrder)
 {
-    // codex batch-2 F1: the same held set in different orders gives one
-    // verdict. Validator 0 equivocates at seq 2 and is dropped, so 3/5.
+    // The same held set in different orders gives one verdict. Validator 0
+    // equivocates at seq 2 and is dropped, so 3/5.
     auto const [key, cases] = load_overlay_fixture();
     auto const abh = verify_with(cases.at("conflict-order-abh"), key, true);
     auto const hab = verify_with(cases.at("conflict-order-hab"), key, true);
@@ -291,8 +291,8 @@ TEST(AnchorVerifier, ConflictVerdictIsIndependentOfManifestOrder)
 
 TEST(AnchorVerifier, HeldBytesThatAreNotAManifestGrantNothing)
 {
-    // codex batch-2 F3: held material that doesn't even parse is ignored like
-    // any other invalid candidate; it must not make the anchor fail.
+    // Held material that doesn't even parse is ignored like any other invalid
+    // candidate; it must not make the anchor fail.
     auto const [key, cases] = load_overlay_fixture();
     auto c = cases.at("rotated-signs");
     std::vector<uint8_t> const garbage{0x01, 0x02, 0x03, 'n', 'o', 'p', 'e'};
@@ -304,8 +304,8 @@ TEST(AnchorVerifier, HeldBytesThatAreNotAManifestGrantNothing)
 
 TEST(AnchorVerifier, HeldManifestWithABadSignatureGrantsNothing)
 {
-    // codex batch-2 F5: a rotation whose master signature is broken must not
-    // re-point the master. Skipping held signature checks would make 4/5.
+    // A rotation whose master signature is broken must not re-point the
+    // master. Skipping held signature checks would make 4/5.
     auto const [key, cases] = load_overlay_fixture();
     auto const r =
         verify_with(cases.at("invalid-signature-grants-nothing"), key, true);
@@ -316,8 +316,8 @@ TEST(AnchorVerifier, HeldManifestWithABadSignatureGrantsNothing)
 
 TEST(AnchorVerifier, HighestSequenceWinsNotLastSeen)
 {
-    // codex batch-2 F5: held seq 3 (key A) then seq 2 (key B); A votes. The
-    // highest sequence wins regardless of order, so A counts: 4/5.
+    // Held seq 3 (key A) then seq 2 (key B); A votes. The highest sequence
+    // wins regardless of order, so A counts: 4/5.
     auto const [key, cases] = load_overlay_fixture();
     auto const r = verify_with(cases.at("highest-sequence-not-last"), key, true);
     EXPECT_TRUE(r.verified) << r.error;

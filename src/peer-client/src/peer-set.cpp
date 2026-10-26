@@ -6031,7 +6031,7 @@ PeerSet::deliver_seal_result(
                 // asio::post covers initiation only and has already returned by
                 // the time this body runs on the completion executor, so a
                 // throwing consumer would otherwise escape that executor's
-                // io_context::run(). Codex found this by fixing the auditor's
+                // io_context::run(). This was found by fixing the auditor's
                 // containment search, which had been crossing the lambda
                 // boundary while looking for a lexical try.
                 try

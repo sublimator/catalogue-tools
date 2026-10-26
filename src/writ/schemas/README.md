@@ -45,6 +45,11 @@ Rules:
 - Annotations bind to the statement they precede, exactly like the
   peer-client's `//@@authority` ledger they will eventually replace.
 
+The annotation idiom is not settled. The inline key=value form above is one
+option; a bare id whose metadata lives in an external model, or a bare id
+with an optional inline hint, are others. The choice is made before the
+first `//@@writ` annotation is written.
+
 ## Progressive closure
 
 - An **open fragment** renders paths, islands, uncovered effects, and

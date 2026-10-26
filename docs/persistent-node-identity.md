@@ -18,9 +18,10 @@ export CATL_NODE_SEED="$(xprv gen-node-seed)"
 xprv serve
 ```
 
-For Cloud Run this is wired automatically by `.ai-docs/scripts/deploy.sh`:
-the script creates a Secret Manager secret on first deploy and mounts it as
-`CATL_NODE_SEED` via `--set-secrets`. Subsequent deploys reuse the same secret.
+For Cloud Run, the deploy script (kept outside this repository) wires this
+automatically: it creates a Secret Manager secret on first deploy and mounts
+it as `CATL_NODE_SEED` via `--set-secrets`. Subsequent deploys reuse the same
+secret.
 
 ### Rotation and the `:latest` contract
 
@@ -40,11 +41,8 @@ the script creates a Secret Manager secret on first deploy and mounts it as
 > 4. Read the public-key log on revision N's fresh instance.
 >    - If unchanged → assumption holds.
 >    - If changed → revision N is silently re-resolving `:latest`;
->      our rotation playbook is wrong. Update both this doc and
->      `.ai-docs/scripts/deploy.sh`.
->
-> See the `OPEN DOUBTS` block in `.ai-docs/scripts/deploy.sh` for
-> related scenarios that haven't been validated.
+>      our rotation playbook is wrong. Update both this doc and the
+>      deploy script.
 
 ## 2. `--node-credentials <path>` / `CATL_NODE_CREDENTIALS` (Compute Engine VM / Docker volume)
 

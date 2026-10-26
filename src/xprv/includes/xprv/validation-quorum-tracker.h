@@ -125,7 +125,7 @@ public:
     /// already active. Returning true guarantees subsequent quorum reads use
     /// this list sequence. The arguments are taken by value: the coroutine
     /// starts lazily, so a reference could outlive a temporary argument when
-    /// the awaitable is handed to co_spawn (astra, batch-2).
+    /// the awaitable is handed to co_spawn.
     boost::asio::awaitable<bool>
     co_sync_unl(
         std::vector<catl::vl::Manifest> validators,
@@ -332,7 +332,7 @@ private:
 
     // Hold a newer publisher manifest and republish the snapshot (owner
     // strand, publication_mutex_ held). Independent of the list sequence: a
-    // publisher can re-issue its manifest for an unchanged list (codex F9).
+    // publisher can re-issue its manifest for an unchanged list.
     // clang-format off
     //@@audit-ack unannotated_authority_candidate reason="records a verified publisher manifest in the collector's held set and republishes the read-only snapshot, as refresh_held_manifests_locked does; it grants and revokes nothing itself, and its callers are the list hand-offs and note_publisher_manifest on the owner strand"
     // clang-format on

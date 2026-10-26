@@ -2402,8 +2402,8 @@ TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
     }
 }
 
-// astra A1: the held-manifest snapshot is republished when a list is applied,
-// not only on peer packets, so a list-borne revocation reaches /verify.
+// The held-manifest snapshot is republished when a list is applied, not only
+// on peer packets, so a list-borne revocation reaches /verify.
 TEST(ProofQuorumAt80, ListUpdateRepublishesHeldManifests)
 {
     auto make = [](uint8_t signing, uint32_t sequence, uint8_t tag) {
@@ -2447,12 +2447,11 @@ TEST(ProofQuorumAt80, ListUpdateRepublishesHeldManifests)
     future.get();
 }
 
-// codex/astra batch-2: the publisher manifest of a list the server loaded
-// reaches /verify's held set. The fixture's anchor embeds a list under
-// publisher manifest seq 1. Once the server has loaded a list carrying the
-// fixture's newer publisher manifest, the held set refuses that anchor, as a
-// verifier holding that manifest would, and a stale site's list doesn't undo
-// it.
+// The publisher manifest of a list the server loaded reaches /verify's held
+// set. The fixture's anchor embeds a list under publisher manifest seq 1. Once
+// the server has loaded a list carrying the fixture's newer publisher manifest,
+// the held set refuses that anchor, as a verifier holding that manifest would,
+// and a stale site's list doesn't undo it.
 TEST(ProofQuorumAt80, LoadedPublisherManifestReachesHeldManifests)
 {
     std::ifstream in(
@@ -2507,9 +2506,9 @@ TEST(ProofQuorumAt80, LoadedPublisherManifestReachesHeldManifests)
     future.get();
 }
 
-// astra batch-2: co_sync_unl's awaitable can be handed to co_spawn with
-// temporary arguments; it owns them, so the list and its publisher manifest
-// still land. (Run under ASan to catch a regression to reference parameters.)
+// co_sync_unl's awaitable can be handed to co_spawn with temporary arguments;
+// it owns them, so the list and its publisher manifest still land. (Run under
+// ASan to catch a regression to reference parameters.)
 TEST(ProofQuorumAt80, SpawnedListSyncOwnsTemporaryArguments)
 {
     auto make = [](uint8_t master, uint8_t signing, uint8_t tag) {
@@ -2593,7 +2592,7 @@ held_verdict(
 
 }  // namespace
 
-// codex F9: a publisher can re-issue its manifest for an unchanged list. The
+// A publisher can re-issue its manifest for an unchanged list. The
 // newer manifest reaches the held set through both hand-offs, at an equal and
 // at an older list sequence, without the list itself being re-applied.
 TEST(ProofQuorumAt80, PublisherAdvanceIsHeldWhateverTheListSequence)

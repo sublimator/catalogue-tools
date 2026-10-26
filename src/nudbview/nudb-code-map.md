@@ -588,7 +588,6 @@ Located in `src/nudbview/nudb-util/`
 ### Current Subcommands
 
 **`count-keys`** - Fast key counting using mmap
-- See `.ai-docs/nudb-util-fast-key-scanner.md` for details
 - Uses mmap to scan .dat file without loading values
 
 ### Structure
@@ -774,5 +773,3 @@ void write(File& f, my_header const& mh, error_code& ec) {
 ## References
 
 - **Original NuDB**: https://github.com/vinniefalco/nudb
-- **Design document**: `.ai-docs/nudb-slice-store-design.md`
-- **Scanner implementation**: `.ai-docs/nudb-util-fast-key-scanner.md`

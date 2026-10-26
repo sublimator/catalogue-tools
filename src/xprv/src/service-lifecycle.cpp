@@ -733,7 +733,7 @@ ServiceLifecycle::try_finish_shutdown_on_control()
         // destruction; their later common-fate disposal is why T0162 must
         // never be labeled as census drain publication. A future redesign
         // must prove child cancellation totality and keep executor release
-        // behind received drain (see .ai-docs issue 0073).
+        // behind received drain.
         commit_terminal_on_control(ServiceTerminalOutcome::forced);
         return;
     }

@@ -757,8 +757,8 @@ contains(
 
 }  // namespace
 
-// astra A1: a revocation carried by a newer list must reach the snapshot that
-// local verifiers use, replacing an older peer rotation.
+// A revocation carried by a newer list must reach the snapshot that local
+// verifiers use, replacing an older peer rotation.
 TEST(ValidationCollector, ListRevocationReplacesAnOlderPeerRotationInTheSnapshot)
 {
     auto const protocol = test_protocol();
@@ -777,8 +777,8 @@ TEST(ValidationCollector, ListRevocationReplacesAnOlderPeerRotationInTheSnapshot
     EXPECT_FALSE(contains(held, rotation.raw));
 }
 
-// codex F6/F7: the evidence is one bounded pair that still proves the conflict
-// after the list moves the validator to a higher sequence.
+// The evidence is one bounded pair that still proves the conflict after the
+// list moves the validator to a higher sequence.
 TEST(ValidationCollector, EquivocationEvidenceIsBoundedAndSurvivesListRefresh)
 {
     auto const protocol = test_protocol();
@@ -800,9 +800,8 @@ TEST(ValidationCollector, EquivocationEvidenceIsBoundedAndSurvivesListRefresh)
         << "the pair still proves the conflict after the list moved on";
 }
 
-
-// astra batch-2: a validator re-issuing its own current signing key at a
-// higher sequence is accepted (it is not a collision), so the snapshot stays
+// A validator re-issuing its own current signing key at a higher sequence is
+// accepted (it is not a collision), so the snapshot stays
 // current. Another validator's key is still refused.
 TEST(ValidationCollector, SameKeyReissueAdvancesButForeignKeyIsRefused)
 {
@@ -827,10 +826,9 @@ TEST(ValidationCollector, SameKeyReissueAdvancesButForeignKeyIsRefused)
     EXPECT_FALSE(contains(collector.held_manifest_bytes(), stolen.raw));
 }
 
-
-// codex F8: a revocation the server holds for a master must stay in the
-// snapshot after a newer list drops that master, because an older proof's own
-// primary list can still name it.
+// A revocation the server holds for a master must stay in the snapshot after a
+// newer list drops that master, because an older proof's own primary list can
+// still name it.
 TEST(ValidationCollector, HeldRevocationSurvivesTheMasterLeavingTheList)
 {
     auto const protocol = test_protocol();
@@ -847,9 +845,8 @@ TEST(ValidationCollector, HeldRevocationSurvivesTheMasterLeavingTheList)
     EXPECT_TRUE(contains(collector.held_manifest_bytes(), revocation.raw));
 }
 
-
-// astra batch-2: a revocation that arrived in a list must outlive the master
-// leaving the list, and an older peer rotation must not replace it.
+// A revocation that arrived in a list must outlive the master leaving the
+// list, and an older peer rotation must not replace it.
 TEST(ValidationCollector, ListBorneRevocationSurvivesTheMasterLeavingTheList)
 {
     auto const protocol = test_protocol();
@@ -870,8 +867,8 @@ TEST(ValidationCollector, ListBorneRevocationSurvivesTheMasterLeavingTheList)
     EXPECT_FALSE(contains(held, rotation.raw));
 }
 
-// codex/astra batch-2: the publisher manifest of a loaded list is held, it
-// outlives later lists, and a stale site's older one doesn't replace it.
+// The publisher manifest of a loaded list is held, it outlives later lists,
+// and a stale site's older one doesn't replace it.
 TEST(ValidationCollector, NewestPublisherManifestIsHeldAcrossLists)
 {
     auto const protocol = test_protocol();

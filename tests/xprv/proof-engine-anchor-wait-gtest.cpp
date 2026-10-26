@@ -471,10 +471,9 @@ TEST(ProofEnginePublisherRevocation, ProveRefusesCachedAndNewProofs)
     stopped.get();
 }
 
-// codex F10, astra A6, grok: a revocation that lands while a cached proof is
-// being replayed stops the replay before the next step, and the cached proof
-// isn't returned. One step pins the check before return; three pin the check
-// before each step.
+// A revocation that lands while a cached proof is being replayed stops the
+// replay before the next step, and the cached proof isn't returned. One step
+// pins the check before return; three pin the check before each step.
 TEST(ProofEnginePublisherRevocation, RevocationDuringCachedReplayStopsTheReplay)
 {
     for (std::size_t steps : {1u, 3u})

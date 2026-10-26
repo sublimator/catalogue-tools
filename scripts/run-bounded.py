@@ -1,4 +1,7 @@
-#!/usr/bin/env -S .ai-docs/.venv/bin/python
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# ///
 """Run one command with bounded time and bounded console output.
 
 The complete combined output is written to an artifact.  The console receives

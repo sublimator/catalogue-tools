@@ -46,8 +46,4 @@ cannot drift apart; shape-provisional until the first checker.
 ## Sources of authority
 
 - `essays/on-the-coroutine-tree` — the constitution.
-- `.ai-docs/peer-client/design/owned-authority-state-model-lessons.md` — the
-  modeling lessons this code must not regress.
-- `.ai-docs/peer-client/design/asio-owned-async-cheatsheet.md` and
-  `asio-macos-linux-differences.md` — portable-contract ledger.
 - Second consumer required before any abstraction here is considered proven.

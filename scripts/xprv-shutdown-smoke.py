@@ -1,4 +1,7 @@
-#!/usr/bin/env -S .ai-docs/.venv/bin/python
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# ///
 """Measure xprv shutdown at explicit live process boundaries.
 
 This is intentionally separate from the broad pytest serve suite.  It owns one
