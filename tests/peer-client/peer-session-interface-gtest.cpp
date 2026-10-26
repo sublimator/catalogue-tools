@@ -6470,19 +6470,11 @@ TEST(PeerSessionInterface, HeaderLeaderCancellationDoesNotAbandonFollower)
     auto primary = std::make_shared<FakePeerSession>(
         io, "cancelled-header-leader:1", true, 6000, 5900, 6100);
     bool response_delivered = false;
+    catl::test::Gate cancel_gate(io);
+    Callback<LedgerHeaderResult> held_response;
     primary->set_get_ledger_header_handler(
-        [&io, &response_delivered](
-            uint32_t, Callback<LedgerHeaderResult> callback) {
-            auto timer = std::make_shared<asio::steady_timer>(io, 100ms);
-            timer->async_wait(
-                [timer, &response_delivered, callback = std::move(callback)](
-                    boost::system::error_code ec) mutable {
-                    if (!ec)
-                    {
-                        response_delivered = true;
-                        callback(Error::Success, LedgerHeaderResult{});
-                    }
-                });
+        [&held_response](uint32_t, Callback<LedgerHeaderResult> callback) {
+            held_response = std::move(callback);
         });
     auto follower_peer = std::make_shared<FakePeerSession>(
         io, "unused-header-joiner:1", true, 6000, 5900, 6100);
@@ -6510,12 +6502,8 @@ TEST(PeerSessionInterface, HeaderLeaderCancellationDoesNotAbandonFollower)
                         asio::deferred),
                     asio::co_spawn(
                         ex,
-                        []() -> asio::awaitable<void> {
-                            auto ex = co_await asio::this_coro::executor;
-                            asio::steady_timer timer(ex, 30ms);
-                            boost::system::error_code ec;
-                            co_await timer.async_wait(
-                                asio::redirect_error(asio::use_awaitable, ec));
+                        [&cancel_gate]() -> asio::awaitable<void> {
+                            co_await cancel_gate.async_wait(asio::use_awaitable);
                         },
                         asio::deferred))
                     .async_wait(
@@ -6543,7 +6531,7 @@ TEST(PeerSessionInterface, HeaderLeaderCancellationDoesNotAbandonFollower)
         asio::detached);
 
     // Drive the leader until its request and shared operation are both
-    // suspended, then attach the follower before the cancellation timer fires.
+    // suspended, then attach the follower before opening the cancellation gate.
     io.poll();
     io.restart();
 
@@ -6567,6 +6555,15 @@ TEST(PeerSessionInterface, HeaderLeaderCancellationDoesNotAbandonFollower)
     io.restart();
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
 
+    ASSERT_TRUE(held_response);
+    cancel_gate.open();
+    io.poll();
+    io.restart();
+    ASSERT_TRUE(leader_done);
+    ASSERT_TRUE(leader_cancelled);
+    ASSERT_FALSE(follower_done);
+    response_delivered = true;
+    held_response(Error::Success, LedgerHeaderResult{});
     io.run();
 
     EXPECT_TRUE(leader_done);
