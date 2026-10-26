@@ -689,7 +689,20 @@ locate_index_entries(
         auto const spill = b.spill();
         if (!spill)
             break;
-        blk.assign(ddat + spill, ddat + spill + kh.block_size);
+        // A spill record is [48-bit zero][16-bit size][bucket], and spill()
+        // names the bucket. Copy only its serialized bytes, which must lie
+        // inside the data file, into a zeroed block: the record is not padded
+        // to the block size.
+        auto const size_field = field<std::uint16_t>::size;
+        if (spill < size_field || spill > df.size())
+            throw std::runtime_error("spill offset outside the data file");
+        std::uint16_t size = 0;
+        istream ss{ddat + spill - size_field, size_field};
+        read<std::uint16_t>(ss, size);
+        if (size > kh.block_size || size > df.size() - spill)
+            throw std::runtime_error("spill record outside the data file");
+        blk.assign(kh.block_size, 0);
+        std::memcpy(blk.data(), ddat + spill, size);
         b = bucket{kh.block_size, blk.data()};
         spilled = true;
     }
