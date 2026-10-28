@@ -390,7 +390,7 @@ footer a{display:inline-block;padding:8px 4px;margin:-8px -4px}
 <line x1="0" y1="100%" x2="11%" y2="89%" stroke="url(#bl)" stroke-width="1.4" filter="url(#glo)"/>
 <line x1="100%" y1="100%" x2="86%" y2="86%" stroke="url(#br)" stroke-width="1.4" filter="url(#glo)"/>
 </svg>
-<a class="gh" href="https://github.com/sublimator/catalogue-tools/blob/main/src/xprv/xls/spec-draft.md" target="_blank" rel="noopener" style="position:fixed;top:1rem;right:1rem;z-index:5;opacity:.34;transition:opacity .2s,transform .2s" onmouseover="this.style.opacity='.8';this.style.transform='translateY(-1px)'" onmouseout="this.style.opacity='.34';this.style.transform='translateY(0)'"><svg width="28" height="28" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
+<a class="gh" href="https://github.com/sublimator/catalogue-tools/blob/main/src/xprv/xls/spec-draft.md" target="_blank" rel="noopener" aria-label="the xprv spec on GitHub" style="position:fixed;top:1rem;right:1rem;z-index:5;opacity:.34;transition:opacity .2s,transform .2s" onmouseover="this.style.opacity='.8';this.style.transform='translateY(-1px)'" onmouseout="this.style.opacity='.34';this.style.transform='translateY(0)'"><svg width="28" height="28" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
 <canvas id="globe"></canvas>
 <main class="hero">
   <div class="title-wrap"><h1>xprv.it: Xahau and XRPL transaction proofs</h1></div>
@@ -454,11 +454,27 @@ function glyphInk(font, ch, size) {
   return min > max ? null : {left: min - size, right: max + 1 - size};
 }
 
+// The fit is decoration. If it can't measure (a browser may refuse canvas
+// pixel reads), the heading falls back to its CSS sizing, and nothing stops
+// the rest of the page from starting.
 function fitCaption() {
   if (!caption || !captionField) return;
+  let fitted = false;
+  try {
+    fitted = fitCaptionToField();
+  } catch (e) {
+    fitted = false;
+  }
+  if (fitted === false)
+    caption.style.fontSize = caption.style.marginLeft = caption.style.marginRight = '';
+}
+
+// Returns true when fitted, false when it measured nothing usable, and
+// undefined when there is nothing to fit yet (zero width): styles are kept.
+function fitCaptionToField() {
   const target = captionField.getBoundingClientRect().width;
   const text = caption.textContent;
-  if (!target || !text) return;
+  if (!target || !text) return undefined;
   const probe = 100;
   caption.style.fontSize = `${probe}px`;
   caption.style.marginLeft = caption.style.marginRight = '0px';
@@ -467,7 +483,7 @@ function fitCaption() {
   const font = `${style.fontStyle} ${style.fontWeight} ${probe}px ${style.fontFamily}`;
   const first = glyphInk(font, text[0], probe);
   const last = glyphInk(font, text[text.length - 1], probe);
-  if (!first || !last) return;
+  if (!first || !last) return false;
 
   // Glyph origins of the first and last characters, from their own boxes,
   // so trailing letter-spacing can't skew the result.
@@ -485,12 +501,13 @@ function fitCaption() {
   const inkLeft = charLeft(nodes[0], 0) + first.left;
   const inkRight = charLeft(tail, tail.length - 1) + last.right;
   const ink = inkRight - inkLeft;
-  if (!(ink > 0)) return;
+  if (!(ink > 0)) return false;
 
   const k = target / ink;
   caption.style.fontSize = `${probe * k}px`;
   caption.style.marginLeft = `${-(inkLeft - box.left) * k}px`;
   caption.style.marginRight = `${-(box.right - inkRight) * k}px`;
+  return true;
 }
 
 fitCaption();
@@ -500,10 +517,12 @@ if (window.ResizeObserver && captionField) new ResizeObserver(fitCaption).observ
 // ── Globe JSON background ─────────────────────────────────────
 let rotation = 0;
 let charGrid = []; // [{ch, isKey}] per line
+let globeDirty = true; // content or size changed since the last draw
 
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
+  globeDirty = true;
 }
 resize();
 window.addEventListener('resize', resize);
@@ -540,6 +559,7 @@ let globeIntensity = 1;
 
 function populateGlobe(jsonStr, intensity = 1) {
   globeIntensity = intensity;
+  globeDirty = true;
   const lines = jsonStr.split('\n').filter(l => l.trim());
   charGrid = lines.map(line => {
     const chars = [];
@@ -585,16 +605,28 @@ function setGlobeColour(rgb, alpha) {
 }
 
 // Motion runs on time at the 60 Hz pace it was designed at (one step per
-// 1/60 s), and the globe redraws on every frame the display offers.
+// 1/60 s), and the globe redraws on every frame the display offers. With
+// prefers-reduced-motion it holds still: no rotation, no pointer follow, and
+// a redraw only when its content or size changes, or the preference does.
 let lastGlobeFrame = 0;
+const reducedMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+if (reducedMotion) {
+  const onMotionPreference = () => { globeDirty = true; lastGlobeFrame = 0; };
+  if (reducedMotion.addEventListener) reducedMotion.addEventListener('change', onMotionPreference);
+  else if (reducedMotion.addListener) reducedMotion.addListener(onMotionPreference);
+}
 
 function drawGlobe(now) {
   requestAnimationFrame(drawGlobe);
   now = now || performance.now();
+  const still = !!(reducedMotion && reducedMotion.matches);
   // A frame's timestamp is when the frame began, which can be a little
   // before the previous call's own clock read; never step backwards.
-  const step = lastGlobeFrame ? Math.max(0, Math.min(now - lastGlobeFrame, 100)) / (1000 / 60) : 1;
+  const step = still ? 0
+    : lastGlobeFrame ? Math.max(0, Math.min(now - lastGlobeFrame, 100)) / (1000 / 60) : 1;
   lastGlobeFrame = now;
+  if (still && !globeDirty) return;
+  globeDirty = false;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!charGrid.length) return;
