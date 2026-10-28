@@ -1436,7 +1436,7 @@ function finishProve(json, hash) {
   lastFilename = filename;
 
   statusEl.className = 'status done';
-  const binFilename = filename.replace('.json', '.xprv.bin');
+  const binFilename = filename.replace('.xprv.json', '.xprv.bin');
   statusEl.innerHTML = `<a class="act act-primary" href="${url}" download="${filename}" title="${filename}">json</a><a class="act" href="/prove?tx=${hash}&format=bin" download="${binFilename}" title="${binFilename}">bin</a><button type="button" class="act" onclick="copyProof()" title="copy JSON">copy</button>`;
 }
 
