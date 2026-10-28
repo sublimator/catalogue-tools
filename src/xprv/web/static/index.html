@@ -44,15 +44,10 @@
   /* type: one sans, one mono */
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-  --title-font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  --title-size:clamp(2.9rem,7vw,4.8rem);
-  --title-weight:280;
-  --title-spacing:.18em;
-  --title-indent:.18em;
-  --input-font:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace;
+  --input-font:var(--mono);
 }
 html{background:var(--bg)}
-html,body{min-height:100vh;height:100%;overflow:hidden;color:var(--text);
+html,body{min-height:100vh;min-height:100dvh;height:100%;overflow:hidden;color:var(--text);
 font-family:var(--sans);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 
 canvas#globe{position:fixed;inset:0;z-index:0;pointer-events:none}
@@ -177,13 +172,14 @@ footer{
 }
 footer a{color:var(--text-2);text-decoration:none}
 footer a:hover{color:var(--ice)}
-/* caption above the field: the domain read aloud; out of flow so the field
-   stays at the exact centre. The slash is lit like the corner beams. */
-/* "prove x/it" spans exactly the field's width, ink edge to ink edge.
-   Ink width = 10 advances + 9 trackings - bearing(p) - bearing(t)
-             = (10*.6021 + 9*.12 - .0928 - .0981)em = 6.9101em  (Menlo, as
-   Chrome resolves --mono on macOS), so font-size = pair width / 6.9101 and
-   the negative side margins trim the bearings and the trailing tracking. */
+/* caption above the field: the domain read aloud. The slash is lit like the
+   corner beams. "prove x/it" spans exactly the field's width, ink edge to ink
+   edge: fitCaption() measures the face the browser actually resolved. These
+   values are the fallback before it runs, worked out for Menlo:
+   ink width = 10 advances + 9 trackings - bearing(p) - bearing(t)
+             = (10*.6021 + 9*.12 - .0928 - .0981)em = 6.9101em, so
+   font-size = pair width / 6.9101, and the negative side margins trim the
+   bearings and the trailing tracking. */
 .caption{
   align-self:center;
   width:max-content;
@@ -211,59 +207,6 @@ input:focus-visible{outline:none}
 background:var(--surface);color:var(--ice);border:1px solid var(--line-strong);border-radius:8px;
 padding:.45rem 1rem;font-family:var(--mono);font-size:12px;opacity:1;transition:opacity .3s}
 
-body.variant-stack{}
-body.variant-below{
-  --title-font:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace;
-  --title-size:clamp(2rem,4.8vw,3.1rem);
-  --title-weight:400;
-  --title-spacing:.22em;
-  --title-indent:.22em;
-}
-body.variant-below .hero{gap:.55rem}
-body.variant-below .title-wrap{order:2}
-body.variant-below .search-shell{order:1}
-body.variant-below h1{opacity:.9}
-
-body.variant-mono{
-  --title-font:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace;
-  --title-size:clamp(2.65rem,6.1vw,4.15rem);
-  --title-weight:400;
-  --title-spacing:.14em;
-  --title-indent:.14em;
-}
-body.variant-mono .hero{gap:.65rem}
-body.variant-mono .search-shell{max-width:700px}
-body.variant-mono input::placeholder{letter-spacing:.04em}
-
-body.variant-side{
-  --title-font:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
-  --title-size:clamp(2.7rem,5.8vw,4.6rem);
-  --title-weight:400;
-  --title-spacing:.06em;
-  --title-indent:.06em;
-}
-body.variant-side .hero{
-  width:min(980px,94vw);
-  flex-direction:row;
-  flex-wrap:wrap;
-  justify-content:center;
-  align-items:flex-end;
-  gap:1.25rem 1.5rem;
-}
-body.variant-side .title-wrap{
-  width:auto;
-  flex:0 0 auto;
-  justify-content:flex-end;
-}
-body.variant-side .search-shell{
-  flex:1 1 520px;
-  max-width:none;
-}
-body.variant-side #details,
-body.variant-side .status{
-  width:100%;
-}
-
 #details{margin-top:.1rem;opacity:0;transform:translateY(4px);transition:opacity .35s,transform .35s;
 font-family:var(--mono);font-size:12px;color:var(--text-2);text-shadow:0 0 6px var(--bg);
 display:flex;align-items:center;gap:0;flex-wrap:wrap;justify-content:center;
@@ -274,35 +217,13 @@ backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);max-width:100%}
 @keyframes details-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 #details .sep{color:var(--faint);margin:0 .7rem}
 @media(max-width:500px){
-  #details{flex-direction:column;gap:.2rem;padding:.55rem 1rem;border-radius:14px}
+  /* two rows on a phone, not a four-row column over the scrolling globe */
+  #details{flex-wrap:wrap;column-gap:1.1rem;row-gap:0;padding:.15rem .9rem;border-radius:14px;background:var(--scrim)}
   #details .sep{display:none}
   input{height:3.5rem;font-size:16px;padding:0 4.2rem 0 1rem}
   input::placeholder{font-size:min(14px,3.6vw)}
   input:not(:placeholder-shown){padding-right:3.4rem}
   .paste{padding:0 .65rem}
-  #variant-dock{
-    right:.75rem;
-    bottom:.8rem;
-    padding:.3rem;
-    gap:.28rem;
-  }
-  #variant-dock button{
-    padding:.42rem .6rem;
-    font-size:.6rem;
-  }
-}
-@media(max-width:900px){
-  body.variant-side .hero{
-    width:min(760px,92vw);
-    flex-direction:column;
-    align-items:center;
-    gap:.8rem;
-  }
-  body.variant-side .title-wrap,
-  body.variant-side .search-shell{
-    width:100%;
-    flex:auto;
-  }
 }
 #details a{color:var(--text);text-decoration:none;cursor:pointer}
 #details a:hover{color:var(--ice)}
@@ -311,55 +232,12 @@ backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);max-width:100%}
 #details .icon{cursor:pointer;opacity:.5;margin-left:.3rem;font-size:.9em}
 #details .icon:hover{opacity:1}
 
-#variant-dock{
-  position:fixed;
-  right:1rem;
-  bottom:1rem;
-  z-index:7;
-  display:none;
-  gap:.35rem;
-  padding:.35rem;
-  border:1px solid rgba(255,255,255,.09);
-  border-radius:999px;
-  background:rgba(0,0,0,.62);
-  backdrop-filter:blur(10px);
-  box-shadow:0 18px 50px rgba(0,0,0,.4);
-}
-#variant-dock button{
-  appearance:none;
-  border:1px solid rgba(255,255,255,.08);
-  background:rgba(255,255,255,.02);
-  color:#7f8982;
-  font:600 .64rem/1 ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;
-  letter-spacing:.08em;
-  text-transform:uppercase;
-  border-radius:999px;
-  padding:.48rem .7rem;
-  cursor:pointer;
-  transition:background .2s,color .2s,border-color .2s,transform .2s;
-}
-#variant-dock button:hover{
-  color:#dce5de;
-  border-color:rgba(255,255,255,.18);
-  background:rgba(255,255,255,.06);
-  transform:translateY(-1px);
-}
-#variant-dock button.active{
-  color:#d9f2e3;
-  border-color:rgba(154,240,203,.22);
-  background:rgba(154,240,203,.1);
-}
-#variant-dock button.font-cycle{
-  min-width:8rem;
-  text-align:center;
-}
-
 #modal{display:none;position:fixed;inset:0;z-index:10;
 background:var(--scrim);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
 align-items:center;justify-content:center;padding:2rem}
 #modal.show{display:flex}
 #modal-inner{background:var(--surface);border:1px solid var(--line);border-radius:14px;
-width:min(1000px,92vw);height:85vh;display:flex;flex-direction:column;
+width:min(1000px,92vw);height:85vh;height:85dvh;display:flex;flex-direction:column;
 font-family:var(--mono);font-size:.8rem;line-height:1.6;color:var(--text-2);
 position:relative;overflow:hidden;
 box-shadow:0 40px 120px rgba(0,0,0,.5),inset 0 1px 0 rgba(var(--ice-rgb),.04)}
@@ -471,7 +349,6 @@ border-radius:8px;cursor:pointer;font:inherit;font-size:.75rem;white-space:nowra
   .step-block{padding-left:.8rem}
   .step-block.map{margin-left:.35rem}
   .step-detail .leaf-data{padding:.4rem .6rem}
-  #details{padding:.15rem 1rem}
 }
 /* every tap target at least 28px; 44px wherever the pointer is a finger */
 .act,#details a,#details .steps{display:inline-flex;align-items:center;min-height:28px}
@@ -488,7 +365,8 @@ footer a{display:inline-block;padding:8px 4px;margin:-8px -4px}
 }
 /* phone landscape: lift the group so the done state clears the footer */
 @media(max-height:500px){
-  body{justify-content:flex-start;padding-top:max(1rem,calc(50vh - 7.5rem))}
+  body{justify-content:flex-start;padding-top:max(1rem,calc(50vh - 7.5rem));
+  padding-top:max(1rem,calc(50dvh - 7.5rem))}
   .below{padding-top:.6rem;gap:.5rem}
   #details{padding-top:0;padding-bottom:0}
   #modal{padding:.5rem}
@@ -531,187 +409,97 @@ footer a{display:inline-block;padding:8px 4px;margin:-8px -4px}
 </main>
 <div id="modal"><div id="modal-inner"><button id="modal-close" aria-label="close"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button><div id="modal-header"></div><div id="modal-body"></div><div id="modal-footer"></div></div></div>
 <footer id="footer"><a href="/verify-xprv.py">verify-xprv.py</a> · standalone verifier script</footer>
-<div id="variant-dock" aria-label="layout variants">
-  <button type="button" data-variant="stack">stack</button>
-  <button type="button" data-variant="below">below</button>
-  <button type="button" data-variant="mono">mono</button>
-  <button type="button" data-variant="side">side</button>
-  <button type="button" id="font-cycle" class="font-cycle">font:sans</button>
-</div>
 <script>
 const tx = document.getElementById('tx');
 const statusEl = document.getElementById('status');
 const details = document.getElementById('details');
 const canvas = document.getElementById('globe');
 const ctx = canvas.getContext('2d');
-const variantDock = document.getElementById('variant-dock');
-const fontCycleBtn = document.getElementById('font-cycle');
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 const HEX_ONLY = /^[0-9a-fA-F]*$/;
 let controller = null;
 let mouseX = 0.5, mouseY = 0.5;
 
+// ── Heading fit ───────────────────────────────────────────────
+// "prove x/it" spans the field exactly, ink edge to ink edge. The monospace
+// face differs by platform (SF Mono, Menlo, Consolas, DejaVu Sans Mono...),
+// so measure the one the browser resolved: lay the caption out at a probe
+// size, find where the first and last glyphs' ink starts and ends, then scale
+// so that ink width equals the field width, and trim the overhang with
+// negative margins. The CSS fallback is the same fit, worked out for Menlo.
+const caption = document.querySelector('.caption');
+const captionField = document.querySelector('.search-shell');
+
+// Where a glyph's ink starts and ends, relative to its origin, found by
+// drawing it and scanning the pixels. Canvas actualBoundingBox metrics would
+// be simpler, but WebKit reports them wider than the ink.
+function glyphInk(font, ch, size) {
+  const c = document.createElement('canvas');
+  c.width = size * 3;
+  c.height = size * 2;
+  const g = c.getContext('2d', {willReadFrequently: true});
+  g.font = font;
+  g.textBaseline = 'middle';
+  g.fillText(ch, size, size);
+  const {data} = g.getImageData(0, 0, c.width, c.height);
+  let min = Infinity, max = -Infinity;
+  for (let y = 0; y < c.height; y++) {
+    for (let x = 0; x < c.width; x++) {
+      if (data[(y * c.width + x) * 4 + 3] >= 128) {
+        if (x < min) min = x;
+        if (x > max) max = x;
+      }
+    }
+  }
+  return min > max ? null : {left: min - size, right: max + 1 - size};
+}
+
+function fitCaption() {
+  if (!caption || !captionField) return;
+  const target = captionField.getBoundingClientRect().width;
+  const text = caption.textContent;
+  if (!target || !text) return;
+  const probe = 100;
+  caption.style.fontSize = `${probe}px`;
+  caption.style.marginLeft = caption.style.marginRight = '0px';
+
+  const style = getComputedStyle(caption);
+  const font = `${style.fontStyle} ${style.fontWeight} ${probe}px ${style.fontFamily}`;
+  const first = glyphInk(font, text[0], probe);
+  const last = glyphInk(font, text[text.length - 1], probe);
+  if (!first || !last) return;
+
+  // Glyph origins of the first and last characters, from their own boxes,
+  // so trailing letter-spacing can't skew the result.
+  const nodes = [];
+  const walker = document.createTreeWalker(caption, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) if (walker.currentNode.length) nodes.push(walker.currentNode);
+  const charLeft = (node, i) => {
+    const r = document.createRange();
+    r.setStart(node, i);
+    r.setEnd(node, i + 1);
+    return r.getBoundingClientRect().left;
+  };
+  const tail = nodes[nodes.length - 1];
+  const box = caption.getBoundingClientRect();
+  const inkLeft = charLeft(nodes[0], 0) + first.left;
+  const inkRight = charLeft(tail, tail.length - 1) + last.right;
+  const ink = inkRight - inkLeft;
+  if (!(ink > 0)) return;
+
+  const k = target / ink;
+  caption.style.fontSize = `${probe * k}px`;
+  caption.style.marginLeft = `${-(inkLeft - box.left) * k}px`;
+  caption.style.marginRight = `${-(box.right - inkRight) * k}px`;
+}
+
+fitCaption();
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitCaption);
+if (window.ResizeObserver && captionField) new ResizeObserver(fitCaption).observe(captionField);
+
 // ── Globe JSON background ─────────────────────────────────────
 let rotation = 0;
 let charGrid = []; // [{ch, isKey}] per line
-
-const FONT_PRESETS = [
-  {
-    id: 'sans',
-    label: 'sans',
-    titleFont: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
-    titleSize: 'clamp(2.9rem,7vw,4.8rem)',
-    titleWeight: '280',
-    titleSpacing: '.18em',
-    titleIndent: '.18em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'grotesk',
-    label: 'grotesk',
-    titleFont: '"Avenir Next","Helvetica Neue",Helvetica,Arial,sans-serif',
-    titleSize: 'clamp(2.8rem,6.8vw,4.6rem)',
-    titleWeight: '300',
-    titleSpacing: '.12em',
-    titleIndent: '.12em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'round',
-    label: 'round',
-    titleFont: '"SF Pro Rounded","Avenir Next Rounded","Arial Rounded MT Bold","Trebuchet MS",sans-serif',
-    titleSize: 'clamp(2.85rem,6.9vw,4.75rem)',
-    titleWeight: '400',
-    titleSpacing: '.08em',
-    titleIndent: '.08em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'human',
-    label: 'human',
-    titleFont: 'Optima,"Segoe UI",Candara,sans-serif',
-    titleSize: 'clamp(2.95rem,6.9vw,4.9rem)',
-    titleWeight: '400',
-    titleSpacing: '.11em',
-    titleIndent: '.11em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'mono',
-    label: 'mono',
-    titleFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace',
-    titleSize: 'clamp(2.6rem,6vw,4.1rem)',
-    titleWeight: '400',
-    titleSpacing: '.14em',
-    titleIndent: '.14em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'term',
-    label: 'term',
-    titleFont: '"Andale Mono","Lucida Console","Courier New",monospace',
-    titleSize: 'clamp(2.5rem,5.8vw,3.95rem)',
-    titleWeight: '400',
-    titleSpacing: '.1em',
-    titleIndent: '.1em',
-    inputFont: '"Andale Mono","Lucida Console","Courier New",monospace'
-  },
-  {
-    id: 'serif',
-    label: 'serif',
-    titleFont: '"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif',
-    titleSize: 'clamp(3rem,6.7vw,5rem)',
-    titleWeight: '400',
-    titleSpacing: '.05em',
-    titleIndent: '.05em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'book',
-    label: 'book',
-    titleFont: '"Baskerville","Times New Roman",serif',
-    titleSize: 'clamp(3.05rem,7vw,5.05rem)',
-    titleWeight: '400',
-    titleSpacing: '.07em',
-    titleIndent: '.07em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'didot',
-    label: 'didot',
-    titleFont: 'Didot,"Bodoni 72","Times New Roman",serif',
-    titleSize: 'clamp(3.2rem,7.4vw,5.4rem)',
-    titleWeight: '400',
-    titleSpacing: '.03em',
-    titleIndent: '.03em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'narrow',
-    label: 'narrow',
-    titleFont: '"Arial Narrow","Aptos Narrow","Helvetica Neue",Arial,sans-serif',
-    titleSize: 'clamp(3.05rem,7vw,5.05rem)',
-    titleWeight: '300',
-    titleSpacing: '.14em',
-    titleIndent: '.14em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  },
-  {
-    id: 'wide',
-    label: 'wide',
-    titleFont: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
-    titleSize: 'clamp(2.85rem,6.9vw,4.7rem)',
-    titleWeight: '260',
-    titleSpacing: '.28em',
-    titleIndent: '.28em',
-    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
-  }
-];
-let fontPresetIndex = 0;
-
-function applyFontPreset(id) {
-  const index = FONT_PRESETS.findIndex(p => p.id === id);
-  const preset = FONT_PRESETS[index >= 0 ? index : 0];
-  fontPresetIndex = index >= 0 ? index : 0;
-  document.body.style.setProperty('--title-font', preset.titleFont);
-  document.body.style.setProperty('--title-size', preset.titleSize);
-  document.body.style.setProperty('--title-weight', preset.titleWeight);
-  document.body.style.setProperty('--title-spacing', preset.titleSpacing);
-  document.body.style.setProperty('--title-indent', preset.titleIndent);
-  document.body.style.setProperty('--input-font', preset.inputFont);
-  fontCycleBtn.textContent = `font:${preset.label}`;
-  try { localStorage.setItem('xprv-font-preset', preset.id); } catch (e) {}
-}
-
-function applyVariant(name) {
-  const variants = ['stack', 'below', 'mono', 'side'];
-  const chosen = variants.includes(name) ? name : 'stack';
-  document.body.classList.remove(
-    'variant-stack',
-    'variant-below',
-    'variant-mono',
-    'variant-side'
-  );
-  document.body.classList.add(`variant-${chosen}`);
-  variantDock.querySelectorAll('button').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.variant === chosen);
-  });
-  try { localStorage.setItem('xprv-landing-variant', chosen); } catch (e) {}
-}
-
-variantDock.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-variant]');
-  if (!btn) return;
-  applyVariant(btn.dataset.variant);
-});
-
-fontCycleBtn.addEventListener('click', () => {
-  const next = FONT_PRESETS[(fontPresetIndex + 1) % FONT_PRESETS.length];
-  applyFontPreset(next.id);
-});
-
-applyVariant('stack');
-applyFontPreset('mono');
 
 function resize() {
   canvas.width = window.innerWidth;
