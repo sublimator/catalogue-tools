@@ -259,6 +259,24 @@ jobs:
           # CoW concurrency stress test is the key race guard — repeat it hard.
           "$shamap" --gtest_filter=ShaMapCoWConcurrency.StressTest \
             --gtest_repeat=100 --gtest_break_on_failure --gtest_brief=1
-          # Full SHAMap + xprv suites under the sanitizer.
+          # Full SHAMap + xprv suites under the sanitizer. The xprv
+          # TsanDominationControl* tests race on purpose; they run on their
+          # own below.
           "$shamap" --gtest_brief=1
-          "$xprv" --gtest_brief=1
+          "$xprv" --gtest_brief=1 --gtest_filter='-*TsanDominationControl*'
+          if [ "${{ matrix.san }}" = "thread" ]; then
+            # The control seeds a data race in the runner topology the
+            # repaired workloads use. TSan must report it, or the quiet run
+            # above proves nothing.
+            if "$xprv" --gtest_filter='*TsanDominationControl*' > tsan-control.log 2>&1; then
+              cat tsan-control.log
+              echo "::error::TSan did not flag the seeded domination control"
+              exit 1
+            fi
+            if ! grep -q "WARNING: ThreadSanitizer: data race" tsan-control.log; then
+              cat tsan-control.log
+              echo "::error::the domination control failed without a TSan race report"
+              exit 1
+            fi
+            echo "domination control flagged by TSan, as required"
+          fi
