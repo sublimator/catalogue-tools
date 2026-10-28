@@ -557,13 +557,55 @@ function populateGlobe(jsonStr, intensity = 1) {
   });
 }
 
-function drawGlobe() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!charGrid.length) { requestAnimationFrame(drawGlobe); return; }
+// The globe draws thousands of characters a frame, so canvas state is set
+// only when it changes: font strings are cached by size, colour strings by
+// colour and 8-bit alpha (the canvas keeps 8 bits of alpha anyway), and
+// textAlign/textBaseline are set once per frame.
+const GLOBE_FONT = 'ui-monospace,Menlo,Consolas,monospace';
+const globeFonts = new Map();
+const globeColours = new Map();
+let globeFont = '', globeColour = '';
 
-  // Smooth lerp toward mouse target (0.03 = slow drift, avoids snap on flyover)
-  mouseX += (targetX - mouseX) * 0.03;
-  mouseY += (targetY - mouseY) * 0.03;
+function setGlobeFont(bold, size) {
+  const key = bold ? -size : size;
+  let font = globeFonts.get(key);
+  if (!font) globeFonts.set(key, font = `${bold ? 'bold ' : ''}${size}px ${GLOBE_FONT}`);
+  if (font !== globeFont) ctx.font = globeFont = font;
+}
+
+function setGlobeColour(rgb, alpha) {
+  const a = Math.max(0, Math.min(255, Math.round(alpha * 255)));
+  const key = `${rgb},${a}`;
+  let colour = globeColours.get(key);
+  if (!colour) {
+    if (globeColours.size > 8192) globeColours.clear();
+    globeColours.set(key, colour = `rgba(${rgb},${a / 255})`);
+  }
+  if (colour !== globeColour) ctx.fillStyle = globeColour = colour;
+}
+
+// Motion runs on time at the 60 Hz pace it was designed at (one step per
+// 1/60 s), and the globe redraws on every frame the display offers.
+let lastGlobeFrame = 0;
+
+function drawGlobe(now) {
+  requestAnimationFrame(drawGlobe);
+  now = now || performance.now();
+  // A frame's timestamp is when the frame began, which can be a little
+  // before the previous call's own clock read; never step backwards.
+  const step = lastGlobeFrame ? Math.max(0, Math.min(now - lastGlobeFrame, 100)) / (1000 / 60) : 1;
+  lastGlobeFrame = now;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!charGrid.length) return;
+  // clearRect resets nothing, but a canvas resize does: start each frame
+  // from known state.
+  globeFont = globeColour = '';
+
+  // Smooth lerp toward mouse target (0.03 per 1/60 s = slow drift, avoids snap on flyover)
+  const follow = 1 - Math.pow(0.97, step);
+  mouseX += (targetX - mouseX) * follow;
+  mouseY += (targetY - mouseY) * follow;
 
   const cx = canvas.width / 2;
   const cy = canvas.height / 2;
@@ -573,13 +615,12 @@ function drawGlobe() {
     // Mobile: slow scrolling JSON text, filling screen width
     const w = canvas.width, h = canvas.height;
     const totalLines = charGrid.length;
-    if (!totalLines) { rotation += 0.001; requestAnimationFrame(drawGlobe); return; }
     const sz = 11; // CSS pixels — canvas handles DPR via resize()
     const lineH = 15;
     const scrollY = rotation * 150;
 
     // Measure actual char width
-    ctx.font = `${sz}px ui-monospace,Menlo,Consolas,monospace`;
+    setGlobeFont(false, sz);
     const charW = ctx.measureText('M').width;
     const charsPerRow = Math.floor(w / charW);
 
@@ -587,6 +628,8 @@ function drawGlobe() {
     const visRows = Math.ceil(h / lineH) + 4;
     const startRow = Math.floor(scrollY / lineH);
     const yOffset = -(scrollY % lineH);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
 
     for (let row = 0; row < visRows; row++) {
       // Cycle through charGrid, wrapping long lines across multiple rows
@@ -601,19 +644,16 @@ function drawGlobe() {
       for (let j = 0; j < charsPerRow && j < parsed.length; j++) {
         const { ch, isKey } = parsed[j];
         if (isKey) {
-          ctx.font = `bold ${sz}px ui-monospace,Menlo,Consolas,monospace`;
-          ctx.fillStyle = `rgba(207,229,255,${0.14 * edgeFade * globeIntensity})`;
+          setGlobeFont(true, sz);
+          setGlobeColour('207,229,255', 0.14 * edgeFade * globeIntensity);
         } else {
-          ctx.font = `${sz}px ui-monospace,Menlo,Consolas,monospace`;
-          ctx.fillStyle = `rgba(150,158,240,${0.075 * edgeFade * globeIntensity})`;
+          setGlobeFont(false, sz);
+          setGlobeColour('150,158,240', 0.075 * edgeFade * globeIntensity);
         }
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
         ctx.fillText(ch, j * charW, y);
       }
     }
-    rotation += 0.001;
-    requestAnimationFrame(drawGlobe);
+    rotation += 0.001 * step;
     return;
   }
 
@@ -630,6 +670,8 @@ function drawGlobe() {
   const totalLines = charGrid.length;
   const latLines = Math.min(totalLines, 80);
   const latSpread = 0.9;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
 
   for (let i = 0; i < latLines; i++) {
     const lineIdx = i % totalLines;
@@ -665,25 +707,20 @@ function drawGlobe() {
 
       if (isKey) {
         const alpha = (0.12 + depth * depth * 0.5) * globeIntensity;
-        const sz = Math.round((baseKey + depth * 4) * scale);
-        ctx.font = `bold ${sz}px ui-monospace,Menlo,Consolas,monospace`;
-        ctx.fillStyle = `rgba(207,229,255,${alpha})`;
+        setGlobeFont(true, Math.round((baseKey + depth * 4) * scale));
+        setGlobeColour('207,229,255', alpha);
       } else {
         const alpha = (0.03 + depth * depth * 0.18) * globeIntensity;
         const lift = Math.floor(depth * 45);
-        const sz = Math.round((baseVal + depth * 2) * scale);
-        ctx.font = `${sz}px ui-monospace,Menlo,Consolas,monospace`;
-        ctx.fillStyle = `rgba(${125 + lift},${135 + lift},${225 + Math.floor(depth * 25)},${alpha})`;
+        setGlobeFont(false, Math.round((baseVal + depth * 2) * scale));
+        setGlobeColour(`${125 + lift},${135 + lift},${225 + Math.floor(depth * 25)}`, alpha);
       }
 
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
       ctx.fillText(ch, sx, sy);
     }
   }
 
-  rotation += 0.002;
-  requestAnimationFrame(drawGlobe);
+  rotation += 0.002 * step;
 }
 populateGlobe(PROOF_FORMAT, 0.45);
 drawGlobe();
