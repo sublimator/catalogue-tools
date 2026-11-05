@@ -7,7 +7,7 @@
     {
       "op": "set",
       "path": "/format_version",
-      "value": 7.0
+      "value": 8.0
     }
   ],
   "expect": {
@@ -15,6 +15,6 @@
     "reason_contains": "format_version"
   },
   "observed": {
-    "python_reason": "unsupported format_version 7.0 (expected 7)"
+    "python_reason": "unsupported format_version 8.0 (expected 8)"
   }
 }

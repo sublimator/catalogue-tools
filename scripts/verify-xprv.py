@@ -59,7 +59,7 @@ _amt._calculate_precision = (
 #
 # A proof JSON has the structure:
 #   {
-#     "format_version": 7,
+#     "format_version": 8,
 #     "network_id": 0,
 #     "steps": [AnchorStep, HeaderStep, MapProofStep, ...]
 #   }
