@@ -19,6 +19,9 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cctype>
+#include <optional>
 
 bool
 parse_endpoint(std::string const& endpoint, std::string& host, uint16_t& port)
@@ -447,7 +450,7 @@ main(int argc, char* argv[])
         std::string proof_path;
         std::string explicit_key;
         std::string manifests_path;
-        uint32_t verify_network_id = 0;
+        std::optional<uint32_t> network_arg;
 
         std::size_t pos = 0;
         while (pos < command_args.size())
@@ -455,7 +458,8 @@ main(int argc, char* argv[])
             std::string const& arg = command_args[pos];
             if (arg == "--network" && pos + 1 < command_args.size())
             {
-                verify_network_id = std::stoul(command_args[pos + 1]);
+                network_arg = static_cast<uint32_t>(
+                    std::stoul(command_args[pos + 1]));
                 pos += 2;
             }
             else if (arg == "--manifests" && pos + 1 < command_args.size())
@@ -488,18 +492,35 @@ main(int argc, char* argv[])
             return 1;
         }
 
-        // Resolve publisher key: explicit arg > network default
-        std::string trusted_key;
-        if (!explicit_key.empty())
+        // A network implies its built-in publisher key; an explicit key may
+        // replace it, but a key built in for one network is never trusted
+        // for another. A known key without --network implies its network.
+        auto const lower = [](std::string v) {
+            std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return v;
+        };
+        std::optional<uint32_t> key_network;
+        for (uint32_t const known : {0u, 21337u})
         {
-            trusted_key = explicit_key;
+            if (!explicit_key.empty() &&
+                lower(xprv::NetworkConfig::for_network(known).publisher_key) ==
+                    lower(explicit_key))
+                key_network = known;
         }
-        else
+        uint32_t const verify_network_id =
+            network_arg.value_or(key_network.value_or(0));
+        if (key_network && *key_network != verify_network_id)
         {
-            auto net_config =
-                xprv::NetworkConfig::for_network(verify_network_id);
-            trusted_key = net_config.publisher_key;
+            std::cerr << "trusted key belongs to network " << *key_network
+                      << ", not configured network " << verify_network_id
+                      << "\n";
+            return 1;
         }
+        std::string const trusted_key = explicit_key.empty()
+            ? xprv::NetworkConfig::for_network(verify_network_id).publisher_key
+            : explicit_key;
 
         auto net_config =
             xprv::NetworkConfig::for_network(verify_network_id);

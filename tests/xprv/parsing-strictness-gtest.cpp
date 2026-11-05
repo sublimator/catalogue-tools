@@ -51,7 +51,10 @@ map_proof(boost::json::value trie)
 }
 
 bool
-verify_text(std::string const& text)
+verify_text(std::string const& text, std::string const& args = {});
+
+bool
+verify_text(std::string const& text, std::string const& args)
 {
     auto path = std::filesystem::temp_directory_path() /
         ("xprv-strict-json-" + std::to_string(getpid()) + ".json");
@@ -66,7 +69,7 @@ verify_text(std::string const& text)
         return out + "'";
     };
     auto command = quote(XPRV_TEST_EXECUTABLE) + " verify " +
-        quote(path.string()) + " >/dev/null 2>&1";
+        quote(path.string()) + " " + args + " >/dev/null 2>&1";
     auto status = std::system(command.c_str());
     std::filesystem::remove(path);
     return status == 0;
@@ -542,4 +545,17 @@ TEST(ParsingStrictness, JsonTextCapIsInclusive)
         EXPECT_NE(std::string(e.what()).find("exceeds"), std::string::npos)
             << e.what();
     }
+}
+
+// A network implies its built-in publisher key. An explicit key may replace
+// it, but a key built in for one network is never trusted for another (§8).
+TEST(ParsingStrictness, BuiltInKeyIsNotTrustedForAnotherNetwork)
+{
+    auto const text = boost::json::serialize(proof_json());
+    std::string const xrpl =
+        "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734";
+    EXPECT_TRUE(verify_text(text));
+    EXPECT_TRUE(verify_text(text, xrpl));
+    EXPECT_TRUE(verify_text(text, xrpl + " --network 0"));
+    EXPECT_FALSE(verify_text(text, xrpl + " --network 21337"));
 }
