@@ -29,6 +29,7 @@ import argparse
 import base64
 import hashlib
 import json
+import re
 import struct
 import sys
 from binascii import hexlify, unhexlify
@@ -41,6 +42,8 @@ import zlib
 
 import xrpl.core.keypairs
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
+from xrpl.core.binarycodec.definitions.definitions import get_field_instance
+from xrpl.core.binarycodec.exceptions import XRPLBinaryCodecException
 
 # Monkey-patch xrpl-py's broken _calculate_precision (XRPLF/xrpl-py#923).
 # It expands e-notation to full decimal form then counts ALL digits instead
@@ -56,7 +59,7 @@ _amt._calculate_precision = (
 #
 # A proof JSON has the structure:
 #   {
-#     "format_version": 3,
+#     "format_version": 7,
 #     "network_id": 0,
 #     "steps": [AnchorStep, HeaderStep, MapProofStep, ...]
 #   }
@@ -138,6 +141,7 @@ class ParsedValidation:
     signature: bytes  # raw DER signature
     signing_data: bytes  # VAL\0 + serialized fields (sans sfSignature)
     full: bool  # vfFullValidation set; only full validations count to quorum
+    ledger_seq: int | None = None  # signed LedgerSequence, if present
 
 
 @dataclass
@@ -162,6 +166,7 @@ class AnchorResult:
     vl_sequence: int = 0
     vl_effective: int = 0
     vl_expiration: int = 0
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -206,7 +211,6 @@ class ResolvedLedgerHashesSupport:
 # ─── Constants ───────────────────────────────────────────────────────
 
 ZERO_HASH: Hash256 = b"\x00" * 32
-HEX_BRANCH = set("0123456789abcdefABCDEF")
 # Branch keys are uppercase only (spec §2.3). No case normalization:
 # accepting both `a` and `A` puts two members on one branch, and only
 # one of them gets hashed into the root.
@@ -340,30 +344,72 @@ def vl_encode(data: bytes) -> bytes:
     raise ValueError(f"VL too large: {len(data)}")
 
 
+class UnknownLeafField(ValueError):
+    """A decoded leaf member that the codec would not serialize."""
+
+
+def _serialized_field(name: str) -> Any:
+    try:
+        field_info = get_field_instance(name)
+    except (KeyError, XRPLBinaryCodecException):
+        return None
+    return field_info if field_info.is_serialized else None
+
+
+def _require_stobject_members(obj: Any, path: str) -> None:
+    if not isinstance(obj, dict):
+        raise ValueError(f"leaf member {path or '(leaf)'} must be an object")
+    for name, value in obj.items():
+        at = f"{path}.{name}" if path else name
+        field_info = _serialized_field(name)
+        if field_info is None:
+            raise UnknownLeafField(f"leaf member {at} is not a serialized field")
+        if field_info.type == "STObject":
+            _require_stobject_members(value, at)
+        elif field_info.type == "STArray":
+            if not isinstance(value, list):
+                raise ValueError(f"leaf member {at} must be an array")
+            for i, element in enumerate(value):
+                element_at = f"{at}[{i}]"
+                if not isinstance(element, dict) or len(element) != 1:
+                    raise ValueError(f"leaf member {element_at} must wrap exactly one object")
+                ((wrapper, inner),) = element.items()
+                wrapper_info = _serialized_field(wrapper)
+                if wrapper_info is None or wrapper_info.type != "STObject":
+                    raise UnknownLeafField(
+                        f"leaf member {element_at}.{wrapper} is not a serialized object field"
+                    )
+                _require_stobject_members(inner, f"{element_at}.{wrapper}")
+
+
+def require_codec_members(leaf: Any, *, is_tx: bool) -> None:
+    """Every member of a decoded leaf is a serialized field, at every depth.
+
+    Leaf data is the decoded XRPL content and nothing else (§2.3). The codec
+    drops known non-serialized names such as `hash` and `index` without a word,
+    so an unchecked member would be shown but never hashed.
+    """
+    if not is_tx:
+        _require_stobject_members(leaf, "")
+        return
+    if not isinstance(leaf, dict) or set(leaf) != {"tx", "meta"}:
+        raise ValueError("a tx leaf must be exactly {tx, meta}")
+    _require_stobject_members(leaf["tx"], "tx")
+    _require_stobject_members(leaf["meta"], "meta")
+
+
 def serialize_leaf(leaf_json: dict[str, Any], *, is_tx: bool) -> bytes:
-    """Serialize a leaf's JSON data to XRPL canonical binary."""
+    """Serialize a leaf's decoded JSON to XRPL canonical binary.
+
+    The bytes hashed are the decoded content re-serialized, so what a reader
+    sees is what the verifier hashed (§2.3).
+    """
+    require_codec_members(leaf_json, is_tx=is_tx)
     if is_tx:
         tx_bytes = bytes.fromhex(encode(leaf_json["tx"]))
         meta_bytes = bytes.fromhex(encode(leaf_json["meta"]))
         return vl_encode(tx_bytes) + vl_encode(meta_bytes)
-    else:
-        # Hash the DECODED content, not a sibling `blob`. What you see must be
-        # what you hash: if the verifier hashed `blob` instead, then `blob` would
-        # be the authenticated datum and the decoded members displayed to a human
-        # would be unauthenticated assertions that could disagree with it while
-        # the proof still verified. Re-serialising is what binds the legible form
-        # to the authenticated one.
-        #
-        # `index`/`hash` duplicate the trie leaf key and `blob` duplicates these
-        # very bytes; none are XRPL fields, so they are dropped before encoding.
-        # Passing them through was the KeyError('blob') that made every
-        # hybrid-leaf proof fail here while its binary form verified.
-        clean = {
-            k: v
-            for k, v in leaf_json.items()
-            if k not in ("index", "blob", "hash")
-        }
-        return bytes.fromhex(encode(clean))
+    return bytes.fromhex(encode(leaf_json))
 
 
 def trie_branches(node: dict[str, Any], depth: int) -> dict[int, Any]:
@@ -383,11 +429,11 @@ def trie_branches(node: dict[str, Any], depth: int) -> dict[int, Any]:
     transaction that never existed. Both reference verifiers returned exit 0 on a
     forged ~1e9 XRP Payment.
 
-    Two rules close it. Normalize the nibble (spec §2: verifiers MAY accept
-    lowercase but MUST normalize before comparing), and REFUSE a duplicate rather
-    than picking a winner — an ambiguous trie has no single meaning, so there is
-    no correct winner to pick. Unknown members are refused for the same reason:
-    a member no consumer agrees about is exactly the hiding place.
+    Two rules close it. Branch keys are uppercase only, with no normalization
+    (spec §2.3: hex values may be lowercase, structural keys may not), and a
+    second member for one branch is REFUSED rather than given a winner, because
+    an ambiguous trie has no single meaning. Unknown members are refused for the
+    same reason: a member no consumer agrees about is exactly the hiding place.
 
     `depth` is this node's nesting depth, 0 at the root. `__depth__`, where present,
     MUST equal it (spec §2.3). Nothing hashes a depth, so a `__depth__` that
@@ -671,6 +717,9 @@ def parse_validation(val_hex: str) -> ParsedValidation | None:
         signing_data=signing_bytes,
         full=isinstance(decoded.get("Flags"), int)
         and bool(decoded["Flags"] & FULL_VALIDATION_FLAG),
+        ledger_seq=decoded["LedgerSequence"]
+        if isinstance(decoded.get("LedgerSequence"), int)
+        else None,
     )
 
 
@@ -720,7 +769,10 @@ def is_properly_formed_toml_domain(domain: bytes) -> bool:
 
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493  # L
-MAX_DECOMPRESSED_PROOF_SIZE = 16 * 1024 * 1024  # matches kMaxDecompressedProofSize
+# §8: the TLV body, plain or inflated, excluding the 10-byte header (C++ XPRV_MAX_BODY_SIZE).
+MAX_DECOMPRESSED_PROOF_SIZE = 16 * 1024 * 1024
+# JSON text, in UTF-8 bytes (C++ XPRV_MAX_JSON_SIZE).
+MAX_JSON_PROOF_SIZE = 64 * 1024 * 1024
 
 
 def _der_integer(sig: bytes, pos: int) -> tuple[int, int] | None:
@@ -1097,6 +1149,7 @@ def verify_anchor(
     partial = 0
     matched_unl = 0
     counted_masters: set[str] = set()
+    counted_seqs: set[int | None] = set()
 
     for key_hex, val_hex in validations.items():
         try:
@@ -1123,6 +1176,7 @@ def verify_anchor(
         if master is not None and master not in counted_masters:
             counted_masters.add(master)
             matched_unl += 1
+            counted_seqs.add(parsed.ledger_seq)
 
     partial_note = f", {partial} partial (not counted)" if partial else ""
     print(
@@ -1146,6 +1200,14 @@ def verify_anchor(
         print(f"    A6: QUORUM — {matched_unl}/{unl_size} (>= 80%)")
     else:
         result.message = f"quorum not met: {matched_unl}/{unl_size} (need {quorum})"
+    # §2.1 SHOULD: the counted validations' signed LedgerSequence against the
+    # advisory index. A mismatch is reported, never a rejection.
+    advisory = anchor.get("ledger_index")
+    if counted_seqs and counted_seqs != {advisory}:
+        signed = ", ".join(str(seq) for seq in sorted(counted_seqs, key=lambda x: (x is None, x or 0)))
+        warn = f"counted validations sign LedgerSequence {signed}, not the advisory ledger_index {advisory}"
+        print(f"    [WARN] {warn}")
+        result.warnings.append(warn)
     return result
 
 
@@ -1185,21 +1247,93 @@ def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:
     return json.loads(raw, object_pairs_hook=object_members)
 
 
-def validate_json_steps(steps: list[Any]) -> None:
+HEX_DIGITS_RE = re.compile(r"(?:[0-9A-Fa-f]{2})*")
+DECIMAL_RE = re.compile(r"[0-9]+")
+
+
+def _require_uint(value: Any, bits: int, what: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 1 << bits:
+        raise ValueError(f"{what} must be a uint{bits}")
+
+
+def _require_hex(value: Any, what: str, size: int | None = None) -> None:
+    if not isinstance(value, str) or not HEX_DIGITS_RE.fullmatch(value):
+        raise ValueError(f"{what} must be a hex string")
+    if size is not None and len(value) != 2 * size:
+        raise ValueError(f"{what} must be {size} bytes")
+
+
+HEADER_MEMBERS = frozenset({
+    "ledger_index", "total_coins", "parent_hash", "transaction_hash", "account_hash",
+    "parent_close_time", "close_time", "close_time_resolution", "close_flags",
+})
+
+
+def _require_members(obj: dict[str, Any], names: frozenset[str] | set[str], what: str) -> None:
+    """The JSON form is closed (§2.4): an object carries exactly its members."""
+    for name in obj:
+        if name not in names:
+            raise ValueError(f"unknown member {name} in {what}")
+    for name in names:
+        if name not in obj:
+            raise ValueError(f"{what} is missing {name}")
+
+
+def validate_json_steps(steps: Any) -> None:
+    """Check each step's members against the types of spec §2.
+
+    An advisory field is still typed: a malformed one is a syntax error.
+    Map proofs decoded by binary_to_proof carry their TLV payload as bytes,
+    which JSON can't express, and are checked when hashed.
+    """
+    if not isinstance(steps, list):
+        raise ValueError("steps must be an array")
     for step in steps:
-        if step.get("type") == "anchor":
-            for key in step.get("validations", {}):
+        if not isinstance(step, dict) or not isinstance(step.get("type"), str):
+            raise ValueError("step must be an object with a string type")
+        kind = step["type"]
+        if kind == "anchor":
+            _require_members(step, {"type", "ledger_hash", "ledger_index", "unl", "validations"}, "anchor")
+            _require_hex(step.get("ledger_hash"), "anchor ledger_hash", 32)
+            _require_uint(step.get("ledger_index"), 32, "anchor ledger_index")
+            validations = step.get("validations")
+            if not isinstance(validations, dict):
+                raise ValueError("anchor validations must be an object")
+            for key, value in validations.items():
                 if len(key) != 66 or any(c not in "0123456789ABCDEF" for c in key):
                     raise ValueError("validation map keys must be uppercase 33-byte hex")
-        elif step.get("type") == "map_proof":
+                _require_hex(value, "validation value")
+        elif kind == "ledger_header":
+            _require_members(step, {"type", "header"}, "ledger_header step")
+            header = step.get("header")
+            if not isinstance(header, dict):
+                raise ValueError("ledger_header must carry a header object")
+            _require_members(header, HEADER_MEMBERS, "header")
+            for name in ("ledger_index", "parent_close_time", "close_time"):
+                _require_uint(header.get(name), 32, f"header {name}")
+            for name in ("close_time_resolution", "close_flags"):
+                _require_uint(header.get(name), 8, f"header {name}")
+            for name in ("parent_hash", "transaction_hash", "account_hash"):
+                _require_hex(header.get(name), f"header {name}", 32)
+            coins = header.get("total_coins")
+            if not isinstance(coins, str) or not DECIMAL_RE.fullmatch(coins) or int(coins) >= 1 << 64:
+                raise ValueError("header total_coins must be a decimal string of a uint64")
+        elif kind == "map_proof":
             if step.get("tree") not in ("state", "tx"):
                 raise ValueError("unknown map tree type")
-            if "trie" in step:
-                validate_json_trie(step["trie"])
+            if isinstance(step.get("__binary_payload__"), bytes):
+                _require_members(step, {"type", "tree", "__binary_payload__"}, "map_proof step")
+                continue
+            if "__binary_payload__" in step or "__binary_root__" in step:
+                raise ValueError("map_proof carries a member reserved for binary decoding")
+            _require_members(step, {"type", "tree", "trie"}, "map_proof step")
+            validate_json_trie(step["trie"])
+        else:
+            raise ValueError(f"unknown step type: {kind!r}")
 
 
 def verify(
-    proof: Proof | dict[str, Any] | list[Any],
+    proof: Proof | dict[str, Any],
     trusted_key: str | None = None,
     network_id: int | None = None,
     extra_manifests: list[bytes] | None = None,
@@ -1208,19 +1342,23 @@ def verify(
 
     `network_id` is the configured network. It defaults to the network of a
     known `trusted_key`, else to XRPL mainnet (0), and the proof's own
-    `network_id` must match it (spec §8). A bare step list is the legacy
-    form and, as in the C++ loader, belongs to network 0.
+    `network_id` must match it (spec §8). The proof is the object of spec §2;
+    a bare step list carries no version and is refused.
     """
     result = VerifyResult()
     error = None
-    if isinstance(proof, list):
-        steps: list[dict[str, Any]] = proof
-        proof_network: Any = 0
+    steps: Any = []
+    proof_network: Any = None
+    if not isinstance(proof, dict):
+        error = "proof must be an object with format_version, network_id and steps"
     else:
         steps = proof.get("steps", [])
         proof_network = proof.get("network_id")
         version = proof.get("format_version")
-        if isinstance(version, bool) or version != FORMAT_VERSION:
+        unknown = sorted(set(proof) - {"format_version", "network_id", "steps"})
+        if unknown:
+            error = f"unknown member {unknown[0]} in proof"
+        elif isinstance(version, bool) or not isinstance(version, int) or version != FORMAT_VERSION:
             error = f"unsupported format_version {version!r} (expected {FORMAT_VERSION})"
         elif isinstance(proof_network, bool) or not isinstance(proof_network, int):
             error = f"proof network_id must be an integer, got {proof_network!r}"
@@ -1296,11 +1434,13 @@ def verify(
             anchor_seen = True
             n_val = len(step.get("validations", {}))
             print(
-                f"\n  Step {i}: ANCHOR seq={step.get('ledger_index', '?')} "
-                f"hash={step.get('ledger_hash', '')[:16]}... ({n_val} validations)"
+                f"\n  Step {i}: ANCHOR advisory seq={step.get('ledger_index', '?')} "
+                f"(not authenticated) hash={step.get('ledger_hash', '')[:16]}... "
+                f"({n_val} validations)"
             )
 
             ar = verify_anchor(step, trusted_key, extra_manifests)
+            result.warnings.extend(f"step {i}: {w}" for w in ar.warnings)
             if ar.ok:
                 ledger_hash = step["ledger_hash"].upper()
                 add_capability(trusted_ledger_hashes, ledger_hash, "anchor")
@@ -1394,14 +1534,17 @@ def verify(
             tree: str = step["tree"]
             is_tx = tree == "tx"
             trie: TrieNode | None = step.get("trie")
-            binary_root_hex: str | None = step.get("__binary_root__")
-            binary_payload: bytes = step.get("__binary_payload__", b"")
+            binary_payload = step.get("__binary_payload__")
 
             print(f"\n  Step {i}: {'TX' if is_tx else 'STATE'} TREE")
 
             try:
-                if binary_root_hex:
-                    root_hex = binary_root_hex.upper()
+                if isinstance(binary_payload, bytes):
+                    # The root comes from the payload, never from a member.
+                    root, end = hash_binary_trie(binary_payload, 0, is_tx=is_tx)
+                    if end != len(binary_payload):
+                        raise ValueError("binary trie: trailing bytes")
+                    root_hex = root.hex().upper()
                     leaves = collect_binary_leaves(binary_payload, is_tx=is_tx)
                     print(f"    Binary trie, root={root_hex[:16]}...")
                 else:
@@ -1416,7 +1559,7 @@ def verify(
                     leaves = collect_json_leaves(trie)
             except Exception as exc:
                 detail = str(exc)
-                if network_id == XAHAU_NETWORK_ID and isinstance(exc, KeyError):
+                if network_id == XAHAU_NETWORK_ID and isinstance(exc, (KeyError, UnknownLeafField)):
                     # Known limitation: xrpl-py ships XRPL definitions only, so
                     # it can't re-serialize Xahau fields in a decoded JSON leaf.
                     detail = (
@@ -1897,15 +2040,23 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
     version, flags, network_id, body_offset = parse_binary_header(data)
 
     body = data[body_offset:]
+    # §8: the cap holds before parsing, compressed or not.
+    if len(body) > MAX_DECOMPRESSED_PROOF_SIZE:
+        raise ValueError("binary proof: body exceeds size cap")
     if flags & FLAG_ZLIB:
-        # §3.8: bound the decompressed size before parsing (zlib bomb), with
-        # the same 16 MiB ceiling as the C++ verifier.
+        # Bound the inflated size while inflating (zlib bomb). The body is one
+        # RFC 1950 stream (§3.1): nothing may follow it.
         inflater = zlib.decompressobj()
-        body = inflater.decompress(body, MAX_DECOMPRESSED_PROOF_SIZE + 1)
+        try:
+            body = inflater.decompress(body, MAX_DECOMPRESSED_PROOF_SIZE + 1)
+        except zlib.error as exc:
+            raise ValueError(f"binary proof: invalid zlib body ({exc})") from None
         if len(body) > MAX_DECOMPRESSED_PROOF_SIZE or inflater.unconsumed_tail:
             raise ValueError("binary proof: decompressed size exceeds cap")
         if not inflater.eof:
             raise ValueError("binary proof: truncated zlib body")
+        if inflater.unused_data:
+            raise ValueError("binary proof: bytes after the zlib stream")
 
     records = parse_tlv_records(body)
 
@@ -1926,20 +2077,11 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
         elif tlv_type in (TLV_MAP_TX, TLV_MAP_STATE):
             tree = "tx" if tlv_type == TLV_MAP_TX else "state"
             is_tx = tree == "tx"
-            root_hash, end = hash_binary_trie(payload, 0, is_tx=is_tx)
+            _, end = hash_binary_trie(payload, 0, is_tx=is_tx)
             if end != len(payload):
                 raise ValueError("binary trie: trailing bytes")
-            # Store the computed root hash and tree type.
-            # We can't convert binary trie to JSON trie easily, so we
-            # store __binary_root__ for the verifier to check directly.
-            steps.append(
-                {
-                    "type": "map_proof",
-                    "tree": tree,
-                    "__binary_root__": root_hash.hex().upper(),
-                    "__binary_payload__": payload,
-                }
-            )
+            # The verifier hashes the payload itself; bytes can't come from JSON.
+            steps.append({"type": "map_proof", "tree": tree, "__binary_payload__": payload})
 
     return {"format_version": version, "network_id": network_id, "steps": steps}
 
@@ -1970,7 +2112,15 @@ def main() -> None:
         print(f"Not found: {path}", file=sys.stderr)
         sys.exit(1)
 
-    raw = path.read_bytes()
+    # Bounded read: no file larger than any proof can be is loaded whole.
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_JSON_PROOF_SIZE + 1)
+    if len(raw) > MAX_JSON_PROOF_SIZE:
+        print(f"Proof file exceeds {MAX_JSON_PROOF_SIZE} bytes", file=sys.stderr)
+        sys.exit(1)
+    if is_binary_proof(raw) and len(raw) > 10 + MAX_DECOMPRESSED_PROOF_SIZE:
+        print("Binary proof body exceeds the size cap", file=sys.stderr)
+        sys.exit(1)
     if is_binary_proof(raw):
         print("Format: binary (XPRV)")
         proof = binary_to_proof(raw)

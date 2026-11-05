@@ -60,8 +60,8 @@ render_narrative(std::vector<ProofStep> const& steps)
         if (auto* a = std::get_if<AnchorStep>(&step.data))
         {
             lines.push_back(
-                prefix + "ANCHOR (ledger " + std::to_string(a->ledger_index) +
-                ")");
+                prefix + "ANCHOR (advisory ledger " +
+                std::to_string(a->ledger_index) + ", not authenticated)");
 
             // Sub-steps from AnchorVerifier
             for (auto const& sub : a->sub_steps)

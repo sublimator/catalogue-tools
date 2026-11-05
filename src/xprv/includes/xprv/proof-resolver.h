@@ -3,7 +3,7 @@
 // Proof chain resolver / verifier.
 //
 // Operates on ProofChain structs (format-agnostic).
-// The caller loads from JSON via from_json() or binary (future).
+// The caller loads from JSON via from_json_text() or binary via from_binary().
 //
 // Verifies each step:
 //   - Anchor: UNL publisher key, blob signature, validation signatures

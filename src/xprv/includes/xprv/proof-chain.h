@@ -2,8 +2,8 @@
 
 // Canonical in-memory representation of a proof chain.
 //
-// Format-agnostic — serialized to JSON by proof-chain-json,
-// and will be serialized to binary TLV in the future.
+// Format-agnostic: serialized to JSON by proof-chain-json and to binary TLV
+// by proof-chain-binary.
 //
 // The builder (proof-builder) produces a ProofChain.
 // The resolver (proof-resolver) verifies a ProofChain.

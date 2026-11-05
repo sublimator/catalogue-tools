@@ -1,5 +1,6 @@
 #include "xprv/proof-chain-binary.h"
 #include "xprv/hex-utils.h"
+#include "xprv/proof-chain-json.h"
 
 #include <catl/shamap/binary-trie.h>
 #include <catl/shamap/json-trie.h>
@@ -1102,6 +1103,7 @@ encode_trie_json_node(
                 // "what you see is what you hash" true. A leaf whose decoded
                 // form cannot round-trip has no JSON form at all; only the
                 // binary form can carry it.
+                require_codec_members(arr[1], is_tx, protocol);
                 data = is_tx
                     ? catl::xdata::serialize_transaction(
                           arr[1].as_object(), protocol)

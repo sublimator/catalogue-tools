@@ -27,14 +27,23 @@ step_to_json(ChainStep const& step);
 /// Deserialize an already unambiguous JSON DOM into a ProofChain.
 /// Untrusted text must enter through from_json_text before duplicate members
 /// can be discarded by a general-purpose DOM parser.
-/// Accepts both the new object format
-/// {"format_version":..., "network_id":..., "steps":[...]}
-/// and the legacy bare array format.
+/// Accepts only the object form
+/// {"format_version":..., "network_id":..., "steps":[...]}.
 ProofChain
 from_json(boost::json::value const& json);
 
 /// Load untrusted JSON text, rejecting repeated members before DOM parsing.
 ProofChain
 from_json_text(std::string_view text);
+
+/// Throw unless a decoded JSON leaf holds only serialized fields of
+/// `protocol`, at every depth: a tx leaf is exactly {tx, meta}. The codec
+/// skips names it doesn't know, so an unchecked member would be shown but
+/// never hashed (§2.3, §3.8).
+void
+require_codec_members(
+    boost::json::value const& leaf,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol);
 
 }  // namespace xprv

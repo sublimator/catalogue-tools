@@ -1,6 +1,7 @@
 #include "xprv/proof-builder.h"
 #include "xprv/hex-utils.h"
 #include "xprv/network-config.h"
+#include "xprv/proof-chain-json.h"
 #include "xprv/skip-list.h"
 #include "xprv/validation-collector.h"
 
@@ -28,6 +29,7 @@
 using namespace catl::peer_client;
 using xprv::bytes_hex;
 using xprv::hash_from_hex;
+using xprv::require_codec_members;
 using xprv::skip_list_key;
 using xprv::upper_hex;
 
@@ -122,6 +124,7 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
             auto const* obj = decoded.if_object();
             if (!obj)
                 throw std::runtime_error("decoded leaf is not an object");
+            require_codec_members(decoded, is_tx_tree, protocol);
             auto const reencoded = is_tx_tree
                 ? catl::xdata::serialize_transaction(*obj, protocol)
                 : catl::xdata::serialize_leaf(*obj, protocol);

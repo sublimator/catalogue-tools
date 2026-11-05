@@ -49,6 +49,7 @@ struct AnchorVerifyResult
     uint32_t vl_effective = 0;
     uint32_t vl_expiration = 0;
     std::string error;
+    std::vector<std::string> warnings;  // reported, never a rejection
 };
 
 class AnchorVerifier
@@ -79,6 +80,7 @@ private:
         std::vector<uint8_t> signature;
         std::vector<uint8_t> without_signature;  // raw bytes sans sfSignature
         std::optional<uint32_t> flags;           // sfFlags, if present
+        std::optional<uint32_t> ledger_seq;      // sfLedgerSequence, if present
         bool valid = false;
     };
 

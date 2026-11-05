@@ -48,6 +48,21 @@ TEST(AnchorVerifier, AcceptsRealFixture)
     EXPECT_TRUE(verify(load_anchor_fixture(), xrpl_publisher).verified);
 }
 
+// §2.1 SHOULD: the counted validations sign a LedgerSequence that the
+// advisory index should match. A mismatch is a warning, never a rejection.
+TEST(AnchorVerifier, WarnsWhenSignedSequenceDiffersFromAdvisoryIndex)
+{
+    auto anchor = load_anchor_fixture();
+    EXPECT_TRUE(verify(anchor, xrpl_publisher).warnings.empty());
+    anchor["ledger_index"] = anchor.at("ledger_index").as_int64() + 1;
+    auto const result = verify(anchor, xrpl_publisher);
+    EXPECT_TRUE(result.verified);
+    ASSERT_EQ(result.warnings.size(), 1u);
+    EXPECT_NE(
+        result.warnings.front().find("not the advisory ledger_index"),
+        std::string::npos);
+}
+
 TEST(AnchorVerifier, RejectsPublisherClaimNotBoundToManifest)
 {
     auto anchor = load_anchor_fixture();

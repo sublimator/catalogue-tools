@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <boost/json.hpp>
 #include <catl/shamap/binary-trie.h>
+#include <catl/xdata/protocol.h>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -260,4 +261,177 @@ TEST(ParsingStrictness, RejectsUnsortedValidationRecords)
 TEST(ParsingStrictness, RejectsDuplicateValidationRecords)
 {
     EXPECT_THROW(xprv::from_binary(mutated_core(3)), std::runtime_error);
+}
+
+namespace {
+
+// The first leaf ([key, data]) of the vector's last map proof of `tree`.
+boost::json::array&
+first_leaf(boost::json::value& proof, std::string_view tree)
+{
+    boost::json::object* found = nullptr;
+    for (auto& step : proof.at("steps").as_array())
+        if (step.at("type") == "map_proof" &&
+            step.at("tree").as_string() == tree)
+            found = &step.as_object();
+    if (!found)
+        throw std::runtime_error("vector has no such map proof");
+    boost::json::value* node = &found->at("trie");
+    while (node->is_object())
+    {
+        boost::json::value* next = nullptr;
+        for (auto& kv : node->as_object())
+            if (kv.key() != "__depth__" && !kv.value().is_string())
+            {
+                next = &kv.value();
+                break;
+            }
+        if (!next)
+            throw std::runtime_error("map proof has no leaf");
+        node = next;
+    }
+    return node->as_array();
+}
+
+}  // namespace
+
+// §2, §9.1: a bare steps array has no version to check.
+TEST(ParsingStrictness, RejectsBareStepsArray)
+{
+    auto const steps = proof_json().at("steps");
+    EXPECT_THROW(xprv::from_json(steps), std::runtime_error);
+    EXPECT_FALSE(verify_text(boost::json::serialize(steps)));
+}
+
+// D12: the JSON form is closed, at every level.
+TEST(ParsingStrictness, RejectsUnknownMembersAtEveryLevel)
+{
+    ASSERT_NO_THROW(xprv::from_json(proof_json()));
+    auto const with_extra = [](auto&& pick) {
+        auto proof = proof_json();
+        pick(proof)["note"] = "not part of the proof";
+        return proof;
+    };
+    auto const steps = [](boost::json::value& p) -> boost::json::array& {
+        return p.at("steps").as_array();
+    };
+    EXPECT_THROW(
+        xprv::from_json(with_extra([](auto& p) -> auto& { return p.as_object(); })),
+        std::runtime_error);
+    EXPECT_THROW(
+        xprv::from_json(with_extra(
+            [&](auto& p) -> auto& { return steps(p).at(0).as_object(); })),
+        std::runtime_error);
+    EXPECT_THROW(
+        xprv::from_json(with_extra(
+            [&](auto& p) -> auto& { return steps(p).at(1).as_object(); })),
+        std::runtime_error);
+    EXPECT_THROW(
+        xprv::from_json(with_extra([&](auto& p) -> auto& {
+            return steps(p).at(1).at("header").as_object();
+        })),
+        std::runtime_error);
+    EXPECT_THROW(
+        xprv::from_json(with_extra(
+            [&](auto& p) -> auto& { return steps(p).at(2).as_object(); })),
+        std::runtime_error);
+}
+
+// D12: an integer field is an integer token; 7.0 is not one.
+TEST(ParsingStrictness, RejectsNonIntegerNumbers)
+{
+    auto version = proof_json();
+    version.as_object()["format_version"] = double(XPRV_FORMAT_VERSION);
+    EXPECT_THROW(xprv::from_json(version), std::runtime_error);
+
+    auto index = proof_json();
+    auto& header = index.at("steps").as_array().at(1).at("header").as_object();
+    header["ledger_index"] = double(header.at("ledger_index").as_int64());
+    EXPECT_THROW(xprv::from_json(index), std::runtime_error);
+}
+
+// §2.3: leaf data is the decoded content and nothing else. The codec skips
+// names it doesn't serialize, so each of these would be shown, never hashed.
+TEST(ParsingStrictness, RejectsLeafMembersTheCodecWouldSkip)
+{
+    ASSERT_TRUE(verify_text(boost::json::serialize(proof_json())));
+    auto const rejects = [](auto&& mutate) {
+        auto proof = proof_json();
+        mutate(proof);
+        return !verify_text(boost::json::serialize(proof));
+    };
+    EXPECT_TRUE(rejects([](auto& p) {
+        first_leaf(p, "state").at(1).as_object()["DisplayedButNotHashed"] = 1;
+    }));
+    EXPECT_TRUE(rejects([](auto& p) {
+        first_leaf(p, "state").at(1).as_object()["index"] =
+            first_leaf(p, "state").at(0);
+    }));
+    EXPECT_TRUE(rejects([](auto& p) {
+        first_leaf(p, "tx").at(1).at("tx").as_object()["hash"] =
+            first_leaf(p, "tx").at(0);
+    }));
+    EXPECT_TRUE(rejects([](auto& p) {
+        first_leaf(p, "tx").at(1).at("meta").as_object()["not_a_field"] = "1";
+    }));
+    EXPECT_TRUE(rejects([](auto& p) {
+        first_leaf(p, "tx").at(1).as_object()["hash"] =
+            first_leaf(p, "tx").at(0);
+    }));
+    EXPECT_TRUE(rejects([](auto& p) {
+        auto& nodes =
+            first_leaf(p, "tx").at(1).at("meta").at("AffectedNodes").as_array();
+        auto& wrapper = nodes.at(0).as_object();
+        wrapper.begin()->value().as_object()["DisplayedButNotHashed"] = 1;
+    }));
+}
+
+// §3.8: a map proof authenticates at least one leaf. Replacing the tx leaf
+// with its own recorded leaf hash keeps the root, and so the anchor, intact.
+TEST(ParsingStrictness, RejectsMapProofWithoutLeaves)
+{
+    auto proof = proof_json();
+    auto const& recorded =
+        vector_data().at("intermediates").at("map_proofs").as_array().back();
+    ASSERT_EQ(recorded.at("tree"), "tx");
+    ASSERT_EQ(recorded.at("leaves").as_array().size(), 1u);
+    auto const leaf_hash = recorded.at("leaves").at(0).at("leaf_hash");
+
+    boost::json::value* node = nullptr;
+    for (auto& step : proof.at("steps").as_array())
+        if (step.at("type") == "map_proof" && step.at("tree") == "tx")
+            node = &step.as_object()["trie"];
+    ASSERT_NE(node, nullptr);
+    while (node->is_object())
+    {
+        boost::json::value* next = nullptr;
+        for (auto& kv : node->as_object())
+            if (kv.key() != "__depth__" && !kv.value().is_string())
+                next = &kv.value();
+        ASSERT_NE(next, nullptr);
+        node = next;
+    }
+    *node = leaf_hash;
+    auto const text = boost::json::serialize(proof);
+    EXPECT_FALSE(verify_text(text));
+
+    auto chain = xprv::from_json_text(text);
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    xprv::BinaryOptions opts;
+    opts.protocol = &protocol;
+    auto const binary = xprv::to_binary(chain, opts);
+    auto path = std::filesystem::temp_directory_path() /
+        ("xprv-leafless-" + std::to_string(getpid()) + ".xprv.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        file.write(
+            reinterpret_cast<char const*>(binary.data()),
+            static_cast<std::streamsize>(binary.size()));
+    }
+    auto const status = std::system(
+        (std::string("'") + XPRV_TEST_EXECUTABLE + "' verify '" + path.string() +
+         "' >/dev/null 2>&1")
+            .c_str());
+    std::filesystem::remove(path);
+    EXPECT_NE(status, 0);
 }

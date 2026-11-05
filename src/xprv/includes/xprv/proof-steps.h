@@ -50,7 +50,7 @@ enum class SkipListType {
 
 struct AnchorStep
 {
-    uint32_t ledger_index = 0;
+    uint32_t ledger_index = 0;  // advisory (§2.1), never authenticated
     std::string ledger_hash;    // hex, truncated for display
     std::string publisher_key;  // hex, truncated
     Check publisher_key_check = Check::skip;

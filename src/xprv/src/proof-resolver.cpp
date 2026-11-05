@@ -398,7 +398,13 @@ resolve_proof_chain_impl(
                         "  Trusted hash: ",
                         ledger_hash_hex.substr(0, 16),
                         "...");
-                    PLOGI(verify_log, "  Ledger index: ", data.ledger_index);
+                    // §2.1: outside every signed preimage; the anchor
+                    // ledger's header step reports the authenticated index.
+                    PLOGI(
+                        verify_log,
+                        "  Ledger index: ",
+                        data.ledger_index,
+                        " (advisory, not authenticated)");
 
                     AnchorStep anchor_step;
                     anchor_step.ledger_index = data.ledger_index;
@@ -434,6 +440,8 @@ resolve_proof_chain_impl(
                             anchor_step.validations_matched =
                                 av_result.validations_matched_unl;
                             anchor_verified = av_result.verified;
+                            for (auto const& warning : av_result.warnings)
+                                PLOGW(verify_log, "  WARN: ", warning);
 
                             if (anchor_verified)
                             {
@@ -716,6 +724,8 @@ resolve_proof_chain_impl(
                                             ledger_hashes_leaves.push_back(
                                                 std::move(*candidate));
                                     }
+                                    require_codec_members(
+                                        leaf_data, !is_state, protocol);
                                     auto bytes = is_state
                                         ? catl::xdata::serialize_leaf(
                                               leaf_data.as_object(), protocol)
@@ -903,6 +913,22 @@ resolve_proof_chain_impl(
                         }
                     }
 
+                    // §3.8: a map proof authenticates at least one leaf. Count
+                    // structural leaves, decoded or not, in both forms.
+                    std::size_t structural_leaves = 0;
+                    if (reconstructed)
+                    {
+                        reconstructed->walk_abbreviated(
+                            [&](catl::shamap::SHAMapNodeID const&,
+                                Hash256 const&,
+                                catl::shamap::SHAMapTreeNodeT<
+                                    catl::shamap::AbbreviatedTreeTraits> const*
+                                    node) {
+                                if (node && node->is_leaf())
+                                    ++structural_leaves;
+                            });
+                    }
+
                     // --- Verify root hash (shared for both paths) ---
                     if (!reconstructed)
                     {
@@ -910,6 +936,15 @@ resolve_proof_chain_impl(
                             verify_log,
                             "  Trie proof:   FAIL (could not reconstruct "
                             "abbreviated tree)");
+                        map_step.root_hash_check = Check::fail;
+                        all_ok = false;
+                    }
+                    else if (structural_leaves == 0)
+                    {
+                        PLOGE(
+                            verify_log,
+                            "  Trie proof:   FAIL (map proof contains no "
+                            "leaves)");
                         map_step.root_hash_check = Check::fail;
                         all_ok = false;
                     }

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <initializer_list>
 #include <span>
 
 namespace xprv {
@@ -49,11 +50,6 @@ anchor_to_json(AnchorData const& a)
         validations[key] = bytes_hex(val);
     }
     obj["validations"] = validations;
-
-    // Summary for quick inspection
-    boost::json::object summary;
-    summary["total_validations"] = static_cast<int>(a.validations.size());
-    obj["summary"] = summary;
 
     return obj;
 }
@@ -137,6 +133,7 @@ decoded_leaf_json(
     obj.erase("index");
     obj.erase("hash");
     obj.erase("blob");
+    require_codec_members(decoded, is_tx, protocol);
 
     std::vector<uint8_t> again;
     try
@@ -297,6 +294,70 @@ step_to_json(ChainStep const& step)
         step);
 }
 
+static void
+require_stobject_members(
+    boost::json::value const& value,
+    catl::xdata::Protocol const& protocol,
+    std::string const& path)
+{
+    namespace types = catl::xdata::FieldTypes;
+    if (!value.is_object())
+        throw std::runtime_error(
+            "map proof: leaf member " + path + " must be an object");
+    for (auto const& [key, member] : value.as_object())
+    {
+        auto const name = std::string(key);
+        auto const at = path.empty() ? name : path + "." + name;
+        auto const field = protocol.find_field(name);
+        if (!field || !field->meta.is_serialized)
+            throw std::runtime_error(
+                "map proof: leaf member " + at + " is not a serialized field");
+        if (field->meta.type == types::STObject)
+            require_stobject_members(member, protocol, at);
+        else if (field->meta.type == types::STArray)
+        {
+            if (!member.is_array())
+                throw std::runtime_error(
+                    "map proof: leaf member " + at + " must be an array");
+            std::size_t index = 0;
+            for (auto const& element : member.as_array())
+            {
+                auto const element_at = at + "[" + std::to_string(index++) + "]";
+                if (!element.is_object() || element.as_object().size() != 1)
+                    throw std::runtime_error(
+                        "map proof: leaf member " + element_at +
+                        " must wrap exactly one object");
+                auto const& [wrapper_key, inner] = *element.as_object().begin();
+                auto const wrapper = std::string(wrapper_key);
+                auto const wrapper_field = protocol.find_field(wrapper);
+                if (!wrapper_field || !wrapper_field->meta.is_serialized ||
+                    !(wrapper_field->meta.type == types::STObject))
+                    throw std::runtime_error(
+                        "map proof: leaf member " + element_at + "." + wrapper +
+                        " is not a serialized object field");
+                require_stobject_members(
+                    inner, protocol, element_at + "." + wrapper);
+            }
+        }
+    }
+}
+
+void
+require_codec_members(
+    boost::json::value const& leaf,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol)
+{
+    if (!is_tx)
+        return require_stobject_members(leaf, protocol, "");
+    if (!leaf.is_object() || leaf.as_object().size() != 2 ||
+        !leaf.as_object().contains("tx") || !leaf.as_object().contains("meta"))
+        throw std::runtime_error(
+            "map proof: a tx leaf must be exactly {tx, meta}");
+    require_stobject_members(leaf.at("tx"), protocol, "tx");
+    require_stobject_members(leaf.at("meta"), protocol, "meta");
+}
+
 boost::json::object
 to_json(ProofChain const& chain)
 {
@@ -311,13 +372,63 @@ to_json(ProofChain const& chain)
 // Deserialize
 //------------------------------------------------------------------------------
 
+// The JSON form is closed (§2.4): an object carries exactly its members.
+static void
+require_members(
+    boost::json::object const& obj,
+    std::initializer_list<std::string_view> names,
+    std::string_view what)
+{
+    for (auto const& kv : obj)
+    {
+        if (std::find(names.begin(), names.end(), kv.key()) == names.end())
+            throw std::runtime_error(
+                "proof JSON: unknown member " + std::string(kv.key()) +
+                " in " + std::string(what));
+    }
+    for (auto const name : names)
+    {
+        if (!obj.contains(name))
+            throw std::runtime_error(
+                "proof JSON: " + std::string(what) + " is missing " +
+                std::string(name));
+    }
+}
+
+// An integer field is an integer token in range; 7.0 is not one.
+static uint64_t
+integer_member(
+    boost::json::object const& obj,
+    std::string_view name,
+    uint64_t max,
+    std::string_view what)
+{
+    auto const& v = obj.at(name);
+    if (v.is_uint64() && v.get_uint64() <= max)
+        return v.get_uint64();
+    if (v.is_int64() && v.get_int64() >= 0 &&
+        static_cast<uint64_t>(v.get_int64()) <= max)
+        return static_cast<uint64_t>(v.get_int64());
+    throw std::runtime_error(
+        "proof JSON: " + std::string(what) + " " + std::string(name) +
+        " must be an integer no greater than " + std::to_string(max));
+}
+
+static constexpr uint64_t kUint32Max = 0xFFFFFFFFu;
+static constexpr uint64_t kUint8Max = 0xFFu;
+
 static AnchorData
 anchor_from_json(boost::json::object const& obj)
 {
+    require_members(
+        obj,
+        {"type", "ledger_hash", "ledger_index", "unl", "validations"},
+        "anchor");
     AnchorData a;
     a.ledger_hash =
         hash_from_hex(std::string(obj.at("ledger_hash").as_string()));
-    a.ledger_index = obj.at("ledger_index").to_number<uint32_t>();
+    a.ledger_index = static_cast<uint32_t>(
+        integer_member(obj, "ledger_index", kUint32Max, "anchor"));
 
     auto const& unl = obj.at("unl").as_object();
     a.publisher_key_hex = std::string(unl.at("public_key").as_string());
@@ -368,9 +479,23 @@ anchor_from_json(boost::json::object const& obj)
 static HeaderData
 header_from_json(boost::json::object const& obj)
 {
+    require_members(obj, {"type", "header"}, "ledger_header step");
     HeaderData h;
     auto const& hdr = obj.at("header").as_object();
-    h.seq = hdr.at("ledger_index").to_number<uint32_t>();
+    require_members(
+        hdr,
+        {"ledger_index",
+         "total_coins",
+         "parent_hash",
+         "transaction_hash",
+         "account_hash",
+         "parent_close_time",
+         "close_time",
+         "close_time_resolution",
+         "close_flags"},
+        "header");
+    h.seq = static_cast<uint32_t>(
+        integer_member(hdr, "ledger_index", kUint32Max, "header"));
     auto const total_coins =
         std::string(hdr.at("total_coins").as_string());
     if (total_coins.empty() ||
@@ -386,23 +511,21 @@ header_from_json(boost::json::object const& obj)
     h.tx_hash = hash_from_hex(std::string(hdr.at("transaction_hash").as_string()));
     h.account_hash =
         hash_from_hex(std::string(hdr.at("account_hash").as_string()));
-    h.parent_close_time =
-        hdr.at("parent_close_time").to_number<uint32_t>();
-    h.close_time = hdr.at("close_time").to_number<uint32_t>();
-    auto const resolution =
-        hdr.at("close_time_resolution").to_number<uint32_t>();
-    auto const flags = hdr.at("close_flags").to_number<uint32_t>();
-    if (resolution > 255 || flags > 255)
-        throw std::runtime_error(
-            "proof JSON: uint8 ledger header field out of range");
-    h.close_time_resolution = static_cast<uint8_t>(resolution);
-    h.close_flags = static_cast<uint8_t>(flags);
+    h.parent_close_time = static_cast<uint32_t>(
+        integer_member(hdr, "parent_close_time", kUint32Max, "header"));
+    h.close_time = static_cast<uint32_t>(
+        integer_member(hdr, "close_time", kUint32Max, "header"));
+    h.close_time_resolution = static_cast<uint8_t>(
+        integer_member(hdr, "close_time_resolution", kUint8Max, "header"));
+    h.close_flags = static_cast<uint8_t>(
+        integer_member(hdr, "close_flags", kUint8Max, "header"));
     return h;
 }
 
 static TrieData
 trie_from_json(boost::json::object const& obj)
 {
+    require_members(obj, {"type", "tree", "trie"}, "map_proof step");
     TrieData t;
     auto tree_str = std::string(obj.at("tree").as_string());
     if (tree_str == "state")
@@ -453,29 +576,25 @@ parse_steps_array(boost::json::array const& arr)
 ProofChain
 from_json(boost::json::value const& json)
 {
-    // New format: {"format_version": N, "network_id": N, "steps": [...]}
-    if (json.is_object())
-    {
-        auto const& obj = json.as_object();
+    // {"format_version": N, "network_id": N, "steps": [...]} is the only
+    // form: a bare steps array carries no version to check (§2).
+    if (!json.is_object())
+        throw std::runtime_error(
+            "proof JSON: expected an object with format_version, network_id "
+            "and steps");
+    auto const& obj = json.as_object();
+    require_members(obj, {"format_version", "network_id", "steps"}, "proof");
 
-        auto const v = obj.at("format_version").to_number<uint32_t>();
-        if (v != XPRV_FORMAT_VERSION)
-            throw std::runtime_error(
-                "proof JSON: format_version " + std::to_string(v) +
-                " != expected " + std::to_string(XPRV_FORMAT_VERSION));
+    auto const v = integer_member(obj, "format_version", kUint32Max, "proof");
+    if (v != XPRV_FORMAT_VERSION)
+        throw std::runtime_error(
+            "proof JSON: format_version " + std::to_string(v) +
+            " != expected " + std::to_string(XPRV_FORMAT_VERSION));
 
-        auto chain = parse_steps_array(obj.at("steps").as_array());
-        chain.network_id = obj.at("network_id").to_number<uint32_t>();
-        return chain;
-    }
-
-    // Legacy format: bare array [...]
-    if (json.is_array())
-    {
-        return parse_steps_array(json.as_array());
-    }
-
-    throw std::runtime_error("proof JSON: expected object or array");
+    auto chain = parse_steps_array(obj.at("steps").as_array());
+    chain.network_id = static_cast<uint32_t>(
+        integer_member(obj, "network_id", kUint32Max, "proof"));
+    return chain;
 }
 
 ProofChain

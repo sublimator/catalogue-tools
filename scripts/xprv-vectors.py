@@ -49,6 +49,7 @@ import argparse
 import importlib.util
 import io
 import json
+import os
 import logging
 import struct
 import subprocess
@@ -63,7 +64,8 @@ LOG = logging.getLogger("xprv-vectors")
 REPO = Path(__file__).resolve().parent.parent
 VERIFIER = REPO / "scripts" / "verify-xprv.py"
 VECTOR_DIR = REPO / "tests" / "xprv" / "vectors"
-XPRV_BIN = REPO / "build" / "src" / "xprv" / "xprv"
+# The encoder to shell out to; XPRV_BIN overrides the default build tree.
+XPRV_BIN = Path(os.environ.get("XPRV_BIN", REPO / "build" / "src" / "xprv" / "xprv"))
 
 
 def load_verifier():

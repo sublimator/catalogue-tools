@@ -644,13 +644,35 @@ class ProofBindingTests(unittest.TestCase):
         proof["format_version"] = 999
         self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "unsupported format_version")
 
-    def test_bare_step_list_belongs_to_network_zero(self) -> None:
+    def test_rejects_bare_step_list(self) -> None:
         f = Fixture()
         steps = f.proof()["steps"]
-        self.assertTrue(self.verify(steps, f.trusted_key, 0).ok)
-        self.assertFailsWith(
-            self.verify(steps, f.trusted_key, 21337), "does not match configured network 21337"
-        )
+        self.assertFailsWith(self.verify(steps, f.trusted_key, 0), "proof must be an object")
+
+    def test_rejects_malformed_field_types(self) -> None:
+        f = Fixture()
+        cases = {
+            "validation value": lambda p: p["steps"][0]["validations"].update({"ED" + "00" * 32: "ZZ"}),
+            "validation value ": lambda p: p["steps"][0]["validations"].update({"ED" + "00" * 32: None}),
+            "anchor ledger_index": lambda p: p["steps"][0].update(ledger_index="1"),
+            "header total_coins": lambda p: p["steps"][1]["header"].update(
+                total_coins=int(p["steps"][1]["header"]["total_coins"])
+            ),
+            "header close_flags": lambda p: p["steps"][1]["header"].update(close_flags=256),
+            "header parent_hash": lambda p: p["steps"][1]["header"].update(parent_hash="AB CD"),
+        }
+        for reason, mutate in cases.items():
+            with self.subTest(reason=reason):
+                proof = f.proof()
+                proof["steps"][1]["header"] = dict(proof["steps"][1]["header"])
+                mutate(proof)
+                self.assertFailsWith(self.verify(proof, f.trusted_key, 0), reason.strip())
+
+    def test_json_map_proof_cannot_carry_binary_members(self) -> None:
+        f = Fixture()
+        proof = f.proof()
+        proof["steps"].append({"type": "map_proof", "tree": "tx", "__binary_root__": "00" * 32})
+        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "reserved for binary decoding")
 
 
 def _der(r: int, s: int) -> bytes:
@@ -695,6 +717,124 @@ class DecompressionBoundTests(unittest.TestCase):
         data = b"XPRV" + bytes([v.FORMAT_VERSION, 1]) + (0).to_bytes(4, "big") + bomb
         with self.assertRaisesRegex(ValueError, "exceeds cap"):
             v.binary_to_proof(data)
+
+
+    def packed(self, body: bytes, flags: int) -> bytes:
+        return b"XPRV" + bytes([v.FORMAT_VERSION, flags]) + (0).to_bytes(4, "big") + body
+
+    def test_cap_is_inclusive_plain_and_inflated(self) -> None:
+        import zlib
+        cap = v.MAX_DECOMPRESSED_PROOF_SIZE
+        for flags, make in ((0, lambda n: b"\x00" * n), (1, lambda n: zlib.compress(b"\x00" * n, 9))):
+            with self.subTest(flags=flags):
+                # Zeros are no TLV body, so exactly the cap still fails, but later.
+                with self.assertRaises(ValueError) as at_cap:
+                    v.binary_to_proof(self.packed(make(cap), flags))
+                self.assertNotIn("exceeds", str(at_cap.exception))
+                with self.assertRaisesRegex(ValueError, "exceeds"):
+                    v.binary_to_proof(self.packed(make(cap + 1), flags))
+
+    def test_one_zlib_stream_and_nothing_after_it(self) -> None:
+        import zlib
+        stream = zlib.compress(b"\x00" * 1024, 9)
+        for name, body, reason in (
+            ("suffix", stream + b"\x00", "bytes after the zlib stream"),
+            ("second stream", stream + stream, "bytes after the zlib stream"),
+            ("bad checksum", stream[:-1] + bytes([stream[-1] ^ 1]), "invalid zlib body"),
+        ):
+            with self.subTest(name):
+                with self.assertRaisesRegex(ValueError, reason):
+                    v.binary_to_proof(self.packed(body, 1))
+
+    def test_real_proof_round_trips_at_levels_one_and_nine(self) -> None:
+        import json as _json
+        import zlib
+        vec = _json.loads(
+            (Path(__file__).parent.parent / "tests/xprv/vectors/positive-tx-skiplist.json").read_text()
+        )
+        raw = bytes.fromhex(vec["form"]["binary_hex"])
+        plain = v.binary_to_proof(raw)
+        for level in (1, 9):
+            with self.subTest(level=level):
+                packed = raw[:5] + b"\x01" + raw[6:10] + zlib.compress(raw[10:], level)
+                self.assertEqual(v.binary_to_proof(packed)["steps"][1], plain["steps"][1])
+
+
+class ClosedJsonTests(unittest.TestCase):
+    """D12: the JSON form is closed; §2.3: leaves hold only what is hashed."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        vector = json.loads((Path(__file__).parents[1] / "tests/xprv/vectors/positive-tx-skiplist.json").read_text())
+        cls.base = vector["form"]["json"]
+
+    def proof(self) -> dict:
+        return copy.deepcopy(self.base)
+
+    def verify(self, proof):
+        return quietly(v.verify, proof)
+
+    @staticmethod
+    def first_leaf(proof: dict, tree: str) -> list:
+        node = [s for s in proof["steps"] if s["type"] == "map_proof" and s["tree"] == tree][-1]["trie"]
+        while isinstance(node, dict):
+            node = next(child for key, child in node.items() if key != "__depth__" and not isinstance(child, str))
+        return node
+
+    def test_corpus_proof_verifies(self) -> None:
+        self.assertTrue(self.verify(self.proof()).ok)
+
+    def test_rejects_unknown_members_at_every_level(self) -> None:
+        picks = {
+            "proof": lambda p: p,
+            "anchor": lambda p: p["steps"][0],
+            "ledger_header step": lambda p: p["steps"][1],
+            "header": lambda p: p["steps"][1]["header"],
+            "map_proof step": lambda p: p["steps"][2],
+        }
+        for what, pick in picks.items():
+            with self.subTest(what):
+                proof = self.proof()
+                pick(proof)["note"] = "not part of the proof"
+                result = self.verify(proof)
+                self.assertFalse(result.ok)
+                self.assertTrue(any(f"unknown member note in {what}" in e for e in result.errors), result.errors)
+
+    def test_rejects_integral_float_version(self) -> None:
+        proof = self.proof()
+        proof["format_version"] = float(v.FORMAT_VERSION)
+        self.assertFalse(self.verify(proof).ok)
+
+    def test_rejects_leaf_members_the_codec_would_skip(self) -> None:
+        def state_extra(p):
+            self.first_leaf(p, "state")[1]["DisplayedButNotHashed"] = 1
+        def state_index(p):
+            leaf = self.first_leaf(p, "state")
+            leaf[1]["index"] = leaf[0]
+        def tx_hash(p):
+            leaf = self.first_leaf(p, "tx")
+            leaf[1]["tx"]["hash"] = leaf[0]
+        def meta_extra(p):
+            self.first_leaf(p, "tx")[1]["meta"]["not_a_field"] = "1"
+        def wrapper_extra(p):
+            leaf = self.first_leaf(p, "tx")
+            leaf[1]["hash"] = leaf[0]
+        def nested_extra(p):
+            node = self.first_leaf(p, "tx")[1]["meta"]["AffectedNodes"][0]
+            next(iter(node.values()))["DisplayedButNotHashed"] = 1
+        for mutate in (state_extra, state_index, tx_hash, meta_extra, wrapper_extra, nested_extra):
+            with self.subTest(mutate.__name__):
+                proof = self.proof()
+                mutate(proof)
+                self.assertFalse(self.verify(proof).ok)
+
+    def test_warns_when_signed_sequence_differs_from_advisory_index(self) -> None:
+        proof = self.proof()
+        proof["steps"][0]["ledger_index"] += 1
+        result = self.verify(proof)
+        self.assertTrue(result.ok)
+        self.assertTrue(any("not the advisory ledger_index" in w for w in result.warnings), result.warnings)
+        self.assertFalse(any("advisory" in w for w in self.verify(self.proof()).warnings))
 
 
 class SignatureCanonicalityTests(unittest.TestCase):
@@ -799,7 +939,6 @@ def proof_over_binary_trie(payload: bytes, *, tree: str) -> tuple[Fixture, dict]
             {
                 "type": "map_proof",
                 "tree": tree,
-                "__binary_root__": root_hex,
                 "__binary_payload__": payload,
             },
         ],

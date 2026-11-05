@@ -173,6 +173,14 @@ AnchorVerifier::parse_validation(std::vector<uint8_t> const& raw)
                 (static_cast<uint32_t>(raw[pos + 2]) << 8) |
                 static_cast<uint32_t>(raw[pos + 3]);
         }
+        // sfLedgerSequence: type=2 (UInt32), field=6 → header byte 0x26
+        else if (type_code == 2 && field_code == 6)
+        {
+            result.ledger_seq = (static_cast<uint32_t>(raw[pos]) << 24) |
+                (static_cast<uint32_t>(raw[pos + 1]) << 16) |
+                (static_cast<uint32_t>(raw[pos + 2]) << 8) |
+                static_cast<uint32_t>(raw[pos + 3]);
+        }
         // sfLedgerHash: type=5 (Hash256), field=1 → header byte 0x51
         else if (type_code == 5 && field_code == 1)
         {
@@ -682,6 +690,7 @@ AnchorVerifier::verify(
 
     int total = 0;
     int verified = 0;
+    std::set<std::optional<uint32_t>> counted_seqs;
     int partial = 0;
     int matched_unl = 0;
     std::set<std::string> counted_masters;  // one vote per validator identity
@@ -756,6 +765,29 @@ AnchorVerifier::verify(
             counted_masters.insert(member->second).second)
         {
             matched_unl++;
+            counted_seqs.insert(parsed.ledger_seq);
+        }
+    }
+
+    // §2.1 SHOULD: the counted validations' signed LedgerSequence against the
+    // advisory index. A mismatch is reported, never a rejection.
+    if (auto const* advisory = anchor.if_contains("ledger_index");
+        advisory && advisory->is_number() && !counted_seqs.empty())
+    {
+        auto const index = advisory->to_number<uint32_t>();
+        if (counted_seqs.size() != 1 || *counted_seqs.begin() != index)
+        {
+            std::string signed_seqs;
+            for (auto const& seq : counted_seqs)
+            {
+                if (!signed_seqs.empty())
+                    signed_seqs += ", ";
+                signed_seqs += seq ? std::to_string(*seq) : "none";
+            }
+            result.warnings.push_back(
+                "counted validations sign LedgerSequence " + signed_seqs +
+                ", not the advisory ledger_index " + std::to_string(index));
+            narrative.push_back("   WARN: " + result.warnings.back() + ".");
         }
     }
 
