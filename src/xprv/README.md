@@ -31,10 +31,18 @@ receives an immutable snapshot of held material:
   a proof whose list was signed under a publisher key since superseded. Every
   sequence seen is kept until a conflict, and the conflicting pair after it.
 
-**A publisher revocation is final.** A verified revocation of the publisher key
-works as a validator's does. The engine drops its list, refuses every later
-list, serves no proof (cached proofs included), and passes the revocation, so
-`/verify` refuses every proof under that publisher.
+**A publisher revocation or conflict is final.** Either one bars proof
+serving on that network for the life of the process, cached proofs included.
+
+- **A revocation:** a verified revocation of the publisher key. The engine also
+  drops its list and refuses every later one.
+- **A conflict:** two different publisher manifests at one sequence. Only the
+  publisher's own master key can produce that.
+
+The engine passes the evidence (the revocation, or the conflicting pair) to
+`/verify`, which then refuses every proof under that publisher. Only that
+network is affected. `/health` reports it per network as `publisher_state`:
+`revoked` or `equivocated`, instead of `active`.
 
 **Proving uses the same rules.** The engine counts its proof quorum under the
 same view. It attaches one validation per listed master, signed under that
@@ -45,10 +53,6 @@ never votes (rule 3).
 
 ## Known gaps
 
-- **Publisher conflict.** Two different publisher manifests at one sequence are
-  kept as a conflict, and `/verify` refuses every proof under that publisher.
-  The engine still builds proofs, and how a long-running server should serve
-  through such a conflict is not yet settled.
 - **Same-sequence lists.** A second list at the cached sequence is refused as a
   refresh, and the conflict is not kept. Rule 7 cannot be exercised yet: each
   proof bundles one primary list, the verifiers take manifests but no other
