@@ -1,10 +1,8 @@
 # Base image with all build tools + Conan dependencies pre-installed.
 # Rebuild only when conanfile.py, conan.sh, or external recipes change.
 #
-# Build:
-#   gcloud builds submit --config src/xprv/deploy/cloudbuild-deps.yaml
-#
-# This produces: us-central1-docker.pkg.dev/xprv-server/xprv/xprv-deps:latest
+# Build, before the Dockerfile that starts FROM it:
+#   docker build -f src/xprv/deploy/Dockerfile.deps -t xprv-deps:local .
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
