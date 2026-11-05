@@ -1,9 +1,11 @@
+#include "trust-evidence-fixture.h"
+#include "xprv/manifest-utils.h"
 #include "xprv/proof-chain-json.h"
 #include "xprv/validation-collector.h"
 
 #include <catl/core/base64.h>
-#include <catl/vl-client/vl-client.h>
 #include <catl/peer-client/connection-types.h>
+#include <catl/vl-client/vl-client.h>
 #include <catl/xdata/protocol.h>
 
 #include "ripple.pb.h"
@@ -598,8 +600,7 @@ TEST(ValidationCollector, DropsPartialValidations)
     auto const& anchor =
         fixture.at("anchors").at("four-full-one-partial").as_object();
 
-    auto const blob_hex =
-        std::string(anchor.at("unl").at("blob").as_string());
+    auto const blob_hex = std::string(anchor.at("unl").at("blob").as_string());
     std::string blob_json;
     for (std::size_t i = 0; i + 1 < blob_hex.size(); i += 2)
         blob_json.push_back(
@@ -615,8 +616,8 @@ TEST(ValidationCollector, DropsPartialValidations)
     xprv::ValidationCollector collector(xrpl_protocol, 0);
     collector.set_unl(manifests);
 
-    auto const validation_type = static_cast<uint16_t>(
-        catl::peer_client::packet_type::validation);
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
     for (auto const& kv : anchor.at("validations").as_object())
     {
         auto const hex = std::string(kv.value().as_string());
@@ -639,8 +640,8 @@ TEST(ValidationCollector, RevokedMemberCountsInNWithoutASigningKey)
 {
     auto const xrpl_protocol = test_protocol();
     auto const anchor = load_anchor_fixture();
-    auto const blob = boost::json::parse(
-        std::string(anchor.blob.begin(), anchor.blob.end()));
+    auto const blob =
+        boost::json::parse(std::string(anchor.blob.begin(), anchor.blob.end()));
     std::vector<catl::vl::Manifest> manifests;
     for (auto const& entry : blob.at("validators").as_array())
         manifests.push_back(catl::vl::parse_manifest(catl::base64_decode(
@@ -728,7 +729,6 @@ TEST(ValidationCollector, EquivocatingValidatorStopsVotingAndIsReported)
         hash, xprv::ValidationCollector::QuorumMode::proof));
 }
 
-
 namespace {
 
 catl::vl::Manifest
@@ -759,7 +759,9 @@ contains(
 
 // A revocation carried by a newer list must reach the snapshot that local
 // verifiers use, replacing an older peer rotation.
-TEST(ValidationCollector, ListRevocationReplacesAnOlderPeerRotationInTheSnapshot)
+TEST(
+    ValidationCollector,
+    ListRevocationReplacesAnOlderPeerRotationInTheSnapshot)
 {
     auto const protocol = test_protocol();
     xprv::ValidationCollector collector(protocol, 0);
@@ -869,7 +871,7 @@ TEST(ValidationCollector, ListBorneRevocationSurvivesTheMasterLeavingTheList)
 
 // The publisher manifest of a loaded list is held, it outlives later lists,
 // and a stale site's older one doesn't replace it.
-TEST(ValidationCollector, NewestPublisherManifestIsHeldAcrossLists)
+TEST(ValidationCollector, PublisherManifestHistoryIsHeldAcrossLists)
 {
     auto const protocol = test_protocol();
     xprv::ValidationCollector collector(protocol, 0);
@@ -886,5 +888,82 @@ TEST(ValidationCollector, NewestPublisherManifestIsHeldAcrossLists)
     collector.note_publisher_manifest(publisher_old);  // a stale site
     auto const held = collector.held_manifest_bytes();
     EXPECT_TRUE(contains(held, publisher_new.raw));
-    EXPECT_FALSE(contains(held, publisher_old.raw));
+    EXPECT_TRUE(contains(held, publisher_old.raw));
+}
+
+TEST(ValidationCollector, PublisherConflictSurvivesHigherManifestInEveryOrder)
+{
+    auto const protocol = test_protocol();
+    std::array<catl::vl::Manifest, 3> const manifests{
+        xprv::test::trust_list("current").publisher_manifest,
+        xprv::test::trust_list("publisher_conflict").publisher_manifest,
+        xprv::test::trust_list("publisher_higher").publisher_manifest};
+    for (auto const& manifest : manifests)
+        ASSERT_TRUE(xprv::verify_manifest(manifest, protocol));
+    std::array<int, 3> order{0, 1, 2};
+    do
+    {
+        xprv::ValidationCollector collector(protocol, 0);
+        for (int index : order)
+            EXPECT_TRUE(collector.note_publisher_manifest(manifests[index]));
+        auto const held = collector.held_manifest_bytes();
+        ASSERT_EQ(held.size(), 3u);
+        for (auto const& manifest : manifests)
+            EXPECT_TRUE(contains(held, manifest.raw));
+        for (int i = 0; i < 20; ++i)
+            for (int index : order)
+                EXPECT_FALSE(
+                    collector.note_publisher_manifest(manifests[index]));
+        EXPECT_EQ(collector.held_manifest_bytes(), held);
+        collector.set_unl({});
+        EXPECT_EQ(collector.held_manifest_bytes(), held);
+    } while (std::next_permutation(order.begin(), order.end()));
+}
+
+TEST(ValidationCollector, PublisherHistoryCompactsToFirstPairAndNewest)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    for (uint32_t sequence = 1; sequence <= 100; ++sequence)
+        collector.note_publisher_manifest(fake_manifest(
+            0xED, 0x06, sequence, static_cast<uint8_t>(sequence)));
+    EXPECT_EQ(collector.held_manifest_bytes().size(), 100u);
+    auto conflict = fake_manifest(0xED, 0x07, 2, 0xF0);
+    EXPECT_TRUE(collector.note_publisher_manifest(conflict));
+    auto const witness = collector.held_manifest_bytes();
+    EXPECT_EQ(witness.size(), 3u);
+    for (uint8_t tag = 0xA0; tag < 0xC0; ++tag)
+        EXPECT_FALSE(collector.note_publisher_manifest(
+            fake_manifest(0xED, 0x07, 2, tag)));
+    EXPECT_EQ(collector.held_manifest_bytes(), witness);
+    EXPECT_TRUE(
+        collector.note_publisher_manifest(fake_manifest(0xED, 0x06, 101, 101)));
+    EXPECT_EQ(collector.held_manifest_bytes().size(), 3u);
+}
+
+TEST(ValidationCollector, ListEvidenceKeepsMembershipAndFormerMemberRevocation)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+    auto const current = xprv::test::trust_list("current");
+    auto const removed = xprv::test::trust_list("removed");
+    auto const revoked = xprv::test::trust_list("validator_revoked");
+    collector.set_unl(current.validators);
+    ASSERT_EQ(collector.unl_size, 5);
+    EXPECT_FALSE(collector.admit_list_manifests(
+        xprv::test::trust_list("unknown").validators));
+    EXPECT_EQ(collector.unl_size, 5);
+    collector.set_unl(removed.validators);
+    ASSERT_EQ(collector.unl_size, 4);
+    EXPECT_TRUE(collector.admit_list_manifests(revoked.validators));
+    EXPECT_EQ(collector.unl_size, 4);
+    EXPECT_TRUE(
+        contains(collector.held_manifest_bytes(), revoked.validators[0].raw));
+    EXPECT_FALSE(collector.admit_list_manifests(revoked.validators));
+    collector.set_unl(current.validators);
+    EXPECT_EQ(collector.unl_size, 5);
+    EXPECT_TRUE(
+        contains(collector.held_manifest_bytes(), revoked.validators[0].raw));
+    EXPECT_FALSE(
+        contains(collector.held_manifest_bytes(), current.validators[0].raw));
 }

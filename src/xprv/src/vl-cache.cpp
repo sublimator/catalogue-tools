@@ -265,6 +265,7 @@ VlCache::do_fetch()
                 // Verify fetched content against the pinned publisher key
                 // before storing it. Treat rejection like a failed fetch so
                 // the previous list remains available.
+                bool evidence_authenticated = false;
                 if (result.success && self->verify_)
                 {
                     std::string verr;
@@ -275,6 +276,8 @@ VlCache::do_fetch()
                             result.success = false;
                             result.error = "VL verification failed: " + verr;
                         }
+                        else
+                            evidence_authenticated = true;
                     }
                     catch (std::exception const& e)
                     {
@@ -282,6 +285,19 @@ VlCache::do_fetch()
                         result.error =
                             std::string("VL verification failed: ") + e.what();
                     }
+                }
+
+                if (evidence_authenticated && self->on_verified_evidence_)
+                {
+                    // Evidence admission is independent of list promotion.
+                    // An old list can carry a new delegation.
+                    // clang-format off
+                    //@@authority transition=prv.T0362 status=provisional scope=statement bind=on_verified_evidence_@79c94520485dd506
+                    // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+                    // calls=on_verified_evidence_
+                    // label=deliver_authenticated_evidence_before_list_promotion
+                    self->on_verified_evidence_(result.vl); //@@authority-target ids=prv.T0362
+                    // clang-format on
                 }
 
                 auto freshness = VlFreshnessDisposition::accept;
@@ -428,7 +444,7 @@ VlCache::do_fetch()
         on_fetch(
             std::nullopt,
             active_fetch_,
-            std::move(failed));  //@@authority-target ids=prv.T0216
+            std::move(failed)); //@@authority-target ids=prv.T0216
         //@@mutation-end vl-fetch-start-refusal-remains-local
     };
 
@@ -453,7 +469,7 @@ VlCache::do_fetch()
             // commit=vl_cache_strand touches=prv.S0067
             // writ_roles=exact.install_or_issue
             // label=install_exact_validator_list_fetch_cancellation_capability
-            active_fetch_ = operation;  //@@authority-target ids=prv.T0208
+            active_fetch_ = operation; //@@authority-target ids=prv.T0208
             if (fail_fetch_operation_starts_for_test_ != 0)
             {
                 --fail_fetch_operation_starts_for_test_;
@@ -593,7 +609,7 @@ VlCache::begin_stop_on_strand()
             // label=request_active_validator_list_fetch_cancellation
             requested =
                 active_fetch_
-                    ->request_cancel();  //@@authority-target ids=prv.T0209
+                    ->request_cancel(); //@@authority-target ids=prv.T0209
         }
         else if (cancel_fetch_for_test_)
         {
@@ -611,7 +627,7 @@ VlCache::begin_stop_on_strand()
         // commit=vl_cache_strand touches=prv.S0068
         // label=retain_owner_accepted_fetch_cancellation_request
         active_fetch_cancel_requested_ =
-            requested;  //@@authority-target ids=prv.T0214
+            requested; //@@authority-target ids=prv.T0214
     }
     try
     {

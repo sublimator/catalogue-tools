@@ -68,20 +68,13 @@ ProofEngine::bind_request_drain_authority(
     request_drain_binding_.bind(std::move(authority));
 }
 
+// clang-format off
+//@@audit-ack unannotated_authority_candidate reason="installs callbacks before the VL cache starts; authentication and evidence admission execute later on the cache and tracker owners, not during this wiring helper"
+// clang-format on
 void
-ProofEngine::start()
+ProofEngine::configure_validator_trust()
 {
-    if (start_called_)
-        throw std::logic_error("ProofEngine::start may be called only once");
-    start_called_ = true;
-
-    // Validation quorum tracker. Created before the VL cache starts, so a
-    // publisher revocation from the first fetch can reach it.
-    quorum_tracker_ =
-        ValidationQuorumTracker::create(io_, protocol_, config_.network_id);
-
-    // VL cache
-    vl_cache_ = VlCache::create(io_, config_.vl_host, config_.vl_port);
+    auto vbuf = quorum_tracker_;
     // Authenticate list contents against the pinned publisher key independently
     // of transport authentication.
     // weak_ptr capture: no dangling if the engine outlives an in-flight fetch,
@@ -112,11 +105,29 @@ ProofEngine::start()
             if (auto self = weak.lock())
                 self->on_publisher_revoked(manifest);
         });
-    vl_cache_->start();
+    vl_cache_->set_on_verified_evidence(
+        [vbuf](catl::vl::ValidatorList const& vl) {
+            vbuf->admit_list_evidence(vl.validators, vl.publisher_manifest);
+        });
+    vl_cache_->set_on_refresh([vbuf](catl::vl::ValidatorList const& vl) {
+        vbuf->set_unl(vl.validators, vl.sequence, vl.publisher_manifest);
+    });
+}
 
-    // Wire VL → quorum tracker: when VL loads, push UNL keys
-    // We do this via a one-shot fetch, then the refresh will re-push.
-    // For now, the VL co_get in prove() handles the initial UNL push.
+void
+ProofEngine::start()
+{
+    if (start_called_)
+        throw std::logic_error("ProofEngine::start may be called only once");
+    start_called_ = true;
+
+    // Install every trust callback before the first fetch can complete.
+    quorum_tracker_ =
+        ValidationQuorumTracker::create(io_, protocol_, config_.network_id);
+    auto vbuf = quorum_tracker_;
+    vl_cache_ = VlCache::create(io_, config_.vl_host, config_.vl_port);
+    configure_validator_trust();
+    vl_cache_->start();
 
     // Shared RPC client with concurrency limiter
     rpc_ = std::make_shared<catl::rpc::RpcClient>(
@@ -165,7 +176,7 @@ ProofEngine::start()
     // Node cache (content-addressed wire node store). The optional coordinator
     // is selected once here; request callsites do not branch on server mode.
     //@@authority transition=prv.T0004 status=provisional scope=statement
-    // bind=create@0bf3d062cfeb1a36
+    // bind=create@21f4d010357882db
     // owner=unresolved owner_hypothesis=ledger_data_provider
     // commit=startup_coroutine calls=create
     // label=construct_live_node_cache_with_selected_transport_capability
@@ -178,7 +189,6 @@ ProofEngine::start()
         ledger_fetch_coordinator_); //@@authority-target ids=prv.T0004
 
     // Wire peers → quorum tracker: unsolicited validations
-    auto vbuf = quorum_tracker_;
     peers_->set_unsolicited_handler(
         [vbuf](uint16_t type, std::vector<uint8_t> const& data) {
             vbuf->on_packet(type, data);
@@ -189,13 +199,6 @@ ProofEngine::start()
 
     // Bootstrap peer discovery
     peers_->bootstrap();
-
-    // Push UNL to quorum tracker on every VL load (initial + refresh).
-    // set_unl() clears the quorum cache, so this must only fire on actual
-    // VL changes — not per-request.
-    vl_cache_->set_on_refresh([vbuf](catl::vl::ValidatorList const& vl) {
-        vbuf->set_unl(vl.validators, vl.sequence, vl.publisher_manifest);
-    });
 
     // The configured endpoint uses PeerSet's owned background census. A
     // detached try_connect caller would be invisible to PeerSet::co_stop().
@@ -1214,7 +1217,8 @@ ProofEngine::get_or_reuse_anchor(
     co_return anchor;
 }
 
-//@@authority transition=prv.T0339 status=provisional scope=function bind=xprv::invalidate_anchor_cache_locked@0fafaa9e26da1d91
+//@@authority transition=prv.T0339 status=provisional scope=function
+//bind=xprv::invalidate_anchor_cache_locked@0fafaa9e26da1d91
 // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
 // touches=prv.S0142
 // label=retain_anchor_invalidation_terminal_before_wake
@@ -1236,7 +1240,8 @@ ProofEngine::invalidate_anchor_cache_locked()
     anchor_cache_.clear();
 }
 
-//@@authority transition=prv.T0340 status=provisional scope=function bind=xprv::invalidate_anchor_cache@50050b274f60b885
+//@@authority transition=prv.T0340 status=provisional scope=function
+//bind=xprv::invalidate_anchor_cache@50050b274f60b885
 // owner=unresolved owner_hypothesis=proof_engine
 // commit=cache_mutex_then_signal_home touches=prv.S0142
 // writ_roles=retained_signal.publish
@@ -1280,7 +1285,8 @@ ProofEngine::get_anchor_bundle(
     {
         std::lock_guard lock(cache_mutex_);
         auto it = anchor_cache_.find(cache_key);
-        //@@authority transition=prv.T0341 status=provisional scope=statement bind=if_statement@51558c5c99082fbf
+        //@@authority transition=prv.T0341 status=provisional scope=statement
+        //bind=if_statement@51558c5c99082fbf
         // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
         // touches=prv.S0142
         // label=select_hit_join_or_install_exact_anchor_shared_operation
@@ -1365,7 +1371,8 @@ ProofEngine::get_anchor_bundle(
         if (auto hook = before_anchor_wait_subscribe_for_test_)
             hook();
 
-        //@@authority transition=prv.T0342 status=provisional scope=statement bind=declaration@cde7028a5cfff710
+        //@@authority transition=prv.T0342 status=provisional scope=statement
+        //bind=declaration@cde7028a5cfff710
         // owner=unresolved owner_hypothesis=proof_engine
         // commit=anchor_wait_home touches=prv.S0142
         // writ_roles=retained_signal.subscribe
@@ -1378,8 +1385,8 @@ ProofEngine::get_anchor_bundle(
         std::exception_ptr failure;
         {
             std::lock_guard lock(cache_mutex_);
-            //@@authority transition=prv.T0343 status=provisional bind=expression_statement@06158e4bec728d5c
-            //scope=statement
+            //@@authority transition=prv.T0343 status=provisional
+            //bind=expression_statement@06158e4bec728d5c scope=statement
             // owner=unresolved owner_hypothesis=proof_engine
             // commit=cache_mutex touches=prv.S0142
             // writ_roles=retained_signal.revalidate
@@ -1419,7 +1426,8 @@ ProofEngine::get_anchor_bundle(
                 throw_request_terminal(*request.terminal);
         }
 
-        //@@authority transition=prv.T0344 status=provisional scope=statement bind=switch_statement@f567139c00543cc7
+        //@@authority transition=prv.T0344 status=provisional scope=statement
+        //bind=switch_statement@f567139c00543cc7
         // owner=unresolved owner_hypothesis=proof_engine commit=waiter_frame
         // touches=prv.S0142 writ_roles=retained_signal.deadline_or_cancel
         // label=map_waiter_local_deadline_or_cancellation_without_shared_terminal
@@ -1478,8 +1486,8 @@ ProofEngine::get_anchor_bundle(
         {
             std::lock_guard lock(cache_mutex_);
             auto it = anchor_cache_.find(cache_key);
-            //@@authority transition=prv.T0345 status=provisional bind=if_statement@329a89cb890f819b
-            //scope=statement
+            //@@authority transition=prv.T0345 status=provisional
+            //bind=if_statement@329a89cb890f819b scope=statement
             // owner=unresolved owner_hypothesis=proof_engine
             // commit=cache_mutex touches=prv.S0142
             // label=retain_exact_anchor_builder_failure_or_stale_invalidation
@@ -1498,7 +1506,8 @@ ProofEngine::get_anchor_bundle(
                 publish = true;
             } //@@authority-target ids=prv.T0345
         }
-        //@@authority transition=prv.T0346 status=provisional scope=statement bind=if_statement@98850c5477c7c2a3
+        //@@authority transition=prv.T0346 status=provisional scope=statement
+        //bind=if_statement@98850c5477c7c2a3
         // owner=unresolved owner_hypothesis=proof_engine
         // commit=anchor_wait_home touches=prv.S0142
         // writ_roles=retained_signal.publish
@@ -1514,7 +1523,8 @@ ProofEngine::get_anchor_bundle(
     {
         std::lock_guard lock(cache_mutex_);
         auto it = anchor_cache_.find(cache_key);
-        //@@authority transition=prv.T0347 status=provisional scope=statement bind=if_statement@39f5735b57f032e1
+        //@@authority transition=prv.T0347 status=provisional scope=statement
+        //bind=if_statement@39f5735b57f032e1
         // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
         // touches=prv.S0142
         // label=retain_exact_anchor_success_or_refuse_stale_publication
@@ -1549,7 +1559,8 @@ ProofEngine::get_anchor_bundle(
         } //@@authority-target ids=prv.T0347
     }
 
-    //@@authority transition=prv.T0348 status=provisional scope=statement bind=if_statement@307320d59ddefb36
+    //@@authority transition=prv.T0348 status=provisional scope=statement
+    //bind=if_statement@307320d59ddefb36
     // owner=unresolved owner_hypothesis=proof_engine
     // commit=anchor_wait_home touches=prv.S0142
     // writ_roles=retained_signal.publish

@@ -5,7 +5,8 @@
 // Collects STValidation messages from the peer network, maintains a ring
 // buffer of recent quorum entries, and services proof requests.
 // TODO: Evaluate extracting only the generic ingress/worker/timer/barrier
-// mechanics; see extract-common-ingress-mechanics-from-validation-quorum-tracker.md.
+// mechanics; see
+// extract-common-ingress-mechanics-from-validation-quorum-tracker.md.
 //
 // Collector and quorum mutation happens on the strand. Packet admission is
 // bounded under a separate mutex before work reaches that strand. Coroutine
@@ -120,6 +121,13 @@ public:
     /// a verified publisher revocation, so held_manifests() carries it.
     void
     note_publisher_manifest(catl::vl::Manifest manifest);
+
+    /// Admit manifests from an authenticated list response without promoting
+    /// its membership. Uses the same admission/publication gate as set_unl().
+    void
+    admit_list_evidence(
+        std::vector<catl::vl::Manifest> const& validators,
+        catl::vl::Manifest const& publisher_manifest);
 
     /// Apply the list on the validation strand, or report that a newer list is
     /// already active. Returning true guarantees subsequent quorum reads use
@@ -321,6 +329,17 @@ private:
         catl::vl::Manifest publisher_manifest;
     };
 
+    void
+    post_list_update(
+        std::shared_ptr<UnlUpdate> owned,
+        std::optional<uint32_t> vl_sequence);
+
+    void
+    apply_list_evidence_locked(UnlUpdate const& update, bool publish);
+
+    void
+    discard_cached_quorums_locked();
+
     bool
     apply_unl_locked(
         UnlUpdate const& update,
@@ -330,12 +349,13 @@ private:
     void
     publish_trust_state_locked();
 
-    // Hold a newer publisher manifest and republish the snapshot (owner
+    // Hold authenticated publisher material and republish the snapshot (owner
     // strand, publication_mutex_ held). Independent of the list sequence: a
     // publisher can re-issue its manifest for an unchanged list.
-    // clang-format off
-    //@@audit-ack unannotated_authority_candidate reason="records a verified publisher manifest in the collector's held set and republishes the read-only snapshot, as refresh_held_manifests_locked does; it grants and revokes nothing itself, and its callers are the list hand-offs and note_publisher_manifest on the owner strand"
-    // clang-format on
+    //@@authority transition=prv.T0369 status=provisional scope=function bind=xprv::ValidationQuorumTracker::note_publisher_manifest_locked@29f2b739278a3535
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=validation_quorum_tracker_strand touches=prv.S0145,prv.S0147
+    // label=admit_publisher_manifest_and_publish_its_retained_evidence
     void
     note_publisher_manifest_locked(catl::vl::Manifest const& manifest)
     {
@@ -448,10 +468,10 @@ private:
     mutable std::mutex held_manifests_mutex_;
 
     // Republish held_manifests_ from the collector (owner strand only).
-    // The ack must stay ONE line, so clang-format is off around it.
-    // clang-format off
-    //@@audit-ack unannotated_authority_candidate reason="republishes an immutable copy of collector state for read-only verifiers behind a leaf mutex and grants or revokes nothing itself; its only callers, apply_unl_locked and the manifest-apply completion on the owner strand, are where trust state changes, and they are unannotated debt in the xprv-only scope"
-    // clang-format on
+    //@@authority transition=prv.T0370 status=provisional scope=function bind=xprv::ValidationQuorumTracker::refresh_held_manifests_locked@b794c7aa302a8675
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // commit=held_manifests_mutex touches=prv.S0147
+    // label=publish_immutable_verifier_evidence_snapshot
     void
     refresh_held_manifests_locked()
     {
@@ -460,6 +480,10 @@ private:
         std::lock_guard lock(held_manifests_mutex_);
         held_manifests_ = std::move(held);
     }
+    //@@authority state=prv.S0147 status=provisional scope=field bind=xprv::ValidationQuorumTracker::held_manifests_@0da5bd988dafaef6
+    // owner=unresolved owner_hypothesis=validation_quorum_tracker
+    // observed_home=ValidationQuorumTracker::held_manifests_
+    // label=published_immutable_verifier_evidence_snapshot
     std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests_ =
         std::make_shared<std::vector<std::vector<uint8_t>> const>();
 
@@ -502,6 +526,8 @@ private:
     bool validation_drain_scheduled_ = false;
     // Gives one validation batch priority after a manifest burst.
     bool validation_drain_priority_ = false;
+    // Includes evidence-only list handoffs; both serialize ahead of quorum
+    // reads.
     std::size_t pending_unl_updates_ = 0;
     uint64_t trust_admission_generation_ = 0;
     std::size_t validation_packets_received_ = 0;

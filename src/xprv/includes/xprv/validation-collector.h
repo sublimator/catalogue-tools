@@ -45,12 +45,17 @@ public:
     void
     set_unl(std::vector<catl::vl::Manifest> const& validators);
 
-    /// Keep the newest manifest of a publisher whose list was loaded, for
-    /// held_manifest_bytes(). A list from a site serving an older publisher
-    /// manifest doesn't replace a newer one. Empty raw bytes are ignored.
-    /// Returns true when the held manifest changed.
+    /// Admit an already authenticated publisher manifest. Keep one raw
+    /// manifest per observed sequence until a conflict is found, then retain
+    /// its witness pair and the newest manifest. Returns true on change.
     bool
     note_publisher_manifest(catl::vl::Manifest const& manifest);
+
+    /// Admit already authenticated list manifests without applying membership.
+    /// Currently or previously listed masters are eligible; N is unchanged.
+    /// Uses the same delegation-admission rules as verified peer material.
+    bool
+    admit_list_manifests(std::vector<catl::vl::Manifest> const& validators);
 
     /// Call from unsolicited handler. Filters for type 41 (validation).
     void
@@ -152,15 +157,15 @@ public:
         return unl_master_keys_;
     }
 
-    void
+    bool
     apply_peer_manifests(std::vector<catl::vl::Manifest> manifests);
 
     /// The §1.3 material this server holds, for verifiers on this server:
-    /// per master, the newest manifest from any list this process has loaded
-    /// or a peer (so a list-borne revocation reaches them too), plus the one
+    /// per master, the newest manifest from an applied list or independently
+    /// admitted list/peer evidence, plus the one
     /// conflicting pair for each equivocated master (so they drop the same
-    /// validator), plus the newest manifest of each publisher whose list was
-    /// loaded (so a superseded publisher key is refused there too).
+    /// validator), plus the authenticated publisher history (or a conflict
+    /// witness and newest publisher manifest after a conflict is established).
     /// Not filtered by the current list: an older proof's own primary list
     /// can still name a master the current list dropped, and a verifier's
     /// rule 1 already filters by that proof's list. Peers' manifests
@@ -182,7 +187,8 @@ public:
             // updates, so a list-borne revocation survives the master leaving
             // the list) and peers.
             std::optional<std::pair<uint32_t, std::vector<uint8_t>>> newest;
-            auto const consider = [&](uint32_t seq, std::vector<uint8_t> const& raw) {
+            auto const consider = [&](uint32_t seq,
+                                      std::vector<uint8_t> const& raw) {
                 if (!raw.empty() && (!newest || seq > newest->first))
                     newest.emplace(seq, raw);
             };
@@ -198,10 +204,26 @@ public:
             auto const evidence = equivocation_evidence_.find(master);
             if (evidence != equivocation_evidence_.end())
                 out.insert(
-                    out.end(), evidence->second.begin(), evidence->second.end());
+                    out.end(),
+                    evidence->second.begin(),
+                    evidence->second.end());
         }
         for (auto const& [_, seen] : publisher_manifests_seen_)
-            out.push_back(seen.second);
+        {
+            if (seen.conflict.empty())
+            {
+                for (auto const& [sequence, raw] : seen.by_sequence)
+                    out.push_back(raw);
+            }
+            else
+            {
+                out.insert(
+                    out.end(), seen.conflict.begin(), seen.conflict.end());
+                if (seen.newest_raw != seen.conflict[0] &&
+                    seen.newest_raw != seen.conflict[1])
+                    out.push_back(seen.newest_raw);
+            }
+        }
         return out;
     }
 
@@ -237,6 +259,12 @@ private:
     catl::xdata::Protocol const& protocol_;
     std::string net_label_;
     std::set<std::string> unl_master_keys_;
+    // Newest non-membership delegation from peers or authenticated list
+    // responses. Retained across membership changes for old-proof verification.
+    //@@authority state=prv.S0146 status=provisional scope=field bind=xprv::ValidationCollector::peer_manifests_by_master_@2c7066757f9f165d
+    // owner=unresolved owner_hypothesis=validation_collector
+    // observed_home=ValidationCollector::peer_manifests_by_master_
+    // label=retained_non_membership_validator_delegations
     std::map<std::string, catl::vl::Manifest> peer_manifests_by_master_;
     std::map<std::string, std::string> vl_signing_to_master_;
     std::map<std::string, std::string> live_signing_to_master_;
@@ -249,10 +277,20 @@ private:
     // available to local verifiers after a newer list drops the master.
     std::map<std::string, std::pair<uint32_t, std::vector<uint8_t>>>
         list_manifests_seen_;
-    // Newest manifest (sequence, raw) per publisher master, from the lists
-    // loaded in this process. One publisher per network in practice (D5).
-    std::map<std::string, std::pair<uint32_t, std::vector<uint8_t>>>
-        publisher_manifests_seen_;
+    struct PublisherEvidence
+    {
+        uint32_t newest_sequence = 0;
+        std::vector<uint8_t> newest_raw;
+        // One authenticated manifest per sequence, until a conflict exists.
+        std::map<uint32_t, std::vector<uint8_t>> by_sequence;
+        // Empty or the first conflicting pair; later replays cannot grow it.
+        std::vector<std::vector<uint8_t>> conflict;
+    };
+    //@@authority state=prv.S0145 status=provisional scope=field bind=xprv::ValidationCollector::publisher_manifests_seen_@2968291e12e11bbb
+    // owner=unresolved owner_hypothesis=validation_collector
+    // observed_home=ValidationCollector::publisher_manifests_seen_
+    // label=authenticated_publisher_sequence_history_and_sticky_conflict_witness
+    std::map<std::string, PublisherEvidence> publisher_manifests_seen_;
     // §1.3 rule 2: masters seen signing two different manifests at one
     // sequence. They stay in N and never vote again in this process. Exactly
     // one conflicting pair per master is kept (bounded; replays add nothing),
@@ -276,7 +314,10 @@ private:
     handle_manifests_packet(std::vector<uint8_t> const& data);
 
     bool
-    apply_manifest(catl::vl::Manifest const& manifest, bool from_vl);
+    apply_manifest(
+        catl::vl::Manifest const& manifest,
+        bool from_vl,
+        bool include_former_members = false);
 
     std::string
     entry_key_hex(Entry const& entry, QuorumMode mode) const;

@@ -24,6 +24,19 @@ namespace xprv {
 class ProofEngineTestAccess
 {
 public:
+    /// Exercise the production trust wiring with controlled local components,
+    /// without booting peer discovery or an RPC connection.
+    static void
+    configure_validator_trust(
+        ProofEngine& engine,
+        std::shared_ptr<VlCache> cache,
+        std::shared_ptr<ValidationQuorumTracker> tracker)
+    {
+        engine.vl_cache_ = std::move(cache);
+        engine.quorum_tracker_ = std::move(tracker);
+        engine.configure_validator_trust();
+    }
+
     static ProofEngine::DrainReceipt
     mint_drain_receipt(std::shared_ptr<ProofEngine> const& engine)
     {

@@ -47,6 +47,10 @@ ValidationCollector::ValidationCollector(
 {
 }
 
+//@@authority transition=prv.T0361 status=provisional scope=function bind=xprv::note_publisher_manifest@880d53227e755c3c
+// owner=unresolved owner_hypothesis=validation_collector
+// commit=caller_serialized touches=prv.S0145
+// label=admit_publisher_history_or_retain_first_conflict_pair
 bool
 ValidationCollector::note_publisher_manifest(catl::vl::Manifest const& manifest)
 {
@@ -54,10 +58,52 @@ ValidationCollector::note_publisher_manifest(catl::vl::Manifest const& manifest)
     if (manifest.raw.empty() || master_key_hex.empty())
         return false;
     auto& seen = publisher_manifests_seen_[master_key_hex];
-    if (!seen.second.empty() && manifest.sequence <= seen.first)
-        return false;
-    seen = {manifest.sequence, manifest.raw};
-    return true;
+    bool const newer =
+        seen.newest_raw.empty() || manifest.sequence > seen.newest_sequence;
+    auto newest_raw = newer ? manifest.raw : std::vector<uint8_t>{};
+    bool changed = false;
+    if (seen.conflict.empty())
+    {
+        auto const [it, inserted] =
+            seen.by_sequence.emplace(manifest.sequence, manifest.raw);
+        changed = inserted;
+        if (!inserted && it->second != manifest.raw)
+        {
+            // Remember A at sequence 2 even if sequence 3 arrives before
+            // the conflicting sequence-2 manifest B.
+            std::vector<std::vector<uint8_t>> pair{it->second, manifest.raw};
+            std::sort(pair.begin(), pair.end());
+            seen.conflict = std::move(pair);
+            seen.by_sequence.clear();
+            changed = true;
+        }
+    }
+    if (newer)
+    {
+        seen.newest_raw = std::move(newest_raw);
+        seen.newest_sequence = manifest.sequence;
+        changed = true;
+    }
+    return changed;
+}
+
+//@@authority transition=prv.T0365 status=provisional scope=function bind=xprv::admit_list_manifests@39c4103e8b729001
+// owner=unresolved owner_hypothesis=validation_collector
+// commit=caller_serialized touches=prv.S0146
+// label=admit_verified_list_delegations_without_promoting_membership
+bool
+ValidationCollector::admit_list_manifests(
+    std::vector<catl::vl::Manifest> const& validators)
+{
+    bool updated = false;
+    for (auto const& manifest : validators)
+        updated = apply_manifest(manifest, false, true) || updated;
+    if (updated)
+    {
+        filter_buffer_to_unl();
+        recompute_quorum_state();
+    }
+    return updated;
 }
 
 void
@@ -944,7 +990,7 @@ ValidationCollector::parse_trusted_manifests_packet(
     return result;
 }
 
-void
+bool
 ValidationCollector::apply_peer_manifests(
     std::vector<catl::vl::Manifest> manifests)
 {
@@ -957,6 +1003,7 @@ ValidationCollector::apply_peer_manifests(
         filter_buffer_to_unl();
         recompute_quorum_state();
     }
+    return updated;
 }
 
 void
@@ -978,19 +1025,24 @@ ValidationCollector::handle_manifests_packet(std::vector<uint8_t> const& data)
     apply_peer_manifests(std::move(parsed.manifests));
 }
 
+//@@authority transition=prv.T0366 status=provisional scope=function bind=xprv::apply_manifest@c68964376c900cad
+// owner=unresolved owner_hypothesis=validation_collector
+// commit=caller_serialized touches=prv.S0146
+// label=apply_verified_manifest_to_current_or_former_member
 bool
 ValidationCollector::apply_manifest(
     catl::vl::Manifest const& manifest,
-    bool from_vl)
+    bool from_vl,
+    bool include_former_members)
 {
     auto const master_key_hex = manifest.master_key_hex();
     if (master_key_hex.empty())
         return false;
 
-    if (!from_vl && unl_master_keys_.empty())
-        return false;
-
-    if (!unl_master_keys_.empty() && !unl_master_keys_.count(master_key_hex))
+    bool const listed = unl_master_keys_.count(master_key_hex) != 0;
+    bool const former = !listed && include_former_members &&
+        list_manifests_seen_.count(master_key_hex) != 0;
+    if (!listed && !former)
         return false;
 
     // §1.3 rule 2: a different manifest at a sequence we already hold for
@@ -1002,17 +1054,23 @@ ValidationCollector::apply_manifest(
         auto const conflicts = [&](std::vector<uint8_t> const& raw) {
             return !raw.empty() && raw != manifest.raw;
         };
-        auto const vl_seq = vl_manifest_sequence_by_master_.find(master_key_hex);
+        auto const vl_seq =
+            vl_manifest_sequence_by_master_.find(master_key_hex);
         auto const vl_raw = vl_manifest_raw_by_master_.find(master_key_hex);
         auto const peer = peer_manifests_by_master_.find(master_key_hex);
-        bool const vl_conflict = vl_seq != vl_manifest_sequence_by_master_.end() &&
+        auto const history = list_manifests_seen_.find(master_key_hex);
+        bool const vl_conflict =
+            vl_seq != vl_manifest_sequence_by_master_.end() &&
             vl_seq->second == manifest.sequence &&
             vl_raw != vl_manifest_raw_by_master_.end() &&
             conflicts(vl_raw->second);
         bool const peer_conflict = peer != peer_manifests_by_master_.end() &&
             peer->second.sequence == manifest.sequence &&
             conflicts(peer->second.raw);
-        if (vl_conflict || peer_conflict)
+        bool const history_conflict = history != list_manifests_seen_.end() &&
+            history->second.first == manifest.sequence &&
+            conflicts(history->second.second);
+        if (vl_conflict || peer_conflict || history_conflict)
         {
             // Keep the first conflicting pair only: both sides, so the pair
             // alone proves the conflict even after the list moves on.
@@ -1020,10 +1078,14 @@ ValidationCollector::apply_manifest(
             if (evidence.empty())
             {
                 evidence.push_back(
-                    vl_conflict ? vl_raw->second : peer->second.raw);
+                    vl_conflict         ? vl_raw->second
+                        : peer_conflict ? peer->second.raw
+                                        : history->second.second);
                 evidence.push_back(manifest.raw);
             }
-            if (equivocated_masters_.insert(master_key_hex).second)
+            bool const newly_equivocated =
+                equivocated_masters_.insert(master_key_hex).second;
+            if (newly_equivocated)
             {
                 PLOGW(
                     log_,
@@ -1036,7 +1098,7 @@ ValidationCollector::apply_manifest(
                     "; it no longer counts");
             }
             drop_equivocated_mappings();
-            return false;
+            return newly_equivocated;
         }
     }
 
@@ -1052,6 +1114,23 @@ ValidationCollector::apply_manifest(
                 return false;
             }
         }
+    }
+
+    if (former)
+    {
+        // Retain evidence for a previous list member without installing any
+        // mapping into today's membership. set_unl() reapplies this overlay
+        // if a later list includes the master again.
+        auto const history = list_manifests_seen_.find(master_key_hex);
+        if (history != list_manifests_seen_.end() &&
+            manifest.sequence <= history->second.first)
+            return false;
+        auto const retained = peer_manifests_by_master_.find(master_key_hex);
+        if (retained != peer_manifests_by_master_.end() &&
+            manifest.sequence <= retained->second.sequence)
+            return false;
+        peer_manifests_by_master_.insert_or_assign(master_key_hex, manifest);
+        return true;
     }
 
     auto const current_seq = manifest_sequence_by_master_.find(master_key_hex);

@@ -1,3 +1,9 @@
+#include "proof-engine-test-access.h"
+#include "trust-evidence-fixture.h"
+#include "xprv/anchor-verifier.h"
+#include "xprv/manifest-utils.h"
+#include "xprv/proof-engine.h"
+#include "xprv/validation-quorum-tracker.h"
 #include "xprv/vl-cache.h"
 
 #include "../test-support/deterministic-scheduler.h"
@@ -15,6 +21,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <limits>
@@ -75,6 +82,29 @@ namespace xprv {
 class VlCacheTestAccess
 {
 public:
+    static void
+    observe_trust_callbacks(
+        std::shared_ptr<VlCache> const& cache,
+        std::function<void()> evidence,
+        std::function<void()> refresh)
+    {
+        auto admit = std::move(cache->on_verified_evidence_);
+        cache->on_verified_evidence_ =
+            [admit = std::move(admit),
+             evidence = std::move(evidence)](auto const& list) {
+                evidence();
+                if (admit)
+                    admit(list);
+            };
+        auto promote = std::move(cache->on_refresh_);
+        cache->on_refresh_ = [promote = std::move(promote),
+                              refresh = std::move(refresh)](auto const& list) {
+            refresh();
+            if (promote)
+                promote(list);
+        };
+    }
+
     struct Snapshot
     {
         bool running = false;
@@ -711,12 +741,11 @@ TEST(VlCacheExecution, SuspendedPublicAwaitableResumesOnOwnerStrand)
 {
     boost::asio::io_context io;
     auto cache = VlCache::create(io, "unused.invalid");
-    auto fetch_admitted = std::make_shared<
-        std::promise<catl::vl::VlCallback>>();
+    auto fetch_admitted =
+        std::make_shared<std::promise<catl::vl::VlCallback>>();
     auto fetch = fetch_admitted->get_future();
     VlCacheTestAccess::set_fetcher(
-        cache,
-        [fetch_admitted](catl::vl::VlCallback callback) {
+        cache, [fetch_admitted](catl::vl::VlCallback callback) {
             fetch_admitted->set_value(std::move(callback));
         });
     auto resumed = std::make_shared<std::promise<bool>>();
@@ -1374,9 +1403,7 @@ TEST(VlCacheRetainedSignal, RefreshWaiterUsesFreshSignalGeneration)
 // writ-claim: retained_signal.retained-completion, witness prv.T0336. A
 // synchronous refresh terminal can arrive before the packaged wait registers;
 // it must still consume the retained completion without suspending.
-TEST(
-    VlCacheRetainedSignal,
-    SynchronousRefreshCompletionCannotLoseRetainedWake)
+TEST(VlCacheRetainedSignal, SynchronousRefreshCompletionCannotLoseRetainedWake)
 {
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
@@ -1786,6 +1813,341 @@ TEST(VlCacheCensus, SynchronousTerminalWithoutPredecessorOwesOneTimerObligation)
     scheduler.run_until_idle();
     ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
     EXPECT_NO_THROW(stopped.get());
+}
+
+}  // namespace
+}  // namespace xprv
+
+namespace xprv {
+namespace {
+
+class VlCacheEvidenceAdmission : public ::testing::Test
+{
+protected:
+    using Held = std::shared_ptr<std::vector<std::vector<uint8_t>> const>;
+    boost::asio::io_context io;
+    catl::xdata::Protocol protocol =
+        catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    std::shared_ptr<VlCache> cache;
+    std::shared_ptr<ValidationQuorumTracker> tracker;
+    std::shared_ptr<ProofEngine> verifier;
+    std::deque<catl::vl::VlResult> responses;
+    size_t evidence_calls = 0;
+    size_t refresh_calls = 0;
+
+    template <class T>
+    T
+    complete(std::future<T>& future)
+    {
+        auto const deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (future.wait_for(std::chrono::milliseconds(0)) !=
+               std::future_status::ready)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+                throw std::runtime_error("list-evidence test did not settle");
+            io.restart();
+            io.run_one_for(std::chrono::milliseconds(10));
+        }
+        return future.get();
+    }
+
+    void
+    barrier()
+    {
+        auto future = boost::asio::co_spawn(
+            io, tracker->co_stats(), boost::asio::use_future);
+        (void)complete(future);
+    }
+
+    void
+    queue(std::string_view name)
+    {
+        catl::vl::VlResult result;
+        result.success = true;
+        result.vl = test::trust_list(name);
+        responses.push_back(std::move(result));
+    }
+
+    catl::vl::ValidatorList
+    current()
+    {
+        auto future =
+            boost::asio::co_spawn(io, cache->co_get(), boost::asio::use_future);
+        return complete(future);
+    }
+
+    std::string
+    refresh(std::string_view name)
+    {
+        queue(name);
+        auto future = boost::asio::co_spawn(
+            io, cache->co_refresh(), boost::asio::use_future);
+        std::string error;
+        try
+        {
+            (void)complete(future);
+        }
+        catch (std::exception const& e)
+        {
+            error = e.what();
+        }
+        barrier();
+        return error;
+    }
+
+    bool
+    verifies(std::string_view name = "current", Held held = {})
+    {
+        auto const bytes = test::trust_proof_bytes(name);
+        size_t calls = 0;
+        auto const result = verifier->verify(
+            bytes, test::trust_publisher_key(), [&](uint32_t network) -> Held {
+                EXPECT_EQ(network, 0u);
+                ++calls;
+                return held ? held : tracker->held_manifests();
+            });
+        EXPECT_EQ(calls, 1u);
+        return result.ok;
+    }
+
+    void
+    insert(ValidationCollector::Entry entry)
+    {
+        ASSERT_TRUE(ValidationCollector::verify_validation_signature(
+            entry.raw, protocol));
+        auto future = boost::asio::co_spawn(
+            io,
+            tracker->co_insert_validation_for_test(std::move(entry)),
+            boost::asio::use_future);
+        EXPECT_TRUE(complete(future));
+    }
+
+    void
+    SetUp() override
+    {
+        tracker = ValidationQuorumTracker::create(io, protocol, 0);
+        cache = VlCache::create(io, "unused.invalid", 443);
+        auto config = NetworkConfig::for_network(0);
+        config.publisher_key = test::trust_publisher_key();
+        verifier = ProofEngine::create(io, std::move(config));
+        VlCacheTestAccess::set_fetcher(
+            cache, [this](catl::vl::VlCallback callback) {
+                if (responses.empty())
+                    throw std::runtime_error("unexpected list fetch");
+                auto response = std::move(responses.front());
+                responses.pop_front();
+                callback(std::move(response));
+            });
+        ProofEngineTestAccess::configure_validator_trust(
+            *verifier, cache, tracker);
+        VlCacheTestAccess::observe_trust_callbacks(
+            cache, [this] { ++evidence_calls; }, [this] { ++refresh_calls; });
+        queue("current");
+        cache->start();
+        ASSERT_EQ(current().sequence, 10u);
+        barrier();
+        ASSERT_TRUE(verifies());
+    }
+
+    void
+    TearDown() override
+    {
+        if (cache)
+        {
+            auto stopped = boost::asio::co_spawn(
+                io, cache->co_stop(), boost::asio::use_future);
+            complete(stopped);
+        }
+        if (tracker)
+        {
+            auto stopped = boost::asio::co_spawn(
+                io, tracker->co_stop(), boost::asio::use_future);
+            complete(stopped);
+        }
+    }
+};
+
+TEST_F(VlCacheEvidenceAdmission, LowerListRevocationReachesProductionVerify)
+{
+    auto const before = tracker->held_manifests();
+    EXPECT_NE(
+        refresh("validator_revoked").find("sequence moved backwards"),
+        std::string::npos);
+    EXPECT_EQ(current().sequence, 10u);
+    EXPECT_EQ(current().validators.size(), 5u);
+    EXPECT_EQ(evidence_calls, 2u);
+    EXPECT_EQ(refresh_calls, 1u);
+    EXPECT_FALSE(verifies());
+    EXPECT_TRUE(verifies("current", before));
+    EXPECT_NE(tracker->held_manifests(), before);
+}
+
+TEST_F(VlCacheEvidenceAdmission, ExpiredListStillContributesRevocation)
+{
+    EXPECT_NE(refresh("expired_revocation").find("expired"), std::string::npos);
+    EXPECT_EQ(current().sequence, 10u);
+    EXPECT_EQ(evidence_calls, 2u);
+    EXPECT_EQ(refresh_calls, 1u);
+    EXPECT_FALSE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, PendingListStillContributesRevocation)
+{
+    EXPECT_NE(
+        refresh("pending_revocation").find("not yet effective"),
+        std::string::npos);
+    EXPECT_EQ(current().sequence, 10u);
+    EXPECT_EQ(evidence_calls, 2u);
+    EXPECT_EQ(refresh_calls, 1u);
+    EXPECT_FALSE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, RotationChangesVotesWithoutPromotingMembership)
+{
+    EXPECT_FALSE(verifies("rotated_proof"));
+    EXPECT_FALSE(refresh("validator_rotation").empty());
+    EXPECT_EQ(current().sequence, 10u);
+    EXPECT_EQ(current().validators.size(), 5u);
+    EXPECT_FALSE(verifies());
+    EXPECT_TRUE(verifies("rotated_proof"));
+}
+
+TEST_F(VlCacheEvidenceAdmission, SameSigningKeyReissueRemainsUsable)
+{
+    EXPECT_FALSE(refresh("validator_same_key").empty());
+    EXPECT_TRUE(verifies());
+    EXPECT_FALSE(refresh("publisher_same_key").empty());
+    EXPECT_TRUE(verifies());
+    EXPECT_EQ(current().sequence, 10u);
+}
+
+TEST_F(
+    VlCacheEvidenceAdmission,
+    LowerListPublisherRotationReachesProductionVerify)
+{
+    EXPECT_FALSE(refresh("publisher_rotation").empty());
+    EXPECT_EQ(current().sequence, 10u);
+    EXPECT_FALSE(verifies());
+}
+
+TEST_F(
+    VlCacheEvidenceAdmission,
+    PublisherConflictPersistsAcrossRefreshAndReplay)
+{
+    EXPECT_NE(
+        refresh("publisher_conflict").find("publisher manifest changed"),
+        std::string::npos);
+    EXPECT_FALSE(verifies());
+    EXPECT_TRUE(refresh("publisher_higher").empty());
+    EXPECT_EQ(current().sequence, 11u);
+    EXPECT_FALSE(verifies());
+    auto const after = tracker->held_manifests();
+    for (int i = 0; i < 4; ++i)
+        EXPECT_FALSE(refresh("publisher_conflict").empty());
+    EXPECT_EQ(tracker->held_manifests(), after);
+    EXPECT_FALSE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, BadSignaturesDoNotPoisonRetainedEvidence)
+{
+    auto const before = tracker->held_manifests();
+    EXPECT_NE(
+        refresh("invalid_publisher").find("verification failed"),
+        std::string::npos);
+    EXPECT_NE(
+        refresh("invalid_validator").find("verification failed"),
+        std::string::npos);
+    EXPECT_EQ(evidence_calls, 1u);
+    EXPECT_EQ(refresh_calls, 1u);
+    EXPECT_EQ(tracker->held_manifests(), before);
+    EXPECT_TRUE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, UnlistedMasterDoesNotEnterTheSnapshot)
+{
+    auto const before = tracker->held_manifests();
+    EXPECT_FALSE(refresh("unknown").empty());
+    EXPECT_EQ(current().validators.size(), 5u);
+    EXPECT_EQ(tracker->held_manifests(), before);
+    EXPECT_TRUE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, FormerMemberRevocationSurvivesRejoining)
+{
+    EXPECT_TRUE(refresh("removed").empty());
+    EXPECT_EQ(current().validators.size(), 4u);
+    EXPECT_TRUE(verifies());
+    EXPECT_FALSE(refresh("validator_revoked").empty());
+    EXPECT_EQ(current().validators.size(), 4u);
+    EXPECT_FALSE(verifies());
+    EXPECT_TRUE(refresh("readded").empty());
+    EXPECT_EQ(current().validators.size(), 5u);
+    EXPECT_FALSE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, ValidatorConflictIsNotHealedByANewerList)
+{
+    EXPECT_FALSE(refresh("validator_conflict").empty());
+    EXPECT_FALSE(verifies());
+    EXPECT_TRUE(refresh("validator_higher").empty());
+    EXPECT_FALSE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, NoVerifierMeansNoEvidenceAdmission)
+{
+    cache->set_verifier({});
+    auto const before = tracker->held_manifests();
+    EXPECT_FALSE(refresh("validator_revoked").empty());
+    EXPECT_EQ(evidence_calls, 1u);
+    EXPECT_EQ(tracker->held_manifests(), before);
+    EXPECT_TRUE(verifies());
+}
+
+TEST_F(VlCacheEvidenceAdmission, StoppedTrackerRejectsLateEvidence)
+{
+    auto const before = tracker->held_manifests();
+    auto stopped =
+        boost::asio::co_spawn(io, tracker->co_stop(), boost::asio::use_future);
+    complete(stopped);
+    EXPECT_FALSE(refresh("validator_revoked").empty());
+    EXPECT_EQ(tracker->held_manifests(), before);
+}
+
+TEST_F(VlCacheEvidenceAdmission, EvidenceDropsVotesAlreadyCapturedByAWaiter)
+{
+    auto const& anchor = test::trust_anchor("current");
+    for (auto const& vote : anchor.at("validations").as_object())
+        insert(test::trust_entry(
+            std::string(vote.key()),
+            std::string(vote.value().as_string()),
+            std::string(anchor.at("ledger_hash").as_string()),
+            1000));
+    auto pending = boost::asio::co_spawn(
+        io,
+        tracker->co_wait_best_quorum(std::chrono::hours(1), 10),
+        boost::asio::use_future);
+    barrier();
+    ASSERT_EQ(
+        pending.wait_for(std::chrono::milliseconds(0)),
+        std::future_status::timeout);
+    EXPECT_FALSE(refresh("validator_revoked").empty());
+    auto const& later = test::trust_evidence_fixture().at("later_validation");
+    insert(test::trust_entry(
+        std::string(later.at("signing_key").as_string()),
+        std::string(later.at("raw").as_string()),
+        std::string(later.at("ledger_hash").as_string()),
+        1001));
+    barrier();
+    // A newer ledger must not finalize the old four-vote sample after its
+    // revoked master stopped counting. There are now only three valid votes.
+    EXPECT_EQ(
+        pending.wait_for(std::chrono::milliseconds(0)),
+        std::future_status::timeout);
+    auto stopped =
+        boost::asio::co_spawn(io, tracker->co_stop(), boost::asio::use_future);
+    complete(stopped);
+    EXPECT_TRUE(complete(pending).quorum.validations.empty());
 }
 
 }  // namespace

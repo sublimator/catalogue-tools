@@ -90,6 +90,20 @@ public:
         on_refresh_ = std::move(cb);
     }
 
+    /// Called after the configured verifier authenticates a response, before
+    /// freshness decides whether its membership replaces the cached list.
+    /// An absent verifier does not authorize evidence delivery. Set before
+    /// start().
+    using EvidenceCallback = RefreshCallback;
+    // clang-format off
+    //@@audit-ack unannotated_authority_candidate reason="pre-start callback wiring; authenticated evidence delivery is the guarded runtime transition in do_fetch, not this setter"
+    // clang-format on
+    void
+    set_on_verified_evidence(EvidenceCallback cb)
+    {
+        on_verified_evidence_ = std::move(cb);
+    }
+
     /// Optional verifier run on every fetched VL BEFORE it is trusted/stored.
     /// Returning false makes the fetch behave exactly like a failed fetch (the
     /// last-known-good VL is kept). This lets the caller enforce the pinned
@@ -213,6 +227,7 @@ private:
     std::string last_fetch_error_;
     ValidatorManifestHistory validator_manifest_history_;
     RefreshCallback on_refresh_;
+    EvidenceCallback on_verified_evidence_;
     VerifyCallback verify_;
     RevocationCheck revocation_check_;
     RevokedCallback on_publisher_revoked_;

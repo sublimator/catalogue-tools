@@ -188,7 +188,7 @@ ValidationQuorumTracker::co_stop()
     // commit=publication_admission_mutex_and_manifest_worker_join
     // touches=prv.S0057
     // label=ensure_sticky_validation_ingress_seal_and_join_manifest_worker
-    seal_admission_and_join_worker();  //@@authority-target ids=prv.T0177
+    seal_admission_and_join_worker(); //@@authority-target ids=prv.T0177
 
     //@@authority transition=prv.T0178 status=provisional scope=statement
     // bind=expression_statement@7628c74624b3ba91
@@ -202,7 +202,7 @@ ValidationQuorumTracker::co_stop()
             self->cancel_pending_locked(QuorumCollectStopReason::timeout);
             co_return;
         },
-        asio::use_awaitable);  //@@authority-target ids=prv.T0178
+        asio::use_awaitable); //@@authority-target ids=prv.T0178
 }
 
 void
@@ -661,10 +661,12 @@ ValidationQuorumTracker::start_manifest_packet(
                                                     " trusted, ",
                                                     parsed.manifests.size(),
                                                     " verified");
-                                                self->collector_
-                                                    .apply_peer_manifests(
-                                                        std::move(
-                                                            parsed.manifests));
+                                                if (self->collector_
+                                                        .apply_peer_manifests(
+                                                            std::move(
+                                                                parsed
+                                                                    .manifests)))
+                                                    self->discard_cached_quorums_locked();
                                                 self->refresh_held_manifests_locked();
                                             }
                                         }
@@ -806,6 +808,31 @@ ValidationQuorumTracker::set_unl(
 {
     auto owned =
         std::make_shared<UnlUpdate>(UnlUpdate{validators, publisher_manifest});
+    post_list_update(std::move(owned), vl_sequence);
+}
+
+//@@authority transition=prv.T0367 status=provisional scope=function bind=xprv::admit_list_evidence@6f59b4a84678fae2
+// owner=unresolved owner_hypothesis=validation_quorum_tracker
+// commit=publication_mutex label=copy_and_admit_verified_list_evidence_handoff
+void
+ValidationQuorumTracker::admit_list_evidence(
+    std::vector<catl::vl::Manifest> const& validators,
+    catl::vl::Manifest const& publisher_manifest)
+{
+    auto owned =
+        std::make_shared<UnlUpdate>(UnlUpdate{validators, publisher_manifest});
+    post_list_update(std::move(owned), std::nullopt);
+}
+
+//@@authority transition=prv.T0363 status=provisional scope=function bind=xprv::post_list_update@2373acf516775fcb
+// owner=unresolved owner_hypothesis=validation_quorum_tracker
+// commit=publication_mutex
+// label=admit_owned_membership_or_evidence_update_before_quorum_publication
+void
+ValidationQuorumTracker::post_list_update(
+    std::shared_ptr<UnlUpdate> owned,
+    std::optional<uint32_t> vl_sequence)
+{
     auto self = shared_from_this();
 
     bool schedule_drain = false;
@@ -854,8 +881,12 @@ ValidationQuorumTracker::set_unl(
                     {
                         try
                         {
-                            self->apply_unl_locked(
-                                *owned, vl_sequence, publish);
+                            if (vl_sequence)
+                                self->apply_unl_locked(
+                                    *owned, *vl_sequence, publish);
+                            else
+                                self->apply_list_evidence_locked(
+                                    *owned, publish);
                         }
                         catch (...)
                         {
@@ -948,7 +979,7 @@ ValidationQuorumTracker::co_sync_unl_on_strand(
     }
     if (vl_sequence_ && *vl_sequence_ >= vl_sequence)
     {
-        note_publisher_manifest_locked(update->publisher_manifest);
+        apply_list_evidence_locked(*update, true);
         co_return *vl_sequence_ == vl_sequence;
     }
     {
@@ -967,9 +998,7 @@ ValidationQuorumTracker::apply_unl_locked(
 {
     if (vl_sequence_ && vl_sequence <= *vl_sequence_)
     {
-        note_publisher_manifest_locked(update.publisher_manifest);
-        if (publish)
-            publish_trust_state_locked();
+        apply_list_evidence_locked(update, publish);
         return false;
     }
 
@@ -1004,6 +1033,50 @@ ValidationQuorumTracker::apply_unl_locked(
     if (publish)
         publish_trust_state_locked();
     return true;
+}
+
+//@@authority transition=prv.T0364 status=provisional scope=function bind=xprv::apply_list_evidence_locked@1a4f5be917615857
+// owner=unresolved owner_hypothesis=validation_quorum_tracker
+// commit=validation_quorum_tracker_strand touches=prv.S0145,prv.S0146,prv.S0147
+// label=apply_verified_evidence_and_publish_immutable_snapshot
+void
+ValidationQuorumTracker::apply_list_evidence_locked(
+    UnlUpdate const& update,
+    bool publish)
+{
+    bool const publisher_changed =
+        collector_.note_publisher_manifest(update.publisher_manifest);
+    bool const validators_changed =
+        collector_.admit_list_manifests(update.validators);
+    if (validators_changed)
+    {
+        discard_cached_quorums_locked();
+    }
+    if (publisher_changed || validators_changed)
+        refresh_held_manifests_locked();
+    if (publish)
+        publish_trust_state_locked();
+}
+
+//@@authority transition=prv.T0368 status=provisional scope=function bind=xprv::discard_cached_quorums_locked@1542bd4df62ef6a2
+// owner=unresolved owner_hypothesis=validation_quorum_tracker
+// commit=validation_quorum_tracker_strand
+// label=invalidate_cached_quorum_samples_after_delegation_changes
+void
+ValidationQuorumTracker::discard_cached_quorums_locked()
+{
+    // Membership and vl_sequence_ stay fixed. Previously captured votes,
+    // including a waiter's provisional quorum, must use the new delegations.
+    last_quorum_hash_ = Hash256();
+    active_live_quorum_log_.reset();
+    recent_quorums_.clear();
+    last_full_quorum_.reset();
+    for (auto& pending : pending_)
+    {
+        pending.ledger_hash = Hash256();
+        pending.ledger_seq = 0;
+        pending.validations.clear();
+    }
 }
 
 void
@@ -2058,7 +2131,7 @@ ValidationQuorumTracker::emit_heartbeat_on_strand()
                 ledger_count,
                 " ledgers, ",
                 collector_.unl_size,
-                " UNL keys");  //@@authority-target ids=prv.T0234
+                " UNL keys"); //@@authority-target ids=prv.T0234
 
 #ifdef XPRV_TESTING
             // Witness completion of the real observable effect, rather than

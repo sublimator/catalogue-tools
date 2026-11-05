@@ -26,11 +26,11 @@
 #include <writ/retained-signal.hpp>
 
 #include <atomic>
-#include <functional>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <chrono>
 #include <exception>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -246,8 +246,9 @@ public:
         std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
     /// Held manifests for a network (§1.3 ambient trust material), or null.
-    using HeldManifestsFn = std::function<
-        std::shared_ptr<std::vector<std::vector<uint8_t>> const>(uint32_t)>;
+    using HeldManifestsFn =
+        std::function<std::shared_ptr<std::vector<std::vector<uint8_t>> const>(
+            uint32_t)>;
 
     /// Verify a proof chain. `held_manifests` supplies newer validator
     /// manifests this server holds for the proof's network (§1.3).
@@ -398,6 +399,9 @@ private:
     friend class HttpServer;
 
     ProofEngine(boost::asio::io_context& io, NetworkConfig config);
+
+    void
+    configure_validator_trust();
 
     void
     bind_request_drain_authority(
