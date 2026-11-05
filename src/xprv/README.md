@@ -16,8 +16,9 @@ built from that material.
 receives an immutable snapshot of held material:
 
 - **Validator manifests.** For every master the engine has seen listed on the
-  proof's network, the newest manifest it holds, from any list it has loaded or
-  from peers. A revocation in a newer list therefore reaches the verifier, and
+  proof's network, the newest manifest it holds, from any authenticated list
+  response or from peers. A list that fails freshness or promotion still
+  contributes its manifests, but never its membership. A revocation in a newer list therefore reaches the verifier, and
   stays after a later list drops that master.
 - **No filtering by the current list.** The snapshot is not filtered by the
   engine's current list. An older proof's own primary list may name a master
@@ -25,10 +26,10 @@ receives an immutable snapshot of held material:
   list.
 - **Equivocation evidence.** The conflicting pair, for any validator the
   engine has seen equivocate.
-- **The publisher manifest.** The newest one from the list responses the
-  engine admitted (see Known gaps for responses it refuses), so `/verify`
-  refuses a proof whose list was signed under a publisher key since
-  superseded.
+- **The publisher manifest.** The newest the engine has authenticated, whether
+  or not the list that carried it replaced the cached one, so `/verify` refuses
+  a proof whose list was signed under a publisher key since superseded. Every
+  sequence seen is kept until a conflict, and the conflicting pair after it.
 
 **A publisher revocation is final.** A verified revocation of the publisher key
 works as a validator's does. The engine drops its list, refuses every later
@@ -44,14 +45,10 @@ never votes (rule 3).
 
 ## Known gaps
 
-- **Evidence in a refused list response.** A response refused by the cache's
-  freshness or promotion checks does not yet pass on its newer manifests. A
-  response at an unchanged list sequence with a newer publisher manifest is
-  admitted; one at a lower sequence is not. That includes a validator revocation or a publisher
-  rotation, so the snapshot can lag that evidence until a list that does
-  replace the cached one arrives.
-- **Same-sequence publisher manifests.** A second, different publisher manifest
-  at one sequence is not yet kept as a conflict.
+- **Publisher conflict.** Two different publisher manifests at one sequence are
+  kept as a conflict, and `/verify` refuses every proof under that publisher.
+  The engine still builds proofs, and how a long-running server should serve
+  through such a conflict is not yet settled.
 - **Same-sequence lists.** A second list at the cached sequence is refused as a
   refresh, and the conflict is not kept. Rule 7 cannot be exercised yet: each
   proof bundles one primary list, the verifiers take manifests but no other
