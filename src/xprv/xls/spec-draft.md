@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Date** | 2026-10-25 |
+| **Date** | 2026-11-05 |
 | **Authors** | Nicholas Dudfield ([@sublimator](https://github.com/sublimator)) |
 | **Discussion** | [XRPLF/XRPL-Standards#107](https://github.com/XRPLF/XRPL-Standards/discussions/107) |
 | **Reference** | XLS-41d XPOP (Richard Holland), [XRPL-Standards](https://github.com/XRPLF/XRPL-Standards) |
@@ -28,7 +28,11 @@ Two representations of the same proof, no mixing:
 - **JSON form** — human-readable, for debugging and review
 - **Binary form** — compact TLV-encoded, for on-ledger storage, wire protocol, QR codes
 
-Both forms encode the same proof data and MUST verify identically.
+Both forms encode the same proof data and MUST verify identically. Two kinds of
+proof have one form only. A proof whose validator list carries `effective`, or
+any other top-level key beyond the three the binary layout reproduces, has no
+binary form (§3.5). A proof with a leaf that its codec cannot decode and
+re-encode exactly has no JSON form (§2.3).
 
 ## Normative Language
 
@@ -163,7 +167,9 @@ canonical order. §1.4, §7 and §8 apply this same rule.
 hashed, signed, cached, or deduplicated, the input is the canonical binary
 encoding of §3 — canonical step order per this section, minimal LEB128 (§4), and
 the byte layouts of §3.4 through §3.7. That encoding is byte-deterministic, so a
-proof hash is well defined.
+proof hash is well defined. The body holds the `0x05` record when the proof
+bundles its list and not otherwise, so a proof with its list and the same proof
+without it have different identities.
 
 Compression is not part of a proof's identity. The canonical form is the
 uncompressed one: the 10-byte header with `flags` zero, followed by the
@@ -184,46 +190,60 @@ hashes the equivalent canonical binary encoding rather than the JSON text.
 ### 1.3 Trust Material
 
 A verifier assesses the anchor against a **trust view** that it resolves before
-verification begins and holds fixed for the whole proof. The view has two
-parts:
+it counts any vote and holds fixed for the whole proof. The view has two parts:
 
 - **Membership.** The validator master keys, and their count N, come from
-  exactly one signed Validator List: the **primary list**. Of the lists the
-  verifier holds that verify under the configured primary publisher key, it
-  is the one with the highest list `sequence` among those in effect at the
-  anchor ledger's close time. That close time is the only time reference:
-  verification never consults the verifier's own clock, so for the same trust
-  material the verdict does not depend on when the proof is checked (newer
-  material can still change it; see Staleness below). When the proof has no
-  header whose hash is the anchor hash, there is no close time, and the
-  primary list is simply the highest-sequence list held. The list embedded in the proof
-  is one such candidate; a lower-sequence list from the same publisher contributes
-  only its validator manifests, like a secondary list. The publisher's own
-  signing key is resolved the same way as a validator's: from the
-  highest-sequence publisher manifest the verifier holds, so a list signed
-  with a superseded publisher signing key cannot be the primary list. Its
-  validator manifests remain candidates, since each verifies under its own
-  master. The primary
-  list's validity interval is checked against the close time of the header
-  whose hash is the anchor hash (§5). A proof without that header (an
-  anchor-only proof) has no close time to check: it establishes only that the
-  anchor hash was validated by a quorum of the primary list, and claims
-  nothing about when. The interval is
-  a consistency check, not a barrier against the list's own validators, who
-  attest the close time themselves.
+  exactly one signed Validator List: the **primary list** (P1–P4 below).
 - **Delegations.** For each master in the primary list, the signing key that
   counts is the one named by the highest-sequence manifest that verifies under
   that master. The candidates are the master's manifest inside the primary list
   and any other validator manifests the verifier holds.
 
-Resolution rules:
+**The anchor's close time.** The only time reference is the `close_time` of the
+anchor ledger: the `ledger_header` whose computed hash equals the anchor hash.
+In a proof with any step after the anchor, that header is the next logical
+step, because the anchor hash is the only capability the anchor produces (§1).
+The verifier checks that the header's preimage hashes to the anchor hash and
+reads its `close_time` before it selects the primary list and counts quorum.
+The header grants no capability until the anchor has verified. An anchor-only
+proof has no close time: it establishes only that the anchor hash was
+validated by a quorum of the primary list, and claims nothing about when.
+Verification never consults the verifier's own clock, so for the same trust
+material the verdict does not depend on when the proof is checked (newer
+material can still change it; see Staleness below).
+
+**Selecting the primary list.**
+
+- **P1.** The publisher's master key is the configured primary publisher key
+  for the proof's network (§8). Its signing key is the one named by the
+  highest-sequence publisher manifest the verifier holds that verifies under
+  that master (rules 2 and 9 cover a conflicting or revoked one).
+- **P2.** The candidates are the lists the verifier holds that verify under
+  that signing key. The list bundled in the proof is one of them. A list signed
+  with a superseded publisher signing key is not a candidate; its validator
+  manifests still are, since each verifies under its own master.
+- **P3.** The primary list is the candidate with the highest list `sequence`
+  among those in effect at the anchor's close time
+  (`effective <= close_time < expiration`; a list without `effective` is in
+  effect from 0). An anchor-only proof has no close time, and its primary list
+  is the highest-sequence candidate. If no candidate is in effect, membership
+  is unavailable and the anchor MUST be rejected. The interval is a
+  consistency check, not a barrier against the list's own validators, who
+  attest the close time themselves.
+- **P4.** A lower-sequence list from the same publisher contributes only its
+  validator manifests, like a secondary list.
+
+**Resolution rules.** Rules 1–8 resolve the view; rules 9–11 state the
+publisher's revocation and the conditions a list must meet before any
+delegation from it is resolved.
 
 1. A manifest is a candidate only if it verifies (§5.1) and its `PublicKey` is
    a master in the primary list. A manifest for any other master grants
    nothing.
 2. The highest `Sequence` wins. Byte-identical candidates are one candidate.
    Two candidates with the same master and the same `Sequence` but different
-   raw bytes are equivocation: only that master's key could have signed both,
+   raw bytes are equivocation, at any sequence the verifier holds, not only
+   the highest: only that master's key could have signed both,
    so it is misused or compromised. That master is treated as revoked (rule 3):
    it stays in N, never votes, and the verifier SHOULD report the conflict. The
    rest of the anchor is unaffected. A publisher manifest conflict is different:
@@ -237,7 +257,8 @@ Resolution rules:
    signing key. A validation signed by a superseded key does not count.
 6. Quorum is ⌈0.8 × N⌉ masters, N being the number of masters in the primary
    list. N MUST be at least 1; a primary list with no masters makes
-   membership unavailable.
+   membership unavailable. XPRV counts against this N and does not apply the
+   Negative UNL.
 7. Two different lists under the primary publisher key with the same highest
    `sequence` make the view unresolvable, and the anchor MUST be rejected: the
    publisher itself has equivocated, so there is no membership to fall back
@@ -245,6 +266,29 @@ Resolution rules:
 8. Only full validations count. A validation without `vfFullValidation`
    (`Flags & 0x00000001`) is a partial validation and never counts toward
    quorum, as in rippled.
+9. If the winning publisher manifest is a revocation, the publisher has no
+   signing key: no list verifies, and the anchor MUST be rejected. A revoked
+   publisher is final, as a revoked validator is.
+10. The primary list itself MUST be sound before any held manifest is applied.
+    The anchor MUST be rejected if the list's own manifests give two masters
+    the same signing key, or give a master a signing key equal to any master
+    key in the list. Two masters can share a delegation only through a misused
+    or compromised key, so held manifests cannot repair such a list. The resolved
+    view is then checked again under rule 4.
+11. Keys are bound, and a list names each master once:
+    - the proof's `unl.public_key`, the publisher manifest's `PublicKey` and the
+      configured primary publisher key are one key;
+    - each list entry's `validation_public_key` equals the `PublicKey` of that
+      entry's own manifest;
+    - a list that names a master twice is invalid, and the anchor MUST be
+      rejected.
+
+The rules sort what the material implicates. A validator's own revocation or
+equivocation costs that validator its vote and nothing else (rules 2 and 3).
+Evidence against the trust root (a conflicting or revoked publisher, rules 2
+and 9), against the list (rules 7, 10 and 11), or a key two masters resolve to
+(rule 4), makes the anchor unavailable. A manifest whose signing key equals its
+own master key is not a valid manifest (§5.1), so it is never a candidate.
 
 **Sources and packaging.** Lists and validator manifests authenticate
 themselves by signature, so where they come from affects only availability,
@@ -337,13 +381,22 @@ replaces only the anchor, the anchor ledger's header and its long-list
 A renewed proof is a different proof, with a different identity (§1.2).
 Separately, a verdict depends on the trust view as well as on the proof bytes:
 two verifiers holding different manifests can reach different verdicts on
-identical bytes. A cached verdict MUST therefore be keyed by both: the proof's
-§1.2 identity, and the material that resolved the view, namely the primary
-list's signed blob bytes and the raw bytes of each master's winning manifest.
+identical bytes. A cached verdict MUST therefore be keyed by both the proof's
+§1.2 identity and the whole resolved view, under one fixed verifier policy:
 
-Renewal produces an ordinary v7 proof. A tail without an anchor is not a v7
-proof; carrying tails or anchors as standalone objects would need a new format
-version (§9.1).
+- the configured publisher key, and the publisher's state: its winning
+  manifest's raw bytes, or its revocation, or both manifests of a conflict;
+- the primary list's signed blob bytes;
+- each master's state: its winning manifest's raw bytes, its revocation, or
+  both manifests of an equivocation at any sequence.
+
+A key built from winning manifests alone is not enough. An equivocation below
+the highest sequence changes the verdict without changing any master's
+highest-sequence manifest, and an equivocation has no single winning manifest.
+
+Renewal produces an ordinary proof of the current format version. A tail
+without an anchor is not a proof; carrying tails or anchors as standalone
+objects would need a new format version (§9.1).
 
 ## 2. JSON Form
 
@@ -371,7 +424,15 @@ parent-first linearization of the logical proof DAG.
 
 XPRV has a single format version: the JSON `format_version` and the binary
 file header `version` byte (§3.1) carry the same number. Verifiers MUST
-reject proofs with an unrecognized version.
+reject proofs with an unrecognized version. A proof is this object: a bare
+array of steps carries no version, and verifiers MUST reject it.
+
+The JSON form is closed. The proof object, every step, every `header` and every
+`unl` carry exactly the members this section lists, and verifiers MUST reject
+any other member. The one exception is the diagnostic `__depth__` on a trie
+inner node (§2.3). A member nothing hashes is an assertion nothing checks, and
+a closed form leaves no place for one. Integer fields are integer number
+tokens: `7`, not `7.0` or `"7"`.
 
 All hashes and binary data are hex-encoded strings. Producers MUST emit uppercase
 hexadecimal (`A`-`F`); verifiers MAY accept lowercase and MUST normalize before
@@ -431,14 +492,12 @@ validations signed with keys newer than the embedded list's manifests: a
 verifier that resolves a different view (§1.3) needs the surplus to establish
 quorum under its signing keys.
 
-Quorum MUST be assessed against one resolved trust view (§1.3): membership from
-exactly one primary list, delegations from the highest-sequence manifests the
-verifier holds for those members. A verifier MUST NOT take membership from more
-than one list, since mixing memberships allows quorum to be assembled from
-validators that were never simultaneously trusted. A proof whose embedded
-snapshot is stale still verifies for an embedded-only verifier as long as that
-snapshot yields quorum; a verifier holding newer manifests may reject it
-(§1.3, Staleness).
+Quorum is assessed against the one trust view §1.3 resolves. Membership never
+comes from more than one list, since mixing memberships allows quorum to be
+assembled from validators that were never simultaneously trusted. A proof whose
+embedded snapshot is stale still verifies for an embedded-only verifier as long
+as that snapshot yields quorum; a verifier holding newer manifests may reject
+it (§1.3, Staleness).
 
 ### 2.2 Ledger Header Step
 
@@ -505,12 +564,31 @@ an object carrying the leaf's decoded XRPL content, and nothing else:
 
 - State tree: the decoded ledger entry, also called a serialized ledger entry
   (SLE) after canonical STObject serialization.
-- Transaction tree: an object with `tx` and `meta` members — the decoded
-  transaction and its metadata.
+- Transaction tree: an object with exactly the members `tx` and `meta`: the
+  decoded transaction and its metadata.
 
 The verifier re-serializes that content to canonical binary and hashes the result
 (§5.2): state leaves as canonical STObject bytes, tx leaves as
 `VL(tx) || VL(meta)`.
+
+Codecs skip what they do not serialize, so "nothing else" is checked, not
+assumed. Before hashing, a verifier MUST reject a leaf with any member, at any
+depth, that is not a serialized field of its codec definitions. That includes
+the definitions' non-serialized names such as `hash` and `index`. Within an
+`STArray`, each element wraps exactly one serialized `STObject` field. Fields
+whose JSON value is itself structured carry exactly one variant's members:
+
+| Field type | JSON value |
+|---|---|
+| Amount | a drops string; `{value, currency, issuer}` with a non-native currency; or `{value, mpt_issuance_id}` |
+| Issue | `"XRP"` or `"XAH"`; `{currency}` with a native currency; `{currency, issuer}` with a non-native currency; or `{mpt_issuance_id}` |
+| PathSet | an array of paths, each an array of steps; a step is a non-empty object whose members are among `account`, `currency` and `issuer` |
+| XChainBridge | exactly `LockingChainDoor`, `LockingChainIssue`, `IssuingChainDoor` and `IssuingChainIssue`, each issue as above |
+| Vector256 | an array of hash strings |
+
+Any other field's value is a string or a number. An issue with a currency but no
+issuer is native in the binary form whatever currency it names, so only `XRP`
+or `XAH` may stand there.
 
 JSON leaves are decoded only. A leaf whose decoded object does not serialize
 back to its exact hashed bytes under the producer's codec definitions has no
@@ -518,13 +596,13 @@ JSON form: the producer MUST NOT emit that proof as JSON, and SHOULD direct the
 consumer to the binary form, whose leaves are the exact bytes and need no codec
 to verify. A hex string is not leaf data, and verifiers MUST reject it.
 
-Non-XRPL convenience members are not part of a leaf. Some producers have emitted
-`index` or `hash` (duplicating the trie leaf key) or `blob` (duplicating the
-hashed bytes). These are not canonical, MUST be excluded before serialization,
-and MUST NOT be trusted: per §1.1 a field is trusted only because it lies inside
-bytes whose hash is already trusted, never because a step asserts it. The
-authenticated leaf key is the trie's `key` element, never a member inside the
-decoded object.
+Non-XRPL convenience members are not part of a leaf. Some decoders add `index`
+or `hash` (duplicating the trie leaf key) or `blob` (duplicating the hashed
+bytes). Producers MUST remove them before emitting a proof, and verifiers MUST
+reject a leaf that carries one, as they reject any other member nothing hashes:
+per §1.1 a field is trusted only because it lies inside bytes whose hash is
+already trusted, never because a step asserts it. The authenticated leaf key is
+the trie's `key` element, never a member inside the decoded object.
 
 > **Why decoded only.** What a reader sees must be what the verifier hashed.
 > Re-serializing the decoded content is what binds the legible form to the
@@ -570,13 +648,22 @@ non-canonical.
 
 ### 2.4 JSON Parsing Policy
 
-JSON verifiers MUST reject unknown top-level proof versions and unknown step types,
-and MUST reject a trie inner node with a lowercase or non-branch member, or a
-repeated branch (§2.3). That last class is JSON-only: a binary trie identifies a
-branch by position in a 2-bit field (§3.7), so a branch there cannot be misspelled
-or repeated. They MUST also reject duplicate object members anywhere in the
-proof, hex-string leaf data (§2.3), a `unl` that bundles its list only in part
-(§2.1), and trie nesting deeper than 64 levels. The binary counterpart is §3.8.
+A JSON verifier MUST reject:
+
+- an unrecognized version, a bare array of steps, or an unknown step type (§2);
+- a member the closed form does not list, or an integer field that is not an
+  integer token (§2);
+- a trie inner node with a lowercase or non-branch member, or a repeated branch
+  (§2.3). This class is JSON-only: a binary trie identifies a branch by position
+  in a 2-bit field (§3.7), so a branch there cannot be misspelled or repeated;
+- duplicate object members anywhere in the proof;
+- hex-string leaf data, and a leaf member that is not a serialized field or a
+  structured value outside its variant's members (§2.3);
+- a `unl` that bundles its list only in part (§2.1);
+- trie nesting deeper than 64 levels;
+- text longer than its configured maximum, checked before parsing (§8).
+
+The binary counterpart is §3.8.
 
 ## 3. Binary Form
 
@@ -592,7 +679,7 @@ Offset  Size  Field
   6       4   network_id  big-endian uint32 (0 = XRPL, 21337 = Xahau)
 ```
 
-When flag bit 0 is set, the entire body (all TLV records concatenated) is compressed as a single RFC 1950 zlib stream. The consumer decompresses before parsing TLVs. Compression is a container option only; it does not change the proof or its identity (§1.2).
+When flag bit 0 is set, the entire body (all TLV records concatenated) is compressed as a single RFC 1950 zlib stream. The consumer decompresses before parsing TLVs. The body is that one complete stream: a truncated stream, a second stream, or any byte after the stream's end makes the proof malformed. Compression is a container option only; it does not change the proof or its identity (§1.2).
 Flag bits 1-7 are reserved and MUST be zero. Verifiers MUST reject a binary
 proof with any reserved flag bit set.
 
@@ -618,10 +705,10 @@ Type bytes:
 | `0x04` | Map proof (state) | Binary trie for account state tree |
 | `0x05` | Anchor UNL | Publisher manifest, blob signature, decomposed VL |
 
-For format version 7, all other type bytes are reserved. Verifiers MUST reject
-unknown TLV types.
+All other type bytes are reserved in the current format version. Verifiers MUST
+reject unknown TLV types.
 
-Length is unsigned LEB128 varint:
+Length is an unsigned LEB128 varint, minimal and at most 5 bytes (§4):
 
 | Payload size | Length bytes |
 |-------------|-------------|
@@ -716,6 +803,10 @@ canonical XRPL STObject field order. Producers MUST verify that this process
 round-trips to the original raw STValidation bytes before emitting decomposed
 validations.
 
+With a single validation every field is common, `SigningPubKey` and
+`Signature` included: the unique field names list is empty, and that
+validator's record carries an empty STObject.
+
 This preserves fields that appear only in some validations while still reducing
 per-validator overhead from ~200 bytes to ~80 bytes.
 
@@ -779,10 +870,10 @@ The shaped encoding is valid only for a VL blob whose top-level keys are
 exactly `{sequence, expiration, validators}` and whose validator objects have
 exactly `{validation_public_key, manifest}`. Producers MUST verify the shaped
 encoding round-trips to the exact signed blob bytes before emitting binary
-form. If it does not round-trip, a v7 binary producer MUST fail rather than
+form. If it does not round-trip, a binary producer MUST fail rather than
 emit a non-verifiable decomposed blob; the JSON form can still carry the raw
 blob bytes in `unl.blob`. A list that carries `effective`, or any other
-top-level key, therefore has no binary form in v7, and every list bundled in a
+top-level key, therefore has no binary form, and every list bundled in a
 binary proof is in effect from 0.
 
 ### 3.6 Ledger Header Payload (0x02)
@@ -835,30 +926,32 @@ canonical STObject bytes; tx tree: `VL(tx) || VL(meta)`. Note the 32-byte key
 precedes the data on the wire but is appended **after** the data in the leaf
 hash preimage.
 
-Every inner node in v7 advances exactly one nibble, so a node's depth is its
+Every inner node advances exactly one nibble, so a node's depth is its
 nesting depth and is never encoded.
 
 ### 3.8 Binary Parsing Policy
 
-Version 7 is a closed format. A v7 verifier MUST reject:
+The binary form is closed. A verifier MUST reject:
 
-- a file header version other than `0x07`;
+- a file header version other than the current one (§9.1);
 - nonzero reserved flag bits;
 - unknown TLV types;
 - a TLV length that exceeds the remaining body bytes;
 - trailing bytes inside a fixed-size payload;
 - duplicate `0x01` or `0x05` records;
-- a missing `0x01` record;
+- a missing `0x01` record, or a first record other than `0x01`;
 - any TLV record after `0x05`;
 - a `0x05` record that precedes the `0x01` record;
 - records after a logical verification failure;
 - an invalid shape byte (`shape & 0xF0 != 0` or top-level permutation index
   greater than 5);
-- decompressed bodies that exceed the verifier's configured maximum size;
+- a body, plain or decompressed, that exceeds the verifier's configured maximum
+  size (§8);
+- a compressed body that is not exactly one complete zlib stream (§3.1);
 - trie recursion deeper than 64 nibbles.
 
 The empty tree, lone-leaf tree root, and proofs of absence are out of scope for
-v7. A `map_proof` MUST contain at least one authenticated leaf and enough inner
+the current format. A `map_proof` MUST contain at least one authenticated leaf and enough inner
 nodes or hash placeholders to recompute a non-empty SHAMap root.
 
 The JSON counterpart of this policy is §2.4.
@@ -900,7 +993,11 @@ roots. Parent-before-child serialized order ensures each step can only consume
 capabilities produced by earlier authenticated steps.
 
 ```
-function verify(chain, trusted_publisher_keys):
+function verify(chain, network_id, primary_publisher_key):
+    // The caller configures one primary publisher key per network (§8),
+    // and network_id selects it.
+    assert chain.network_id == network_id
+
     // §1: exactly one anchor, and it comes first.
     assert chain.steps is non-empty and chain.steps[0] is anchor
     assert no later step is an anchor
@@ -918,41 +1015,29 @@ function verify(chain, trusted_publisher_keys):
     for each step in chain.steps:
 
         if step is anchor:
-            // Steps 2-5 run over the primary list selected by §1.3: the
-            // highest-sequence list held under the trusted publisher key
-            // that is in effect at the anchor ledger's close time, of which
-            // the anchor's own list (§2.1) is one candidate. Where the list
-            // is not bundled (binary without 0x05, or a JSON unl carrying
-            // only public_key), the candidates come from the verifier's held
-            // trust alone (§3.3).
-            // 1. Assert unl.public_key is in trusted_publisher_keys
-            // 2. Verify publisher manifest signatures:
-            //      MAN\0 + manifest fields without Signature/MasterSignature
-            //    The publisher's signing key is the one named by the
-            //    highest-sequence publisher manifest held (§1.3); a list
-            //    signed by a superseded or revoked key cannot be primary.
-            // 3. Use the manifest's SigningPubKey to verify unl.signature
-            //    over unl.blob
-            // 4. Decode unl.blob → validator entries: the primary list's
-            //    membership (§1.3), N = number of masters
-            // 5. Verify each validator manifest the same way, then resolve
-            //    each master's delegation from its highest-sequence verified
-            //    manifest among the list's and any others held (§1.3), and
-            //    build the signing_key → master_key map from the result,
-            //    applying §1.3 rules 2-4: an equivocating master (equal
-            //    sequence, different bytes) is treated as revoked; a revoked
-            //    master stays in N with no key; a key collision rejects
-            // 6. For each validation:
-            //      deserialize STValidation
-            //      verify LedgerHash == anchor.ledger_hash
-            //      verify VAL\0 signing data signature using SigningPubKey
-            //        (canonical form, §8: secp256k1 strict DER and low S; Ed25519 S < L)
-            //      count it only if Flags has vfFullValidation (0x00000001):
-            //        a partial validation never counts (§1.3 rule 8)
-            //      verify SigningPubKey maps to a resolved delegation
-            //      SHOULD: verify LedgerSequence == anchor.ledger_index
-            // 7. Quorum: >= ceil(0.8 × N) distinct masters, each counted at
-            //    most once and only through its resolved signing key
+            // The anchor's close time (§1.3): the next logical step, if any,
+            // whose preimage hashes to anchor.ledger_hash. It is read here
+            // to select the primary list and grants nothing until the anchor
+            // has verified. An anchor-only proof has no close time.
+            close_time = close time of the next step, if it is the anchor
+                         ledger's header, else none
+            view = resolve_trust_view(anchor, primary_publisher_key, close_time)
+            // resolve_trust_view applies §1.3 P1-P4 and rules 1-11: the
+            // publisher's signing key, the primary list (the anchor's own
+            // list is one candidate; a list-less anchor's come from held
+            // trust alone, §3.3), its soundness, each master's delegation,
+            // and collisions. Manifests verify as §5.1 states. It rejects
+            // the anchor where those rules say so.
+            // For each validation:
+            //   deserialize STValidation
+            //   verify LedgerHash == anchor.ledger_hash
+            //   verify the VAL\0 signature using SigningPubKey (§5.1)
+            //   count it only if Flags has vfFullValidation (§1.3 rule 8)
+            //     and SigningPubKey is a master's resolved key (rule 5)
+            //   SHOULD: report a counted validation whose signed
+            //     LedgerSequence differs from anchor.ledger_index (§2.1)
+            // Quorum: >= ceil(0.8 x N) distinct masters (§1.3 rule 6)
+            assert quorum_met(view)
             list_effective, list_expiration = the primary list's interval
             trusted_ledger_hashes.add(step.ledger_hash)
 
@@ -1062,7 +1147,15 @@ MAN\0 || canonical_STObject(manifest without Signature and MasterSignature)
 Verifiers MUST verify the manifest `MasterSignature` with the manifest
 `PublicKey` (master public key). A non-revocation manifest MUST include both
 `SigningPubKey` and `Signature`, and verifiers MUST verify `Signature` with
-`SigningPubKey`. A revocation MUST include neither.
+`SigningPubKey`. A revocation MUST include neither. As in rippled, a manifest is
+also invalid if:
+
+- its bytes are not the canonical serialization of its fields;
+- it carries a `Version` other than 0;
+- it has a `Domain` that is not a well-formed domain;
+- its `SigningPubKey` equals its own `PublicKey`.
+
+An invalid manifest is never a candidate (§1.3 rule 1).
 
 STValidation signing data is:
 
@@ -1081,6 +1174,16 @@ Supported public-key encodings:
 | `0x02` or `0x03` | secp256k1 ECDSA | DER-encoded ECDSA signature over `SHA512-Half(signing_data)` |
 
 Verifiers MUST reject unknown public-key prefixes.
+
+Every signature a verifier checks (validations, manifests, the list blob) MUST be
+in canonical form:
+
+- **secp256k1:** strict DER with `0 < r < n` and `0 < s <= n/2` (low S), as
+  libsecp256k1 enforces.
+- **Ed25519:** 64 bytes with `S < L` (RFC 8032 §5.1.7), as libsodium enforces.
+
+A non-canonical twin is a second valid encoding of one signature, and two
+verifiers that disagree on it disagree on the same bytes.
 
 ### 5.2 SHAMap Node Hashing
 
@@ -1304,7 +1407,8 @@ A conforming producer MUST:
 - emit no JSON form for a proof whose leaves cannot be round-tripped exactly
   through its codec, and point the consumer to the binary form;
 - emit binary VL decomposition only when the shaped blob round-trips exactly;
-- not emit unknown, reserved, or extension values in format v7.
+- emit no member the closed JSON form does not list (§2), and no unknown,
+  reserved, or extension values in the binary form (§3.8).
 
 A conforming verifier MUST:
 
@@ -1327,69 +1431,55 @@ At minimum, verifier output SHOULD expose:
 
 ## 8. Security Considerations
 
-- The verifier MUST be configured with one or more trusted VL publisher keys.
-- Validation messages are ephemeral: a producer can only capture them while the
+- **Trust configuration.** A verifier MUST be configured with exactly one
+  primary publisher key for each network it accepts. It MAY also hold secondary
+  publisher keys, whose lists only refresh members' manifests (§1.3).
+  `network_id` selects the primary key: a proof whose `network_id` does not
+  match the network of the configured key MUST be rejected. `network_id` is
+  otherwise unauthenticated metadata.
+- **Ephemeral validations.** A producer can only capture validations while the
   anchor ledger is being validated, and a node keeps them for minutes.
-- Quorum is `ceil(0.8 × UNL size)` distinct UNL validators, each counted at
-  most once, matching the XRPL consensus requirement.
-- Verifiers MUST bind `network_id` to the trusted publisher key set: a proof
-  whose `network_id` does not match the network implied by the configured
-  publisher key MUST be rejected. `network_id` is otherwise unauthenticated
-  metadata.
-- All hashes use SHA512-Half as specified by the XRPL protocol.
-- The verifier MUST reject chains where any step fails.
-- Every signature a verifier checks (validations, manifests, the list blob) MUST
-  be in canonical form. secp256k1: strict DER with `0 < r < n` and
-  `0 < s <= n/2` (low S), as libsecp256k1 enforces. Ed25519: 64 bytes with
-  `S < L` (RFC 8032 §5.1.7), as libsodium enforces. A non-canonical twin is a
-  second valid encoding of one signature, and two verifiers that disagree on it
-  disagree on the same bytes.
-- Verifiers MUST enforce a configured maximum body size before parsing, on the
-  decompressed body for a compressed container (zlib-bomb protection), and MUST
+- **Quorum.** Quorum is counted against the primary list's unreduced N (§1.3
+  rule 6). rippled can lower its own threshold by excluding validators on the
+  Negative UNL; XPRV does not, so a ledger rippled considers validated can
+  still lack an XPRV quorum while validators are offline.
+- **Hashes and signatures.** All hashes use SHA512-Half as specified by the
+  XRPL protocol. Every signature MUST be in canonical form (§5.1).
+- **Failure.** The verifier MUST reject chains where any step fails.
+- **Resource limits.** Verifiers MUST enforce configured maximum sizes before
+  parsing: on the binary body, plain or decompressed (a compressed body is
+  bounded while it inflates, against zlib bombs), and on JSON text. They MUST
   reject trie recursion deeper than 64 nibbles (§3.8).
-- Binary and JSON forms of the same proof MUST verify identically.
-- Producers MUST emit canonical serialized order (§1.2) whenever proofs are
-  hashed, signed, cached, compared, or deduplicated, and MUST take such hashes
-  over the canonical uncompressed binary encoding rather than JSON text (§1.2).
-- A verifier accepting proofs without the `0x05` anchor UNL (§3.3) MUST source
-  the UNL from configured or cached trust and MUST NOT weaken quorum or
-  publisher-key checks in that mode. Cached trust material SHOULD be bound to
-  the publisher key it was verified under, so a cached UNL cannot be applied to
-  a proof from a different publisher.
-- Reference verifiers SHOULD support both an offline mode that trusts only the
-  embedded VL snapshot and an online mode that can refresh the latest VL before
-  assessing the included anchor validations.
-- Sources of trust material (§1.3) are channels for evidence, not trust roots:
-  a source can withhold a newer manifest, but it cannot make an unverified one
-  count. A verifier that keeps material between runs SHOULD keep each master's
-  highest manifest sequence, so that a restart or an older bundle cannot return
-  signing to a key the validator has rotated away from.
-- Holding the newest manifests is not provable offline. A verifier SHOULD
-  report the view it used, so a consumer can judge whether it was current
-  enough.
+- **Two forms.** Binary and JSON forms of the same proof MUST verify
+  identically. Hashes, signatures and cache keys are taken over the canonical
+  uncompressed binary encoding, never the JSON text (§1.2).
+- **Proofs without `0x05`.** A verifier accepting them sources the list as §3.3
+  requires. Cached trust material SHOULD be bound to the publisher key it was
+  verified under, so a cached list cannot be applied to a proof from a
+  different publisher.
+- **Sources of trust material** (§1.3) are channels for evidence, not trust
+  roots. A source can withhold a newer manifest, but it cannot make an
+  unverified one count. A verifier that keeps material between runs SHOULD keep
+  each master's highest manifest sequence, so that a restart or an older bundle
+  cannot return signing to a key the validator has rotated away from.
+- **Reporting the view.** Holding the newest manifests is not provable offline.
+  A verifier SHOULD report the view it used, so a consumer can judge whether it
+  was current enough.
 
 ## 9. Registries, MIME Types, and File Extensions
 
 ### 9.1 Format Versions
 
-| Version | Status | Notes |
-|---------|--------|-------|
-| 5 | superseded, never released | Required the `0x05` anchor-UNL record in every binary proof |
-| 6 | superseded, deployed on xprv.it until 2026-10-25 | JSON `format_version` and binary header version are the same value. Makes the `0x05` anchor-UNL record OPTIONAL (§3.3) |
-| 7 | current draft | JSON leaves are decoded only (no hex leaves, §2.3). A JSON anchor may omit its list, like binary (§2.1). Only full validations count; the time reference is the anchor's close time; one primary publisher per network; N ≥ 1; equal-sequence lists conflict (§1.3). Canonical signatures (§8). Proof identity is the uncompressed canonical form (§1.2) |
+| Version | Status |
+|---------|--------|
+| 7 (`0x07`) | current draft |
+| 6 | superseded; served publicly by xprv.it until 2026-10-25 |
+| 5 and earlier | superseded, never released |
 
-Version 6 exists because optional `0x05` changes which byte sequences are
-valid: a proof omitting the anchor UNL is malformed under v5 and well-formed
-under v6. Reusing the v5 number would leave two verifiers, both claiming v5,
-disagreeing about the same bytes — which is the interop failure version numbers
-exist to prevent. v5 was never released, so no deployed proof is invalidated.
-
-Version 7 exists because it changes which inputs are valid. Hex leaves were
-permitted by the v6 text and are rejected under v7. A quorum that needed partial
-validations passed the v6 reference verifiers and fails under v7. A list-less
-JSON anchor is malformed under v6 and well-formed under v7. v6 proofs were
-served publicly by xprv.it, so v7 verifiers reject them by version rather than
-by content, and producers re-issue.
+The number changes whenever a change alters which inputs are valid, and a
+number is never reused: two verifiers claiming one version must not disagree
+about the same bytes. v6 proofs were served publicly, so current verifiers
+reject them by version rather than by content, and producers reissue them.
 
 Versions other than 7 are unrecognized by this draft and MUST be rejected.
 
@@ -1401,13 +1491,13 @@ Versions other than 7 are unrecognized by this draft and MUST be rejected.
 | 21337 | Xahau mainnet |
 
 Other values are reserved for future registry entries or private deployments.
-Verifiers MUST bind any accepted value to the configured trusted publisher-key
-set (§8).
+Verifiers MUST bind any accepted value to its configured primary publisher key
+(§8).
 
 ### 9.3 Binary Type Registries
 
 The TLV type registry is defined in §3.2. The shape-byte registry is defined in
-§3.5. All unassigned values are reserved in format v7 and MUST be rejected.
+§3.5. All unassigned values are reserved in the current format version and MUST be rejected.
 
 ### 9.4 MIME Types and File Extensions
 
@@ -1419,65 +1509,41 @@ The TLV type registry is defined in §3.2. The shape-byte registry is defined in
 The binary MIME type is a placeholder until a dedicated media type is
 registered.
 
+## 10. Reference Implementations
+
+- **C++ prover + verifier**: [catalogue-tools/src/xprv](https://github.com/sublimator/catalogue-tools/tree/main/src/xprv)
+- **Python verifier**: [verify-xprv.py](https://github.com/sublimator/catalogue-tools/blob/main/scripts/verify-xprv.py)
+- **Live demo**: [xprv.it](https://xprv.it)
+
 ## Appendix A. Reference Implementation Status
 
-The current C++ and Python reference verifiers implement capability-based
-verification of the parent-before-child DAG model. They keep authenticated
-ledger hashes and tree roots alive across sibling fan-out, and may emit warnings
-for non-canonical duplication or ordering while still accepting a valid proof.
+What the reference verifiers implement of this draft. How the reference server
+holds and passes trust material is described in `src/xprv/README.md` in the
+reference repository.
 
-Both reference verifiers resolve the §1.3 view from the embedded list plus any
-held manifests passed to them: `xprv verify --manifests FILE` and
-`verify-xprv.py --manifests FILE`, where FILE is a JSON array of base64 raw
-manifests. The reference server's `/verify` passes, for every master it has
-seen listed on the proof's network, the newest manifest it holds from any list
-it has loaded or from peers (so a revocation in a newer list reaches it, and
-stays after a later list drops that master), plus the conflicting pair for any
-validator it has seen equivocate. It does not filter by its current list,
-because an older proof's own primary list may name a master the current list
-dropped; the verifier's rule 1 filters by the proof's list. It also passes the
-newest publisher manifest it has seen in a list response, whatever that list's
-sequence, so it refuses a proof whose list was signed under a publisher key since
-superseded. A verified revocation of the publisher key is final, as a validator's
-is: the server drops its list, refuses every later list, serves no proof (cached
-ones included), and passes the revocation, so `/verify` refuses every proof under
-that publisher.
-The server counts its proof quorum under the same view and attaches one
-validation per listed master, signed under that master's current key; a
-validation under a superseded key, from a validator caught mid-rotation, is not
-attached. It drops an equivocating validator for the life of the process. Neither
-verifier fetches a primary list from outside the proof yet, so both reject a
-list-less anchor as having no list. Both follow §1.3 rule 3 for the
-embedded list: a revoked validator stays in N and never votes. The reference
-server applies the same rule to the lists it loads.
+| Capability | C++ `xprv verify` | Python `verify-xprv.py` |
+|---|---|---|
+| Both forms; capability-based verification of the DAG (§1, §5) | yes | yes |
+| Trust view from the bundled list plus held manifests (§1.3) | yes, `--manifests FILE` | yes, `--manifests FILE` |
+| Primary lists from outside the proof; a list-less anchor (§3.3) | no: rejected for want of a list | no: same |
+| Online list refresh before verifying | no; the reference server refreshes lists | no |
+| Canonical binary encoder (`convert`, JSON to binary and back) | yes | no; it decodes binary only |
+| Decoded Xahau JSON leaves | yes | no: xrpl-py ships XRPL definitions only, so it verifies Xahau binary proofs and points Xahau JSON proofs to the binary form |
+| Sibling fan-out and multi-leaf proofs | accepted; non-canonical repetition warned | same |
 
-The Python reference verifier uses xrpl-py's codec, which ships XRPL
-definitions only. It verifies Xahau binary proofs, whose leaves are exact bytes,
-but cannot re-serialize decoded Xahau leaves, so it rejects Xahau JSON proofs
-with fields XRPL lacks and says to verify the binary form instead.
-
-Progressive verification with a cached UNL is not implemented in the reference
-verifiers. The `0x05` anchor UNL record is OPTIONAL (§3.3) and both reference
-binary parsers accept a proof without it, but neither verifier sources the UNL from
-cache or configuration, so both require it in practice. A `0x05`-less proof is
-well-formed and currently unverifiable by the reference implementations.
-
-Both reference implementations convert between the two forms offline
-(`xprv convert`), so a proof captured as JSON can be re-encoded to canonical
-binary without network access. This is what makes §8's requirement that both
-forms verify identically testable in both directions, and what allows the
-Appendix B corpus to be regenerated without live peers.
-
-The reference verifiers accept sibling fan-out and multi-leaf proofs, and warn
-when repeated sibling roots or header orderings are non-canonical.
+FILE is a JSON array of base64 raw manifests. A list-less anchor is well-formed
+and unverifiable by both verifiers until one can hold lists from outside the
+proof.
 
 ## Appendix B. Test Vectors
 
 Known-answer vectors live in `tests/xprv/vectors/` in the reference repository.
 
-**Positive vectors** carry one proof in both JSON and binary form, together with
-the intermediate values an independent implementation needs in order to localise
-a mismatch rather than merely observe one:
+**Positive vectors** carry one proof in both JSON and binary form. Each states
+its configured trust: the network and its publisher key, taken from the
+verifier's configuration, never from the key the proof names. Each also
+carries the intermediate values an independent implementation needs in order
+to localise a mismatch rather than merely observe one:
 
 - for each `ledger_header`: the full `LWR\0` preimage (122 bytes: 4-byte prefix
   plus the 118-byte canonical header), its recorded length, and the resulting
@@ -1486,12 +1552,28 @@ a mismatch rather than merely observe one:
   hashed (§5.2) with the resulting leaf hash;
 - the derived short and long skip-list keys (§5.3).
 
-**Negative vectors** are stored as a reference to a positive vector plus explicit
-byte mutations, rather than as whole copies. Each names the rule it violates and
-the rejection reason expected, so a verifier that rejects for the *wrong* reason
-is also a finding. The family covers an unrecognised version, a set reserved flag
-bit, an unknown TLV type, a `0x05` record preceding `0x01`, a TLV length exceeding
-the remaining body, and a corrupted container magic.
+**Negative vectors** are stored as a reference to a positive vector plus
+explicit edits, rather than as whole copies. There are two kinds:
+- **byte mutations of the binary form:** set, insert, truncate, recompress or
+  append;
+- **JSON-pointer patches of the JSON form,** for attacks that live in JSON
+  structure or in the anchor's contents.
+
+Each names the rule it violates and the rejection reason expected, so a
+verifier that rejects for the *wrong* reason is also a finding. Each also names
+the layer it tests:
+- **parse:** malformed syntax;
+- **graph:** a post-anchor capability or leaf rule;
+- **trust:** the list, quorum or signatures.
+
+The family covers:
+- the container: version, flags, magic, TLV type, order and length; non-minimal
+  LEB128; a zlib trailer;
+- the closed JSON form: a bare list, an unknown member, a float version, a
+  malformed validation value, a wrong `__depth__`;
+- leaf rules: an unhashed leaf member, a map proof without leaves;
+- trust: a failed quorum, forged validation signatures, a publisher-key
+  mismatch, a missing list.
 
 ### Cross-validation, and why the split matters
 
@@ -1499,33 +1581,32 @@ The corpus is deliberately not authored by a single implementation. The
 intermediates are derived by the Python reference verifier
 (`scripts/xprv-vectors.py annotate`), and the C++ implementation is held to them
 by `tests/xprv/vectors-gtest.cpp`. Neither side grades its own homework: a
-divergence between the two — including a disagreement between their XRPL codecs
-about the bytes a decoded leaf serialises to — fails a build rather than shipping.
+divergence between the two, including a disagreement between their XRPL codecs
+about the bytes a decoded leaf serialises to, fails a build rather than shipping.
 
-The generator refuses to record a claim it cannot substantiate. If a mutation is
-*accepted* by the reference verifier, `mutate` errors out instead of writing a
-vector that asserts a rejection which does not occur.
+**Two passes in C++.** Every vector runs through the production verification
+path under its configured trust, and its refusal reason is checked. Parse and
+graph negatives also run with the anchor pretrusted, which isolates the checks
+after the anchor. Trust negatives are left out of that pass, since skipping the
+anchor checks is its purpose.
 
-Producing the binary form is the C++ implementation's job (`xprv convert`), since
-it owns the canonical encoder; reimplementing that encoder in the vector tooling
-would create a second encoder to keep in sync, and a divergence between the two
-would be indistinguishable from a divergence between implementations.
+**No unsubstantiated claims.** The generator refuses to record a claim it
+cannot substantiate. If a mutation or patch is *accepted* by the reference
+verifier, `mutate` errors out instead of writing a vector that asserts a
+rejection which does not occur.
 
-A **JSON-form negative** carries the whole malformed proof inline rather than a
-byte patch, because a JSON-trie attack cannot be expressed as a mutation of the
-binary encoding. The corpus includes one: a real anchor and real UNL with a
-forged tail, where a LedgerHashes leaf hangs off a lowercase branch key beside
-its uppercase sibling (§2.3). Both reference verifiers accepted it before that
-rule existed.
+**One encoder.** Producing the binary form is the C++ implementation's job
+(`xprv convert`), since it owns the canonical encoder. Reimplementing that
+encoder in the vector tooling would create a second encoder to keep in sync,
+and a divergence between the two would be indistinguishable from a divergence
+between implementations.
 
-Not yet covered by vectors: a proof omitting the optional `0x05` anchor UNL
-(§3.3), which needs a verifier mode that sources trust from cache or
-configuration; a non-minimal LEB128 length (§4); a failed-quorum anchor; and a
-`__depth__` that disagrees with the nesting (§2.3).
+**The historical forgery.** One JSON-form negative carries its whole proof
+inline: a real anchor and real UNL with a forged tail, where a LedgerHashes
+leaf hangs off a lowercase branch key beside its uppercase sibling (§2.3). Both
+reference verifiers accepted it before that rule existed.
 
-
-## 10. Reference Implementations
-
-- **C++ prover + verifier**: [catalogue-tools/src/xprv](https://github.com/sublimator/catalogue-tools/tree/main/src/xprv)
-- **Python verifier**: [verify-xprv.py](https://github.com/sublimator/catalogue-tools/blob/main/scripts/verify-xprv.py)
-- **Live demo**: [xprv.it](https://xprv.it)
+**Not yet covered:** a *positive* proof without the optional `0x05` anchor UNL
+(§3.3), verified from trust the verifier already holds. That needs a verifier
+that holds lists from outside the proof. The negative case, a missing list
+refused for want of trust, is covered.
