@@ -303,7 +303,6 @@ border:1px solid var(--ice);border-radius:50%;margin-right:.35rem;vertical-align
 .step-detail .leaf-data{margin-top:.45rem;padding:.4rem .8rem;
 border-left:1px solid var(--line-strong);margin-left:.2rem;background:rgba(var(--ice-rgb),.025);border-radius:0 8px 8px 0}
 .step-detail .leaf-ellipsis{display:block;color:var(--muted);font-size:.66rem;letter-spacing:.18em}
-.step-detail .ok-mark{color:var(--ok);font-size:.85em;margin-right:.3rem}
 
 .step-skeleton{margin-bottom:1.15rem;padding:.5rem .5rem .55rem 1rem;border-left:2px solid var(--line);
 animation:sk-pulse 1.6s ease-in-out infinite}
@@ -545,14 +544,13 @@ const PROOF_FORMAT = JSON.stringify({
   steps: [
     {type: 'anchor', ledger_hash: '<hash256>', ledger_index: '<uint32>',
      unl: {public_key: '<hex>', manifest: '<hex>', blob: '<hex>', signature: '<hex>'},
-     validations: {'<validator public_key>': '<hex>', '…': '<hex>'},
-     summary: {total_validations: '<uint32>'}},
+     validations: {'<validator public_key>': '<hex>', '…': '<hex>'}},
     {type: 'ledger_header', header: PROOF_HEADER_FORMAT},
     {type: 'map_proof', tree: 'state',
      trie: {'<nibble>': {'<nibble>': ['<hash256>', {LedgerEntryType: 'LedgerHashes', Hashes: ['<hash256>', '…']}], '…': '<hash256>'}}},
     {type: 'ledger_header', header: PROOF_HEADER_FORMAT},
     {type: 'map_proof', tree: 'tx',
-     trie: {'<nibble>': ['<hash256>', {tx: {hash: '<hash256>', TransactionType: '<string>'}, meta: {TransactionResult: '<string>'}}], '…': '<hash256>'}}
+     trie: {'<nibble>': ['<hash256>', {tx: {TransactionType: '<string>', Account: '<account>'}, meta: {TransactionResult: '<string>'}}], '…': '<hash256>'}}
   ]
 }, null, 2);
 let globeIntensity = 1;
@@ -772,6 +770,10 @@ function networkSlugForId(networkId) {
   if (n === 0) return 'xrpl-mainnet';
   if (n === 21337) return 'xahau-mainnet';
   return String(n);
+}
+
+function nativeUnit(networkId) {
+  return Number(networkId) === 21337 ? 'XAH' : 'XRP';
 }
 
 function networkLabel(networkId) {
@@ -1404,15 +1406,16 @@ async function describeStep(step, i, allSteps) {
         }
         if (data.tx) {
           const tx = data.tx;
-          const txHash = tx.hash || leaf[0] || '';
-          if (txHash) sub.push(kv('hash', `<span class="ok-mark">\u2713</span>${hx(txHash, 24)}`));
+          // The trie key, which the leaf hash covers. This page hashes no
+          // transaction, so it shows the key without a check mark.
+          if (leaf[0]) sub.push(kv('key', hx(leaf[0], 24)));
           if (tx.TransactionType) sub.push(kv('TransactionType', `<span class="v">${tx.TransactionType}</span>`));
           if (tx.Account) sub.push(kv('Account', `<span class="v">${tx.Account}</span>`));
           if (tx.Destination) sub.push(kv('Destination', `<span class="v">${tx.Destination}</span>`));
           if (tx.Amount) {
             let amt;
             if (typeof tx.Amount === 'string') {
-              amt = (parseInt(tx.Amount) / 1e6).toFixed(6) + ' XRP';
+              amt = (parseInt(tx.Amount) / 1e6).toFixed(6) + ' ' + nativeUnit(lastProofJson && lastProofJson.network_id);
             } else {
               let cur = tx.Amount.currency;
               if (cur && cur.length === 40) {
