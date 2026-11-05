@@ -151,6 +151,9 @@ add_subdirectory(src/lesser-peer)
 # Add the xprv tool
 add_subdirectory(src/xprv)
 
+# Add the peer-seed tool
+add_subdirectory(src/peer-seed)
+
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)
 if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/tests")
