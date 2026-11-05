@@ -1,6 +1,7 @@
 #include "commands.h"
 #include "config.h"
 #include "node-identity-resolver.h"
+#include "proof-file.h"
 
 #include <catl/core/logger.h>
 #include <catl/core/request-context.h>
@@ -523,17 +524,14 @@ main(int argc, char* argv[])
                 compress = true;
         }
 
-        std::ifstream in(in_path, std::ios::binary);
-        if (!in)
+        std::string read_error;
+        auto loaded = xprv::read_proof_file(in_path, read_error);
+        if (!loaded)
         {
-            std::cerr << "convert: cannot open " << in_path << "\n";
+            std::cerr << "convert: " << read_error << "\n";
             return 1;
         }
-        // Parenthesise the first argument: without it this is the most-vexing
-        // parse and declares a function rather than reading the file.
-        std::vector<uint8_t> raw(
-            (std::istreambuf_iterator<char>(in)),
-            std::istreambuf_iterator<char>());
+        auto raw = std::move(*loaded);
         if (raw.empty())
         {
             std::cerr << "convert: " << in_path << " is empty\n";

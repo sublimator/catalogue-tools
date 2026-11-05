@@ -34,6 +34,7 @@ find_package(nudb REQUIRED)
 find_package(lz4 REQUIRED)
 find_package(RocksDB REQUIRED)
 find_package(tomlplusplus REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # Set C++ standard for all targets Using C++20 since Apple Clang doesn't have
 # full C++23 support yet (no std::generator)

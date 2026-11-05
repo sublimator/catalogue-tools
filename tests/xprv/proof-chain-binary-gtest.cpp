@@ -98,7 +98,7 @@ zlib_compress_zeros(size_t n)
 // ─── Decompression-bomb guard (#0050) ───────────────────────────
 
 // Regression: a /verify body with FLAG_ZLIB whose payload inflates past the
-// 16 MiB cap must not be fully expanded (decompression bomb). The CappedSink
+// 16 MiB cap must not be fully expanded (decompression bomb). The inflate loop
 // bounds output during inflation; from_binary must reject the blob rather
 // than allocate the full decompressed size.
 TEST(ProofChainBinary, RejectsZlibDecompressionBomb)
@@ -111,7 +111,7 @@ TEST(ProofChainBinary, RejectsZlibDecompressionBomb)
     auto blob = make_zlib_proof(compressed);
 
     // Must surface the cap error specifically (not OOM, not an incidental
-    // decode error) — proves the CappedSink, not something downstream,
+    // decode error) — proves the inflate loop, not something downstream,
     // stopped it.
     try
     {
@@ -147,6 +147,113 @@ TEST(ProofChainBinary, AcceptsSmallZlibBodyPastDecompression)
             std::string(e.what()).find("decompressed size exceeds cap"),
             std::string::npos)
             << "small body must not trip the decompression cap";
+    }
+}
+
+namespace {
+
+std::string
+from_binary_error(std::vector<uint8_t> const& blob)
+{
+    try
+    {
+        from_binary(std::span<const uint8_t>(blob));
+    }
+    catch (std::exception const& e)
+    {
+        return e.what();
+    }
+    return {};
+}
+
+std::vector<uint8_t>
+make_plain_proof(std::size_t body_size)
+{
+    auto blob = make_zlib_proof({});
+    blob[5] = 0x00;
+    blob.resize(blob.size() + body_size, 0);
+    return blob;
+}
+
+bool
+mentions(std::string const& error, char const* text)
+{
+    return error.find(text) != std::string::npos;
+}
+
+}  // namespace
+
+// §8: exactly the cap inflates; one byte more trips it. Zeros are not a
+// valid TLV body, so the exact-cap case still fails, but later.
+TEST(ProofChainBinary, ZlibCapIsInclusive)
+{
+    auto const at_cap =
+        from_binary_error(make_zlib_proof(zlib_compress_zeros(XPRV_MAX_BODY_SIZE)));
+    EXPECT_FALSE(mentions(at_cap, "exceeds cap")) << at_cap;
+    auto const over = from_binary_error(
+        make_zlib_proof(zlib_compress_zeros(XPRV_MAX_BODY_SIZE + 1)));
+    EXPECT_TRUE(mentions(over, "decompressed size exceeds cap")) << over;
+}
+
+// §8: the cap applies before parsing to a plain body too.
+TEST(ProofChainBinary, PlainBodyCapIsInclusive)
+{
+    auto const at_cap = from_binary_error(make_plain_proof(XPRV_MAX_BODY_SIZE));
+    EXPECT_FALSE(mentions(at_cap, "exceeds size cap")) << at_cap;
+    auto const over =
+        from_binary_error(make_plain_proof(XPRV_MAX_BODY_SIZE + 1));
+    EXPECT_TRUE(mentions(over, "body exceeds size cap")) << over;
+}
+
+// §3.1: the body is one zlib stream, whole, and nothing after it.
+TEST(ProofChainBinary, RejectsZlibSuffixTruncationAndBadChecksum)
+{
+    auto const stream = zlib_compress_zeros(1024);
+
+    auto suffix = stream;
+    suffix.push_back(0);
+    EXPECT_TRUE(mentions(
+        from_binary_error(make_zlib_proof(suffix)), "bytes after the zlib stream"));
+
+    auto twice = stream;
+    twice.insert(twice.end(), stream.begin(), stream.end());
+    EXPECT_TRUE(mentions(
+        from_binary_error(make_zlib_proof(twice)), "bytes after the zlib stream"));
+
+    auto truncated = stream;
+    truncated.pop_back();
+    EXPECT_TRUE(mentions(
+        from_binary_error(make_zlib_proof(truncated)), "truncated zlib body"));
+
+    auto bad_checksum = stream;
+    bad_checksum.back() ^= 0x01;  // the last four bytes are the Adler-32
+    EXPECT_TRUE(mentions(
+        from_binary_error(make_zlib_proof(bad_checksum)), "invalid zlib body"));
+}
+
+// A compressed proof is the same proof (§1.2) at any zlib level.
+TEST(ProofChainBinary, CompressedRoundTripAtLevelsOneAndNine)
+{
+    ProofChain chain;
+    HeaderData h;
+    h.seq = 12345678;
+    h.drops = 99999999999000000ULL;
+    h.parent_hash = make_hash(0xAA);
+    h.tx_hash = make_hash(0xBB);
+    h.account_hash = make_hash(0xCC);
+    h.close_time = 751234567;
+    chain.steps.push_back(h);
+    auto const canonical = to_binary(chain);
+
+    for (int level : {1, 9})
+    {
+        BinaryOptions opts;
+        opts.compress = true;
+        opts.compress_level = level;
+        auto const compressed = to_binary(chain, opts);
+        ASSERT_EQ(compressed[5], 0x01) << "level " << level;
+        auto const decoded = from_binary(compressed);
+        EXPECT_EQ(to_binary(decoded), canonical) << "level " << level;
     }
 }
 

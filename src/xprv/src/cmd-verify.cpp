@@ -1,4 +1,5 @@
 #include "commands.h"
+#include "proof-file.h"
 
 #include "xprv/proof-chain-binary.h"
 #include "xprv/proof-chain-json.h"
@@ -74,16 +75,14 @@ cmd_verify(
         }
     }
 
-    std::ifstream in(proof_path, std::ios::binary);
-    if (!in.is_open())
+    std::string read_error;
+    auto const raw = xprv::read_proof_file(proof_path, read_error);
+    if (!raw)
     {
-        std::cerr << "Cannot open: " << proof_path << "\n";
+        std::cerr << read_error << "\n";
         return 1;
     }
-
-    std::string file_data(
-        (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    in.close();
+    std::string const file_data(raw->begin(), raw->end());
 
     xprv::ProofChain proof;
 

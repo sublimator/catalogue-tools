@@ -2,10 +2,18 @@
 
 #include "proof-chain.h"
 
+#include <catl/xdata/protocol.h>
+
 #include <boost/json.hpp>
+#include <cstddef>
 #include <string_view>
 
 namespace xprv {
+
+/// Ceiling on a JSON proof's text, in UTF-8 bytes. Hex doubles the binary
+/// body and the trie adds structure, so this sits well above 2x the binary
+/// body cap.
+inline constexpr std::size_t XPRV_MAX_JSON_SIZE = 64u * 1024 * 1024;
 
 /// Serialize a ProofChain to JSON.
 /// Returns {"format_version": N, "network_id": N, "steps": [...]}.

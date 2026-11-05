@@ -21,6 +21,7 @@ target_link_libraries(
           catl_shamap_abbreviated
           Boost::json
           Boost::iostreams
+          ZLIB::ZLIB
           OpenSSL::SSL
           libsodium::libsodium
           catl::base58

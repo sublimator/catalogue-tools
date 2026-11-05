@@ -141,4 +141,5 @@ target_link_libraries(
           catl_shamap_abbreviated
           catl::xdata
           Boost::iostreams
+          ZLIB::ZLIB
           tomlplusplus::tomlplusplus)

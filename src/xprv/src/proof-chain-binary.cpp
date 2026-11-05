@@ -17,10 +17,12 @@
 #include <boost/iostreams/filter/zlib.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/json.hpp>
+#include <zlib.h>
 
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -194,53 +196,67 @@ zlib_compress(std::vector<uint8_t> const& input, int level = 9)
     return {output.begin(), output.end()};
 }
 
-// Hard ceiling on decompressed proof size. A real proof body is a few KB to
-// a few hundred KB (a handful of SHAMap nodes per ledger across the skip-list
-// chain); 16 MiB is far above any legitimate proof. Without it, a hostile
-// /verify body of a few hundred KB of zeros expands to hundreds of MB
-// (decompression bomb) and OOM-kills the instance.
-static constexpr size_t kMaxDecompressedProofSize = 16u * 1024 * 1024;
-
 namespace {
 
-// boost::iostreams sink that appends to a vector but throws once the total
-// would exceed `cap` — bounds decompression output DURING inflation rather
-// than after the bomb has already allocated.
-struct CappedSink
+struct InflateStream
 {
-    using char_type = char;
-    using category = boost::iostreams::sink_tag;
+    z_stream zs{};
 
-    std::vector<char>* out;
-    size_t cap;
-
-    std::streamsize
-    write(char const* s, std::streamsize n)
+    InflateStream()
     {
-        if (out->size() + static_cast<size_t>(n) > cap)
-            throw std::runtime_error(
-                "binary proof: decompressed size exceeds cap");
-        out->insert(out->end(), s, s + n);
-        return n;
+        if (inflateInit(&zs) != Z_OK)
+            throw std::runtime_error("binary proof: zlib init failed");
     }
+    ~InflateStream()
+    {
+        inflateEnd(&zs);
+    }
+    InflateStream(InflateStream const&) = delete;
+    InflateStream&
+    operator=(InflateStream const&) = delete;
 };
 
 }  // namespace
 
+// The body is one RFC 1950 stream (§3.1). Without a cap a hostile body of a
+// few hundred KB of zeros inflates to hundreds of MB, so output is bounded
+// before each append rather than after a bomb has allocated. Input left over
+// after the stream's end is refused.
 static std::vector<uint8_t>
 zlib_decompress(std::span<const uint8_t> input)
 {
-    namespace io = boost::iostreams;
-    std::vector<char> output;
-    io::filtering_ostream out;
-    out.push(io::zlib_decompressor());
-    out.push(CappedSink{&output, kMaxDecompressedProofSize});
-    io::write(
-        out,
-        reinterpret_cast<const char*>(input.data()),
-        static_cast<std::streamsize>(input.size()));
-    out.reset();
-    return {output.begin(), output.end()};
+    // The caller caps the body first, so the length fits zlib's uInt.
+    static_assert(XPRV_MAX_BODY_SIZE <= std::numeric_limits<uInt>::max());
+    if (input.size() > XPRV_MAX_BODY_SIZE)
+        throw std::runtime_error("binary proof: body exceeds size cap");
+
+    InflateStream stream;
+    auto& zs = stream.zs;
+    zs.next_in = const_cast<Bytef*>(input.data());
+    zs.avail_in = static_cast<uInt>(input.size());
+
+    std::vector<uint8_t> output;
+    std::array<uint8_t, 64 * 1024> chunk{};
+    int rc = Z_OK;
+    while (rc != Z_STREAM_END)
+    {
+        zs.next_out = chunk.data();
+        zs.avail_out = static_cast<uInt>(chunk.size());
+        rc = inflate(&zs, Z_NO_FLUSH);
+        // Z_BUF_ERROR: no progress is possible, so the input ran out first.
+        if (rc == Z_BUF_ERROR)
+            throw std::runtime_error("binary proof: truncated zlib body");
+        if (rc != Z_OK && rc != Z_STREAM_END)
+            throw std::runtime_error("binary proof: invalid zlib body");
+        auto const produced = chunk.size() - zs.avail_out;
+        if (produced > XPRV_MAX_BODY_SIZE - output.size())
+            throw std::runtime_error(
+                "binary proof: decompressed size exceeds cap");
+        output.insert(output.end(), chunk.begin(), chunk.begin() + produced);
+    }
+    if (zs.avail_in != 0)
+        throw std::runtime_error("binary proof: bytes after the zlib stream");
+    return output;
 }
 
 //------------------------------------------------------------------------------
@@ -1129,7 +1145,10 @@ from_binary(std::span<const uint8_t> data)
     size_t net_pos = 6;
     uint32_t network_id = read_u32_be(data, net_pos);
 
+    // §8: the cap holds before parsing, compressed or not.
     auto body_span = data.subspan(10);
+    if (body_span.size() > XPRV_MAX_BODY_SIZE)
+        throw std::runtime_error("binary proof: body exceeds size cap");
 
     ProofChain chain;
     if (flags & FLAG_ZLIB)

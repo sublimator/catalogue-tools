@@ -58,6 +58,7 @@
 
 #include <catl/xdata/protocol.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -66,6 +67,11 @@ namespace xprv {
 
 /// Binary proof magic bytes.
 inline constexpr uint8_t XPRV_MAGIC[4] = {'X', 'P', 'R', 'V'};
+
+/// Ceiling on a binary proof's TLV body (§8), excluding the 10-byte header,
+/// whether it arrives plain or is inflated from zlib. A real proof body is
+/// tens of KB; 16 MiB is far above any legitimate one.
+inline constexpr std::size_t XPRV_MAX_BODY_SIZE = 16u * 1024 * 1024;
 
 /// Options for binary serialization.
 struct BinaryOptions
