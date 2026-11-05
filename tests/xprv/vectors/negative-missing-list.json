@@ -1,0 +1,18 @@
+{
+  "name": "missing-list",
+  "violates": "spec \u00a73.3: a verifier without cached trust MUST reject a 0x05-less proof",
+  "layer": "trust",
+  "mutations": [
+    {
+      "truncate_to": 25342
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "no external list"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "step 1: anchor: validator list not bundled and no external list; step 2: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 3: state root 72DB884ECB8F3C58... is not supported by any earlier header; step 4: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 5: state root EDCE53D36B387392... is not supported by any earlier header; step 6: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 7: tx root 48EF725280083243... is not supported by any earlier header"
+  }
+}

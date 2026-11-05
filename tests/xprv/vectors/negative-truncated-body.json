@@ -1,6 +1,7 @@
 {
   "name": "truncated-body",
   "violates": "spec \u00a73.8: a TLV length exceeding the remaining bytes",
+  "layer": "parse",
   "mutations": [
     {
       "truncate_to": 34824

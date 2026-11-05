@@ -1,6 +1,7 @@
 {
   "name": "anchor-unl-before-core",
   "violates": "spec \u00a73.8: a 0x05 record that precedes 0x01",
+  "layer": "parse",
   "mutations": [
     {
       "at": 10,

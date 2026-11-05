@@ -28,12 +28,16 @@
 #include <catl/xdata/serialize.h>
 
 #include <boost/json.hpp>
+#include <zlib.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <optional>
+#include <set>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -92,11 +96,47 @@ apply_mutations(
     for (auto const& m : muts)
     {
         auto const& o = m.as_object();
+        if (auto const* level = o.if_contains("compress_body"))
+        {
+            // Any valid stream will do: what is tested is what follows it.
+            std::vector<uint8_t> body(raw.begin() + 10, raw.end());
+            uLongf size = compressBound(static_cast<uLong>(body.size()));
+            std::vector<uint8_t> packed(size);
+            if (compress2(
+                    packed.data(),
+                    &size,
+                    body.data(),
+                    static_cast<uLong>(body.size()),
+                    static_cast<int>(level->to_number<int64_t>())) != Z_OK)
+                throw std::runtime_error("compress_body failed");
+            packed.resize(size);
+            raw.resize(10);
+            raw[5] |= 0x01;
+            raw.insert(raw.end(), packed.begin(), packed.end());
+            continue;
+        }
+        if (auto const* tail = o.if_contains("append_hex"))
+        {
+            auto const bytes = from_hex(std::string(tail->as_string()));
+            raw.insert(raw.end(), bytes.begin(), bytes.end());
+            continue;
+        }
         if (auto const* t = o.if_contains("truncate_to"))
         {
             auto n = static_cast<size_t>(t->to_number<uint64_t>());
             if (n < raw.size())
                 raw.resize(n);
+            continue;
+        }
+        if (auto const* at = o.if_contains("insert_at"))
+        {
+            auto const n = static_cast<size_t>(at->to_number<uint64_t>());
+            if (n > raw.size())
+                throw std::runtime_error("insertion exceeds file length");
+            auto const bytes =
+                from_hex(std::string(o.at("insert_hex").as_string()));
+            raw.insert(raw.begin() + static_cast<std::ptrdiff_t>(n),
+                bytes.begin(), bytes.end());
             continue;
         }
         auto at = static_cast<size_t>(o.at("at").to_number<uint64_t>());
@@ -106,6 +146,67 @@ apply_mutations(
         std::copy(patch.begin(), patch.end(), raw.begin() + at);
     }
     return raw;
+}
+
+/// Apply a negative's edits to its base's JSON form. Mirrors
+/// apply_json_patch() in scripts/xprv-vectors.py: `set` writes a value at a
+/// JSON pointer, `select` makes the value at a pointer the whole document.
+boost::json::value
+apply_json_patch(boost::json::value doc, boost::json::array const& ops)
+{
+    auto const tokens = [](std::string const& pointer) {
+        std::vector<std::string> out;
+        if (pointer.empty())
+            return out;
+        std::size_t at = 1;
+        while (true)
+        {
+            auto const next = pointer.find('/', at);
+            auto token = pointer.substr(
+                at, next == std::string::npos ? std::string::npos : next - at);
+            for (std::size_t i; (i = token.find("~1")) != std::string::npos;)
+                token.replace(i, 2, "/");
+            for (std::size_t i; (i = token.find("~0")) != std::string::npos;)
+                token.replace(i, 2, "~");
+            out.push_back(std::move(token));
+            if (next == std::string::npos)
+                return out;
+            at = next + 1;
+        }
+    };
+    auto const step = [](boost::json::value& node,
+                          std::string const& token) -> boost::json::value& {
+        if (node.is_array())
+            return node.as_array().at(std::stoul(token));
+        return node.as_object().at(token);
+    };
+    for (auto const& op_value : ops)
+    {
+        auto const& op = op_value.as_object();
+        auto const kind = std::string(op.at("op").as_string());
+        auto const path = tokens(std::string(op.at("path").as_string()));
+        if (kind == "select")
+        {
+            boost::json::value* node = &doc;
+            for (auto const& token : path)
+                node = &step(*node, token);
+            boost::json::value selected = *node;
+            doc = std::move(selected);
+        }
+        else if (kind == "set")
+        {
+            boost::json::value* parent = &doc;
+            for (std::size_t i = 0; i + 1 < path.size(); ++i)
+                parent = &step(*parent, path[i]);
+            if (parent->is_array())
+                parent->as_array().at(std::stoul(path.back())) = op.at("value");
+            else
+                parent->as_object()[path.back()] = op.at("value");
+        }
+        else
+            throw std::runtime_error("unknown json_patch op " + kind);
+    }
+    return doc;
 }
 
 /// Uppercase hex of a byte vector. `bytes_hex` emits lowercase and the vectors
@@ -336,116 +437,223 @@ TEST(XprvVectors, BothFormsVerifyAndAgree)
     }
 }
 
+// The same, through the production anchor path under the vector's configured
+// trust: the network's publisher key, never the key the proof names.
+TEST(XprvVectors, BothFormsVerifyOnTheProductionPath)
+{
+    for (auto const& path : vectors_matching(false))
+    {
+        auto const vec = read_json(path);  // owns what obj refers to
+        auto const& obj = vec.as_object();
+        ASSERT_TRUE(obj.contains("trust")) << path.filename();
+        auto const key =
+            std::string(obj.at("trust").at("publisher_key").as_string());
+        auto const network_id = static_cast<uint32_t>(
+            obj.at("trust").at("network_id").to_number<uint64_t>());
+        auto const protocol = protocol_for(network_id);
+        auto const& form = obj.at("form").as_object();
+
+        std::string json_why, bin_why;
+        auto const json_ok = resolve_proof_chain(
+            from_json(form.at("json")), protocol, key, {}, &json_why);
+        auto const bin_ok = resolve_proof_chain(
+            from_binary(from_hex(
+                std::string(form.at("binary_hex").as_string()))),
+            protocol,
+            key,
+            {},
+            &bin_why);
+        EXPECT_TRUE(json_ok) << path.filename() << ": JSON form: " << json_why;
+        EXPECT_TRUE(bin_ok) << path.filename() << ": binary form: " << bin_why;
+    }
+}
+
 // ─── negative vectors ────────────────────────────────────────────────
 
-// JSON-form negatives carry the whole malformed proof inline, because the attack
-// lives in JSON trie structure and cannot be expressed as a byte patch on the
-// binary form.
-TEST(XprvVectors, JsonFormNegativeVectorsAreRejected)
+namespace {
+
+struct Negative
 {
-    size_t checked = 0;
+    fs::path path;
+    boost::json::object vector;
+    std::vector<uint8_t> bytes;  // the proof as a verifier would receive it
+    bool binary = false;  // parsed as binary even when the magic is mutated
+    std::string layer;           // parse, graph or trust
+    std::string trust_key;
+    uint32_t network_id = 0;
+};
+
+// Each negative as bytes: a byte mutation of its base, or the proof carried
+// inline (JSON structure, a container option or anchor contents that no byte
+// patch expresses). Trust comes from the vector's metadata or its base's.
+std::vector<Negative>
+negatives()
+{
+    std::vector<Negative> out;
     for (auto const& path : vectors_matching(true))
     {
-        auto vec = read_json(path);
-        auto const& obj = vec.as_object();
-        if (obj.contains("base"))
-            continue;  // byte-mutation negative, covered below
-        if (!obj.contains("form") ||
-            !obj.at("form").as_object().contains("json"))
-            continue;
-
-        ++checked;
-        auto network_id = obj.contains("network_id")
-            ? static_cast<uint32_t>(obj.at("network_id").to_number<uint64_t>())
-            : 0u;
-        auto protocol = protocol_for(network_id);
-
-        bool rejected = false;
-        std::string how;
-        try
+        Negative n;
+        n.path = path;
+        n.vector = read_json(path).as_object();
+        n.layer = std::string(n.vector.at("layer").as_string());
+        boost::json::object trust;
+        if (n.vector.contains("base"))
         {
-            auto chain = from_json(obj.at("form").at("json"));
-            rejected = !resolve_proof_chain_with_pretrusted_anchor_for_testing(
-                chain, protocol);
-            how = "verification refused";
+            auto const base =
+                read_json(vector_dir() /
+                    (std::string(n.vector.at("base").as_string()) + ".json"))
+                    .as_object();
+            if (n.vector.contains("json_patch"))
+            {
+                auto const text = boost::json::serialize(apply_json_patch(
+                    base.at("form").at("json"),
+                    n.vector.at("json_patch").as_array()));
+                n.bytes.assign(text.begin(), text.end());
+            }
+            else
+            {
+                n.bytes = apply_mutations(
+                    from_hex(std::string(
+                        base.at("form").at("binary_hex").as_string())),
+                    n.vector.at("mutations").as_array());
+                n.binary = true;
+            }
+            trust = base.at("trust").as_object();
         }
-        catch (std::exception const& e)
+        else
         {
-            rejected = true;
-            how = e.what();
+            auto const& form = n.vector.at("form").as_object();
+            n.binary = form.contains("binary_hex");
+            if (n.binary)
+                n.bytes = from_hex(
+                    std::string(form.at("binary_hex").as_string()));
+            else
+            {
+                auto const text = boost::json::serialize(form.at("json"));
+                n.bytes.assign(text.begin(), text.end());
+            }
+            trust = n.vector.at("trust").as_object();
         }
-
-        EXPECT_TRUE(rejected)
-            << path.filename() << " ("
-            << std::string(obj.at("violates").as_string())
-            << "): forged proof was ACCEPTED — this is a hole, not a test "
-               "failure";
-        if (rejected)
-            EXPECT_NE(
-                how.find(std::string(
-                    obj.at("expect").at("reason_contains").as_string())),
-                std::string::npos)
-                << path.filename() << ": wrong rejection reason: " << how;
+        n.trust_key = std::string(trust.at("publisher_key").as_string());
+        n.network_id =
+            static_cast<uint32_t>(trust.at("network_id").to_number<uint64_t>());
+        out.push_back(std::move(n));
     }
-    EXPECT_GT(checked, 0u)
+    return out;
+}
+
+// Why `n` is refused, or nullopt if it is accepted. A parse refusal and a
+// verification refusal are both refusals; silence is not.
+std::optional<std::string>
+refusal(Negative const& n, bool production)
+{
+    try
+    {
+        auto const chain = n.binary
+            ? from_binary(n.bytes)
+            : from_json_text(std::string_view(
+                  reinterpret_cast<char const*>(n.bytes.data()),
+                  n.bytes.size()));
+        auto const protocol = protocol_for(n.network_id);
+        std::string why;
+        bool const ok = production
+            ? resolve_proof_chain(chain, protocol, n.trust_key, {}, &why)
+            : resolve_proof_chain_with_pretrusted_anchor_for_testing(
+                  chain, protocol, &why);
+        if (ok)
+            return std::nullopt;
+        return why.empty() ? std::string("verification refused") : why;
+    }
+    catch (std::exception const& e)
+    {
+        return std::string(e.what());
+    }
+}
+
+bool
+contains_ignoring_case(std::string haystack, std::string needle)
+{
+    auto const lower = [](std::string& s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+    };
+    lower(haystack);
+    lower(needle);
+    return haystack.find(needle) != std::string::npos;
+}
+
+void
+expect_refused_for_its_reason(Negative const& n, bool production)
+{
+    auto const why = refusal(n, production);
+    EXPECT_TRUE(why) << n.path.filename() << " ("
+                     << std::string(n.vector.at("violates").as_string())
+                     << "): ACCEPTED, which is a hole, not a test failure";
+    if (why)
+        EXPECT_TRUE(contains_ignoring_case(
+            *why,
+            std::string(
+                n.vector.at("expect").at("reason_contains").as_string())))
+            << n.path.filename() << ": wrong rejection reason: " << *why;
+}
+
+}  // namespace
+
+// Every negative, through the production anchor path under configured trust.
+TEST(XprvVectors, NegativeVectorsAreRejectedOnTheProductionPath)
+{
+    auto const all = negatives();
+    ASSERT_FALSE(all.empty());
+    std::set<std::string> layers;
+    for (auto const& n : all)
+    {
+        layers.insert(n.layer);
+        expect_refused_for_its_reason(n, true);
+    }
+    EXPECT_EQ(layers, (std::set<std::string>{"graph", "parse", "trust"}))
+        << "the corpus should cover parse, graph and trust refusals";
+}
+
+// Parse and graph negatives also fail with the anchor pretrusted, so the
+// post-anchor checks are proven on their own. Trust negatives are left out:
+// skipping the anchor checks is this pass's purpose.
+TEST(XprvVectors, GraphNegativeVectorsAreRejectedWithAPretrustedAnchor)
+{
+    size_t checked = 0, inline_json = 0;
+    for (auto const& n : negatives())
+    {
+        if (n.layer == "trust")
+            continue;
+        ++checked;
+        if (n.vector.contains("json_patch") ||
+            (!n.vector.contains("base") &&
+             n.vector.at("form").as_object().contains("json")))
+            ++inline_json;
+        expect_refused_for_its_reason(n, false);
+    }
+    EXPECT_GT(checked, 0u);
+    EXPECT_GT(inline_json, 0u)
         << "no JSON-form negative vectors found; the corpus is blind to "
            "JSON-trie soundness, which is where the known forgery lived";
 }
 
-TEST(XprvVectors, NegativeVectorsAreRejected)
+// A mutation that changes nothing would assert a rejection never exercised.
+TEST(XprvVectors, MutationsChangeTheirBase)
 {
-    auto negs = vectors_matching(true);
-    ASSERT_FALSE(negs.empty());
-
-    for (auto const& path : negs)
+    for (auto const& path : vectors_matching(true))
     {
-        auto vec = read_json(path);
+        auto const vec = read_json(path);  // owns what obj refers to
         auto const& obj = vec.as_object();
-        // JSON-form negatives carry the proof inline and have no base to patch;
-        // they are covered by JsonFormNegativeVectorsAreRejected.
-        if (!obj.contains("base"))
+        if (!obj.contains("base") || !obj.contains("mutations"))
             continue;
-        auto base_name = std::string(obj.at("base").as_string());
-        auto base = read_json(vector_dir() / (base_name + ".json"));
-
-        auto raw = from_hex(std::string(
-            base.as_object().at("form").as_object().at("binary_hex").as_string()));
-        auto mutated = apply_mutations(raw, obj.at("mutations").as_array());
-
-        ASSERT_NE(mutated, raw)
-            << path.filename()
-            << ": mutation produced no change — the vector asserts a rejection "
-               "that is never actually exercised";
-
-        // Rejection may surface at parse or at verification; either is a
-        // rejection. Silence is not.
-        bool rejected = false;
-        std::string how;
-        try
-        {
-            auto network_id = static_cast<uint32_t>(
-                base.as_object().at("network_id").to_number<uint64_t>());
-            auto protocol = protocol_for(network_id);
-            auto chain = from_binary(mutated);
-            rejected = !resolve_proof_chain_with_pretrusted_anchor_for_testing(
-                chain, protocol);
-            how = "verification refused";
-        }
-        catch (std::exception const& e)
-        {
-            rejected = true;
-            how = e.what();
-        }
-
-        EXPECT_TRUE(rejected)
-            << path.filename() << " (" << obj.at("violates").as_string()
-            << "): mutated proof was ACCEPTED — this is a hole, not a test "
-               "failure";
-        if (rejected)
-            EXPECT_NE(
-                how.find(std::string(
-                    obj.at("expect").at("reason_contains").as_string())),
-                std::string::npos)
-                << path.filename() << ": wrong rejection reason: " << how;
+        auto const base =
+            read_json(vector_dir() /
+                (std::string(obj.at("base").as_string()) + ".json"))
+                .as_object();
+        auto const raw =
+            from_hex(std::string(base.at("form").at("binary_hex").as_string()));
+        EXPECT_NE(apply_mutations(raw, obj.at("mutations").as_array()), raw)
+            << path.filename();
     }
 }

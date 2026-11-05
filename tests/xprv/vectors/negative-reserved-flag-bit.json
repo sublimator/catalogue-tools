@@ -1,6 +1,7 @@
 {
   "name": "reserved-flag-bit",
   "violates": "spec \u00a73.1/\u00a73.8: reserved flag bits MUST be zero",
+  "layer": "parse",
   "mutations": [
     {
       "at": 5,

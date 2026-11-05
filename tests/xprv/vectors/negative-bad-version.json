@@ -1,6 +1,7 @@
 {
   "name": "bad-version",
   "violates": "spec \u00a73.8: a file header version other than 0x07",
+  "layer": "parse",
   "mutations": [
     {
       "at": 4,

@@ -1,0 +1,20 @@
+{
+  "name": "unknown-member",
+  "violates": "D12: the JSON form is closed; every member is part of the proof",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/note",
+      "value": "x"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "unknown member note"
+  },
+  "observed": {
+    "python_reason": "unknown member note in proof"
+  }
+}

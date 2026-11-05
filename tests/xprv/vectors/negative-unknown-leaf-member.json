@@ -1,0 +1,20 @@
+{
+  "name": "unknown-leaf-member",
+  "violates": "spec \u00a72.3: leaf data is the decoded content and nothing else",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/4/trie/B/4/9/7/9/A/1/DisplayedButNotHashed",
+      "value": 1
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "not a serialized field"
+  },
+  "observed": {
+    "python_reason": "step 5: state tree error: leaf member DisplayedButNotHashed is not a serialized field; step 6: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 7: tx root 48EF725280083243... is not supported by any earlier header"
+  }
+}

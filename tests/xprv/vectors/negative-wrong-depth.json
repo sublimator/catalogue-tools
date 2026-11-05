@@ -1,0 +1,20 @@
+{
+  "name": "wrong-depth",
+  "violates": "spec \u00a72.3: __depth__ MUST equal the node's nesting depth",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie/__depth__",
+      "value": 17
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "__depth__"
+  },
+  "observed": {
+    "python_reason": "trie inner node __depth__ is 17 but its nesting depth is 0 (spec \u00a72.3)"
+  }
+}

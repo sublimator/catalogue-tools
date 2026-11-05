@@ -1,6 +1,7 @@
 {
   "name": "bad-magic",
   "violates": "spec \u00a73.1: magic identifies the binary container",
+  "layer": "parse",
   "mutations": [
     {
       "at": 0,

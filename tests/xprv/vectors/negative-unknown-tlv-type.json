@@ -1,6 +1,7 @@
 {
   "name": "unknown-tlv-type",
   "violates": "spec \u00a73.2/\u00a73.8: unknown TLV types MUST be rejected",
+  "layer": "parse",
   "mutations": [
     {
       "at": 10,

@@ -7,6 +7,10 @@
     "verdict": "accept",
     "both_forms_verify": true
   },
+  "trust": {
+    "network_id": 0,
+    "publisher_key": "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734"
+  },
   "form": {
     "json": {
       "format_version": 7,

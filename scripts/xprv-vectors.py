@@ -46,6 +46,7 @@ check     verify every vector; assert verdicts AND recorded intermediates
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import io
 import json
@@ -55,6 +56,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -161,13 +163,20 @@ def derive_intermediates(proof: dict[str, Any]) -> dict[str, Any]:
 # ─── verdicts ────────────────────────────────────────────────────────
 
 
-def python_verdict(raw: bytes, *, binary: bool = False) -> tuple[bool, str]:
-    """Run the reference Python verifier, capturing its narrative output."""
+def python_verdict(
+    raw: bytes, *, binary: bool = False, trust: dict[str, Any] | None = None
+) -> tuple[bool, str]:
+    """Run the reference Python verifier, capturing its narrative output.
+
+    `trust` is the vector's configured trust ({network_id, publisher_key}),
+    never the key a proof names for itself.
+    """
     buf = io.StringIO()
+    trust = trust or {}
     try:
         with redirect_stdout(buf):
             proof = V.binary_to_proof(raw) if binary or V.is_binary_proof(raw) else V.load_json_proof(raw)
-            res = V.verify(proof)
+            res = V.verify(proof, trust.get("publisher_key"), trust.get("network_id"))
         return bool(res.ok), "; ".join(res.errors) or "ok"
     except Exception as exc:  # a parse refusal is a legitimate reject
         return False, f"{type(exc).__name__}: {exc}"
@@ -184,11 +193,12 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
     """
     fam: list[dict[str, Any]] = []
 
-    def mut(name: str, rule: str, edits: list[dict[str, Any]], reason: str) -> None:
+    def mut(name: str, rule: str, edits: list[dict[str, Any]], reason: str, layer: str = "parse") -> None:
         fam.append(
             {
                 "name": name,
                 "violates": rule,
+                "layer": layer,
                 "mutations": edits,
                 "expect": {"verdict": "reject", "reason_contains": reason},
             }
@@ -217,38 +227,200 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
 
     # Offsets below depend on the first TLV record, which starts at byte 10.
     first_type_at = 10
-    fam.append(
-        {
-            "name": "unknown-tlv-type",
-            "violates": "spec §3.2/§3.8: unknown TLV types MUST be rejected",
-            "mutations": [{"at": first_type_at, "set_hex": "7F"}],
-            "expect": {"verdict": "reject", "reason_contains": "TLV"},
-        }
+    mut(
+        "unknown-tlv-type",
+        "spec §3.2/§3.8: unknown TLV types MUST be rejected",
+        [{"at": first_type_at, "set_hex": "7F"}],
+        "TLV",
     )
-    fam.append(
-        {
-            "name": "anchor-unl-before-core",
-            "violates": "spec §3.8: a 0x05 record that precedes 0x01",
-            "mutations": [{"at": first_type_at, "set_hex": "05"}],
-            "expect": {"verdict": "reject", "reason_contains": "anchor"},
-        }
+    mut(
+        "anchor-unl-before-core",
+        "spec §3.8: a 0x05 record that precedes 0x01",
+        [{"at": first_type_at, "set_hex": "05"}],
+        "anchor",
     )
-    fam.append(
-        {
-            "name": "truncated-body",
-            "violates": "spec §3.8: a TLV length exceeding the remaining bytes",
-            "mutations": [{"truncate_to": len(raw) - 64}],
-            "expect": {"verdict": "reject", "reason_contains": "exceeds"},
-        }
+    mut(
+        "truncated-body",
+        "spec §3.8: a TLV length exceeding the remaining bytes",
+        [{"truncate_to": len(raw) - 64}],
+        "exceeds",
     )
+
+    # The first record's length, re-encoded one byte longer than it needs.
+    length = _leb128(len(V.parse_tlv_records(raw[10:])[0][1]))
+    last = first_type_at + len(length)
+    mut(
+        "nonminimal-leb128",
+        "spec §4: decoders MUST reject non-minimal LEB128",
+        [
+            {"at": last, "set_hex": f"{length[-1] | 0x80:02X}"},
+            {"insert_at": last + 1, "insert_hex": "00"},
+        ],
+        "non-minimal",
+    )
+    # Without its 0x05 record the anchor has no list. The reference verifiers
+    # hold no external one, so this is a missing-trust refusal (§3.3), not a
+    # malformed proof.
+    mut(
+        "missing-list",
+        "spec §3.3: a verifier without cached trust MUST reject a 0x05-less proof",
+        [{"truncate_to": _record_offsets(raw)[-1][1]}],
+        "no external list",
+        layer="trust",
+    )
+    mut(
+        "zlib-trailer",
+        "spec §3.1: a compressed body is one RFC 1950 zlib stream",
+        [{"compress_body": 9}, {"append_hex": "00"}],
+        "bytes after the zlib stream",
+    )
+    return fam
+
+
+def _leb128(value: int) -> bytes:
+    out = bytearray()
+    while value >= 0x80:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+    return bytes(out)
+
+
+def _record_offsets(raw: bytes) -> list[tuple[int, int]]:
+    """(type, offset) of each TLV record in an uncompressed binary proof."""
+    offsets, at = [], 10
+    for tlv_type, payload in V.parse_tlv_records(raw[10:]):
+        offsets.append((tlv_type, at))
+        at += 1 + len(_leb128(len(payload))) + len(payload)
+    return offsets
+
+
+def _leaf_pointer(proof: dict[str, Any], tree: str) -> str:
+    """JSON pointer to the first leaf of the last map proof of `tree`."""
+    index = max(i for i, s in enumerate(proof["steps"]) if s["type"] == "map_proof" and s["tree"] == tree)
+    path, node = f"/steps/{index}/trie", proof["steps"][index]["trie"]
+    while isinstance(node, dict):
+        key = next(k for k, c in node.items() if k != "__depth__" and not isinstance(c, str))
+        path, node = f"{path}/{key}", node[key]
+    return path
+
+
+def _pointer_tokens(pointer: str) -> list[str]:
+    return [t.replace("~1", "/").replace("~0", "~") for t in pointer.split("/")[1:]] if pointer else []
+
+
+def _step(node: Any, token: str) -> Any:
+    return node[int(token)] if isinstance(node, list) else node[token]
+
+
+def apply_json_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
+    """Apply a negative's edits to its base's JSON form.
+
+    `set` writes a value at a JSON pointer (RFC 6901), creating an object member
+    if needed; `select` replaces the whole document with the value at a pointer.
+    """
+    doc = copy.deepcopy(doc)
+    for op in ops:
+        tokens = _pointer_tokens(op["path"])
+        if op["op"] == "select":
+            for token in tokens:
+                doc = _step(doc, token)
+        elif op["op"] == "set":
+            parent = doc
+            for token in tokens[:-1]:
+                parent = _step(parent, token)
+            if isinstance(parent, list):
+                parent[int(tokens[-1])] = op["value"]
+            else:
+                parent[tokens[-1]] = op["value"]
+        else:
+            raise SystemExit(f"unknown json_patch op {op['op']!r}")
+    return doc
+
+
+def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str, Any]]:
+    """Negatives stated as edits of a positive vector's JSON form.
+
+    These attacks live in JSON structure or in the anchor's contents, so no
+    byte patch of the binary form expresses them. Like a byte mutation, each
+    names exactly what it changes.
+    """
+    proof = base["form"]["json"]
+    fam: list[dict[str, Any]] = []
+
+    def neg(name: str, rule: str, layer: str, reason: str, ops: list[dict[str, Any]]) -> None:
+        fam.append({
+            "name": name,
+            "violates": rule,
+            "layer": layer,
+            "base": base_name,
+            "json_patch": ops,
+            "expect": {"verdict": "reject", "reason_contains": reason},
+        })
+
+    def at(path: str, value: Any) -> dict[str, Any]:
+        return {"op": "set", "path": path, "value": value}
+
+    first_map = next(i for i, s in enumerate(proof["steps"]) if s["type"] == "map_proof")
+    state_leaf, tx_leaf = _leaf_pointer(proof, "state"), _leaf_pointer(proof, "tx")
+    validations = proof["steps"][0]["validations"]
+
+    neg("bare-list", "spec §2: a proof is the versioned object; a steps array alone has no version",
+        "parse", "object", [{"op": "select", "path": "/steps"}])
+    neg("unknown-member", "D12: the JSON form is closed; every member is part of the proof",
+        "parse", "unknown member note", [at("/note", "x")])
+    neg("integral-float-version", "D12: integer fields are integer tokens",
+        "parse", "format_version", [at("/format_version", float(proof["format_version"]))])
+    neg("malformed-validation-value", "spec §2.1: validations map signing keys to hex STValidation bytes",
+        "parse", "validation value must be a hex string", [at("/steps/0/validations/ED" + "00" * 32, "ZZ")])
+    neg("wrong-depth", "spec §2.3: __depth__ MUST equal the node's nesting depth",
+        "parse", "__depth__", [at(f"/steps/{first_map}/trie/__depth__", 17)])
+    neg("unknown-leaf-member", "spec §2.3: leaf data is the decoded content and nothing else",
+        "graph", "not a serialized field", [at(f"{state_leaf}/1/DisplayedButNotHashed", 1)])
+
+    recorded = base["intermediates"]["map_proofs"][-1]
+    assert recorded["tree"] == "tx" and len(recorded["leaves"]) == 1
+    neg("leafless-map", "spec §3.8: a map proof MUST contain at least one authenticated leaf",
+        "graph", "contains no leaves", [at(tx_leaf, recorded["leaves"][0]["leaf_hash"])])
+
+    neg("failed-quorum", "spec §1.3 rule 6: quorum is ceil(0.8 x N) masters",
+        "trust", "quorum not met", [at("/steps/0/validations", dict(list(validations.items())[:5]))])
+
+    # Enough corrupted signatures to drop the votes below quorum: a verifier
+    # that skipped signature checks would still count them and accept.
+    forged = []
+    for key in list(validations)[:5]:
+        fields = V.decode(validations[key])
+        sig = fields["Signature"]
+        fields["Signature"] = sig[:-2] + f"{int(sig[-2:], 16) ^ 1:02X}"
+        forged.append(at(f"/steps/0/validations/{key}", V.encode(fields).upper()))
+    neg("forged-validation-signatures", "spec §5: every counted validation's signature MUST verify",
+        "trust", "quorum not met", forged)
+
+    other = next(k for k in V.PUBLISHER_KEY_BY_NETWORK.values() if k != base["trust"]["publisher_key"])
+    neg("publisher-key-mismatch", "spec §8: the anchor's publisher key MUST be the configured one",
+        "trust", "publisher key mismatch", [at("/steps/0/unl/public_key", other)])
     return fam
 
 
 def apply_mutations(raw: bytes, muts: list[dict[str, Any]]) -> bytes:
     buf = bytearray(raw)
     for m in muts:
+        if "compress_body" in m:
+            # Any valid stream will do: what is tested is what follows it.
+            buf = buf[:5] + bytes([buf[5] | 1]) + buf[6:10] + zlib.compress(bytes(buf[10:]), int(m["compress_body"]))
+            continue
+        if "append_hex" in m:
+            buf += bytes.fromhex(m["append_hex"])
+            continue
         if "truncate_to" in m:
             buf = buf[: int(m["truncate_to"])]
+            continue
+        if "insert_at" in m:
+            at = int(m["insert_at"])
+            if at > len(buf):
+                raise SystemExit(f"insertion at {at} exceeds file length {len(buf)}")
+            buf[at:at] = bytes.fromhex(m["insert_hex"])
             continue
         at = int(m["at"])
         patch = bytes.fromhex(m["set_hex"])
@@ -296,8 +468,12 @@ def cmd_annotate(args: argparse.Namespace) -> int:
         xprv_convert(json_path, bin_path)
         bin_raw = bin_path.read_bytes()
 
-        json_ok, json_reason = python_verdict(json_path.read_bytes())
-        bin_ok, bin_reason = python_verdict(bin_raw)
+        trust = {
+            "network_id": proof.get("network_id"),
+            "publisher_key": V.PUBLISHER_KEY_BY_NETWORK[proof.get("network_id")],
+        }
+        json_ok, json_reason = python_verdict(json_path.read_bytes(), trust=trust)
+        bin_ok, bin_reason = python_verdict(bin_raw, trust=trust)
 
     if not (json_ok and bin_ok) and not args.allow_failing:
         LOG.error("refusing to record a positive vector that does not verify "
@@ -318,6 +494,12 @@ def cmd_annotate(args: argparse.Namespace) -> int:
         "spec_version": proof.get("format_version"),
         "network_id": proof.get("network_id"),
         "expect": {"verdict": "accept"},
+        # Configured trust for checking this vector: the network's publisher
+        # key from the verifier's own table, not the key the proof names.
+        "trust": {
+            "network_id": proof.get("network_id"),
+            "publisher_key": V.PUBLISHER_KEY_BY_NETWORK[proof.get("network_id")],
+        },
         "form": {},
         "intermediates": derive_intermediates(proof),
         "provenance": {
@@ -352,9 +534,21 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     raw = bytes.fromhex(bin_hex)
 
     written = 0
+    for neg in patch_negative_family(base, args.base):
+        data = json.dumps(apply_json_patch(base["form"]["json"], neg["json_patch"])).encode()
+        ok, reason = python_verdict(data, trust=base["trust"])
+        if ok:
+            LOG.error("inline negative %r was ACCEPTED by the reference verifier; "
+                      "not writing a vector that asserts a false claim", neg["name"])
+            return 1
+        neg["observed"] = {"python_reason": reason}
+        out = VECTOR_DIR / f"negative-{neg['name']}.json"
+        out.write_text(json.dumps(neg, indent=2) + "\n")
+        LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
+        written += 1
     for neg in negative_family(raw):
         mutated = apply_mutations(raw, neg["mutations"])
-        ok, reason = python_verdict(mutated, binary=True)
+        ok, reason = python_verdict(mutated, binary=True, trust=base["trust"])
         if ok:
             LOG.error("mutation %r was ACCEPTED by the reference verifier — "
                       "either the mutation does not land or there is a real "
@@ -396,7 +590,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                 if "binary_hex" in form
                 else json.dumps(form["json"]).encode()
             )
-            ok, reason = python_verdict(raw)
+            ok, reason = python_verdict(raw, trust=vec.get("trust"))
             if ok:
                 failures.append(
                     f"{name}: expected reject, got ACCEPT — this is a hole, "
@@ -413,10 +607,14 @@ def cmd_check(args: argparse.Namespace) -> int:
         if "base" in vec:
             negatives += 1
             base = json.loads((VECTOR_DIR / f"{vec['base']}.json").read_text())
-            raw = apply_mutations(
-                bytes.fromhex(base["form"]["binary_hex"]), vec["mutations"]
-            )
-            ok, reason = python_verdict(raw, binary=True)
+            if "json_patch" in vec:
+                raw = json.dumps(apply_json_patch(base["form"]["json"], vec["json_patch"])).encode()
+                ok, reason = python_verdict(raw, trust=base.get("trust"))
+            else:
+                raw = apply_mutations(
+                    bytes.fromhex(base["form"]["binary_hex"]), vec["mutations"]
+                )
+                ok, reason = python_verdict(raw, binary=True, trust=base.get("trust"))
             if ok:
                 failures.append(f"{name}: expected reject, got accept")
             elif (want := expect.get("reason_contains")) and \
@@ -434,10 +632,13 @@ def cmd_check(args: argparse.Namespace) -> int:
         # independently rather than picking one, since a divergence between them
         # is exactly the class of bug this corpus exists to surface.
         verdicts: dict[str, tuple[bool, str]] = {}
+        trust = vec.get("trust")
+        if not trust:
+            failures.append(f"{name}: positive vector has no configured trust")
         if "json" in form:
-            verdicts["json"] = python_verdict(json.dumps(form["json"]).encode())
+            verdicts["json"] = python_verdict(json.dumps(form["json"]).encode(), trust=trust)
         if "binary_hex" in form:
-            verdicts["binary"] = python_verdict(bytes.fromhex(form["binary_hex"]))
+            verdicts["binary"] = python_verdict(bytes.fromhex(form["binary_hex"]), trust=trust)
 
         if expect.get("verdict") == "accept":
             for which, (ok, reason) in verdicts.items():

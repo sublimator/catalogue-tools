@@ -1,0 +1,20 @@
+{
+  "name": "integral-float-version",
+  "violates": "D12: integer fields are integer tokens",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/format_version",
+      "value": 7.0
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "format_version"
+  },
+  "observed": {
+    "python_reason": "unsupported format_version 7.0 (expected 7)"
+  }
+}

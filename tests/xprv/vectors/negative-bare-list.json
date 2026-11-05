@@ -1,0 +1,19 @@
+{
+  "name": "bare-list",
+  "violates": "spec \u00a72: a proof is the versioned object; a steps array alone has no version",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "select",
+      "path": "/steps"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "object"
+  },
+  "observed": {
+    "python_reason": "proof must be an object with format_version, network_id and steps"
+  }
+}

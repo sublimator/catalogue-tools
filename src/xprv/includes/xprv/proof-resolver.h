@@ -27,19 +27,23 @@ namespace xprv {
 /// Returns true if all verifiable steps pass.
 /// `extra_manifests` are raw validator/publisher manifests held from outside
 /// the proof (§1.3 trust view); they only update keys of listed masters.
+/// When `failure` is given, it receives the first refusal's reason.
 bool
 resolve_proof_chain(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol,
     std::string const& trusted_publisher_key,
     std::vector<std::vector<uint8_t>> const& extra_manifests =
-        std::vector<std::vector<uint8_t>>());
+        std::vector<std::vector<uint8_t>>(),
+    std::string* failure = nullptr);
 
 #ifdef XPRV_TESTING
 /// Test-only entry point for exercising the post-anchor capability graph.
 bool
 resolve_proof_chain_with_pretrusted_anchor_for_testing(
-    ProofChain const& chain, catl::xdata::Protocol const& protocol);
+    ProofChain const& chain,
+    catl::xdata::Protocol const& protocol,
+    std::string* failure = nullptr);
 #endif
 
 }  // namespace xprv

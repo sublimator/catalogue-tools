@@ -1,0 +1,23 @@
+{
+  "name": "nonminimal-leb128",
+  "violates": "spec \u00a74: decoders MUST reject non-minimal LEB128",
+  "layer": "parse",
+  "mutations": [
+    {
+      "at": 12,
+      "set_hex": "A7"
+    },
+    {
+      "insert_at": 13,
+      "insert_hex": "00"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "non-minimal"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: LEB128: non-minimal encoding"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "zlib-trailer",
+  "violates": "spec \u00a73.1: a compressed body is one RFC 1950 zlib stream",
+  "layer": "parse",
+  "mutations": [
+    {
+      "compress_body": 9
+    },
+    {
+      "append_hex": "00"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "bytes after the zlib stream"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: bytes after the zlib stream"
+  }
+}

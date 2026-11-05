@@ -1,6 +1,11 @@
 {
   "name": "negative-json-duplicate-nibble-forge",
   "violates": "spec \u00a72.3: branch keys are uppercase 0-9A-F only, one member per branch; a leaf enumerated but not hashed into the root is unauthenticated",
+  "layer": "parse",
+  "trust": {
+    "network_id": 0,
+    "publisher_key": "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734"
+  },
   "provenance": "independent adversarial review, 2026-07-25 \u2014 forged a ~1e9 XRP Payment that never existed on-ledger; both reference verifiers returned exit 0 before the fix",
   "form": {
     "json": {

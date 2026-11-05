@@ -469,8 +469,14 @@ anchor_from_json(boost::json::object const& obj)
             }))
             throw std::runtime_error(
                 "proof JSON: malformed validation key or value");
-        a.validations[key] =
-            from_hex(std::string(kv.value().as_string()));
+        auto const value = std::string(kv.value().as_string());
+        if (value.size() % 2 != 0 ||
+            !std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                return std::isxdigit(c) != 0;
+            }))
+            throw std::runtime_error(
+                "proof JSON: validation value must be a hex string");
+        a.validations[key] = from_hex(value);
     }
 
     return a;

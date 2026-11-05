@@ -1,0 +1,20 @@
+{
+  "name": "publisher-key-mismatch",
+  "violates": "spec \u00a78: the anchor's publisher key MUST be the configured one",
+  "layer": "trust",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/unl/public_key",
+      "value": "EDA46E9C39B1389894E690E58914DC1029602870370A0993E5B87C4A24EAF4A8E8"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "publisher key mismatch"
+  },
+  "observed": {
+    "python_reason": "step 1: anchor: publisher key mismatch: EDA46E9C39B13898... != ED2677ABFFD1B33A...; step 2: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 3: state root 72DB884ECB8F3C58... is not supported by any earlier header; step 4: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 5: state root EDCE53D36B387392... is not supported by any earlier header; step 6: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 7: tx root 48EF725280083243... is not supported by any earlier header"
+  }
+}

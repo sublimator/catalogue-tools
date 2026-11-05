@@ -1,0 +1,20 @@
+{
+  "name": "leafless-map",
+  "violates": "spec \u00a73.8: a map proof MUST contain at least one authenticated leaf",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2",
+      "value": "51ECE46A62921034D2858131AC55C4567B38590254A16A8082AFE9741B801B6B"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "contains no leaves"
+  },
+  "observed": {
+    "python_reason": "step 7: tx map proof contains no leaves"
+  }
+}

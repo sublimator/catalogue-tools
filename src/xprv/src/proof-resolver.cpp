@@ -288,8 +288,15 @@ resolve_proof_chain_impl(
     catl::xdata::Protocol const& protocol,
     std::string const& trusted_publisher_key,
     bool pretrusted_anchor_for_testing,
-    std::vector<std::vector<uint8_t>> const& extra_manifests)
+    std::vector<std::vector<uint8_t>> const& extra_manifests,
+    std::string* failure)
 {
+    // The first refusal, for callers that report why (tests, the corpus).
+    auto refuse = [failure](std::string reason) {
+        if (failure && failure->empty())
+            *failure = std::move(reason);
+        return false;
+    };
     PLOGI(verify_log, "");
     PLOGI(
         verify_log,
@@ -301,7 +308,7 @@ resolve_proof_chain_impl(
             verify_log,
             "  Anchor: no trusted publisher key configured; refusing "
             "implicit trust");
-        return false;
+        return refuse("no trusted publisher key configured");
     }
     PLOGI(
         verify_log,
@@ -335,7 +342,9 @@ resolve_proof_chain_impl(
                 verify_log,
                 "  Structure: expected exactly one anchor step, found ",
                 anchors);
-            return false;
+            return refuse(
+                "proof must contain exactly one anchor, found " +
+                std::to_string(anchors));
         }
         if (first_anchor_at != 0)
         {
@@ -343,12 +352,16 @@ resolve_proof_chain_impl(
                 verify_log,
                 "  Structure: anchor must be the first step, found at index ",
                 first_anchor_at);
-            return false;
+            return refuse("anchor must be the first step");
         }
     }
 
     int step_num = 0;
     bool all_ok = true;
+    auto fail = [&](std::string reason) {
+        all_ok = false;
+        refuse(std::move(reason));
+    };
 
     std::map<std::string, std::vector<std::string>> trusted_ledger_hashes;
     std::map<std::string, std::vector<std::string>> trusted_tx_roots;
@@ -382,12 +395,12 @@ resolve_proof_chain_impl(
                     if (step_num != 1)
                     {
                         PLOGE(verify_log, "  Anchor: must be the first step");
-                        all_ok = false;
+                        fail("anchor must be the first step");
                     }
                     if (anchor_seen)
                     {
                         PLOGE(verify_log, "  Anchor: duplicate anchor step");
-                        all_ok = false;
+                        fail("duplicate anchor step");
                     }
                     anchor_seen = true;
 
@@ -465,7 +478,7 @@ resolve_proof_chain_impl(
                                     "  Anchor: FAILED (",
                                     av_result.error,
                                     ")");
-                                all_ok = false;
+                                fail("anchor: " + av_result.error);
                             }
                         }
                         catch (std::exception const& e)
@@ -476,7 +489,7 @@ resolve_proof_chain_impl(
                                 e.what(),
                                 ")");
                             anchor_step.quorum_check = Check::fail;
-                            all_ok = false;
+                            fail(std::string("anchor: malformed: ") + e.what());
                         }
                     }
 
@@ -537,6 +550,9 @@ resolve_proof_chain_impl(
                                 verify_log,
                                 "  VL validity:  FAIL (anchor close time is "
                                 "outside the signed list interval)");
+                            fail(
+                                "anchor close time is outside the list's "
+                                "validity interval");
                         }
                         else
                         {
@@ -544,8 +560,10 @@ resolve_proof_chain_impl(
                                 verify_log,
                                 "  Hash check:   FAIL (unsupported by prior "
                                 "anchor/header/recognized LedgerHashes leaf)");
+                            fail(
+                                "header is not supported by an earlier "
+                                "authenticated step");
                         }
-                        all_ok = false;
                         hdr_step.hash_check = Check::fail;
                     }
                     else
@@ -679,6 +697,7 @@ resolve_proof_chain_impl(
                         catl::shamap::AbbreviatedTreeTraits>;
 
                     std::optional<AbbrevMap> reconstructed;
+                    std::string reconstruct_error;
                     std::vector<LedgerHashesLeaf> ledger_hashes_leaves;
 
                     // --- JSON trie path ---
@@ -742,6 +761,7 @@ resolve_proof_chain_impl(
                                 verify_log,
                                 "  JSON trie reconstruction failed: ",
                                 e.what());
+                            reconstruct_error = e.what();
                         }
 
                         // Extract narrative info from JSON trie
@@ -910,6 +930,7 @@ resolve_proof_chain_impl(
                                 verify_log,
                                 "  Binary trie reconstruction failed: ",
                                 e.what());
+                            reconstruct_error = e.what();
                         }
                     }
 
@@ -937,7 +958,9 @@ resolve_proof_chain_impl(
                             "  Trie proof:   FAIL (could not reconstruct "
                             "abbreviated tree)");
                         map_step.root_hash_check = Check::fail;
-                        all_ok = false;
+                        fail(
+                            "map proof could not be reconstructed: " +
+                            reconstruct_error);
                     }
                     else if (structural_leaves == 0)
                     {
@@ -946,7 +969,7 @@ resolve_proof_chain_impl(
                             "  Trie proof:   FAIL (map proof contains no "
                             "leaves)");
                         map_step.root_hash_check = Check::fail;
-                        all_ok = false;
+                        fail("map proof contains no leaves");
                     }
                     else
                     {
@@ -1023,7 +1046,9 @@ resolve_proof_chain_impl(
                                             "has no authenticated containing "
                                             "ledger sequence)");
                                         map_step.root_hash_check = Check::fail;
-                                        all_ok = false;
+                                        fail(
+                                            "state root has no authenticated "
+                                            "containing ledger sequence");
                                     }
                                     else
                                     {
@@ -1066,7 +1091,9 @@ resolve_proof_chain_impl(
                                     "  Trie root:    FAIL (unsupported by "
                                     "prior header)");
                                 map_step.root_hash_check = Check::fail;
-                                all_ok = false;
+                                fail(
+                                    "map proof root is not supported by an "
+                                    "earlier header");
                             }
                         }
                         catch (std::exception const& e)
@@ -1076,7 +1103,9 @@ resolve_proof_chain_impl(
                                 "  Trie hash verification failed: ",
                                 e.what());
                             map_step.root_hash_check = Check::fail;
-                            all_ok = false;
+                            fail(
+                                std::string("map proof hash failed: ") +
+                                e.what());
                         }
                     }
 
@@ -1092,7 +1121,7 @@ resolve_proof_chain_impl(
     if (!anchor_seen)
     {
         PLOGE(verify_log, "  Anchor: missing required anchor step");
-        all_ok = false;
+        fail("missing required anchor step");
     }
 
     // Results
@@ -1140,19 +1169,21 @@ resolve_proof_chain(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol,
     std::string const& trusted_publisher_key,
-    std::vector<std::vector<uint8_t>> const& extra_manifests)
+    std::vector<std::vector<uint8_t>> const& extra_manifests,
+    std::string* failure)
 {
     return resolve_proof_chain_impl(
-        chain, protocol, trusted_publisher_key, false, extra_manifests);
+        chain, protocol, trusted_publisher_key, false, extra_manifests, failure);
 }
 
 #ifdef XPRV_TESTING
 bool
 resolve_proof_chain_with_pretrusted_anchor_for_testing(
     ProofChain const& chain,
-    catl::xdata::Protocol const& protocol)
+    catl::xdata::Protocol const& protocol,
+    std::string* failure)
 {
-    return resolve_proof_chain_impl(chain, protocol, "", true, {});
+    return resolve_proof_chain_impl(chain, protocol, "", true, {}, failure);
 }
 #endif
 
