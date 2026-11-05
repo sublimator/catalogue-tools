@@ -6,7 +6,7 @@ RUN mkdir -p /ccache
 
 # ── Stage 1: Build ───────────────────────────────────────────────
 # ccache should be in deps base image. Install if missing (slower).
-# xprv-deps:local is Dockerfile.deps, built first (xprv-box.py build does both).
+# xprv-deps:local is Dockerfile.deps, built first.
 FROM xprv-deps:local AS builder
 ARG XPRV_BUILD_ID
 RUN which ccache || (apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/*)
