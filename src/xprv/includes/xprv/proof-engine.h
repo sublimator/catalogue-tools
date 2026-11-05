@@ -156,6 +156,8 @@ class ProofEngine : public std::enable_shared_from_this<ProofEngine>
 #endif
 
 public:
+    static constexpr char const* kPublisherEquivocated =
+        "validator list publisher equivocated";
     /// Unforgeable evidence that this exact engine instance consumed its
     /// admitted request-drain authority and completed its installed child
     /// population. Failure produces no receipt.
@@ -436,15 +438,16 @@ private:
     CacheList cache_lru_;  // front = most recently used
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
     std::atomic<bool> cache_enabled_{true};
-    // Set once by on_publisher_revoked(); final for the process. prove() reads
-    // it before the proof cache, before each streamed step and before it
-    // returns.
+    enum class PublisherStatus { active, revoked, equivocated };
+    // One terminal serving guard per network engine, with the first reason
+    // retained for diagnostics. Neither a later list nor a different reason
+    // can reopen it. Verifiers consume the original signed evidence separately.
     //@@authority state=prv.S0144 status=provisional scope=field
-    // bind=xprv::ProofEngine::publisher_revoked_@d5c43b134932940d
+    // bind=xprv::ProofEngine::publisher_status_@9409eaabd332eb95
     // owner=unresolved owner_hypothesis=proof_engine
-    // observed_home=ProofEngine::publisher_revoked_
-    // label=terminal_publisher_key_revocation_latch
-    std::atomic<bool> publisher_revoked_{false};
+    // observed_home=ProofEngine::publisher_status_
+    // label=terminal_publisher_revocation_or_equivocation_serving_guard
+    std::atomic<PublisherStatus> publisher_status_{PublisherStatus::active};
     size_t node_cache_size_ = 65536;
     std::chrono::milliseconds fetch_timeout_{1500};
     int max_walk_peer_retries_ = 3;
@@ -566,9 +569,15 @@ private:
     void
     on_publisher_revoked(catl::vl::Manifest const& revocation);
 
-    // Stream one step unless the publisher key has been revoked.
+    void
+    bar_publisher(PublisherStatus reason) noexcept;
+
+    void
+    throw_if_publisher_barred() const;
+
+    // Stream one step unless the publisher has been revoked or equivocated.
     boost::asio::awaitable<void>
-    step_unless_publisher_revoked(StepCallback inner, ChainStep const& step);
+    step_unless_publisher_barred(StepCallback inner, ChainStep const& step);
 
     // Mutex-held invalidation commit. Callers that already hold
     // cache_mutex_ must publish retained_signal wakes only after releasing

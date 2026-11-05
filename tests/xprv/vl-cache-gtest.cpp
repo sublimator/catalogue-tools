@@ -1911,6 +1911,63 @@ protected:
         return result.ok;
     }
 
+    std::string
+    prove_error(std::string const& transaction)
+    {
+        auto result = boost::asio::co_spawn(
+            io, verifier->prove(transaction), boost::asio::use_future);
+        try
+        {
+            (void)complete(result);
+            return "(served a proof)";
+        }
+        catch (std::runtime_error const& e)
+        {
+            return e.what();
+        }
+    }
+
+    void
+    conflict_during_replay(size_t steps)
+    {
+        std::string const transaction(64, 'B');
+        ProofChain chain;
+        chain.steps.resize(steps);
+        ProofEngineTestAccess::seed_proof_cache(
+            *verifier,
+            transaction,
+            ProofEngine::ProveResult{chain, 1000, test::trust_publisher_key()});
+        size_t replayed = 0;
+        auto on_step = [&](ChainStep const&) -> boost::asio::awaitable<void> {
+            ++replayed;
+            queue("publisher_conflict");
+            try
+            {
+                (void)co_await cache->co_refresh();
+            }
+            catch (std::runtime_error const&)
+            {
+            }
+            (void)co_await tracker->co_stats();
+        };
+        auto result = boost::asio::co_spawn(
+            io,
+            verifier->prove(transaction, nullptr, 0, 0, on_step),
+            boost::asio::use_future);
+        std::string error = "(served a proof)";
+        try
+        {
+            (void)complete(result);
+        }
+        catch (std::runtime_error const& e)
+        {
+            error = e.what();
+        }
+        EXPECT_EQ(error, ProofEngine::kPublisherEquivocated);
+        EXPECT_EQ(replayed, 1u);
+        EXPECT_FALSE(verifies());
+    }
+
     void
     insert(ValidationCollector::Entry entry)
     {
@@ -2062,6 +2119,98 @@ TEST_F(VlCacheEvidenceAdmission, BadSignaturesDoNotPoisonRetainedEvidence)
     EXPECT_EQ(refresh_calls, 1u);
     EXPECT_EQ(tracker->held_manifests(), before);
     EXPECT_TRUE(verifies());
+    std::string const transaction(64, 'A');
+    ProofEngineTestAccess::seed_proof_cache(
+        *verifier,
+        transaction,
+        ProofEngine::ProveResult{{}, 1000, test::trust_publisher_key()});
+    EXPECT_EQ(prove_error(transaction), "(served a proof)");
+}
+
+TEST_F(VlCacheEvidenceAdmission, PublisherConflictRefusesCachedAndNewProofs)
+{
+    std::string const transaction(64, 'A');
+    auto const result =
+        ProofEngine::ProveResult{{}, 1000, test::trust_publisher_key()};
+    ProofEngineTestAccess::seed_proof_cache(*verifier, transaction, result);
+    ASSERT_EQ(prove_error(transaction), "(served a proof)");
+    EXPECT_FALSE(refresh("publisher_conflict").empty());
+    ASSERT_EQ(prove_error(transaction), ProofEngine::kPublisherEquivocated);
+    EXPECT_EQ(
+        prove_error(std::string(64, 'C')), ProofEngine::kPublisherEquivocated);
+    EXPECT_TRUE(refresh("publisher_higher").empty());
+    // Even a separately reinserted proof cannot bypass the terminal guard.
+    ProofEngineTestAccess::seed_proof_cache(*verifier, transaction, result);
+    EXPECT_EQ(prove_error(transaction), ProofEngine::kPublisherEquivocated);
+    EXPECT_FALSE(verifies());
+
+    auto other = ProofEngine::create(io, NetworkConfig::for_network(21337));
+    ProofEngineTestAccess::seed_proof_cache(*other, transaction, result);
+    auto unaffected = boost::asio::co_spawn(
+        io, other->prove(transaction), boost::asio::use_future);
+    EXPECT_NO_THROW((void)complete(unaffected));
+}
+
+TEST_F(VlCacheEvidenceAdmission, PublisherConflictStopsBeforeNextCachedStep)
+{
+    conflict_during_replay(3);
+}
+
+TEST_F(VlCacheEvidenceAdmission, PublisherConflictStopsAfterLastCachedStep)
+{
+    conflict_during_replay(1);
+}
+
+TEST_F(VlCacheEvidenceAdmission, PublisherConflictRefusesNewAnchorAdmission)
+{
+    EXPECT_FALSE(refresh("publisher_conflict").empty());
+    auto anchor = boost::asio::co_spawn(
+        io,
+        ProofEngineTestAccess::join_anchor_wait(
+            verifier, 1000, Hash256(), 10, std::chrono::seconds(1)),
+        boost::asio::use_future);
+    std::string error = "(returned an anchor)";
+    try
+    {
+        (void)complete(anchor);
+    }
+    catch (std::runtime_error const& e)
+    {
+        error = e.what();
+    }
+    EXPECT_EQ(error, ProofEngine::kPublisherEquivocated);
+    EXPECT_FALSE(ProofEngineTestAccess::anchor_entry_in_flight(
+        *verifier, 1000, Hash256(), 10));
+}
+
+TEST_F(VlCacheEvidenceAdmission, PublisherConflictInvalidatesPendingAnchor)
+{
+    auto operation = ProofEngineTestAccess::create_in_flight_anchor(
+        *verifier, 1000, Hash256(), 10);
+    auto anchor = boost::asio::co_spawn(
+        io,
+        ProofEngineTestAccess::join_anchor_wait(
+            verifier, 1000, Hash256(), 10, std::chrono::seconds(30)),
+        boost::asio::use_future);
+    barrier();
+    ASSERT_EQ(
+        anchor.wait_for(std::chrono::milliseconds(0)),
+        std::future_status::timeout);
+    EXPECT_FALSE(refresh("publisher_conflict").empty());
+    std::string error = "(returned an anchor)";
+    try
+    {
+        (void)complete(anchor);
+    }
+    catch (std::exception const& e)
+    {
+        error = e.what();
+    }
+    EXPECT_NE(
+        error.find("anchor bundle operation was invalidated"),
+        std::string::npos);
+    EXPECT_FALSE(ProofEngineTestAccess::complete_anchor_build(
+        *verifier, 1000, Hash256(), 10, operation));
 }
 
 TEST_F(VlCacheEvidenceAdmission, UnlistedMasterDoesNotEnterTheSnapshot)

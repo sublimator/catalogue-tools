@@ -75,6 +75,10 @@ void
 ProofEngine::configure_validator_trust()
 {
     auto vbuf = quorum_tracker_;
+    vbuf->set_on_publisher_equivocated([weak = weak_from_this()]() noexcept {
+        if (auto self = weak.lock())
+            self->bar_publisher(PublisherStatus::equivocated);
+    });
     // Authenticate list contents against the pinned publisher key independently
     // of transport authentication.
     // weak_ptr capture: no dangling if the engine outlives an in-flight fetch,
@@ -595,16 +599,15 @@ ProofEngine::prove(
     co_await asio::this_coro::reset_cancellation_state(
         asio::enable_total_cancellation());
 
-    // No proofs, cached or new, under a revoked publisher key.
-    if (publisher_revoked_)
-        throw std::runtime_error(VlCache::kPublisherRevoked);
-    // A revocation can land while a step is being streamed: stop before the
+    // No proofs, cached or new, under a barred publisher.
+    throw_if_publisher_barred();
+    // Evidence can land while a step is being streamed: stop before the
     // next step, in cached replay and in a fresh build alike.
     if (on_step)
     {
         on_step = [self = shared_from_this(),
                    inner = std::move(on_step)](ChainStep const& step) {
-            return self->step_unless_publisher_revoked(inner, step);
+            return self->step_unless_publisher_barred(inner, step);
         };
     }
 
@@ -626,8 +629,7 @@ ProofEngine::prove(
                 for (auto const& step : cached->chain.steps)
                     co_await on_step(step);
             }
-            if (publisher_revoked_)
-                throw std::runtime_error(VlCache::kPublisherRevoked);
+            throw_if_publisher_barred();
             co_return *cached;
         }
     }
@@ -647,6 +649,7 @@ ProofEngine::prove(
     }
     if (!vl)
         throw std::runtime_error("validator list changed while starting proof");
+    throw_if_publisher_barred();
 
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
     auto cached_seq = tx_ledger_get(tx_hash);
@@ -713,8 +716,7 @@ ProofEngine::prove(
         result.tx_ledger_seq,
         result.publisher_key_hex};
 
-    if (publisher_revoked_)
-        throw std::runtime_error(VlCache::kPublisherRevoked);
+    throw_if_publisher_barred();
     if (cache_enabled_)
     {
         cache_put(tx_hash, prove_result);
@@ -775,30 +777,63 @@ ProofEngine::lookup_tx(std::string const& tx_hash)
 // ═══════════════════════════════════════════════════════════════════════
 
 asio::awaitable<void>
-ProofEngine::step_unless_publisher_revoked(
+ProofEngine::step_unless_publisher_barred(
     StepCallback inner,
     ChainStep const& step)
 {
-    if (publisher_revoked_)
-        throw std::runtime_error(VlCache::kPublisherRevoked);
+    throw_if_publisher_barred();
     co_await inner(step);
 }
 
+void
+ProofEngine::throw_if_publisher_barred() const
+{
+    switch (publisher_status_.load())
+    {
+        case PublisherStatus::active:
+            return;
+        case PublisherStatus::revoked:
+            throw std::runtime_error(VlCache::kPublisherRevoked);
+        case PublisherStatus::equivocated:
+            throw std::runtime_error(kPublisherEquivocated);
+    }
+}
+
 //@@authority transition=prv.T0360 status=provisional scope=function
-// bind=xprv::on_publisher_revoked@a8e6c927216c7ea5
+// bind=xprv::bar_publisher@9e259d499da08589
 // owner=unresolved owner_hypothesis=proof_engine commit=atomic
 // touches=prv.S0144
-// label=latch_terminal_publisher_revocation_before_dropping_cached_proofs
+// label=latch_terminal_publisher_refusal_before_dropping_cached_proofs
+void
+ProofEngine::bar_publisher(PublisherStatus reason) noexcept
+{
+    auto expected = PublisherStatus::active;
+    if (!publisher_status_.compare_exchange_strong(expected, reason))
+        return;
+    try
+    {
+        {
+            std::lock_guard lock(cache_mutex_);
+            cache_map_.clear();
+            cache_lru_.clear();
+        }
+        invalidate_anchor_cache();
+    }
+    catch (...)
+    {
+        // The atomic guard remains closed even if physical cache cleanup
+        // fails. In particular, do not prevent publication of the witness.
+    }
+}
+
+//@@authority transition=prv.T0371 status=provisional scope=function bind=xprv::on_publisher_revoked@a8e6c927216c7ea5
+// owner=unresolved owner_hypothesis=proof_engine
+// commit=atomic_then_tracker_admission touches=prv.S0144
+// label=bar_revoked_publisher_and_forward_its_signed_evidence
 void
 ProofEngine::on_publisher_revoked(catl::vl::Manifest const& revocation)
 {
-    publisher_revoked_ = true;
-    {
-        std::lock_guard lock(cache_mutex_);
-        cache_map_.clear();
-        cache_lru_.clear();
-    }
-    invalidate_anchor_cache();
+    bar_publisher(PublisherStatus::revoked);
     if (quorum_tracker_)
         quorum_tracker_->note_publisher_manifest(revocation);
 }
@@ -1000,6 +1035,7 @@ ProofEngine::get_or_reuse_anchor(
     uint32_t max_age_secs,
     std::shared_ptr<catl::core::RequestScope> request_scope)
 {
+    throw_if_publisher_barred();
     if (!vl)
         throw std::runtime_error("validator list snapshot is missing");
     auto const quorum_threshold =
@@ -1083,6 +1119,7 @@ ProofEngine::get_or_reuse_anchor(
             throw std::runtime_error(
                 "validator list changed while reusing proof anchor");
         }
+        throw_if_publisher_barred();
         co_return *reusable;
     }
 
@@ -1214,11 +1251,12 @@ ProofEngine::get_or_reuse_anchor(
             "validator list changed while building proof anchor");
     }
 
+    throw_if_publisher_barred();
     co_return anchor;
 }
 
 //@@authority transition=prv.T0339 status=provisional scope=function
-//bind=xprv::invalidate_anchor_cache_locked@0fafaa9e26da1d91
+// bind=xprv::invalidate_anchor_cache_locked@0fafaa9e26da1d91
 // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
 // touches=prv.S0142
 // label=retain_anchor_invalidation_terminal_before_wake
@@ -1241,7 +1279,7 @@ ProofEngine::invalidate_anchor_cache_locked()
 }
 
 //@@authority transition=prv.T0340 status=provisional scope=function
-//bind=xprv::invalidate_anchor_cache@50050b274f60b885
+// bind=xprv::invalidate_anchor_cache@50050b274f60b885
 // owner=unresolved owner_hypothesis=proof_engine
 // commit=cache_mutex_then_signal_home touches=prv.S0142
 // writ_roles=retained_signal.publish
@@ -1284,9 +1322,10 @@ ProofEngine::get_anchor_bundle(
 
     {
         std::lock_guard lock(cache_mutex_);
+        throw_if_publisher_barred();
         auto it = anchor_cache_.find(cache_key);
         //@@authority transition=prv.T0341 status=provisional scope=statement
-        //bind=if_statement@51558c5c99082fbf
+        // bind=if_statement@51558c5c99082fbf
         // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
         // touches=prv.S0142
         // label=select_hit_join_or_install_exact_anchor_shared_operation
@@ -1372,7 +1411,7 @@ ProofEngine::get_anchor_bundle(
             hook();
 
         //@@authority transition=prv.T0342 status=provisional scope=statement
-        //bind=declaration@cde7028a5cfff710
+        // bind=declaration@cde7028a5cfff710
         // owner=unresolved owner_hypothesis=proof_engine
         // commit=anchor_wait_home touches=prv.S0142
         // writ_roles=retained_signal.subscribe
@@ -1386,7 +1425,7 @@ ProofEngine::get_anchor_bundle(
         {
             std::lock_guard lock(cache_mutex_);
             //@@authority transition=prv.T0343 status=provisional
-            //bind=expression_statement@06158e4bec728d5c scope=statement
+            // bind=expression_statement@06158e4bec728d5c scope=statement
             // owner=unresolved owner_hypothesis=proof_engine
             // commit=cache_mutex touches=prv.S0142
             // writ_roles=retained_signal.revalidate
@@ -1427,7 +1466,7 @@ ProofEngine::get_anchor_bundle(
         }
 
         //@@authority transition=prv.T0344 status=provisional scope=statement
-        //bind=switch_statement@f567139c00543cc7
+        // bind=switch_statement@f567139c00543cc7
         // owner=unresolved owner_hypothesis=proof_engine commit=waiter_frame
         // touches=prv.S0142 writ_roles=retained_signal.deadline_or_cancel
         // label=map_waiter_local_deadline_or_cancellation_without_shared_terminal
@@ -1487,7 +1526,7 @@ ProofEngine::get_anchor_bundle(
             std::lock_guard lock(cache_mutex_);
             auto it = anchor_cache_.find(cache_key);
             //@@authority transition=prv.T0345 status=provisional
-            //bind=if_statement@329a89cb890f819b scope=statement
+            // bind=if_statement@329a89cb890f819b scope=statement
             // owner=unresolved owner_hypothesis=proof_engine
             // commit=cache_mutex touches=prv.S0142
             // label=retain_exact_anchor_builder_failure_or_stale_invalidation
@@ -1507,7 +1546,7 @@ ProofEngine::get_anchor_bundle(
             } //@@authority-target ids=prv.T0345
         }
         //@@authority transition=prv.T0346 status=provisional scope=statement
-        //bind=if_statement@98850c5477c7c2a3
+        // bind=if_statement@98850c5477c7c2a3
         // owner=unresolved owner_hypothesis=proof_engine
         // commit=anchor_wait_home touches=prv.S0142
         // writ_roles=retained_signal.publish
@@ -1524,7 +1563,7 @@ ProofEngine::get_anchor_bundle(
         std::lock_guard lock(cache_mutex_);
         auto it = anchor_cache_.find(cache_key);
         //@@authority transition=prv.T0347 status=provisional scope=statement
-        //bind=if_statement@39f5735b57f032e1
+        // bind=if_statement@39f5735b57f032e1
         // owner=unresolved owner_hypothesis=proof_engine commit=cache_mutex
         // touches=prv.S0142
         // label=retain_exact_anchor_success_or_refuse_stale_publication
@@ -1560,7 +1599,7 @@ ProofEngine::get_anchor_bundle(
     }
 
     //@@authority transition=prv.T0348 status=provisional scope=statement
-    //bind=if_statement@307320d59ddefb36
+    // bind=if_statement@307320d59ddefb36
     // owner=unresolved owner_hypothesis=proof_engine
     // commit=anchor_wait_home touches=prv.S0142
     // writ_roles=retained_signal.publish

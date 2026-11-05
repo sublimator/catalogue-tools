@@ -51,6 +51,15 @@ public:
     bool
     note_publisher_manifest(catl::vl::Manifest const& manifest);
 
+    bool
+    publisher_equivocated() const
+    {
+        for (auto const& [master, seen] : publisher_manifests_seen_)
+            if (!seen.conflict.empty())
+                return true;
+        return false;
+    }
+
     /// Admit already authenticated list manifests without applying membership.
     /// Currently or previously listed masters are eligible; N is unchanged.
     /// Uses the same delegation-admission rules as verified peer material.
@@ -261,7 +270,8 @@ private:
     std::set<std::string> unl_master_keys_;
     // Newest non-membership delegation from peers or authenticated list
     // responses. Retained across membership changes for old-proof verification.
-    //@@authority state=prv.S0146 status=provisional scope=field bind=xprv::ValidationCollector::peer_manifests_by_master_@2c7066757f9f165d
+    //@@authority state=prv.S0146 status=provisional scope=field
+    //bind=xprv::ValidationCollector::peer_manifests_by_master_@2c7066757f9f165d
     // owner=unresolved owner_hypothesis=validation_collector
     // observed_home=ValidationCollector::peer_manifests_by_master_
     // label=retained_non_membership_validator_delegations
@@ -286,7 +296,8 @@ private:
         // Empty or the first conflicting pair; later replays cannot grow it.
         std::vector<std::vector<uint8_t>> conflict;
     };
-    //@@authority state=prv.S0145 status=provisional scope=field bind=xprv::ValidationCollector::publisher_manifests_seen_@2968291e12e11bbb
+    //@@authority state=prv.S0145 status=provisional scope=field
+    //bind=xprv::ValidationCollector::publisher_manifests_seen_@2968291e12e11bbb
     // owner=unresolved owner_hypothesis=validation_collector
     // observed_home=ValidationCollector::publisher_manifests_seen_
     // label=authenticated_publisher_sequence_history_and_sticky_conflict_witness

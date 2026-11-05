@@ -122,6 +122,17 @@ public:
     void
     note_publisher_manifest(catl::vl::Manifest manifest);
 
+    /// Install before admitting trust material. The callback closes the
+    /// engine's serving gate before a conflicting snapshot is published.
+    // clang-format off
+    //@@audit-ack unannotated_authority_candidate reason="pre-start callback installation only; the snapshot publication edge invokes the terminal publisher guard on the tracker strand"
+    // clang-format on
+    void
+    set_on_publisher_equivocated(std::function<void()> callback)
+    {
+        on_publisher_equivocated_ = std::move(callback);
+    }
+
     /// Admit manifests from an authenticated list response without promoting
     /// its membership. Uses the same admission/publication gate as set_unl().
     void
@@ -352,7 +363,8 @@ private:
     // Hold authenticated publisher material and republish the snapshot (owner
     // strand, publication_mutex_ held). Independent of the list sequence: a
     // publisher can re-issue its manifest for an unchanged list.
-    //@@authority transition=prv.T0369 status=provisional scope=function bind=xprv::ValidationQuorumTracker::note_publisher_manifest_locked@29f2b739278a3535
+    //@@authority transition=prv.T0369 status=provisional scope=function
+    //bind=xprv::ValidationQuorumTracker::note_publisher_manifest_locked@29f2b739278a3535
     // owner=unresolved owner_hypothesis=validation_quorum_tracker
     // commit=validation_quorum_tracker_strand touches=prv.S0145,prv.S0147
     // label=admit_publisher_manifest_and_publish_its_retained_evidence
@@ -468,24 +480,30 @@ private:
     mutable std::mutex held_manifests_mutex_;
 
     // Republish held_manifests_ from the collector (owner strand only).
-    //@@authority transition=prv.T0370 status=provisional scope=function bind=xprv::ValidationQuorumTracker::refresh_held_manifests_locked@b794c7aa302a8675
+    //@@authority transition=prv.T0370 status=provisional scope=function
+    //bind=xprv::ValidationQuorumTracker::refresh_held_manifests_locked@b794c7aa302a8675
     // owner=unresolved owner_hypothesis=validation_quorum_tracker
-    // commit=held_manifests_mutex touches=prv.S0147
-    // label=publish_immutable_verifier_evidence_snapshot
+    // commit=publisher_guard_then_held_manifests_mutex
+    // touches=prv.S0144,prv.S0147
+    // label=bar_equivocated_publisher_then_publish_immutable_verifier_snapshot
     void
     refresh_held_manifests_locked()
     {
+        if (collector_.publisher_equivocated() && on_publisher_equivocated_)
+            on_publisher_equivocated_();
         auto held = std::make_shared<std::vector<std::vector<uint8_t>> const>(
             collector_.held_manifest_bytes());
         std::lock_guard lock(held_manifests_mutex_);
         held_manifests_ = std::move(held);
     }
-    //@@authority state=prv.S0147 status=provisional scope=field bind=xprv::ValidationQuorumTracker::held_manifests_@0da5bd988dafaef6
+    //@@authority state=prv.S0147 status=provisional scope=field
+    //bind=xprv::ValidationQuorumTracker::held_manifests_@0da5bd988dafaef6
     // owner=unresolved owner_hypothesis=validation_quorum_tracker
     // observed_home=ValidationQuorumTracker::held_manifests_
     // label=published_immutable_verifier_evidence_snapshot
     std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests_ =
         std::make_shared<std::vector<std::vector<uint8_t>> const>();
+    std::function<void()> on_publisher_equivocated_;
 
     // Packet admission is callable from any peer thread. Manifest work and
     // validation ingress are both bounded before they reach the strand. A
