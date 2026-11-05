@@ -268,6 +268,14 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
         "no external list",
         layer="trust",
     )
+    # 21337, big-endian, in the header's network field.
+    mut(
+        "network-mismatch-binary",
+        "spec §8: a proof whose network_id is not the configured network MUST be rejected",
+        [{"at": 6, "set_hex": "00005359"}],
+        "does not match configured network",
+        layer="trust",
+    )
     mut(
         "zlib-trailer",
         "spec §3.1: a compressed body is one RFC 1950 zlib stream",
@@ -397,6 +405,9 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("forged-validation-signatures", "spec §5: every counted validation's signature MUST verify",
         "trust", "quorum not met", forged)
 
+    other_network = next(n for n in V.PUBLISHER_KEY_BY_NETWORK if n != base["trust"]["network_id"])
+    neg("network-mismatch", "spec §8: a proof whose network_id is not the configured network MUST be rejected",
+        "trust", "does not match configured network", [at("/network_id", other_network)])
     other = next(k for k in V.PUBLISHER_KEY_BY_NETWORK.values() if k != base["trust"]["publisher_key"])
     neg("publisher-key-mismatch", "spec §8: the anchor's publisher key MUST be the configured one",
         "trust", "publisher key mismatch", [at("/steps/0/unl/public_key", other)])

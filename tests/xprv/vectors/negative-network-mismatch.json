@@ -1,0 +1,20 @@
+{
+  "name": "network-mismatch",
+  "violates": "spec \u00a78: a proof whose network_id is not the configured network MUST be rejected",
+  "layer": "trust",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/network_id",
+      "value": 21337
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "does not match configured network"
+  },
+  "observed": {
+    "python_reason": "proof network_id 21337 does not match configured network 0"
+  }
+}

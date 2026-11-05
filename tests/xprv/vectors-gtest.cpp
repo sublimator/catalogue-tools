@@ -239,6 +239,27 @@ protocol_for(uint32_t network_id)
     return NetworkConfig::for_network(network_id).load_protocol();
 }
 
+// The production path as a configured verifier runs it: the proof's network
+// must be the configured one (§8), then the chain resolves under that
+// network's publisher key. resolve_proof_chain itself takes the key only.
+bool
+verify_configured(
+    ProofChain const& chain,
+    uint32_t network_id,
+    std::string const& publisher_key,
+    std::string& why)
+{
+    if (chain.network_id != network_id)
+    {
+        why = "proof network_id " + std::to_string(chain.network_id) +
+            " does not match configured network " + std::to_string(network_id);
+        return false;
+    }
+    return resolve_proof_chain(
+        chain, protocol_for(network_id), publisher_key, {}, &why);
+}
+
+
 }  // namespace
 
 // ─── positive vectors ────────────────────────────────────────────────
@@ -450,19 +471,17 @@ TEST(XprvVectors, BothFormsVerifyOnTheProductionPath)
             std::string(obj.at("trust").at("publisher_key").as_string());
         auto const network_id = static_cast<uint32_t>(
             obj.at("trust").at("network_id").to_number<uint64_t>());
-        auto const protocol = protocol_for(network_id);
         auto const& form = obj.at("form").as_object();
 
         std::string json_why, bin_why;
-        auto const json_ok = resolve_proof_chain(
-            from_json(form.at("json")), protocol, key, {}, &json_why);
-        auto const bin_ok = resolve_proof_chain(
-            from_binary(from_hex(
-                std::string(form.at("binary_hex").as_string()))),
-            protocol,
+        auto const json_ok = verify_configured(
+            from_json(form.at("json")), network_id, key, json_why);
+        auto const bin_ok = verify_configured(
+            from_binary(
+                from_hex(std::string(form.at("binary_hex").as_string()))),
+            network_id,
             key,
-            {},
-            &bin_why);
+            bin_why);
         EXPECT_TRUE(json_ok) << path.filename() << ": JSON form: " << json_why;
         EXPECT_TRUE(bin_ok) << path.filename() << ": binary form: " << bin_why;
     }
@@ -557,7 +576,7 @@ refusal(Negative const& n, bool production)
         auto const protocol = protocol_for(n.network_id);
         std::string why;
         bool const ok = production
-            ? resolve_proof_chain(chain, protocol, n.trust_key, {}, &why)
+            ? verify_configured(chain, n.network_id, n.trust_key, why)
             : resolve_proof_chain_with_pretrusted_anchor_for_testing(
                   chain, protocol, &why);
         if (ok)
