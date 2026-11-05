@@ -359,10 +359,17 @@ def run_concurrently(count: int, fn) -> list[Any]:
         return [future.result() for future in futures]
 
 
+NETWORK_SLUGS = {0: "xrpl-mainnet", 21337: "xahau-mainnet"}
+
+
 def case_health(server: RunningServer) -> None:
+    # The top-level copies exist only with one engine; read the configured
+    # network's own entry, which every server shape has.
     body = assert_json_result(server.request("GET", "/health"), context="GET /health")
-    if "peer_count" not in body or "vl_loaded" not in body:
-        raise CaseFailure(f"/health missing expected keys: {body}")
+    slug = NETWORK_SLUGS.get(server.config.network, str(server.config.network))
+    entry = (body.get("networks") or {}).get(slug)
+    if not isinstance(entry, dict) or "peer_count" not in entry or "vl_loaded" not in entry:
+        raise CaseFailure(f"/health has no complete {slug} entry: {body}")
 
 
 def case_prove_json(server: RunningServer) -> None:

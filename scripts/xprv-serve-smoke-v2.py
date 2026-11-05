@@ -355,6 +355,23 @@ def prove_path_for_case(case: TxCase) -> str:
     return f"/prove?tx={encoded_tx}"
 
 
+NETWORK_SLUGS = {0: "xrpl-mainnet", 21337: "xahau-mainnet"}
+
+
+def network_health(body: dict[str, Any], network_id: int) -> dict[str, Any]:
+    """The /health entry for one network.
+
+    The server copies peer_count, vl_loaded and the rest to the top level only
+    when it runs one engine; xprv.it runs two. Checks read the configured
+    network's own entry, so one healthy network never passes for another.
+    """
+    networks = body.get("networks")
+    assert isinstance(networks, dict) and networks, f"/health missing networks: {body}"
+    slug = NETWORK_SLUGS.get(network_id, str(network_id))
+    assert slug in networks, f"/health has no {slug} entry: {sorted(networks)}"
+    return networks[slug]
+
+
 def cache_stats_from_health(body: dict[str, Any]) -> dict[str, int]:
     cache = body.get("proof_cache") or body.get("cache")
     assert isinstance(cache, dict), f"/health missing proof_cache object: {body}"
@@ -1236,7 +1253,8 @@ def proof_sse_events(proof_sse_response: HttpResult) -> list[dict[str, Any]]:
     return decode_sse_events(proof_sse_response.body, context="/prove SSE")
 
 
-def test_health_shape(health: dict[str, Any]) -> None:
+def test_health_shape(health: dict[str, Any], config: TestConfig) -> None:
+    health = network_health(health, config.network)
     assert "peer_count" in health, f"/health missing peer_count: {health}"
     assert "vl_loaded" in health, f"/health missing vl_loaded: {health}"
     assert isinstance(health["peer_count"], int)
@@ -1312,7 +1330,7 @@ def test_server_connects_peers(server: RunningServer, config: TestConfig) -> Non
             server.request("GET", "/health", timeout=5.0).body,
             context="peer-connect health",
         )
-        last = int(body.get("peer_count", 0))
+        last = int(network_health(body, config.network).get("peer_count", 0))
         if last > 0:
             LOG.info("peers connected: peer_count=%s", last)
             return
@@ -1728,7 +1746,7 @@ def test_health_burst_survives_without_emfile(
         assert_json_content_type(result)
         body = decode_json_bytes(result.body, context=f"health burst {index}")
         assert isinstance(body, dict)
-        assert "peer_count" in body
+        assert isinstance(body.get("networks"), dict)
         return True
 
     results = run_concurrently(
