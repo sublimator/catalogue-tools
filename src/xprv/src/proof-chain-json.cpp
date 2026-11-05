@@ -294,6 +294,126 @@ step_to_json(ChainStep const& step)
         step);
 }
 
+[[noreturn]] static void
+not_a_value(std::string const& at, std::string_view type)
+{
+    throw std::runtime_error(
+        "map proof: leaf member " + at + " is not a serialized " +
+        std::string(type) + " value");
+}
+
+static bool
+is_native_code(boost::json::value const& v)
+{
+    return v.is_string() && (v.as_string() == "XRP" || v.as_string() == "XAH");
+}
+
+static bool
+has_exactly(
+    boost::json::object const& obj,
+    std::initializer_list<std::string_view> names)
+{
+    return obj.size() == names.size() &&
+        std::all_of(names.begin(), names.end(), [&](auto name) {
+               return obj.contains(name);
+           });
+}
+
+static void
+require_issue(boost::json::value const& v, std::string const& at)
+{
+    if (is_native_code(v))
+        return;
+    if (!v.is_object())
+        not_a_value(at, "Issue");
+    auto const& o = v.as_object();
+    // A currency without an issuer is native; the codec writes native bytes
+    // for any such currency, so anything but XRP or XAH would misstate them.
+    if (has_exactly(o, {"mpt_issuance_id"}) ||
+        (has_exactly(o, {"currency"}) && is_native_code(o.at("currency"))) ||
+        (has_exactly(o, {"currency", "issuer"}) &&
+         !is_native_code(o.at("currency"))))
+        return;
+    not_a_value(at, "Issue");
+}
+
+// Values whose JSON is an object or array have a grammar of their own. Their
+// codecs read the members they need and skip the rest, so each variant must
+// carry exactly its members (§2.3).
+static void
+require_value_grammar(
+    catl::xdata::FieldType const& type,
+    boost::json::value const& v,
+    std::string const& at)
+{
+    namespace types = catl::xdata::FieldTypes;
+    if (type == types::Amount)
+    {
+        if (v.is_string())
+            return;
+        if (v.is_object())
+        {
+            auto const& o = v.as_object();
+            if (has_exactly(o, {"value", "mpt_issuance_id"}) ||
+                (has_exactly(o, {"value", "currency", "issuer"}) &&
+                 !is_native_code(o.at("currency"))))
+                return;
+        }
+        not_a_value(at, "Amount");
+    }
+    if (type == types::Issue)
+        return require_issue(v, at);
+    if (type == types::XChainBridge)
+    {
+        if (!v.is_object() ||
+            !has_exactly(
+                v.as_object(),
+                {"LockingChainDoor",
+                 "LockingChainIssue",
+                 "IssuingChainDoor",
+                 "IssuingChainIssue"}) ||
+            !v.at("LockingChainDoor").is_string() ||
+            !v.at("IssuingChainDoor").is_string())
+            not_a_value(at, "XChainBridge");
+        require_issue(v.at("LockingChainIssue"), at + ".LockingChainIssue");
+        require_issue(v.at("IssuingChainIssue"), at + ".IssuingChainIssue");
+        return;
+    }
+    if (type == types::PathSet)
+    {
+        if (!v.is_array())
+            not_a_value(at, "PathSet");
+        for (auto const& path : v.as_array())
+        {
+            if (!path.is_array())
+                not_a_value(at, "PathSet");
+            for (auto const& hop : path.as_array())
+            {
+                if (!hop.is_object() || hop.as_object().empty())
+                    not_a_value(at, "PathSet");
+                for (auto const& kv : hop.as_object())
+                    if ((kv.key() != "account" && kv.key() != "currency" &&
+                         kv.key() != "issuer") ||
+                        !kv.value().is_string())
+                        not_a_value(at, "PathSet");
+            }
+        }
+        return;
+    }
+    if (type == types::Vector256)
+    {
+        if (!v.is_array() ||
+            !std::all_of(
+                v.as_array().begin(), v.as_array().end(), [](auto const& e) {
+                    return e.is_string();
+                }))
+            not_a_value(at, "Vector256");
+        return;
+    }
+    if (v.is_object() || v.is_array())
+        not_a_value(at, type.name);
+}
+
 static void
 require_stobject_members(
     boost::json::value const& value,
@@ -339,6 +459,8 @@ require_stobject_members(
                     inner, protocol, element_at + "." + wrapper);
             }
         }
+        else
+            require_value_grammar(field->meta.type, member, at);
     }
 }
 
@@ -606,6 +728,11 @@ from_json(boost::json::value const& json)
 ProofChain
 from_json_text(std::string_view text)
 {
+    // §8: a configured maximum before either parse pass.
+    if (text.size() > XPRV_MAX_JSON_SIZE)
+        throw std::runtime_error(
+            "proof JSON: text exceeds " + std::to_string(XPRV_MAX_JSON_SIZE) +
+            " bytes");
     return from_json(detail::parse_unique_json(text));
 }
 

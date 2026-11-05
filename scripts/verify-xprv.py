@@ -356,6 +356,79 @@ def _serialized_field(name: str) -> Any:
     return field_info if field_info.is_serialized else None
 
 
+def _is_native_code(value: Any) -> bool:
+    return value in ("XRP", "XAH")
+
+
+def _not_a_value(at: str, type_name: str) -> UnknownLeafField:
+    return UnknownLeafField(f"leaf member {at} is not a serialized {type_name} value")
+
+
+def _require_issue(value: Any, at: str) -> None:
+    # A currency without an issuer is native; the codec writes native bytes
+    # for it, so anything but XRP or XAH would misstate them.
+    if _is_native_code(value):
+        return
+    if isinstance(value, dict) and (
+        set(value) == {"mpt_issuance_id"}
+        or (set(value) == {"currency"} and _is_native_code(value["currency"]))
+        or (set(value) == {"currency", "issuer"} and not _is_native_code(value["currency"]))
+    ):
+        return
+    raise _not_a_value(at, "Issue")
+
+
+def _require_value_grammar(type_name: str, value: Any, at: str) -> None:
+    """Values whose JSON is an object or array have a grammar of their own.
+
+    Their codecs read the members they need and skip the rest, so each variant
+    must carry exactly its members (§2.3).
+    """
+    if type_name == "Amount":
+        if isinstance(value, str):
+            return
+        if isinstance(value, dict) and (
+            set(value) == {"value", "mpt_issuance_id"}
+            or (set(value) == {"value", "currency", "issuer"} and not _is_native_code(value["currency"]))
+        ):
+            return
+        raise _not_a_value(at, "Amount")
+    if type_name == "Issue":
+        _require_issue(value, at)
+        return
+    if type_name == "XChainBridge":
+        members = {"LockingChainDoor", "LockingChainIssue", "IssuingChainDoor", "IssuingChainIssue"}
+        if (
+            not isinstance(value, dict)
+            or set(value) != members
+            or not isinstance(value["LockingChainDoor"], str)
+            or not isinstance(value["IssuingChainDoor"], str)
+        ):
+            raise _not_a_value(at, "XChainBridge")
+        _require_issue(value["LockingChainIssue"], f"{at}.LockingChainIssue")
+        _require_issue(value["IssuingChainIssue"], f"{at}.IssuingChainIssue")
+        return
+    if type_name == "PathSet":
+        if not isinstance(value, list) or not all(isinstance(path, list) for path in value):
+            raise _not_a_value(at, "PathSet")
+        for path in value:
+            for hop in path:
+                if (
+                    not isinstance(hop, dict)
+                    or not hop
+                    or not set(hop) <= {"account", "currency", "issuer"}
+                    or not all(isinstance(x, str) for x in hop.values())
+                ):
+                    raise _not_a_value(at, "PathSet")
+        return
+    if type_name == "Vector256":
+        if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+            raise _not_a_value(at, "Vector256")
+        return
+    if isinstance(value, (dict, list)):
+        raise _not_a_value(at, type_name)
+
+
 def _require_stobject_members(obj: Any, path: str) -> None:
     if not isinstance(obj, dict):
         raise ValueError(f"leaf member {path or '(leaf)'} must be an object")
@@ -380,6 +453,8 @@ def _require_stobject_members(obj: Any, path: str) -> None:
                         f"leaf member {element_at}.{wrapper} is not a serialized object field"
                     )
                 _require_stobject_members(inner, f"{element_at}.{wrapper}")
+        else:
+            _require_value_grammar(field_info.type, value, at)
 
 
 def require_codec_members(leaf: Any, *, is_tx: bool) -> None:
@@ -1236,7 +1311,13 @@ def validate_json_trie(node: Any, depth: int = 0) -> None:
 
 
 def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:
-    """Reject repeated members before a normal dict could discard their tokens."""
+    """Reject repeated members before a normal dict could discard their tokens.
+
+    The text cap (§8) counts UTF-8 bytes and holds before parsing.
+    """
+    size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
+    if size > MAX_JSON_PROOF_SIZE:
+        raise ValueError(f"proof JSON: text exceeds {MAX_JSON_PROOF_SIZE} bytes")
     def object_members(pairs):
         obj = {}
         for key, value in pairs:

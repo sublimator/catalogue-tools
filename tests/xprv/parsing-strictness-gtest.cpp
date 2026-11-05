@@ -435,3 +435,111 @@ TEST(ParsingStrictness, RejectsMapProofWithoutLeaves)
     std::filesystem::remove(path);
     EXPECT_NE(status, 0);
 }
+
+namespace {
+
+boost::json::object
+tx_leaf_with(std::string const& name, boost::json::value value)
+{
+    boost::json::object tx{
+        {"TransactionType", "Payment"},
+        {"Account", "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"}};
+    tx[name] = std::move(value);
+    return {{"tx", std::move(tx)}, {"meta", {{"TransactionResult", "tesSUCCESS"}}}};
+}
+
+bool
+leaf_accepted(boost::json::object const& leaf)
+{
+    static auto const protocol =
+        catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    try
+    {
+        xprv::require_codec_members(leaf, true, protocol);
+        return true;
+    }
+    catch (std::runtime_error const&)
+    {
+        return false;
+    }
+}
+
+}  // namespace
+
+// §2.3: a structured value's codec reads its members and skips the rest, so
+// each variant carries exactly its own. An issue without an issuer is
+// native, whatever currency it names.
+TEST(ParsingStrictness, StructuredValuesCarryExactlyTheirMembers)
+{
+    auto const issuer = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+    boost::json::object const iou{
+        {"value", "1"}, {"currency", "USD"}, {"issuer", issuer}};
+    boost::json::object iou_extra = iou;
+    iou_extra["note"] = "x";
+    EXPECT_TRUE(leaf_accepted(tx_leaf_with("Amount", "1000000")));
+    EXPECT_TRUE(leaf_accepted(tx_leaf_with("Amount", iou)));
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("Amount", iou_extra)));
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with(
+        "Amount", {{"value", "1"}, {"currency", "XRP"}, {"issuer", issuer}})));
+
+    EXPECT_TRUE(leaf_accepted(tx_leaf_with("Asset", "XRP")));
+    EXPECT_TRUE(leaf_accepted(tx_leaf_with("Asset", {{"currency", "XRP"}})));
+    EXPECT_TRUE(leaf_accepted(
+        tx_leaf_with("Asset", {{"currency", "USD"}, {"issuer", issuer}})));
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("Asset", {{"currency", "USD"}})));
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with(
+        "Asset", {{"currency", "USD"}, {"issuer", issuer}, {"note", "x"}})));
+
+    boost::json::array paths{boost::json::array{
+        boost::json::object{{"currency", "USD"}, {"issuer", issuer}}}};
+    EXPECT_TRUE(leaf_accepted(tx_leaf_with("Paths", paths)));
+    paths[0].as_array()[0].as_object()["note"] = "x";
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("Paths", paths)));
+    EXPECT_FALSE(leaf_accepted(
+        tx_leaf_with("Paths", boost::json::array{boost::json::array{
+                                  boost::json::object{}}})));
+
+    boost::json::object bridge{
+        {"LockingChainDoor", issuer},
+        {"LockingChainIssue", "XRP"},
+        {"IssuingChainDoor", issuer},
+        {"IssuingChainIssue", "XRP"}};
+    EXPECT_TRUE(leaf_accepted(tx_leaf_with("XChainBridge", bridge)));
+    auto bridge_extra = bridge;
+    bridge_extra["note"] = "x";
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("XChainBridge", bridge_extra)));
+    auto bridge_issue = bridge;
+    bridge_issue["IssuingChainIssue"] = {{"currency", "USD"}};
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("XChainBridge", bridge_issue)));
+
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with(
+        "Amendments", boost::json::array{boost::json::object{}})));
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("Fee", {{"value", "10"}})));
+}
+
+// §8: the shared loader caps the text before either parse pass.
+TEST(ParsingStrictness, JsonTextCapIsInclusive)
+{
+    std::string text(xprv::XPRV_MAX_JSON_SIZE, ' ');
+    try
+    {
+        xprv::from_json_text(text);
+        FAIL() << "blank text is not a proof";
+    }
+    catch (std::exception const& e)
+    {
+        EXPECT_EQ(std::string(e.what()).find("exceeds"), std::string::npos)
+            << e.what();
+    }
+    text.push_back(' ');
+    try
+    {
+        xprv::from_json_text(text);
+        FAIL() << "over-cap text was parsed";
+    }
+    catch (std::exception const& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("exceeds"), std::string::npos)
+            << e.what();
+    }
+}

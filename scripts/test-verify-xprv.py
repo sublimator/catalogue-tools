@@ -837,6 +837,68 @@ class ClosedJsonTests(unittest.TestCase):
         self.assertFalse(any("advisory" in w for w in self.verify(self.proof()).warnings))
 
 
+class StructuredValueGrammarTests(unittest.TestCase):
+    """§2.3: each structured value carries exactly its variant's members."""
+
+    ISSUER = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+
+    def leaf(self, name, value):
+        tx = {"TransactionType": "Payment", "Account": self.ISSUER, name: value}
+        return {"tx": tx, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    def accepted(self, name, value) -> bool:
+        try:
+            v.require_codec_members(self.leaf(name, value), is_tx=True)
+            return True
+        except ValueError:
+            return False
+
+    def test_variants(self) -> None:
+        iou = {"value": "1", "currency": "USD", "issuer": self.ISSUER}
+        bridge = {
+            "LockingChainDoor": self.ISSUER, "LockingChainIssue": "XRP",
+            "IssuingChainDoor": self.ISSUER, "IssuingChainIssue": "XRP",
+        }
+        accept = [
+            ("Amount", "1000000"), ("Amount", iou),
+            ("Asset", "XRP"), ("Asset", {"currency": "XRP"}),
+            ("Asset", {"currency": "USD", "issuer": self.ISSUER}),
+            ("Paths", [[{"currency": "USD", "issuer": self.ISSUER}]]),
+            ("XChainBridge", bridge),
+        ]
+        refuse = [
+            ("Amount", {**iou, "note": "x"}),
+            ("Amount", {**iou, "currency": "XRP"}),
+            ("Asset", {"currency": "USD"}),
+            ("Asset", {"currency": "USD", "issuer": self.ISSUER, "note": "x"}),
+            ("Paths", [[{"currency": "USD", "issuer": self.ISSUER, "note": "x"}]]),
+            ("Paths", [[{}]]),
+            ("XChainBridge", {**bridge, "note": "x"}),
+            ("XChainBridge", {**bridge, "IssuingChainIssue": {"currency": "USD"}}),
+            ("Amendments", [{}]),
+            ("Fee", {"value": "10"}),
+        ]
+        for name, value in accept:
+            with self.subTest(accept=name, value=value):
+                self.assertTrue(self.accepted(name, value))
+        for name, value in refuse:
+            with self.subTest(refuse=name, value=value):
+                self.assertFalse(self.accepted(name, value))
+
+
+class JsonTextCapTests(unittest.TestCase):
+    def test_cap_is_inclusive_and_counts_utf8_bytes(self) -> None:
+        cap = v.MAX_JSON_PROOF_SIZE
+        with self.assertRaises(ValueError) as at_cap:
+            v.load_json_proof(b" " * cap)
+        self.assertNotIn("exceeds", str(at_cap.exception))
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            v.load_json_proof(b" " * (cap + 1))
+        # Fewer characters than the cap, more bytes: the bytes are what count.
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            v.load_json_proof("\u00e9" * (cap // 2 + 1))
+
+
 class SignatureCanonicalityTests(unittest.TestCase):
     """Python must refuse what libsecp256k1 refuses in the C++ verifier."""
 
