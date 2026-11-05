@@ -39,6 +39,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 
@@ -286,12 +287,18 @@ public:
         uint64_t total_connects = 0;
         uint64_t total_disconnects = 0;
         bool vl_loaded = false;
+        // "active", or why proof serving is barred: "revoked" or "equivocated".
+        std::string publisher_state = "active";
         std::optional<uint32_t> latest_quorum_seq;
         ValidationQuorumTracker::Stats validation_quorum_tracker;
         Coordinator ledger_fetch_coordinator;
     };
     boost::asio::awaitable<Status>
     co_health();
+
+    /// "active", or why proof serving is barred: "revoked" or "equivocated".
+    std::string_view
+    publisher_state() const noexcept;
 
     /// Access shared services (for advanced usage / testing).
     std::shared_ptr<catl::peer_client::PeerSet>

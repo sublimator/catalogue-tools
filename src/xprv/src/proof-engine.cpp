@@ -989,6 +989,21 @@ ProofEngine::tx_ledger_get(std::string const& tx_hash)
 // co_health() — collect status from each service
 // ═══════════════════════════════════════════════════════════════════════
 
+std::string_view
+ProofEngine::publisher_state() const noexcept
+{
+    switch (publisher_status_.load(std::memory_order_acquire))
+    {
+        case PublisherStatus::revoked:
+            return "revoked";
+        case PublisherStatus::equivocated:
+            return "equivocated";
+        case PublisherStatus::active:
+            break;
+    }
+    return "active";
+}
+
 asio::awaitable<ProofEngine::Status>
 ProofEngine::co_health()
 {
@@ -999,6 +1014,7 @@ ProofEngine::co_health()
     status.total_disconnects = conn_stats.total_disconnects;
 
     status.vl_loaded = co_await vl_cache_->co_is_loaded();
+    status.publisher_state = std::string(publisher_state());
 
     auto latest = co_await quorum_tracker_->co_latest_quorum();
     if (latest)

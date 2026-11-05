@@ -2134,8 +2134,10 @@ TEST_F(VlCacheEvidenceAdmission, PublisherConflictRefusesCachedAndNewProofs)
         ProofEngine::ProveResult{{}, 1000, test::trust_publisher_key()};
     ProofEngineTestAccess::seed_proof_cache(*verifier, transaction, result);
     ASSERT_EQ(prove_error(transaction), "(served a proof)");
+    EXPECT_EQ(verifier->publisher_state(), "active");
     EXPECT_FALSE(refresh("publisher_conflict").empty());
     ASSERT_EQ(prove_error(transaction), ProofEngine::kPublisherEquivocated);
+    EXPECT_EQ(verifier->publisher_state(), "equivocated");
     EXPECT_EQ(
         prove_error(std::string(64, 'C')), ProofEngine::kPublisherEquivocated);
     EXPECT_TRUE(refresh("publisher_higher").empty());

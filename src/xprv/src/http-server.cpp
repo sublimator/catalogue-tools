@@ -1445,6 +1445,7 @@ HttpServer::handle_session(
                     body["total_connects"] = status.total_connects;
                     body["total_disconnects"] = status.total_disconnects;
                     body["vl_loaded"] = status.vl_loaded;
+                    body["publisher_state"] = status.publisher_state;
                     if (status.latest_quorum_seq)
                         body["latest_quorum_seq"] = *status.latest_quorum_seq;
                     body["validation_quorum_tracker"] =
@@ -1487,6 +1488,7 @@ HttpServer::handle_session(
                         net_body["total_disconnects"] =
                             status.total_disconnects;
                         net_body["vl_loaded"] = status.vl_loaded;
+                        net_body["publisher_state"] = status.publisher_state;
                         if (status.latest_quorum_seq)
                             net_body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
@@ -1547,6 +1549,7 @@ HttpServer::handle_session(
                         body["total_connects"] = status.total_connects;
                         body["total_disconnects"] = status.total_disconnects;
                         body["vl_loaded"] = status.vl_loaded;
+                        body["publisher_state"] = status.publisher_state;
                         if (status.latest_quorum_seq)
                             body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
