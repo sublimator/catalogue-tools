@@ -25,9 +25,10 @@ receives an immutable snapshot of held material:
   list.
 - **Equivocation evidence.** The conflicting pair, for any validator the
   engine has seen equivocate.
-- **The publisher manifest.** The newest one the engine has seen in a list
-  response, so `/verify` refuses a proof whose list was signed under a
-  publisher key since superseded.
+- **The publisher manifest.** The newest one from the list responses the
+  engine admitted (see Known gaps for responses it refuses), so `/verify`
+  refuses a proof whose list was signed under a publisher key since
+  superseded.
 
 **A publisher revocation is final.** A verified revocation of the publisher key
 works as a validator's does. The engine drops its list, refuses every later
@@ -43,9 +44,10 @@ never votes (rule 3).
 
 ## Known gaps
 
-- **Evidence in a refused list response.** A response that cannot replace the
-  cached list, because its sequence is lower or unchanged, does not yet pass on
-  its newer manifests. That includes a validator revocation or a publisher
+- **Evidence in a refused list response.** A response refused by the cache's
+  freshness or promotion checks does not yet pass on its newer manifests. A
+  response at an unchanged list sequence with a newer publisher manifest is
+  admitted; one at a lower sequence is not. That includes a validator revocation or a publisher
   rotation, so the snapshot can lag that evidence until a list that does
   replace the cached one arrives.
 - **Same-sequence publisher manifests.** A second, different publisher manifest

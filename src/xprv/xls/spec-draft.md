@@ -225,9 +225,11 @@ material can still change it; see Staleness below).
 - **P3.** The primary list is the candidate with the highest list `sequence`
   among those in effect at the anchor's close time
   (`effective <= close_time < expiration`; a list without `effective` is in
-  effect from 0). An anchor-only proof has no close time, and its primary list
-  is the highest-sequence candidate. If no candidate is in effect, membership
-  is unavailable and the anchor MUST be rejected. The interval is a
+  effect from 0). When the proof has the anchor ledger's header and no
+  candidate is in effect, membership is unavailable and the anchor MUST be
+  rejected. An anchor-only proof has no close time and no time test: its
+  primary list is the highest-sequence candidate, and it fails only when there
+  is no candidate. The interval is a
   consistency check, not a barrier against the list's own validators, who
   attest the close time themselves.
 - **P4.** A lower-sequence list from the same publisher contributes only its
@@ -237,8 +239,8 @@ material can still change it; see Staleness below).
 publisher's revocation and the conditions a list must meet before any
 delegation from it is resolved.
 
-1. A manifest is a candidate only if it verifies (§5.1) and its `PublicKey` is
-   a master in the primary list. A manifest for any other master grants
+1. A validator manifest is a candidate only if it verifies (§5.1) and its
+   `PublicKey` is a master in the primary list. A manifest for any other master grants
    nothing.
 2. The highest `Sequence` wins. Byte-identical candidates are one candidate.
    Two candidates with the same master and the same `Sequence` but different
@@ -260,7 +262,7 @@ delegation from it is resolved.
    membership unavailable. XPRV counts against this N and does not apply the
    Negative UNL.
 7. Two different lists under the primary publisher key with the same highest
-   `sequence` make the view unresolvable, and the anchor MUST be rejected: the
+   eligible `sequence` (P3) make the view unresolvable, and the anchor MUST be rejected: the
    publisher itself has equivocated, so there is no membership to fall back
    on. Byte-identical lists are one list.
 8. Only full validations count. A validation without `vfFullValidation`
@@ -269,7 +271,8 @@ delegation from it is resolved.
 9. If the winning publisher manifest is a revocation, the publisher has no
    signing key: no list verifies, and the anchor MUST be rejected. A revoked
    publisher is final, as a revoked validator is.
-10. The primary list itself MUST be sound before any held manifest is applied.
+10. The primary list itself MUST be sound before supplementary validator
+    manifests are applied to its delegations.
     The anchor MUST be rejected if the list's own manifests give two masters
     the same signing key, or give a master a signing key equal to any master
     key in the list. Two masters can share a delegation only through a misused
@@ -285,7 +288,8 @@ delegation from it is resolved.
       held from elsewhere is simply not a candidate (rule 1).
 
 The rules sort what the material implicates. A validator's own revocation or
-equivocation costs that validator its vote and nothing else (rules 2 and 3).
+equivocation removes that validator's vote and does not by itself invalidate
+the rest of the view (rules 2 and 3); quorum must still be met without it.
 Evidence against the trust root (a conflicting or revoked publisher, rules 2
 and 9), against the list (rules 7, 10 and 11), or a key two masters resolve to
 (rule 4), makes the anchor unavailable. A manifest whose signing key equals its
@@ -383,16 +387,22 @@ replaces only the anchor, the anchor ledger's header and its long-list
 A renewed proof is a different proof, with a different identity (§1.2).
 Separately, a verdict depends on the trust view as well as on the proof bytes:
 two verifiers holding different manifests can reach different verdicts on
-identical bytes. A cached verdict MUST therefore be keyed by both the proof's
-§1.2 identity and the whole resolved view, under one fixed verifier policy:
+identical bytes. A cached verdict, accepting or rejecting, MUST therefore be
+keyed by both the proof's §1.2 identity and the whole resolved view, under one
+fixed verifier policy:
 
-- the configured publisher key, and the publisher's state: its winning
-  manifest's raw bytes, or its revocation, or both manifests of a conflict;
-- the primary list's signed blob bytes;
-- each master's state: its winning manifest's raw bytes, its revocation, or
-  both manifests of an equivocation at any sequence.
+- the configured publisher key, and the publisher's state: active with its
+  winning manifest, revoked with the revocation, or conflicting with both
+  manifests;
+- the membership state: the selected primary list's signed blob, or
+  unavailable, or conflicting with both lists' signed blobs (rule 7);
+- each master's state: active with its winning manifest, revoked with the
+  revocation, or equivocating with both manifests, at any sequence.
 
-A key built from winning manifests alone is not enough. An equivocation below
+Each state is a tag plus the raw bytes of its evidence. The key encodes them in
+the order above, masters sorted by master key, each item length-prefixed, so
+two views produce the same key only when they hold the same evidence. A key
+built from winning manifests alone is not enough. An equivocation below
 the highest sequence changes the verdict without changing any master's
 highest-sequence manifest, and an equivocation has no single winning manifest.
 
@@ -1022,8 +1032,10 @@ function verify(chain, network_id, primary_publisher_key):
             // whose preimage hashes to anchor.ledger_hash. It is read here
             // to select the primary list and grants nothing until the anchor
             // has verified. An anchor-only proof has no close time.
-            close_time = close time of the next step, if it is the anchor
-                         ledger's header, else none
+            // If a next step exists it must be the anchor ledger's header;
+            // anything else is rejected here, not treated as anchor-only.
+            close_time = that header's close_time, or none when the anchor
+                         is the only step
             view = resolve_trust_view(anchor, primary_publisher_key, close_time)
             // resolve_trust_view applies §1.3 P1-P4 and rules 1-11: the
             // publisher's signing key, the primary list (the anchor's own
@@ -1454,8 +1466,9 @@ At minimum, verifier output SHOULD expose:
   bounded while it inflates, against zlib bombs), and on JSON text. They MUST
   reject trie recursion deeper than 64 nibbles (§3.8).
 - **Two forms.** Binary and JSON forms of the same proof MUST verify
-  identically. Hashes, signatures and cache keys are taken over the canonical
-  uncompressed binary encoding, never the JSON text (§1.2).
+  identically. A proof's identity, used to hash, sign or cache it, is taken
+  over the canonical uncompressed binary encoding, never the JSON text (§1.2).
+  A cached verdict also needs the resolved view (§1.4).
 - **Proofs without `0x05`.** A verifier accepting them sources the list as §3.3
   requires. Cached trust material SHOULD be bound to the publisher key it was
   verified under, so a cached list cannot be applied to a proof from a
