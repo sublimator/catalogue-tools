@@ -280,15 +280,17 @@ delegation from it is resolved.
       configured primary publisher key are one key;
     - each list entry's `validation_public_key` equals the `PublicKey` of that
       entry's own manifest;
-    - a list that names a master twice is invalid, and the anchor MUST be
-      rejected.
+    - a list that names a master twice, or carries a manifest that is not valid
+      (§5.1), is invalid, and the anchor MUST be rejected. An invalid manifest
+      held from elsewhere is simply not a candidate (rule 1).
 
 The rules sort what the material implicates. A validator's own revocation or
 equivocation costs that validator its vote and nothing else (rules 2 and 3).
 Evidence against the trust root (a conflicting or revoked publisher, rules 2
 and 9), against the list (rules 7, 10 and 11), or a key two masters resolve to
 (rule 4), makes the anchor unavailable. A manifest whose signing key equals its
-own master key is not a valid manifest (§5.1), so it is never a candidate.
+own master key is not a valid manifest (§5.1): held from elsewhere it is never a
+candidate, and inside the primary list it makes the list invalid (rule 11).
 
 **Sources and packaging.** Lists and validator manifests authenticate
 themselves by signature, so where they come from affects only availability,
@@ -586,7 +588,8 @@ whose JSON value is itself structured carry exactly one variant's members:
 | XChainBridge | exactly `LockingChainDoor`, `LockingChainIssue`, `IssuingChainDoor` and `IssuingChainIssue`, each issue as above |
 | Vector256 | an array of hash strings |
 
-Any other field's value is a string or a number. An issue with a currency but no
+`STObject` and `STArray` values follow the rules above. Any other field's value
+is a string or a number. An issue with a currency but no
 issuer is native in the binary form whatever currency it names, so only `XRP`
 or `XAH` may stand there.
 

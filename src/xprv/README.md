@@ -51,5 +51,6 @@ never votes (rule 3).
 - **Same-sequence publisher manifests.** A second, different publisher manifest
   at one sequence is not yet kept as a conflict.
 - **Same-sequence lists.** A second list at the cached sequence is refused as a
-  refresh, and the conflict is not kept. Rule 7 is applied only to lists bundled
-  in a proof.
+  refresh, and the conflict is not kept. Rule 7 cannot be exercised yet: each
+  proof bundles one primary list, the verifiers take manifests but no other
+  lists, and the server keeps no conflicting signed list to pass on.
