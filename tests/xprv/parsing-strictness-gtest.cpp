@@ -558,4 +558,11 @@ TEST(ParsingStrictness, BuiltInKeyIsNotTrustedForAnotherNetwork)
     EXPECT_TRUE(verify_text(text, xrpl));
     EXPECT_TRUE(verify_text(text, xrpl + " --network 0"));
     EXPECT_FALSE(verify_text(text, xrpl + " --network 21337"));
+
+    // The proof relabelled to match: only the key/network binding refuses it,
+    // since the proof's network and the configured one agree.
+    auto relabelled = proof_json();
+    relabelled.as_object()["network_id"] = 21337;
+    EXPECT_FALSE(verify_text(
+        boost::json::serialize(relabelled), xrpl + " --network 21337"));
 }
