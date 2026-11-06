@@ -171,8 +171,10 @@ jobs:
   # Build the SHAMap/xprv test binaries with TSan and ASan (one compiler,
   # two separate builds — the sanitizers are mutually exclusive) and run the
   # CoW concurrency stress test plus the full suites under each. Gating:
-  # a data race or memory error here is a real bug, and TSan flags the
-  # unsynchronized-access pattern deterministically (not by timing luck).
+  # a data race or memory error here is a real bug. Under TSan, the xprv
+  # domination control then proves on every run that an unsynchronized
+  # pair in the workloads' runner topology is reported, so the quiet run
+  # means something.
   sanitizers:
     name: sanitizers (${{ matrix.san }})
     runs-on: ubuntu-24.04
@@ -266,17 +268,21 @@ jobs:
           "$xprv" --gtest_brief=1 --gtest_filter='-*TsanDominationControl*'
           if [ "${{ matrix.san }}" = "thread" ]; then
             # The control seeds a data race in the runner topology the
-            # repaired workloads use. TSan must report it, or the quiet run
-            # above proves nothing.
-            if "$xprv" --gtest_filter='*TsanDominationControl*' > tsan-control.log 2>&1; then
-              cat tsan-control.log
+            # repaired workloads use, unordered on every run. TSan must
+            # report it, and the report must name the seeded pair, or the
+            # quiet run above proves nothing.
+            control=0
+            "$xprv" --gtest_filter='*TsanDominationControl*' > tsan-control.log 2>&1 || control=$?
+            cat tsan-control.log
+            if [ "$control" -eq 0 ]; then
               echo "::error::TSan did not flag the seeded domination control"
               exit 1
             fi
-            if ! grep -q "WARNING: ThreadSanitizer: data race" tsan-control.log; then
-              cat tsan-control.log
-              echo "::error::the domination control failed without a TSan race report"
+            if ! grep -q "WARNING: ThreadSanitizer: data race" tsan-control.log ||
+               ! grep -q "seeded_control_write" tsan-control.log ||
+               ! grep -q "seeded_control_read" tsan-control.log; then
+              echo "::error::the domination control failed without a TSan report naming its seeded pair"
               exit 1
             fi
-            echo "domination control flagged by TSan, as required"
+            echo "domination control flagged by TSan at its seeded pair, as required"
           fi

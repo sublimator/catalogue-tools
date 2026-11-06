@@ -25,9 +25,11 @@
 //   report invalidated older toolchains for strand claims.)
 // - TsanDominationControlSeededPair seeds a plain
 //   unsynchronized read/write pair in the SAME runner topology; a TSan
-//   build MUST flag it. It proves the environment catches this defect
-//   class, so a quiet TSan run of the repaired workloads is meaningful
-//   evidence rather than a null probe.
+//   build MUST flag it, on every run. It proves the environment catches
+//   this defect class, so a quiet TSan run of the repaired workloads is
+//   meaningful evidence rather than a null probe.
+// - TsanOrderedTwinStaysQuiet is the same choreography with the pair
+//   ordered by release/acquire; it must stay quiet.
 
 #include "xprv/proof-chain-json.h"
 #include "xprv/validation-collector.h"
@@ -40,7 +42,6 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -470,56 +471,216 @@ TEST(ValidationQuorumTrackerPostHop0076, TsanWorkloadForeignReadersVsIngress)
 // the repaired workloads above meaningful evidence rather than a null
 // probe. In non-TSan builds the control is skipped: an intentional data
 // race is still undefined behavior even when it is test-local.
-TEST(ValidationQuorumTrackerPostHop0076, TsanDominationControlSeededPair)
+//
+// The pair must be unordered on every run, not just on most. The
+// scheduler locks its mutex between handlers, and TSan counts that lock
+// as ordering, so a write in one handler and a read in a later one are
+// ordered and correctly not reported. One runner can also take both
+// handlers while the other sits idle. A timer-paced loop therefore
+// produces a reportable pair only when the schedule happens to allow it.
+// The run below arranges it instead.
+
+namespace {
+
+// Out of line so a TSan report names them; CI checks that the control's
+// report is this pair and not some other race. The accesses are volatile
+// because clang otherwise moves a plain load into the caller (argument
+// promotion), and the report then names the caller instead.
+[[gnu::noinline]] void
+seeded_control_write(std::size_t& cell)
 {
-    if (!kThreadSanitizerEnabled)
-        GTEST_SKIP() << "domination control requires a TSan build";
+    auto& target = *static_cast<std::size_t volatile*>(&cell);
+    target = target + 1;
+}
+
+[[gnu::noinline]] std::size_t
+seeded_control_read(std::size_t const& cell)
+{
+    return *static_cast<std::size_t const volatile*>(&cell);
+}
+
+struct SeededPairRun
+{
+    bool writer_done = false;
+    bool reader_done = false;
+    std::thread::id writer_thread;
+    std::thread::id reader_thread;
+    bool writer_on_strand = false;
+    bool reader_on_strand = true;
+    std::size_t observed = 0;
+};
+
+// The writer is born on a strand and the reader on the bare io_context,
+// and two threads run io.run(): the topology of the TsanWorkload tests.
+// Both bodies are queued before either runner starts.
+//
+// Inside its body, each one announces itself and waits for the other, so
+// both are inside a handler at once, on different runners (one thread
+// can't be in both). The coordination is relaxed atomics, which carry no
+// happens-before for TSan, so it can't hide the race it sets up. A
+// deadline turns a peer that never arrives into a failure instead of a
+// hang.
+//
+// The writer then writes and sets `written`; the reader waits for
+// `written`, waits a millisecond more, and reads. The accesses must not
+// be simultaneous: TSan's per-address history isn't updated atomically,
+// so two accesses at the same instant can each check it before the
+// other's entry lands, and neither is reported. Straight after the
+// meeting they were within about 100 ns, and Linux clang-20 missed the
+// pair in roughly 1 run in 100. Waiting for `written` puts the write
+// first, and the extra millisecond lets its history entry become visible
+// before the read checks it.
+//
+// `written` is relaxed, so the pair is still unordered. Each body returns
+// after its access; that takes the scheduler's mutex, but the reader takes
+// no lock between the meeting and its read.
+//
+// With `ordered`, `written` is a release store and an acquire load: the
+// same choreography with the pair ordered, which must stay quiet.
+// `runners` and `patience` exist so a test can show that one runner can't
+// make the bodies meet.
+SeededPairRun
+run_seeded_pair(
+    bool ordered,
+    int runners = 2,
+    std::chrono::milliseconds patience = 10s)
+{
+    constexpr unsigned kWriter = 1;
+    constexpr unsigned kReader = 2;
+    constexpr unsigned kBoth = kWriter | kReader;
 
     asio::io_context io;
     auto work = asio::make_work_guard(io);
     auto strand = asio::make_strand(io);
 
-    // Deliberately non-atomic shared state, written on the strand's
-    // runner and read from the other runner with no synchronization.
-    static std::size_t seeded_cell = 0;
-    std::atomic<bool> keep_running{true};
+    // TSan keeps the last four accesses per 8 bytes and, when all four are
+    // taken, overwrites one chosen pseudo-randomly. A stack slot can hold
+    // stale entries from earlier frames; a new allocation starts with one
+    // write and three empty slots, which this pair can't fill.
+    auto const seeded_cell = std::make_unique<std::size_t>(0);
+    std::atomic<unsigned> arrived{0};
+    std::atomic<bool> written{false};
+    std::atomic<bool> gave_up{false};
+    SeededPairRun run;
 
-    asio::co_spawn(
+    auto both = [](std::atomic<unsigned> const& mask) {
+        return mask.load(std::memory_order_relaxed) == kBoth;
+    };
+    auto spin_until = [&gave_up, patience](auto const& done) {
+        // Giving up is checked first, so a body that arrives after its
+        // peer has given up doesn't go on to make its access alone.
+        auto const deadline = std::chrono::steady_clock::now() + patience;
+        while (!gave_up.load(std::memory_order_relaxed))
+        {
+            if (done())
+                return true;
+            if (std::chrono::steady_clock::now() > deadline)
+                gave_up.store(true, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+        return false;
+    };
+
+    auto writer = asio::co_spawn(
         strand,
         [&]() -> asio::awaitable<void> {
-            auto ex = co_await asio::this_coro::executor;
-            while (keep_running.load(std::memory_order_acquire))
-            {
-                seeded_cell = seeded_cell + 1;
-                asio::steady_timer tick(ex, 1ms);
-                co_await tick.async_wait(asio::use_awaitable);
-            }
+            run.writer_thread = std::this_thread::get_id();
+            run.writer_on_strand = strand.running_in_this_thread();
+            arrived.fetch_or(kWriter, std::memory_order_relaxed);
+            if (!spin_until([&] { return both(arrived); }))
+                co_return;
+            seeded_control_write(*seeded_cell);
+            written.store(
+                true,
+                ordered ? std::memory_order_release
+                        : std::memory_order_relaxed);
+            run.writer_done = true;
         },
-        asio::detached);
+        asio::use_future);
 
-    std::size_t sink = 0;
-    asio::co_spawn(
+    auto reader = asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            auto ex = co_await asio::this_coro::executor;
-            while (keep_running.load(std::memory_order_acquire))
-            {
-                sink += seeded_cell;
-                asio::steady_timer tick(ex, 1ms);
-                co_await tick.async_wait(asio::use_awaitable);
-            }
+            run.reader_thread = std::this_thread::get_id();
+            run.reader_on_strand = strand.running_in_this_thread();
+            arrived.fetch_or(kReader, std::memory_order_relaxed);
+            if (!spin_until([&] { return both(arrived); }))
+                co_return;
+            if (!spin_until([&] {
+                    return written.load(
+                        ordered ? std::memory_order_acquire
+                                : std::memory_order_relaxed);
+                }))
+                co_return;
+            std::this_thread::sleep_for(1ms);
+            run.observed = seeded_control_read(*seeded_cell);
+            run.reader_done = true;
         },
-        asio::detached);
+        asio::use_future);
 
-    std::thread runner_a([&io] { io.run(); });
-    std::thread runner_b([&io] { io.run(); });
+    std::vector<std::thread> threads;
+    for (int i = 0; i < runners; ++i)
+        threads.emplace_back([&io] { io.run(); });
 
-    std::this_thread::sleep_for(200ms);
-    keep_running.store(false, std::memory_order_release);
+    auto const writer_status = writer.wait_for(2 * patience + 5s);
+    auto const reader_status = reader.wait_for(2 * patience + 5s);
+    if (writer_status != std::future_status::ready ||
+        reader_status != std::future_status::ready)
+    {
+        // A body stuck outside its deadline loop: stop the spinners
+        // before tearing down what they reference.
+        gave_up.store(true, std::memory_order_relaxed);
+    }
 
     work.reset();
-    runner_a.join();
-    runner_b.join();
-    RecordProperty("seeded_sink", static_cast<int>(sink % 1024));
-    SUCCEED();
+    io.stop();
+    for (auto& thread : threads)
+        thread.join();
+    return run;
+}
+
+}  // namespace
+
+TEST(ValidationQuorumTrackerPostHop0076, TsanDominationControlSeededPair)
+{
+    if (!kThreadSanitizerEnabled)
+        GTEST_SKIP() << "domination control requires a TSan build";
+
+    // Under halt_on_error=1 TSan ends the process at the seeded pair, so
+    // these checks matter only when it didn't, and then they say why.
+    auto const run = run_seeded_pair(false);
+    EXPECT_TRUE(run.writer_done && run.reader_done)
+        << "the two bodies never met, so no unordered pair was made";
+    EXPECT_NE(run.writer_thread, run.reader_thread);
+    EXPECT_TRUE(run.writer_on_strand);
+    EXPECT_FALSE(run.reader_on_strand);
+    RecordProperty("seeded_observed", static_cast<int>(run.observed));
+}
+
+// The control's ordered twin: the same topology and choreography, with a
+// release/acquire pair ordering the write before the read. It must stay
+// quiet under TSan, which shows the control's report comes from the
+// missing ordering and not from the choreography around it. There is no
+// race here, so it runs in every build.
+TEST(ValidationQuorumTrackerPostHop0076, TsanOrderedTwinStaysQuiet)
+{
+    auto const run = run_seeded_pair(true);
+    EXPECT_TRUE(run.writer_done);
+    EXPECT_TRUE(run.reader_done);
+    EXPECT_NE(run.writer_thread, run.reader_thread);
+    EXPECT_TRUE(run.writer_on_strand);
+    EXPECT_FALSE(run.reader_on_strand);
+    EXPECT_EQ(run.observed, 1u);
+}
+
+// The meeting needs two runners: with one, the first body waits out its
+// deadline and the second then gives up at once, so neither makes its
+// access. This is what stops one thread from running both accesses back
+// to back, which is how the old timer-paced control could go quiet.
+TEST(ValidationQuorumTrackerPostHop0076, TsanSeededPairNeedsTwoRunners)
+{
+    auto const run = run_seeded_pair(false, 1, 200ms);
+    EXPECT_FALSE(run.writer_done);
+    EXPECT_FALSE(run.reader_done);
+    EXPECT_EQ(run.observed, 0u);
 }
