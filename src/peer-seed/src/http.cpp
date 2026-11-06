@@ -11,14 +11,70 @@
 #include <cctype>
 #include <chrono>
 #include <exception>
+#include <future>
+#include <memory>
 #include <optional>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace peer_seed {
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace http = beast::http;
+
+namespace {
+
+std::vector<asio::ip::tcp::endpoint>
+resolve_before(
+    std::string const& host,
+    std::string const& port,
+    std::chrono::steady_clock::time_point deadline,
+    std::string const& url)
+{
+    unsigned long const port_number = std::stoul(port);
+    boost::system::error_code ec;
+    auto const literal = asio::ip::make_address(host, ec);
+    if (!ec)
+        return {{literal, static_cast<unsigned short>(port_number)}};
+
+    using Endpoints = std::vector<asio::ip::tcp::endpoint>;
+    auto promise = std::make_shared<std::promise<Endpoints>>();
+    auto result = promise->get_future();
+    std::thread([promise, host, port] {
+        try
+        {
+            asio::io_context io;
+            asio::ip::tcp::resolver resolver(io);
+            Endpoints found;
+            for (auto const& entry : resolver.resolve(host, port))
+                found.push_back(entry.endpoint());
+            promise->set_value(std::move(found));
+        }
+        catch (...)
+        {
+            promise->set_exception(std::current_exception());
+        }
+    }).detach();
+    if (result.wait_until(deadline) != std::future_status::ready)
+        throw std::runtime_error(
+            url + ": DNS lookup of " + host + " timed out");
+    try
+    {
+        return result.get();
+    }
+    catch (boost::system::system_error const& e)
+    {
+        throw std::runtime_error(url + ": " + host + ": " + e.code().message());
+    }
+    catch (std::exception const& e)
+    {
+        throw std::runtime_error(url + ": " + e.what());
+    }
+}
+
+}  // namespace
 
 HttpResponse
 http_post(std::string const& url, std::string const& body, int timeout_secs)
@@ -42,25 +98,26 @@ http_post(std::string const& url, std::string const& body, int timeout_secs)
     request.body() = body;
     request.prepare_payload();
 
-    // Beast's stream deadline applies only to asynchronous operations, so the
-    // exchange runs as one coroutine with a single deadline over connect,
-    // write and read. The resolver has no deadline of its own; run_for
-    // bounds it, and anything still pending is cancelled and drained.
-    auto const timeout = std::chrono::seconds(timeout_secs);
+    // One deadline covers the whole exchange. getaddrinfo can't be
+    // cancelled once it starts, so a hostname is resolved on a detached
+    // thread that is waited for only until the deadline; an IP literal skips
+    // DNS. Beast's stream deadline applies only to asynchronous operations,
+    // so connect, write and read run as one coroutine under it.
+    auto const deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(timeout_secs);
+    auto const endpoints = resolve_before(host, port, deadline, url);
+
     asio::io_context io;
-    asio::ip::tcp::resolver resolver(io);
     beast::tcp_stream stream(io);
     beast::flat_buffer buffer;
     http::response<http::string_body> response;
     bool done = false;
     std::exception_ptr failure;
 
+    stream.expires_at(deadline);
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            auto const endpoints = co_await resolver.async_resolve(
-                host, port, asio::use_awaitable);
-            stream.expires_after(timeout);
             co_await stream.async_connect(endpoints, asio::use_awaitable);
             co_await http::async_write(stream, request, asio::use_awaitable);
             co_await http::async_read(
@@ -69,10 +126,10 @@ http_post(std::string const& url, std::string const& body, int timeout_secs)
         },
         [&](std::exception_ptr e) { failure = e; });
 
-    io.run_for(timeout + std::chrono::seconds(1));
+    io.run_until(deadline + std::chrono::seconds(1));
     if (!done && !failure)
     {
-        resolver.cancel();
+        // Socket operations finish promptly once the socket is closed.
         beast::error_code ignored;
         stream.socket().close(ignored);
         io.restart();
