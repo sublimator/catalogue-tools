@@ -26,6 +26,20 @@ namespace http = beast::http;
 
 namespace {
 
+unsigned short
+parse_port(std::string const& text, std::string const& url)
+{
+    // Checked before narrowing: 120360 must be refused, not sent to 54824.
+    bool const digits = !text.empty() && text.size() <= 5 &&
+        std::all_of(text.begin(), text.end(), [](unsigned char c) {
+                            return std::isdigit(c);
+                        });
+    unsigned long const value = digits ? std::stoul(text) : 0;
+    if (value == 0 || value > 65535)
+        throw std::runtime_error(url + ": bad port '" + text + "'");
+    return static_cast<unsigned short>(value);
+}
+
 std::vector<asio::ip::tcp::endpoint>
 resolve_before(
     std::string const& host,
@@ -33,11 +47,11 @@ resolve_before(
     std::chrono::steady_clock::time_point deadline,
     std::string const& url)
 {
-    unsigned long const port_number = std::stoul(port);
+    auto const port_number = parse_port(port, url);
     boost::system::error_code ec;
     auto const literal = asio::ip::make_address(host, ec);
     if (!ec)
-        return {{literal, static_cast<unsigned short>(port_number)}};
+        return {{literal, port_number}};
 
     using Endpoints = std::vector<asio::ip::tcp::endpoint>;
     auto promise = std::make_shared<std::promise<Endpoints>>();
