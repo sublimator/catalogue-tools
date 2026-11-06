@@ -194,9 +194,13 @@ jobs:
           lfs: true
 
       - name: Install build dependencies
+        # llvm-20 ships /usr/bin/llvm-symbolizer-20, the path Ubuntu's TSan
+        # runtime starts to name frames. The domination-control gate greps
+        # for function names, so it's named here instead of arriving only
+        # as a recommendation of clang-20.
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang-20 build-essential libstdc++-14-dev
+          sudo apt-get install -y ninja-build clang-20 llvm-20 build-essential libstdc++-14-dev
           pip install --upgrade conan
 
       - name: Restore Conan cache
