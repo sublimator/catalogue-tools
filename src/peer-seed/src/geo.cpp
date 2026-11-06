@@ -140,8 +140,18 @@ geolocate(
     }
     if (!missing.empty())
     {
-        std::filesystem::create_directories(cache_path.parent_path());
-        std::ofstream(cache_path) << boost::json::serialize(cache) << "\n";
+        // The cache only saves repeat lookups; failing to write it is a note.
+        std::error_code ec;
+        std::filesystem::create_directories(cache_path.parent_path(), ec);
+        auto const temporary =
+            std::filesystem::path(cache_path.string() + ".tmp");
+        std::ofstream out(temporary, std::ios::trunc);
+        out << boost::json::serialize(cache) << "\n";
+        out.close();
+        if (out)
+            std::filesystem::rename(temporary, cache_path, ec);
+        if (!out || ec)
+            std::cerr << "geo: couldn't save " << cache_path.string() << "\n";
     }
 
     std::map<std::string, boost::json::object> out;

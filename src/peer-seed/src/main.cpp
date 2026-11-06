@@ -57,7 +57,7 @@ using namespace peer_seed;
 
 namespace {
 
-constexpr uint32_t kStaleLedgers = 256;
+constexpr int64_t kStaleLedgers = 256;
 
 struct Args
 {
@@ -259,25 +259,45 @@ ip_of(std::string const& address)
     return address.substr(0, address.rfind(':'));
 }
 
-/// Ready peers with pings, nearest first, minus any trailing the rest.
+/// Ready peers on this network with pings, nearest first. A peer whose last
+/// ledger is more than kStaleLedgers from the median of the ready peers, in
+/// either direction, is dropped: one peer reporting a wild ledger can't set
+/// the tip for everyone else.
 std::vector<PeerRecord>
-rank_ready(std::vector<PeerRecord> const& records)
+rank_ready(std::vector<PeerRecord> const& records, uint32_t network_id)
 {
-    uint32_t tip = 0;
-    for (auto const& r : records)
-    {
-        if (r.outcome == "ready" && r.last_ledger)
-            tip = std::max(tip, *r.last_ledger);
-    }
+    auto const network = std::to_string(network_id);
     std::vector<PeerRecord> ready;
     for (auto const& r : records)
     {
         if (r.outcome != "ready" || r.ping_ms.empty())
             continue;
-        if (r.last_ledger && tip > *r.last_ledger + kStaleLedgers)
+        if (r.network_id && *r.network_id != network)
             continue;
         ready.push_back(r);
     }
+
+    std::vector<int64_t> ledgers;
+    for (auto const& r : ready)
+    {
+        if (r.last_ledger)
+            ledgers.push_back(*r.last_ledger);
+    }
+    if (!ledgers.empty())
+    {
+        std::nth_element(
+            ledgers.begin(),
+            ledgers.begin() + ledgers.size() / 2,
+            ledgers.end());
+        auto const tip = ledgers[ledgers.size() / 2];
+        std::erase_if(ready, [tip](PeerRecord const& r) {
+            if (!r.last_ledger)
+                return false;
+            auto const distance = static_cast<int64_t>(*r.last_ledger) - tip;
+            return distance > kStaleLedgers || -distance > kStaleLedgers;
+        });
+    }
+
     std::stable_sort(
         ready.begin(), ready.end(), [](auto const& a, auto const& b) {
             return *a.ping_min() < *b.ping_min();
@@ -441,7 +461,7 @@ survey(Args const& args, std::vector<BootcacheEntry> const& bootcache)
 std::vector<PeerRecord>
 measure(Args const& args, std::vector<PeerRecord> records)
 {
-    auto const ready = rank_ready(records);
+    auto const ready = rank_ready(records, args.survey.network_id);
     if (ready.empty() || args.measure_concurrency == 0)
         return records;
     SurveyOptions options = args.survey;
@@ -473,6 +493,31 @@ measure(Args const& args, std::vector<PeerRecord> records)
     return records;
 }
 
+/// Write text to path through a temporary file and a rename, so a reader
+/// sees the old file or the whole new one. Throws on any failure.
+void
+write_file(fs::path const& path, std::string const& text)
+{
+    auto const temporary = fs::path(path.string() + ".tmp");
+    {
+        std::ofstream out(temporary, std::ios::trunc);
+        if (!out)
+            throw std::runtime_error("can't write " + temporary.string());
+        out << text;
+        out.flush();
+        if (!out)
+            throw std::runtime_error(
+                "writing " + temporary.string() + " failed");
+    }
+    std::error_code ec;
+    fs::rename(temporary, path, ec);
+    if (ec)
+    {
+        fs::remove(temporary, ec);
+        throw std::runtime_error("can't write " + path.string());
+    }
+}
+
 void
 save_survey(
     fs::path const& path,
@@ -486,20 +531,37 @@ save_survey(
     doc["measured_at"] = now_text("%Y-%m-%dT%H:%M:%S%z");
     doc["network_id"] = args.survey.network_id;
     doc["records"] = std::move(rows);
-    std::ofstream(path) << boost::json::serialize(doc) << "\n";
+    write_file(path, boost::json::serialize(doc) + "\n");
     std::cerr << "survey saved to " << path.string() << "\n";
 }
 
+/// A saved survey, which must be for the network this run is about.
 std::vector<PeerRecord>
-load_survey(fs::path const& path)
+load_survey(fs::path const& path, uint32_t network_id)
 {
     std::ifstream in(path);
+    if (!in)
+        throw std::runtime_error("can't read " + path.string());
     std::stringstream text;
     text << in.rdbuf();
     // Bind the parsed value before walking it: a temporary would dangle.
     auto const doc = boost::json::parse(text.str());
+    auto const& object = doc.as_object();
+    auto const* saved = object.if_contains("network_id");
+    if (!saved || !saved->is_number())
+        throw std::runtime_error(
+            path.string() + " doesn't say which network it surveyed");
+    auto const saved_network = saved->to_number<uint32_t>();
+    if (saved_network != network_id)
+    {
+        throw std::runtime_error(
+            path.string() + " surveyed network " +
+            std::to_string(saved_network) + ", not " +
+            std::to_string(network_id) + "; pass --network-id " +
+            std::to_string(saved_network) + " if that's the one you mean");
+    }
     std::vector<PeerRecord> records;
-    for (auto const& row : doc.as_object().at("records").as_array())
+    for (auto const& row : object.at("records").as_array())
         records.push_back(record_from_json(row.as_object()));
     return records;
 }
@@ -524,17 +586,25 @@ cmd_rank(Args const& args)
     if (args.db)
     {
         bootcache = read_bootcache(*args.db);
-        if (!args.from && !open_by(*args.db).empty())
-            std::cerr
-                << "warning: the node is running; its traffic shares this "
-                   "link and inflates every timing\n";
+        try
+        {
+            if (!args.from && !open_by(*args.db).empty())
+                std::cerr
+                    << "warning: the node is running; its traffic shares this "
+                       "link and inflates every timing\n";
+        }
+        catch (std::exception const& e)
+        {
+            // rank writes nothing, so an unknown node state is only a note.
+            std::cerr << "note: " << e.what() << "\n";
+        }
     }
-    auto records = args.from ? load_survey(*args.from)
+    auto records = args.from ? load_survey(*args.from, args.survey.network_id)
                              : measure(args, survey(args, bootcache));
     annotate_geo(args, records);
     if (args.json_out)
         save_survey(*args.json_out, args, records);
-    auto const ranked = rank_ready(records);
+    auto const ranked = rank_ready(records, args.survey.network_id);
     auto const chosen = choose(ranked, args);
     std::set<std::string> marked;
     for (auto const& c : chosen)
@@ -566,12 +636,13 @@ cmd_seed(Args const& args)
         present.insert(entry.address);
     }
 
-    auto records = args.from ? load_survey(*args.from)
+    auto records = args.from ? load_survey(*args.from, args.survey.network_id)
                              : measure(args, survey(args, bootcache));
     annotate_geo(args, records);
     if (args.json_out)
         save_survey(*args.json_out, args, records);
-    auto const chosen = choose(rank_ready(records), args);
+    auto const chosen =
+        choose(rank_ready(records, args.survey.network_id), args);
     if (chosen.empty())
     {
         std::cerr << "no ready peers found\n";
@@ -591,8 +662,11 @@ cmd_seed(Args const& args)
         out << std::setw(3) << i + 1 << std::setw(6) << std::fixed
             << std::setprecision(0) << *chosen[i].ping_min() << "ms  valence "
             << plan[i].second << "  " << plan[i].first << "  ("
-            << (present.contains(plan[i].first) ? "update" : "insert") << ", "
-            << prefix_of(plan[i].first) << ")\n";
+            << (present.contains(plan[i].first) ? "update" : "insert")
+            << (present.contains(mapped_twin(plan[i].first))
+                    ? ", drops " + mapped_twin(plan[i].first)
+                    : "")
+            << ", " << prefix_of(plan[i].first) << ")\n";
     }
     auto const spread = distinct_prefixes(chosen);
     if (spread < 4)
@@ -606,11 +680,21 @@ cmd_seed(Args const& args)
     // The survey takes minutes; the node may have started meanwhile.
     if (refuse_if_open(db))
         return 1;
-    fs::create_directories(state_dir());
-    auto const backup =
-        state_dir() / ("peerfinder-" + now_text("%Y%m%d-%H%M%S") + ".sqlite");
+
+    // Make sure the receipt can be written before the database changes, so
+    // a seed is never left without the record restore and check rely on.
+    auto const receipt = state_dir() / "last-seed.json";
+    std::error_code ec;
+    if (fs::exists(receipt, ec) && !fs::is_regular_file(receipt, ec))
+        throw std::runtime_error(receipt.string() + " is not a file");
+    write_file(fs::path(receipt.string() + ".check"), "");
+    fs::remove(fs::path(receipt.string() + ".check"), ec);
+
+    // A new backup file per seed: an earlier seed's backup is never touched.
+    auto const backup = reserve_new_file(
+        state_dir(), "peerfinder-" + now_text("%Y%m%d-%H%M%S"));
     copy_database(db, backup);
-    upsert_valences(db, plan);
+    auto const twins = upsert_valences(db, plan);
 
     boost::json::array seeds;
     for (std::size_t i = 0; i < plan.size(); ++i)
@@ -625,10 +709,21 @@ cmd_seed(Args const& args)
         {"backup", backup.string()},
         {"written_at", now_text("%Y-%m-%dT%H:%M:%S%z")},
         {"seeds", std::move(seeds)}};
-    std::ofstream(state_dir() / "last-seed.json")
-        << boost::json::serialize(last) << "\n";
-    out << "seeded " << plan.size() << " peers across " << spread
-        << " /16s; backup " << backup.string() << "\n";
+    try
+    {
+        write_file(receipt, boost::json::serialize(last) + "\n");
+    }
+    catch (std::exception const& e)
+    {
+        std::cerr << "seeded " << db.string() << ", but the receipt was not "
+                  << "written (" << e.what() << "). Its backup is "
+                  << backup.string() << "; restore needs that path by hand.\n";
+        return 1;
+    }
+    out << "seeded " << plan.size() << " peers across " << spread << " /16s";
+    if (twins > 0)
+        out << ", dropped " << twins << " [::ffff:] twin rows";
+    out << "; backup " << backup.string() << "\n";
     return 0;
 }
 
@@ -787,9 +882,17 @@ cmd_probe(Args args)
     for (auto const& endpoint : endpoints)
     {
         if (!normalize_endpoint(endpoint, true))
+        {
             std::cerr << "skipping " << endpoint
-                      << ": not a public IP endpoint\n";
+                      << ": not a public IP endpoint (ip:port)\n";
+            continue;
+        }
         seeds.emplace_back(endpoint, "argument");
+    }
+    if (seeds.empty())
+    {
+        std::cerr << "nothing to probe\n";
+        return 1;
     }
     args.survey.ipv6 = true;
     run_survey(seeds, args.survey, [](PeerRecord const& record) {
@@ -813,20 +916,21 @@ main(int argc, char** argv)
     auto args = parse_args(argc, argv);
     if (!args)
         return usage();
-    if (args->db && !fs::exists(*args->db))
-    {
-        std::cerr << args->db->string() << " does not exist\n";
-        return 1;
-    }
 
     Logger::set_level(LogLevel::ERROR);
     Logger::set_output_stream(&std::cerr);
-    fs::create_directories(state_dir());
-    catl::peer_client::node_identity::set_keys_path(
-        (args->identity ? *args->identity : state_dir() / "node-key").string());
-
     try
     {
+        if (args->db && !fs::is_regular_file(*args->db))
+        {
+            std::cerr << args->db->string() << " is not a database file\n";
+            return 1;
+        }
+        fs::create_directories(state_dir());
+        catl::peer_client::node_identity::set_keys_path(
+            (args->identity ? *args->identity : state_dir() / "node-key")
+                .string());
+
         if (args->command == "rank")
             return cmd_rank(*args);
         if (args->command == "seed")

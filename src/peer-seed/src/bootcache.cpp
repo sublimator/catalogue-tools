@@ -2,11 +2,19 @@
 
 #include <sqlite3.h>
 
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 
 namespace peer_seed {
 
@@ -114,7 +122,8 @@ open_by(std::filesystem::path const& db)
     for (auto const& suffix : {"", "-wal", "-shm"})
     {
         auto const path = db.string() + suffix;
-        if (std::filesystem::exists(path))
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec))
         {
             command += " " + shell_quote(path);
             any = true;
@@ -122,22 +131,66 @@ open_by(std::filesystem::path const& db)
     }
     if (!any)
         return {};
-    command += " 2>/dev/null";
-    std::unique_ptr<FILE, int (*)(FILE*)> pipe(
-        popen(command.c_str(), "r"), pclose);
+    command += " 2>&1";
+    auto* pipe = popen(command.c_str(), "r");
     if (!pipe)
         throw std::runtime_error("could not run lsof");
     std::set<std::string> pids;
-    char buffer[64];
-    while (fgets(buffer, sizeof buffer, pipe.get()))
+    std::string other;
+    char buffer[512];
+    while (fgets(buffer, sizeof buffer, pipe))
     {
-        std::string pid(buffer);
-        while (!pid.empty() && (pid.back() == '\n' || pid.back() == ' '))
-            pid.pop_back();
-        if (!pid.empty())
-            pids.insert(pid);
+        std::string line(buffer);
+        while (!line.empty() &&
+               std::isspace(static_cast<unsigned char>(line.back())))
+            line.pop_back();
+        if (line.empty())
+            continue;
+        if (std::all_of(line.begin(), line.end(), [](unsigned char c) {
+                return std::isdigit(c);
+            }))
+            pids.insert(line);
+        else if (other.size() < 400)
+            other += (other.empty() ? "" : "; ") + line;
     }
-    return {pids.begin(), pids.end()};
+    auto const status = pclose(pipe);
+
+    // lsof exits 0 when it lists a holder and 1, silently, when nothing has
+    // the files open. Anything else means the check didn't happen, and a
+    // write must not go ahead on a check that didn't happen.
+    auto const code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (code == 0 && !pids.empty() && other.empty())
+        return {pids.begin(), pids.end()};
+    if (code == 1 && pids.empty() && other.empty())
+        return {};
+    if (code == 127)
+        throw std::runtime_error(
+            "lsof is not on PATH, so whether the node has the database open "
+            "can't be checked");
+    throw std::runtime_error(
+        "lsof couldn't check whether the database is open (exit " +
+        std::to_string(code) + (other.empty() ? "" : ": " + other) + ")");
+}
+
+std::filesystem::path
+reserve_new_file(std::filesystem::path const& dir, std::string const& stem)
+{
+    std::filesystem::create_directories(dir);
+    for (int n = 0; n < 1000; ++n)
+    {
+        auto const path =
+            dir / (stem + (n == 0 ? "" : "-" + std::to_string(n)) + ".sqlite");
+        int const fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0)
+        {
+            ::close(fd);
+            return path;
+        }
+        if (errno != EEXIST)
+            throw std::system_error(
+                errno, std::generic_category(), path.string());
+    }
+    throw std::runtime_error("no free backup name in " + dir.string());
 }
 
 void
@@ -158,7 +211,18 @@ copy_database(
         throw std::runtime_error(std::string("backup: ") + sqlite3_errstr(rc));
 }
 
-void
+std::string
+mapped_twin(std::string const& address)
+{
+    if (address.empty() || address.front() == '[')
+        return {};
+    auto const colon = address.rfind(':');
+    if (colon == std::string::npos)
+        return {};
+    return "[::ffff:" + address.substr(0, colon) + "]" + address.substr(colon);
+}
+
+std::size_t
 upsert_valences(
     std::filesystem::path const& db_path,
     std::vector<std::pair<std::string, int64_t>> const& rows)
@@ -167,23 +231,42 @@ upsert_valences(
     exec(db.get(), "BEGIN IMMEDIATE");
     try
     {
-        auto statement = prepare(
+        auto upsert = prepare(
             db.get(),
             std::string("INSERT INTO ") + kTable +
                 " (address, valence) VALUES (?, ?)"
                 " ON CONFLICT(address) DO UPDATE SET valence = "
                 "excluded.valence");
+        auto remove = prepare(
+            db.get(),
+            std::string("DELETE FROM ") + kTable + " WHERE address = ?");
+        std::size_t removed = 0;
         for (auto const& [address, valence] : rows)
         {
-            sqlite3_reset(statement.get());
+            sqlite3_reset(upsert.get());
             sqlite3_bind_text(
-                statement.get(), 1, address.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(statement.get(), 2, valence);
-            if (sqlite3_step(statement.get()) != SQLITE_DONE)
+                upsert.get(), 1, address.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(upsert.get(), 2, valence);
+            if (sqlite3_step(upsert.get()) != SQLITE_DONE)
                 throw std::runtime_error(
                     std::string("sqlite: ") + sqlite3_errmsg(db.get()));
+
+            // The node keys its cache by text, so [::ffff:a.b.c.d]:p is a
+            // second entry for the same peer. Drop it, so the seed is the
+            // only entry for that machine.
+            auto const twin = mapped_twin(address);
+            if (twin.empty())
+                continue;
+            sqlite3_reset(remove.get());
+            sqlite3_bind_text(
+                remove.get(), 1, twin.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(remove.get()) != SQLITE_DONE)
+                throw std::runtime_error(
+                    std::string("sqlite: ") + sqlite3_errmsg(db.get()));
+            removed += static_cast<std::size_t>(sqlite3_changes(db.get()));
         }
         exec(db.get(), "COMMIT");
+        return removed;
     }
     catch (...)
     {
