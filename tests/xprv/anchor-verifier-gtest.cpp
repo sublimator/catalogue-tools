@@ -72,6 +72,54 @@ TEST(AnchorVerifier, RejectsPublisherClaimNotBoundToManifest)
     EXPECT_EQ(result.error, "publisher manifest master key mismatch");
 }
 
+TEST(AnchorVerifier, RejectsIntegralFloatInSignedBlob)
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) +
+        "tests/xprv/fixture/strict-blob-cases.json");
+    ASSERT_TRUE(in.is_open());
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto const fixture = boost::json::parse(buffer.str()).as_object();
+    auto const key = std::string(fixture.at("trusted_key").as_string());
+    auto const result =
+        verify(fixture.at("integral_float_sequence").as_object(), key);
+    EXPECT_FALSE(result.verified);
+    EXPECT_EQ(result.error, "UNL blob validity fields are malformed")
+        << result.error;
+}
+
+TEST(AnchorVerifier, RejectsAnchorOnlyExpirationNotAfterEffective)
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) +
+        "tests/xprv/fixture/strict-blob-cases.json");
+    ASSERT_TRUE(in.is_open());
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    auto const fixture = boost::json::parse(buffer.str()).as_object();
+    auto const key = std::string(fixture.at("trusted_key").as_string());
+    auto const result =
+        verify(fixture.at("expiration_not_after_effective").as_object(), key);
+    EXPECT_FALSE(result.verified);
+    EXPECT_EQ(result.error, "UNL blob validity interval is invalid")
+        << result.error;
+}
+
+TEST(AnchorVerifier, RejectsIncompleteValidationBesideAQuorum)
+{
+    auto anchor = load_anchor_fixture();
+    ASSERT_TRUE(verify(anchor, xrpl_publisher).verified);
+    anchor.at("validations")
+        .as_object()
+            ["0000000000000000000000000000000000000000000000000000000000"
+             "000000"] = "00";
+    auto const result = verify(anchor, xrpl_publisher);
+    EXPECT_FALSE(result.verified);
+    EXPECT_NE(result.error.find("canonical STValidation"), std::string::npos)
+        << result.error;
+}
+
 TEST(AnchorVerifier, RejectsValidationMapKeyMismatch)
 {
     auto anchor = load_anchor_fixture();
@@ -152,7 +200,8 @@ TEST(AnchorVerifier, RevokedMasterStaysInNAndNeverVotes)
     auto const key = std::string(fixture.at("trusted_key").as_string());
     auto const& anchors = fixture.at("anchors").as_object();
 
-    auto const four = verify(anchors.at("revoked-plus-four-full").as_object(), key);
+    auto const four =
+        verify(anchors.at("revoked-plus-four-full").as_object(), key);
     EXPECT_TRUE(four.verified) << four.error;
     EXPECT_EQ(four.unl_size, 5);
     EXPECT_EQ(four.unl_revoked, 1);
@@ -334,7 +383,8 @@ TEST(AnchorVerifier, HighestSequenceWinsNotLastSeen)
     // Held seq 3 (key A) then seq 2 (key B); A votes. The highest sequence
     // wins regardless of order, so A counts: 4/5.
     auto const [key, cases] = load_overlay_fixture();
-    auto const r = verify_with(cases.at("highest-sequence-not-last"), key, true);
+    auto const r =
+        verify_with(cases.at("highest-sequence-not-last"), key, true);
     EXPECT_TRUE(r.verified) << r.error;
     EXPECT_EQ(r.validations_matched_unl, 4);
 }

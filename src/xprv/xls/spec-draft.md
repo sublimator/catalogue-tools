@@ -28,11 +28,14 @@ Two representations of the same proof, no mixing:
 - **JSON form** — human-readable, for debugging and review
 - **Binary form** — compact TLV-encoded, for on-ledger storage, wire protocol, QR codes
 
-Both forms encode the same proof data and MUST verify identically. Two kinds of
-proof have one form only. A proof whose validator list carries `effective`, or
-any other top-level key beyond the three the binary layout reproduces, has no
-binary form (§3.5). A proof with a leaf that its codec cannot decode and
-re-encode exactly has no JSON form (§2.3).
+Both forms encode the same proof data and MUST verify identically. A proof has
+one form only in these cases. A proof whose validator list is not reproduced
+byte-for-byte by §3.5's shaped encoding — it carries `effective`, any other
+top-level key, whitespace, or other non-shaped formatting — has no binary form
+(§3.5). A proof whose anchor `STValidation` carries fields the XRPL codec
+cannot round-trip through the §3.4 decomposition has no binary form either.
+A proof with a leaf that its codec cannot decode and re-encode exactly has no
+JSON form (§2.3).
 
 ## Normative Language
 
@@ -187,6 +190,12 @@ are not expected to be byte-identical, and nothing in this specification require
 them to be. A producer needing a stable identifier for a JSON-delivered proof
 hashes the equivalent canonical binary encoding rather than the JSON text.
 
+That identity exists only for a proof that has a canonical binary form. A
+JSON-only proof still verifies in JSON. It has no identity in this section, and
+a verifier MUST NOT hash it, sign it as one, or store a verdict for it by
+inventing a JSON hash or by stripping `0x05`. Refusing to cache it is the
+compliant behavior (§1.4).
+
 ### 1.3 Trust Material
 
 A verifier assesses the anchor against a **trust view** that it resolves before
@@ -219,19 +228,29 @@ material can still change it; see Staleness below).
   highest-sequence publisher manifest the verifier holds that verifies under
   that master (rules 2 and 9 cover a conflicting or revoked one).
 - **P2.** The candidates are the lists the verifier holds that verify under
-  that signing key. The list bundled in the proof is one of them. A list signed
-  with a superseded publisher signing key is not a candidate; its validator
-  manifests still are, since each verifies under its own master.
+  that signing key. The list bundled in the proof is one of them. A bundled
+  list that does not verify is not a candidate, and it does not poison a
+  primary list the verifier already holds. A list signed with a superseded
+  publisher signing key is not a candidate; its validator manifests still are,
+  since each verifies under its own master.
 - **P3.** The primary list is the candidate with the highest list `sequence`
   among those in effect at the anchor's close time
   (`effective <= close_time < expiration`; a list without `effective` is in
   effect from 0). When the proof has the anchor ledger's header and no
   candidate is in effect, membership is unavailable and the anchor MUST be
-  rejected. An anchor-only proof has no close time and no time test: its
-  primary list is the highest-sequence candidate, and it fails only when there
-  is no candidate. The interval is a
-  consistency check, not a barrier against the list's own validators, who
-  attest the close time themselves.
+  rejected. An anchor-only proof has no close time and skips only that
+  comparison against a ledger close time. It does not waive candidate-list
+  well-formedness, soundness, manifest checks, or quorum. Its primary list is
+  the highest-sequence candidate, and it fails when there is no candidate. The
+  interval is a consistency check, not a barrier against the list's own
+  validators, who attest the close time themselves.
+
+A decoded list `blob` is well-formed only when it is a JSON object whose
+`sequence`, `expiration`, and optional `effective` (default `0`) are uint32
+integer tokens — integers in `0 .. 2^32 - 1`, never a float, boolean, or
+string — satisfying `expiration > effective`, and whose `validators` is a JSON
+array of objects with `validation_public_key` and `manifest`. A blob that
+fails this is not a candidate, whether or not the proof has a close time.
 - **P4.** A lower-sequence list from the same publisher contributes only its
   validator manifests, like a secondary list.
 
@@ -264,7 +283,7 @@ delegation from it is resolved.
 7. Two different lists under the primary publisher key with the same highest
    eligible `sequence` (P3) make the view unresolvable, and the anchor MUST be rejected: the
    publisher itself has equivocated, so there is no membership to fall back
-   on. Byte-identical lists are one list.
+   on. Byte-identical signed `blob`s are one list.
 8. Only full validations count. A validation without `vfFullValidation`
    (`Flags & 0x00000001`) is a partial validation and never counts toward
    quorum, as in rippled.
@@ -278,14 +297,18 @@ delegation from it is resolved.
     key in the list. Two masters can share a delegation only through a misused
     or compromised key, so held manifests cannot repair such a list. The resolved
     view is then checked again under rule 4.
-11. Keys are bound, and a list names each master once:
-    - the proof's `unl.public_key`, the publisher manifest's `PublicKey` and the
-      configured primary publisher key are one key;
-    - each list entry's `validation_public_key` equals the `PublicKey` of that
-      entry's own manifest;
-    - a list that names a master twice, or carries a manifest that is not valid
-      (§5.1), is invalid, and the anchor MUST be rejected. An invalid manifest
-      held from elsewhere is simply not a candidate (rule 1).
+11. Keys are bound, and the primary list names each master once:
+    - `unl.public_key` equals the configured primary publisher key, and any
+      candidate publisher manifest's `PublicKey` equals that key. This holds
+      for a list-less anchor as well;
+    - each primary-list entry's `validation_public_key` equals the `PublicKey`
+      of that entry's own manifest;
+    - a primary list that names a master twice, or carries a manifest that is
+      not valid (§5.1), is invalid, and the anchor MUST be rejected. An invalid
+      manifest held from elsewhere is simply not a candidate (rule 1).
+      Secondary lists and lower-sequence lists supply only individual verified
+      validator manifests under rule 1. They are not the list this rule's
+      second and third bullets constrain.
 
 The rules sort what the material implicates. A validator's own revocation or
 equivocation removes that validator's vote and does not by itself invalidate
@@ -392,12 +415,13 @@ keyed by both the proof's §1.2 identity and the whole resolved view, under one
 fixed verifier policy:
 
 - the configured publisher key, and the publisher's state: active with its
-  winning manifest, revoked with the revocation, or conflicting with both
-  manifests;
+  winning manifest, revoked with the revocation, conflicting, or unavailable
+  when no verified publisher manifest is held (a list-less proof and an empty
+  cache is this case);
 - the membership state: the selected primary list's signed blob, or
-  unavailable, or conflicting with both lists' signed blobs (rule 7);
+  unavailable, or conflicting (rule 7);
 - each master's state: active with its winning manifest, revoked with the
-  revocation, or equivocating with both manifests, at any sequence.
+  revocation, or equivocating, at any sequence.
 
 Each state is a tag plus the raw bytes of its evidence. The key encodes them in
 the order above, masters sorted by master key, each item length-prefixed, so
@@ -405,6 +429,16 @@ two views produce the same key only when they hold the same evidence. A key
 built from winning manifests alone is not enough. An equivocation below
 the highest sequence changes the verdict without changing any master's
 highest-sequence manifest, and an equivocation has no single winning manifest.
+
+Conflict evidence is independent of arrival order. For a publisher-manifest
+conflict, a rule 7 conflict of signed blobs, or a rule 2 conflict of validator
+manifests, the key uses the lowest sequence at which the conflict occurs, and
+at that sequence the two lexicographically smallest distinct raw byte strings,
+in ascending order. Further conflicting items at that sequence, and conflicts
+at higher sequences, do not add further key bytes: the lowest sequence and
+those two strings already distinguish the held set's conflict from a
+non-conflict and from a different pair. A proof with no §1.2 identity is not
+cached (§1.2).
 
 Renewal produces an ordinary proof of the current format version. A tail
 without an anchor is not a proof; carrying tails or anchors as standalone
@@ -418,7 +452,7 @@ parent-first linearization of the logical proof DAG.
 
 ```json
 {
-    "format_version": 7,
+    "format_version": 8,
     "network_id": 0,
     "steps": [
         { "type": "anchor", ... },
@@ -494,7 +528,23 @@ all of the three members, or with any other member, MUST be rejected.
 
 A list's `effective` and `expiration` (in the blob, and in `0x05`) are seconds
 since the Ripple Epoch (2000-01-01 00:00:00 UTC), the same unit as a ledger's
-`close_time` (§2.2). A list without `effective` is in effect from 0.
+`close_time` (§2.2). A list without `effective` is in effect from 0. The blob's
+`sequence`, `expiration`, and `effective` are uint32 integer tokens with
+`expiration > effective`, as §1.3 requires of a candidate. A float such as
+`100.0` is not that token.
+
+Every `validations` entry, in JSON and in a reconstructed binary `0x01`
+record, MUST be a complete canonical `STValidation` under the XRPL codec named
+in the normative references: the bytes round-trip, and the object contains
+`LedgerHash` (32 bytes), `Signature`, and a 33-byte `SigningPubKey` whose
+prefix is `0xED`, `0x02`, or `0x03`. The outer key MUST equal that
+`SigningPubKey`. A verifier MUST reject the anchor when any entry fails this.
+An entry that passes it counts toward quorum only when its `LedgerHash` equals
+the anchor hash, its signature is canonical (§5.1) and verifies
+`VAL\0 || signing_data`, `Flags` has `vfFullValidation`, and the key is a
+primary-list master's resolved signing key (§1.3 rules 5 and 8), at most one
+vote per master. Failing one of those four leaves the vote uncounted. It does
+not reject the anchor, and the remaining votes can still make quorum.
 
 An anchor carries the VL snapshot it was built against, so an offline verifier can
 establish quorum entirely from the proof — or, per §3.3, from equivalent trust it
@@ -570,6 +620,11 @@ The trie is a nested JSON structure. Three JSON types discriminate three node ty
 | **String** (64 hex chars) | Pruned subtree hash (placeholder) |
 | **Object** (keys `"0"`-`"F"`) | Inner node |
 | **Array** `[key, data]` | Leaf node |
+
+The root `trie` value MUST be an inner-node object. A bare `[key, data]` leaf
+or a bare hash string is not a root: the binary trie always begins with a
+4-byte branch header (§3.7), and a lone-leaf tree root is out of scope (§3.8).
+Verifiers MUST reject that shape at parse time.
 
 The leaf `key` is a 64-character uppercase hex string (32 bytes). Leaf `data` is
 an object carrying the leaf's decoded XRPL content, and nothing else:
@@ -784,14 +839,20 @@ Canonical binary order is the form-independent canonical order (§1.2), with
 [ledger_index: 4 bytes, big-endian uint32, advisory as in §2.1]
 [publisher_key: 33 bytes, XRPL format (0xED prefix + 32-byte Ed25519 key)]
 [validation_count: LEB128]
-[common_fields_len: LEB128][common_fields: serialized STObject]
-[unique_field_count: LEB128]
-  for each unique field name:
-    [name_len: LEB128][name: UTF-8 bytes]
-  for each validator:
-    [signing_key: 33 bytes]
-    [unique_fields_len: LEB128][unique_fields: serialized STObject]
+if validation_count > 0:
+    [common_fields_len: LEB128][common_fields: serialized STObject]
+    [unique_field_count: LEB128]
+      for each unique field name:
+        [name_len: LEB128][name: UTF-8 bytes]
+      for each validator:
+        [signing_key: 33 bytes]
+        [unique_fields_len: LEB128][unique_fields: serialized STObject]
 ```
+
+When `validation_count` is 0 the payload ends immediately after that count: 32
++ 4 + 33 + one LEB128 byte, 70 bytes in all. That payload parses. It then fails
+quorum, because N is at least 1 and no validation votes. The failure is at the
+trust layer, not the parse layer.
 
 **Validation decomposition**: STValidation objects across validators typically
 share many fields (LedgerSequence, SigningTime, Cookie, ServerVersion, etc.).
@@ -815,6 +876,16 @@ decoded per-validator unique field map, then serializes the merged map using
 canonical XRPL STObject field order. Producers MUST verify that this process
 round-trips to the original raw STValidation bytes before emitting decomposed
 validations.
+
+Verifiers MUST reject a `0x01` payload whose `common_fields` or `unique_fields`
+are not canonical STObject bytes under that same XRPL codec, whose common and
+unique fields overlap, whose `common_fields` omits a field present in every
+validation with an identical value, whose `unique_field_names` is not the
+strictly ascending lexicographic set `union(all fields) \ common_fields`, or
+whose validator records are not strictly ascending 33-byte `signing_key`s each
+equal to the reconstructed validation's `SigningPubKey`. Those checks are
+parse failures. A reconstructed validation that is not a complete canonical
+`STValidation` (§2.1) is also a parse failure.
 
 With a single validation every field is common, `SigningPubKey` and
 `Signature` included: the unique field names list is empty, and that
@@ -885,9 +956,13 @@ exactly `{validation_public_key, manifest}`. Producers MUST verify the shaped
 encoding round-trips to the exact signed blob bytes before emitting binary
 form. If it does not round-trip, a binary producer MUST fail rather than
 emit a non-verifiable decomposed blob; the JSON form can still carry the raw
-blob bytes in `unl.blob`. A list that carries `effective`, or any other
-top-level key, therefore has no binary form, and every list bundled in a
-binary proof is in effect from 0.
+blob bytes in `unl.blob`. A list that carries `effective`, whitespace, or any
+other top-level key or formatting the shaped encoding does not reproduce,
+therefore has no binary form, and every list bundled in a binary proof is in
+effect from 0. Such a proof verifies in JSON and has no §1.2 identity. An
+`STValidation` the XRPL codec cannot round-trip is not a complete canonical
+validation: the anchor is rejected (§2.1), and those bytes have no binary form
+(§3.4).
 
 ### 3.6 Ledger Header Payload (0x02)
 
@@ -1043,11 +1118,15 @@ function verify(chain, network_id, primary_publisher_key):
             // trust alone, §3.3), its soundness, each master's delegation,
             // and collisions. Manifests verify as §5.1 states. It rejects
             // the anchor where those rules say so.
-            // For each validation:
-            //   deserialize STValidation
-            //   verify LedgerHash == anchor.ledger_hash
-            //   verify the VAL\0 signature using SigningPubKey (§5.1)
-            //   count it only if Flags has vfFullValidation (§1.3 rule 8)
+            // For each validation, reject the anchor unless it is a complete
+            // canonical STValidation (§2.1) whose outer key equals SigningPubKey:
+            //   deserialize under the XRPL codec and require a round-trip
+            //   require LedgerHash, Signature, and a 33-byte SigningPubKey
+            //     with prefix 0xED, 0x02, or 0x03
+            // Then, without rejecting the anchor:
+            //   count it only if LedgerHash == anchor.ledger_hash
+            //     and the VAL\0 signature is canonical and verifies (§5.1)
+            //     and Flags has vfFullValidation (§1.3 rule 8)
             //     and SigningPubKey is a master's resolved key (rule 5)
             //   SHOULD: report a counted validation whose signed
             //     LedgerSequence differs from anchor.ledger_index (§2.1)
@@ -1150,14 +1229,19 @@ Manifest signing data is:
 MAN\0 || canonical_STObject(manifest without Signature and MasterSignature)
 ```
 
-| Manifest field | Meaning |
+A manifest is an STObject whose fields are exactly this set:
+`Version`, `Sequence`, `PublicKey`, `SigningPubKey`, `Signature`, `Domain`,
+`MasterSignature`. Any other field makes it invalid.
+
+| Manifest field | Presence |
 |---|---|
-| `PublicKey` | The validator's (or publisher's) master public key |
-| `SigningPubKey` | The signing key the master delegates to |
-| `Sequence` | Manifest sequence; `0xFFFFFFFF` is a revocation |
-| `Signature` | Signature by `SigningPubKey` over the signing data |
-| `MasterSignature` | Signature by `PublicKey` over the signing data |
-| `Domain` | Optional; a properly formed domain if present |
+| `Sequence` | Required. `0xFFFFFFFF` is a revocation |
+| `PublicKey` | Required. The validator's or publisher's master public key |
+| `MasterSignature` | Required. Signature by `PublicKey` over the signing data |
+| `Version` | Optional. If present it MUST be `0` |
+| `Domain` | Optional. If present it MUST match the grammar below |
+| `SigningPubKey` | Required on a non-revocation, forbidden on a revocation. The signing key the master delegates to |
+| `Signature` | Required on a non-revocation, forbidden on a revocation. Signature by `SigningPubKey` over the signing data |
 
 Verifiers MUST verify the manifest `MasterSignature` with the manifest
 `PublicKey` (master public key). A non-revocation manifest MUST include both
@@ -1167,8 +1251,15 @@ also invalid if:
 
 - its bytes are not the canonical serialization of its fields;
 - it carries a `Version` other than 0;
-- it has a `Domain` that is not a well-formed domain;
+- it has a `Domain` that is not well-formed under the grammar below;
 - its `SigningPubKey` equals its own `PublicKey`.
+
+A well-formed `Domain` is 4 to 128 bytes. Split on `.` it has at least two
+labels. Each label is 1 to 63 bytes and neither starts nor ends with `-`.
+Every non-final label is ASCII `A-Z`, `a-z`, `0-9`, or `-`. The final label
+is at least two bytes and is ASCII letters only (`A-Z` or `a-z`). The check
+uses those code-point ranges, not a locale's letter class. A trailing dot, an
+empty label, or a non-ASCII byte fails it.
 
 An invalid manifest is never a candidate (§1.3 rule 1).
 
@@ -1178,8 +1269,10 @@ STValidation signing data is:
 VAL\0 || canonical_STObject(STValidation without Signature)
 ```
 
-Verifiers MUST verify each validation signature with the embedded
-`SigningPubKey`.
+A validation that has passed the structural checks in §2.1 has its signature
+verified with the embedded `SigningPubKey`. A failed or non-canonical signature
+leaves that vote uncounted; it does not reject the anchor (§2.1). An unknown
+public-key prefix never reaches this step: §2.1 already rejected the anchor.
 
 Supported public-key encodings:
 

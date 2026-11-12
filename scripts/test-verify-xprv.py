@@ -20,7 +20,7 @@ from binascii import hexlify, unhexlify
 from pathlib import Path
 
 from xrpl import CryptoAlgorithm
-from xrpl.core.binarycodec import encode, encode_for_signing
+from xrpl.core.binarycodec import decode, encode, encode_for_signing
 from xrpl.core.keypairs import derive_keypair, generate_seed, sign
 
 
@@ -369,6 +369,35 @@ class AnchorVerificationTests(unittest.TestCase):
         f = Fixture()
         f.blob_fields = {"sequence": 1, "effective": 10, "expiration": 5}
         self.assertRejected(self.verify(f.anchor(), f.trusted_key), "validity interval is invalid")
+
+    def test_rejects_anchor_only_when_expiration_is_not_after_effective(self) -> None:
+        f = Fixture()
+        f.blob_fields = {"sequence": 1, "expiration": 0}
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "validity interval is invalid")
+
+    def test_rejects_integral_float_blob_fields(self) -> None:
+        f = Fixture()
+        f.blob_fields = {"sequence": 100.0, "expiration": 900000000}
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "malformed")
+        f.blob_fields = {"sequence": 1, "expiration": 900000000.0}
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "malformed")
+        f.blob_fields = {"sequence": 1, "effective": 0.0, "expiration": 900000000}
+        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "malformed")
+
+    def test_rejects_incomplete_validation_even_when_quorum_is_present(self) -> None:
+        f = Fixture()
+        anchor = f.anchor()
+        anchor["validations"]["00" * 33] = "00"
+        self.assertRejected(
+            self.verify(anchor, f.trusted_key), "not a canonical STValidation"
+        )
+
+    def test_bad_signature_does_not_reject_a_quorum(self) -> None:
+        f = Fixture()
+        anchor = f.anchor()
+        spare = keypair(250)
+        anchor["validations"][spare[0]] = make_validation(spare, "AB" * 32)
+        self.assertTrue(self.verify(anchor, f.trusted_key).ok)
 
 
 class TrustViewOverlayTests(unittest.TestCase):
@@ -1221,6 +1250,111 @@ class StrictParsingTests(unittest.TestCase):
     def test_rejects_duplicate_validation_records(self):
         with self.assertRaises(ValueError):
             v.decode_anchor_core(self.core_mutation("duplicate"))
+
+
+class StructuralParityTests(unittest.TestCase):
+    def core(self, items: list[tuple[bytes, dict | None]]) -> bytes:
+        """0x01 payload. None is an empty validator record (no fields)."""
+        items = sorted(items, key=lambda item: item[0])
+        present = [fields for _, fields in items if fields is not None]
+        union = set().union(*(fields.keys() for fields in present)) if present else set()
+        if any(fields is None for _, fields in items):
+            common: dict = {}
+        else:
+            common = {
+                key: present[0][key]
+                for key in union
+                if all(key in fields and fields[key] == present[0][key] for fields in present)
+            }
+        names = sorted(union - common.keys())
+        common_bytes = bytes.fromhex(encode(common)) if common else b""
+        payload = bytearray(32)
+        payload += (1).to_bytes(4, "big")
+        payload += bytes(33)
+        payload += leb128(len(items))
+        payload += leb128(len(common_bytes)) + common_bytes
+        payload += leb128(len(names))
+        for name in names:
+            raw = name.encode()
+            payload += leb128(len(raw)) + raw
+        for key, fields in items:
+            unique = {} if fields is None else {name: fields[name] for name in names if name in fields}
+            unique_bytes = bytes.fromhex(encode(unique)) if unique else b""
+            payload += key + leb128(len(unique_bytes)) + unique_bytes
+        return bytes(payload)
+
+    def test_zero_validation_core_parses(self):
+        payload = bytes(32) + (0).to_bytes(4, "big") + bytes(33) + bytes([0])
+        self.assertEqual(len(payload), 70)
+        decoded = v.decode_anchor_core(payload)
+        self.assertEqual(decoded["validations"], {})
+
+    def test_zero_key_empty_record_is_rejected_beside_a_real_validation(self):
+        signer = keypair(200)
+        fields = decode(make_validation(signer, "AB" * 32))
+        good = self.core([(bytes.fromhex(signer[0]), fields)])
+        self.assertIn(signer[0], v.decode_anchor_core(good)["validations"])
+        bad = self.core([(bytes(33), None), (bytes.fromhex(signer[0]), fields)])
+        with self.assertRaisesRegex(ValueError, "canonical STValidation"):
+            v.decode_anchor_core(bad)
+
+    def test_common_field_left_unique_is_rejected(self):
+        signer = keypair(200)
+        fields = decode(make_validation(signer, "AB" * 32))
+        names = sorted(fields)
+        payload = bytearray(32)
+        payload += (1).to_bytes(4, "big")
+        payload += bytes(33)
+        payload += leb128(1)
+        payload += leb128(0)  # common omits fields every validation carries
+        payload += leb128(len(names))
+        for name in names:
+            raw = name.encode()
+            payload += leb128(len(raw)) + raw
+        unique = bytes.fromhex(encode(fields))
+        payload += bytes.fromhex(signer[0]) + leb128(len(unique)) + unique
+        with self.assertRaisesRegex(ValueError, "non-canonical"):
+            v.decode_anchor_core(bytes(payload))
+
+    def test_root_leaf_is_rejected_at_parse(self):
+        leaf = ["AB" * 32, {"LedgerEntryType": "AccountRoot"}]
+        with self.assertRaisesRegex(ValueError, "inner node"):
+            v.validate_json_trie(leaf)
+        with self.assertRaisesRegex(ValueError, "inner node"):
+            v.hash_trie(leaf, is_tx=False)
+        with self.assertRaisesRegex(ValueError, "inner node"):
+            v.validate_json_trie("AB" * 32)
+
+    def test_manifest_outside_the_template_or_with_a_bad_domain_is_rejected(self):
+        master, signing = keypair(100), keypair(200)
+        extra = sign_manifest(
+            {
+                "Sequence": 1,
+                "PublicKey": master[0],
+                "SigningPubKey": signing[0],
+                "Flags": 0,
+            },
+            master,
+            signing,
+        )
+        ok, message, _ = v.verify_manifest(extra)
+        self.assertFalse(ok)
+        self.assertIn("outside the template", message)
+
+        for domain in (b"example.com.", b"xn--.com", "bücher.de".encode()):
+            raw = sign_manifest(
+                {
+                    "Sequence": 1,
+                    "PublicKey": master[0],
+                    "SigningPubKey": signing[0],
+                    "Domain": domain.hex().upper(),
+                },
+                master,
+                signing,
+            )
+            ok, message, _ = v.verify_manifest(raw)
+            self.assertFalse(ok, domain)
+            self.assertIn("Domain", message)
 
 
 if __name__ == "__main__":

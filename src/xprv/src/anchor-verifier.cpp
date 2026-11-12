@@ -6,11 +6,16 @@
 #include <catl/core/logger.h>
 #include <catl/crypto/sig-verify.h>
 #include <catl/vl-client/vl-client.h>
+#include <catl/xdata/json-visitor.h>
+#include <catl/xdata/parser-context.h>
+#include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
+#include <catl/xdata/serialize.h>
 
 #include <cstring>
 #include <iomanip>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -51,172 +56,106 @@ AnchorVerifier::to_hex(std::span<const uint8_t> data)
 }
 
 //------------------------------------------------------------------------------
-// STValidation parsing — strip sfSignature field
+// STValidation parsing — XRPL codec, then strip sfSignature
 //------------------------------------------------------------------------------
+
+namespace {
+
+// A JSON number is a uint32 only as an integer token. 100.0 is a double.
+std::optional<uint32_t>
+strict_uint32(boost::json::value const& value)
+{
+    if (value.is_uint64() && value.get_uint64() <= 0xFFFFFFFFu)
+        return static_cast<uint32_t>(value.get_uint64());
+    if (value.is_int64() && value.get_int64() >= 0 &&
+        static_cast<uint64_t>(value.get_int64()) <= 0xFFFFFFFFu)
+        return static_cast<uint32_t>(value.get_int64());
+    return std::nullopt;
+}
+
+catl::xdata::Protocol const&
+xrpl_protocol()
+{
+    static auto const protocol =
+        catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    return protocol;
+}
+
+}  // namespace
 
 AnchorVerifier::ParsedValidation
 AnchorVerifier::parse_validation(std::vector<uint8_t> const& raw)
 {
     ParsedValidation result;
-    if (raw.size() < 50)
-        return result;
-
-    // Walk the serialized STObject to find:
-    //   sfLedgerHash (0x51) — 32 bytes
-    //   sfSigningPubKey (0x73) — VL-encoded blob
-    //   sfSignature (0x76) — VL-encoded blob (strip this)
-    //
-    // We scan linearly, tracking each field's position.
-    // The signing data = VAL\0 + (raw bytes with sfSignature removed)
-
-    size_t pos = 0;
-    size_t sig_start = 0;
-    size_t sig_end = 0;
-
-    while (pos < raw.size())
+    try
     {
-        uint8_t byte1 = raw[pos];
-        uint32_t type_code = byte1 >> 4;
-        uint32_t field_code = byte1 & 0x0F;
+        auto const& protocol = xrpl_protocol();
+        Slice slice(raw.data(), raw.size());
+        catl::xdata::JsonVisitor::Options options;
+        options.ascii_hints = false;
+        catl::xdata::JsonVisitor visitor(protocol, options);
+        catl::xdata::ParserContext ctx(slice);
+        catl::xdata::parse_with_visitor(ctx, protocol, visitor);
+        auto parsed = visitor.get_result();
+        if (!ctx.cursor.empty() || !parsed.is_object())
+            return result;
 
-        size_t header_start = pos;
-        pos++;
+        auto const& obj = parsed.as_object();
+        if (catl::xdata::codecs::serialize_object(obj, protocol) != raw)
+            return result;
 
-        // Extended type code
-        if (type_code == 0 && pos < raw.size())
+        auto const* ledger_hash = obj.if_contains("LedgerHash");
+        auto const* signing_key = obj.if_contains("SigningPubKey");
+        auto const* signature = obj.if_contains("Signature");
+        if (!ledger_hash || !ledger_hash->is_string() || !signing_key ||
+            !signing_key->is_string() || !signature || !signature->is_string())
+            return result;
+
+        auto hash_bytes = from_hex(ledger_hash->as_string());
+        auto key_bytes = from_hex(signing_key->as_string());
+        auto sig_bytes = from_hex(signature->as_string());
+        if (hash_bytes.size() != 32 || key_bytes.size() != 33 ||
+            sig_bytes.empty())
+            return result;
+        auto const prefix = key_bytes[0];
+        if (prefix != 0xED && prefix != 0x02 && prefix != 0x03)
+            return result;
+
+        if (auto const* flags = obj.if_contains("Flags"))
         {
-            type_code = raw[pos++];
+            auto const value = strict_uint32(*flags);
+            if (!value)
+                return result;
+            result.flags = *value;
+        }
+        if (auto const* seq = obj.if_contains("LedgerSequence"))
+        {
+            auto const value = strict_uint32(*seq);
+            if (!value)
+                return result;
+            result.ledger_seq = *value;
         }
 
-        // Extended field code
-        if (field_code == 0 && pos < raw.size())
-        {
-            field_code = raw[pos++];
-        }
-
-        // Determine field size based on type
-        size_t field_size = 0;
-
-        switch (type_code)
-        {
-            case 1:  // UInt16
-                field_size = 2;
-                break;
-            case 2:  // UInt32
-                field_size = 4;
-                break;
-            case 3:  // UInt64
-                field_size = 8;
-                break;
-            case 4:  // Hash128
-                field_size = 16;
-                break;
-            case 5:  // Hash256
-                field_size = 32;
-                break;
-            case 6:  // Amount
-                // Check high bit of first byte
-                if (pos < raw.size() && (raw[pos] & 0x80) == 0)
-                {
-                    field_size = 8;  // XRP
-                }
-                else
-                {
-                    field_size = 48;  // IOU
-                }
-                break;
-            case 7:  // Blob (VL-encoded)
-            {
-                if (pos >= raw.size())
-                    goto done;
-                uint8_t vl_byte = raw[pos++];
-                if (vl_byte <= 192)
-                {
-                    field_size = vl_byte;
-                }
-                else if (vl_byte <= 240 && pos < raw.size())
-                {
-                    uint8_t b2 = raw[pos++];
-                    field_size = 193 + ((vl_byte - 193) * 256) + b2;
-                }
-                else if (pos + 1 < raw.size())
-                {
-                    uint8_t b2 = raw[pos++];
-                    uint8_t b3 = raw[pos++];
-                    field_size =
-                        12481 + ((vl_byte - 241) * 65536) + (b2 * 256) + b3;
-                }
-                break;
-            }
-            case 8:  // AccountID (VL-encoded, typically 20 bytes)
-            {
-                if (pos >= raw.size())
-                    goto done;
-                uint8_t vl_byte = raw[pos++];
-                field_size = vl_byte;  // always <= 192 for accounts
-                break;
-            }
-            default:
-                // Unknown type — can't continue
-                goto done;
-        }
-
-        if (pos + field_size > raw.size())
-            goto done;
-
-        // Extract specific fields
-        // sfFlags: type=2 (UInt32), field=2 → header byte 0x22
-        if (type_code == 2 && field_code == 2)
-        {
-            result.flags = (static_cast<uint32_t>(raw[pos]) << 24) |
-                (static_cast<uint32_t>(raw[pos + 1]) << 16) |
-                (static_cast<uint32_t>(raw[pos + 2]) << 8) |
-                static_cast<uint32_t>(raw[pos + 3]);
-        }
-        // sfLedgerSequence: type=2 (UInt32), field=6 → header byte 0x26
-        else if (type_code == 2 && field_code == 6)
-        {
-            result.ledger_seq = (static_cast<uint32_t>(raw[pos]) << 24) |
-                (static_cast<uint32_t>(raw[pos + 1]) << 16) |
-                (static_cast<uint32_t>(raw[pos + 2]) << 8) |
-                static_cast<uint32_t>(raw[pos + 3]);
-        }
-        // sfLedgerHash: type=5 (Hash256), field=1 → header byte 0x51
-        else if (type_code == 5 && field_code == 1)
-        {
-            result.ledger_hash = Hash256(raw.data() + pos);
-        }
-        // sfSigningPubKey: type=7 (Blob), field=3 → header byte 0x73
-        else if (type_code == 7 && field_code == 3)
-        {
-            result.signing_key.assign(
-                raw.data() + pos, raw.data() + pos + field_size);
-        }
-        // sfSignature: type=7 (Blob), field=6 → header byte 0x76
-        else if (type_code == 7 && field_code == 6)
-        {
-            result.signature.assign(
-                raw.data() + pos, raw.data() + pos + field_size);
-            sig_start = header_start;
-            sig_end = pos + field_size;
-        }
-
-        pos += field_size;
+        boost::json::object without = obj;
+        without.erase("Signature");
+        result.without_signature =
+            catl::xdata::codecs::serialize_object(without, protocol);
+        result.ledger_hash = Hash256(hash_bytes.data());
+        result.signing_key = std::move(key_bytes);
+        result.signature = std::move(sig_bytes);
+        result.valid = true;
     }
-
-done:
-    if (result.signing_key.empty() || result.signature.empty())
-        return result;
-
-    // Build without_signature: raw bytes with sfSignature field stripped
-    result.without_signature.reserve(raw.size() - (sig_end - sig_start));
-    result.without_signature.insert(
-        result.without_signature.end(), raw.begin(), raw.begin() + sig_start);
-    result.without_signature.insert(
-        result.without_signature.end(), raw.begin() + sig_end, raw.end());
-
-    result.valid = true;
+    catch (std::exception const&)
+    {
+        return ParsedValidation{};
+    }
     return result;
+}
+
+bool
+AnchorVerifier::is_canonical_stvalidation(std::vector<uint8_t> const& raw)
+{
+    return parse_validation(raw).valid;
 }
 
 //------------------------------------------------------------------------------
@@ -462,23 +401,20 @@ AnchorVerifier::verify(
         return result;
     }
 
-    try
-    {
-        result.vl_sequence = blob_obj.at("sequence").to_number<std::uint32_t>();
-        result.vl_expiration =
-            blob_obj.at("expiration").to_number<std::uint32_t>();
-        if (blob_obj.contains("effective"))
-        {
-            result.vl_effective =
-                blob_obj.at("effective").to_number<std::uint32_t>();
-        }
-    }
-    catch (std::exception const&)
+    auto const sequence = strict_uint32(blob_obj.at("sequence"));
+    auto const expiration = strict_uint32(blob_obj.at("expiration"));
+    std::optional<uint32_t> effective = 0;
+    if (blob_obj.contains("effective"))
+        effective = strict_uint32(blob_obj.at("effective"));
+    if (!sequence || !expiration || !effective)
     {
         result.error = "UNL blob validity fields are malformed";
         narrative.push_back("   FAIL: UNL blob validity fields are malformed.");
         return result;
     }
+    result.vl_sequence = *sequence;
+    result.vl_expiration = *expiration;
+    result.vl_effective = *effective;
     if (result.vl_expiration <= result.vl_effective)
     {
         result.error = "UNL blob validity interval is invalid";
@@ -671,10 +607,9 @@ AnchorVerifier::verify(
     narrative.push_back(
         "   Step A4: UNL blob contains " + std::to_string(result.unl_size) +
         " validator manifests. Each maps a master key to a signing key." +
-        (result.unl_revoked > 0
-             ? " " + std::to_string(result.unl_revoked) +
+        (result.unl_revoked > 0 ? " " + std::to_string(result.unl_revoked) +
                  " are revoked: they count toward N and cannot vote."
-             : std::string{}));
+                                : std::string{}));
 
     // ── Step 5: Verify each STValidation ────────────────────────
     if (!anchor.contains("validations") ||
@@ -705,8 +640,10 @@ AnchorVerifier::verify(
         auto parsed = parse_validation(val_bytes);
         if (!parsed.valid)
         {
-            PLOGD(log_, "  Validation ", total, ": parse failed");
-            continue;
+            result.error = "validation is not a canonical STValidation";
+            narrative.push_back(
+                "   FAIL: a validation is not a canonical STValidation.");
+            return result;
         }
 
         auto const parsed_key_hex = lower(to_hex(parsed.signing_key));

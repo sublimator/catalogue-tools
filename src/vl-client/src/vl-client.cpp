@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -326,8 +327,10 @@ is_properly_formed_toml_domain(std::span<const uint8_t> domain)
         bool const is_tld = label_end == domain.size();
         for (auto i = label_start; i < label_end; ++i)
         {
-            auto const c = static_cast<unsigned char>(domain[i]);
-            if (is_tld ? !std::isalpha(c) : !(std::isalnum(c) || c == '-'))
+            auto const c = domain[i];
+            bool const alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+            bool const digit = c >= '0' && c <= '9';
+            if (is_tld ? !alpha : !(alpha || digit || c == '-'))
             {
                 return false;
             }
@@ -769,22 +772,49 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                     auto blob_json = boost::json::parse(blob_str);
                     auto const& blob_obj = blob_json.as_object();
 
+                    auto const uint32_token =
+                        [](boost::json::value const& value)
+                        -> std::optional<uint32_t> {
+                        if (value.is_uint64() &&
+                            value.get_uint64() <= 0xFFFFFFFFu)
+                            return static_cast<uint32_t>(value.get_uint64());
+                        if (value.is_int64() && value.get_int64() >= 0 &&
+                            static_cast<uint64_t>(value.get_int64()) <=
+                                0xFFFFFFFFu)
+                            return static_cast<uint32_t>(value.get_int64());
+                        return std::nullopt;
+                    };
                     if (blob_obj.contains("sequence"))
                     {
-                        vl.sequence =
-                            blob_obj.at("sequence").to_number<uint32_t>();
+                        auto const sequence =
+                            uint32_token(blob_obj.at("sequence"));
+                        if (!sequence)
+                            throw std::runtime_error(
+                                "validator list sequence is not a uint32 "
+                                "integer");
+                        vl.sequence = *sequence;
                         vl.has_sequence = true;
                     }
                     if (blob_obj.contains("expiration"))
                     {
-                        vl.expiration =
-                            blob_obj.at("expiration").to_number<uint32_t>();
+                        auto const expiration =
+                            uint32_token(blob_obj.at("expiration"));
+                        if (!expiration)
+                            throw std::runtime_error(
+                                "validator list expiration is not a uint32 "
+                                "integer");
+                        vl.expiration = *expiration;
                         vl.has_expiration = true;
                     }
                     if (blob_obj.contains("effective"))
                     {
-                        vl.effective =
-                            blob_obj.at("effective").to_number<uint32_t>();
+                        auto const effective =
+                            uint32_token(blob_obj.at("effective"));
+                        if (!effective)
+                            throw std::runtime_error(
+                                "validator list effective is not a uint32 "
+                                "integer");
+                        vl.effective = *effective;
                     }
 
                     // Parse each validator manifest

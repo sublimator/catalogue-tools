@@ -1,0 +1,17 @@
+{
+  "name": "trie-root-leaf",
+  "violates": "spec §2.3: a JSON map_proof root is an inner node",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie",
+      "value": ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", {}]
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "inner node"
+  }
+}

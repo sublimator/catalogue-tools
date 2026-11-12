@@ -38,9 +38,10 @@ struct AnchorVerifyResult
 {
     bool verified = false;
     int unl_size = 0;
-    int unl_revoked = 0;  // revoked masters: counted in unl_size, never vote
+    int unl_revoked = 0;   // revoked masters: counted in unl_size, never vote
     int unl_overlaid = 0;  // delegations updated by manifests held outside
-    int unl_equivocated = 0;  // masters with conflicting same-sequence manifests
+    int unl_equivocated =
+        0;  // masters with conflicting same-sequence manifests
     int validations_total = 0;
     int validations_verified = 0;
     int validations_partial = 0;
@@ -70,6 +71,12 @@ public:
         std::vector<std::string>& narrative,
         std::vector<std::vector<uint8_t>> const& extra_manifests =
             std::vector<std::vector<uint8_t>>());
+
+    /// True when `raw` is a complete canonical XRPL `STValidation`: it
+    /// round-trips under the XRPL codec and carries `LedgerHash`, `Signature`,
+    /// and a 33-byte `SigningPubKey` whose prefix is `0xED`, `0x02`, or `0x03`.
+    static bool
+    is_canonical_stvalidation(std::vector<uint8_t> const& raw);
 
 private:
     /// Parse a raw STValidation, strip sfSignature, return components.

@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <boost/json.hpp>
 #include <catl/shamap/binary-trie.h>
+#include <catl/xdata/json-visitor.h>
+#include <catl/xdata/parser-context.h>
+#include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
 #include <cctype>
 #include <cstdlib>
@@ -12,7 +15,9 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <sstream>
+#include <stdexcept>
 #include <unistd.h>
+#include <variant>
 
 namespace {
 using Bytes = std::vector<uint8_t>;
@@ -147,7 +152,153 @@ mutated_core(unsigned mutation)
     result.insert(result.end(), binary.begin() + end, binary.end());
     return result;
 }
+
+Bytes
+wrap_anchor_core(Bytes const& core)
+{
+    Bytes out(xprv::XPRV_MAGIC, xprv::XPRV_MAGIC + 4);
+    out.push_back(static_cast<uint8_t>(XPRV_FORMAT_VERSION));
+    out.push_back(0);
+    out.insert(out.end(), 4, 0);
+    out.push_back(0x01);
+    catl::shamap::leb128_encode(out, core.size());
+    out.insert(out.end(), core.begin(), core.end());
+    return out;
+}
+
+std::string
+binary_error(Bytes const& blob)
+{
+    try
+    {
+        xprv::from_binary(blob);
+    }
+    catch (std::runtime_error const& error)
+    {
+        return error.what();
+    }
+    return {};
+}
+
+struct FixtureValidation
+{
+    Bytes key;
+    Bytes raw;
+    std::vector<std::string> names;
+};
+
+FixtureValidation
+first_fixture_validation()
+{
+    auto const proof = proof_json().as_object();
+    auto const& validations =
+        proof.at("steps").as_array().at(0).at("validations").as_object();
+    auto const& entry = *validations.begin();
+    FixtureValidation fixture;
+    fixture.key = xprv::from_hex(std::string(entry.key()));
+    fixture.raw = xprv::from_hex(std::string(entry.value().as_string()));
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    Slice slice(fixture.raw.data(), fixture.raw.size());
+    catl::xdata::JsonVisitor::Options options;
+    options.ascii_hints = false;
+    catl::xdata::JsonVisitor visitor(protocol, options);
+    catl::xdata::ParserContext ctx(slice);
+    catl::xdata::parse_with_visitor(ctx, protocol, visitor);
+    auto parsed = visitor.get_result();
+    if (!ctx.cursor.empty() || !parsed.is_object())
+        throw std::runtime_error("fixture validation did not decode");
+    for (auto const& field : parsed.as_object())
+    {
+        if (!field.key().empty() &&
+            std::islower(static_cast<unsigned char>(field.key()[0])))
+            continue;
+        fixture.names.emplace_back(field.key());
+    }
+    std::sort(fixture.names.begin(), fixture.names.end());
+    return fixture;
+}
+
+void
+append_vl(Bytes& out, Bytes const& data)
+{
+    catl::shamap::leb128_encode(out, data.size());
+    out.insert(out.end(), data.begin(), data.end());
+}
+
+// 32-byte hash, ledger index 1, 33-byte publisher key.
+Bytes
+anchor_prefix()
+{
+    Bytes payload(69, 0);
+    payload[35] = 1;
+    return payload;
+}
+
+Bytes
+core_with_names(
+    Bytes const& prefix,
+    std::vector<std::pair<Bytes, Bytes>> const& records,
+    std::vector<std::string> const& names)
+{
+    auto payload = prefix;
+    catl::shamap::leb128_encode(payload, records.size());
+    catl::shamap::leb128_encode(payload, 0);
+    catl::shamap::leb128_encode(payload, names.size());
+    for (auto const& name : names)
+    {
+        catl::shamap::leb128_encode(payload, name.size());
+        payload.insert(payload.end(), name.begin(), name.end());
+    }
+    for (auto const& [key, unique] : records)
+    {
+        payload.insert(payload.end(), key.begin(), key.end());
+        append_vl(payload, unique);
+    }
+    return payload;
+}
 }  // namespace
+
+TEST(ParsingStrictness, RejectsTrieRootThatIsNotAnInnerNode)
+{
+    EXPECT_THROW(
+        xprv::from_json(map_proof(
+            boost::json::array{std::string(64, 'A'), boost::json::object{}})),
+        std::runtime_error);
+    EXPECT_THROW(
+        xprv::from_json(map_proof(boost::json::string(std::string(64, 'A')))),
+        std::runtime_error);
+}
+
+TEST(ParsingStrictness, ZeroValidationCoreParses)
+{
+    Bytes core(69, 0);
+    core.push_back(0);
+    ASSERT_EQ(core.size(), 70u);
+    auto const chain = xprv::from_binary(wrap_anchor_core(core));
+    auto const& anchor = std::get<xprv::AnchorData>(chain.steps.at(0));
+    EXPECT_TRUE(anchor.validations.empty());
+}
+
+TEST(ParsingStrictness, RejectsEmptyValidationRecordBesideARealOne)
+{
+    auto const fixture = first_fixture_validation();
+    Bytes const zero(33, 0);
+    auto const payload = core_with_names(
+        anchor_prefix(),
+        {{zero, {}}, {fixture.key, fixture.raw}},
+        fixture.names);
+    auto const error = binary_error(wrap_anchor_core(payload));
+    EXPECT_NE(error.find("canonical STValidation"), std::string::npos) << error;
+}
+
+TEST(ParsingStrictness, RejectsCommonFieldLeftUnique)
+{
+    auto const fixture = first_fixture_validation();
+    auto const payload = core_with_names(
+        anchor_prefix(), {{fixture.key, fixture.raw}}, fixture.names);
+    auto const error = binary_error(wrap_anchor_core(payload));
+    EXPECT_NE(error.find("non-canonical"), std::string::npos) << error;
+}
 
 TEST(ParsingStrictness, RejectsWrongDiagnosticDepth)
 {
@@ -319,7 +470,8 @@ TEST(ParsingStrictness, RejectsUnknownMembersAtEveryLevel)
         return p.at("steps").as_array();
     };
     EXPECT_THROW(
-        xprv::from_json(with_extra([](auto& p) -> auto& { return p.as_object(); })),
+        xprv::from_json(
+            with_extra([](auto& p) -> auto& { return p.as_object(); })),
         std::runtime_error);
     EXPECT_THROW(
         xprv::from_json(with_extra(
@@ -431,10 +583,10 @@ TEST(ParsingStrictness, RejectsMapProofWithoutLeaves)
             reinterpret_cast<char const*>(binary.data()),
             static_cast<std::streamsize>(binary.size()));
     }
-    auto const status = std::system(
-        (std::string("'") + XPRV_TEST_EXECUTABLE + "' verify '" + path.string() +
-         "' >/dev/null 2>&1")
-            .c_str());
+    auto const status =
+        std::system((std::string("'") + XPRV_TEST_EXECUTABLE + "' verify '" +
+                     path.string() + "' >/dev/null 2>&1")
+                        .c_str());
     std::filesystem::remove(path);
     EXPECT_NE(status, 0);
 }
@@ -448,7 +600,8 @@ tx_leaf_with(std::string const& name, boost::json::value value)
         {"TransactionType", "Payment"},
         {"Account", "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"}};
     tx[name] = std::move(value);
-    return {{"tx", std::move(tx)}, {"meta", {{"TransactionResult", "tesSUCCESS"}}}};
+    return {
+        {"tx", std::move(tx)}, {"meta", {{"TransactionResult", "tesSUCCESS"}}}};
 }
 
 bool
@@ -498,9 +651,9 @@ TEST(ParsingStrictness, StructuredValuesCarryExactlyTheirMembers)
     EXPECT_TRUE(leaf_accepted(tx_leaf_with("Paths", paths)));
     paths[0].as_array()[0].as_object()["note"] = "x";
     EXPECT_FALSE(leaf_accepted(tx_leaf_with("Paths", paths)));
-    EXPECT_FALSE(leaf_accepted(
-        tx_leaf_with("Paths", boost::json::array{boost::json::array{
-                                  boost::json::object{}}})));
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with(
+        "Paths",
+        boost::json::array{boost::json::array{boost::json::object{}}})));
 
     boost::json::object bridge{
         {"LockingChainDoor", issuer},
@@ -515,8 +668,8 @@ TEST(ParsingStrictness, StructuredValuesCarryExactlyTheirMembers)
     bridge_issue["IssuingChainIssue"] = {{"currency", "USD"}};
     EXPECT_FALSE(leaf_accepted(tx_leaf_with("XChainBridge", bridge_issue)));
 
-    EXPECT_FALSE(leaf_accepted(tx_leaf_with(
-        "Amendments", boost::json::array{boost::json::object{}})));
+    EXPECT_FALSE(leaf_accepted(
+        tx_leaf_with("Amendments", boost::json::array{boost::json::object{}})));
     EXPECT_FALSE(leaf_accepted(tx_leaf_with("Fee", {{"value", "10"}})));
 }
 

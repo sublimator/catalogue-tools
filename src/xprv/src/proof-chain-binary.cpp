@@ -1,4 +1,5 @@
 #include "xprv/proof-chain-binary.h"
+#include "xprv/anchor-verifier.h"
 #include "xprv/hex-utils.h"
 #include "xprv/proof-chain-json.h"
 
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -425,8 +427,7 @@ encode_anchor_core(AnchorData const& a)
             unique_key_set.insert(key);
     }
 
-    auto common_bytes =
-        catl::xdata::codecs::serialize_object(common, protocol);
+    auto common_bytes = catl::xdata::codecs::serialize_object(common, protocol);
     write_vl(payload, common_bytes);
 
     std::vector<std::string> unique_keys(
@@ -436,9 +437,7 @@ encode_anchor_core(AnchorData const& a)
     {
         leb128_encode(payload, uk.size());
         write_bytes(
-            payload,
-            reinterpret_cast<uint8_t const*>(uk.data()),
-            uk.size());
+            payload, reinterpret_cast<uint8_t const*>(uk.data()), uk.size());
     }
 
     for (auto const& [key_hex, fields] : parsed)
@@ -469,7 +468,8 @@ static void
 decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a);
 
 /// Encode anchor UNL: publisher manifest + blob signature + decomposed VL blob.
-/// This goes at the end — only needed if the verifier doesn't have a cached UNL.
+/// This goes at the end — only needed if the verifier doesn't have a cached
+/// UNL.
 static std::vector<uint8_t>
 encode_anchor_unl(AnchorData const& a)
 {
@@ -505,8 +505,7 @@ encode_anchor_unl(AnchorData const& a)
         auto const& validators = obj.at("validators").as_array();
         if (!validators.empty())
         {
-            val_perm =
-                detect_key_order(validators[0].as_object(), VAL_KEYS, 2);
+            val_perm = detect_key_order(validators[0].as_object(), VAL_KEYS, 2);
         }
         uint8_t shape = (top_perm & 0x07) | ((val_perm & 0x01) << 3);
         payload.push_back(shape);
@@ -523,8 +522,8 @@ encode_anchor_unl(AnchorData const& a)
         for (auto const& v : validators)
         {
             auto const& vobj = v.as_object();
-            auto vpk = hex_decode(std::string_view(
-                vobj.at("validation_public_key").as_string()));
+            auto vpk = hex_decode(
+                std::string_view(vobj.at("validation_public_key").as_string()));
             if (vpk.size() < 33)
                 vpk.resize(33, 0);
             write_bytes(payload, vpk.data(), 33);
@@ -595,9 +594,7 @@ encode_trie_json_node(
     catl::xdata::Protocol const& protocol);
 
 static std::vector<uint8_t>
-encode_tlv_body(
-    ProofChain const& chain,
-    catl::xdata::Protocol const* protocol)
+encode_tlv_body(ProofChain const& chain, catl::xdata::Protocol const* protocol)
 {
     std::vector<uint8_t> out;
     std::vector<uint8_t> unl_tail;  // UNL TLV(s), appended at end
@@ -765,8 +762,7 @@ decode_anchor_core(std::span<const uint8_t> payload)
         Slice unique_slice(unique_bytes.data(), unique_bytes.size());
         catl::xdata::JsonVisitor unique_visitor(protocol);
         catl::xdata::ParserContext unique_ctx(unique_slice);
-        catl::xdata::parse_with_visitor(
-            unique_ctx, protocol, unique_visitor);
+        catl::xdata::parse_with_visitor(unique_ctx, protocol, unique_visitor);
         auto unique_json = unique_visitor.get_result().as_object();
 
         boost::json::object merged = common_json;
@@ -779,6 +775,24 @@ decode_anchor_core(std::span<const uint8_t> payload)
 
         auto full_bytes =
             catl::xdata::codecs::serialize_object(merged, protocol);
+        if (!AnchorVerifier::is_canonical_stvalidation(full_bytes))
+            throw std::runtime_error(
+                "binary proof: validation is not a canonical STValidation");
+        auto const* embedded = merged.if_contains("SigningPubKey");
+        auto const embedded_hex = embedded && embedded->is_string()
+            ? std::string(embedded->as_string())
+            : std::string{};
+        if (embedded_hex.size() != key_hex.size() ||
+            !std::equal(
+                embedded_hex.begin(),
+                embedded_hex.end(),
+                key_hex.begin(),
+                [](char a, char b) {
+                    return std::tolower(static_cast<unsigned char>(a)) ==
+                        std::tolower(static_cast<unsigned char>(b));
+                }))
+            throw std::runtime_error(
+                "binary proof: validation key does not match SigningPubKey");
         a.validations[key_hex] = std::move(full_bytes);
     }
 
@@ -985,8 +999,7 @@ decode_tlv_body(std::span<const uint8_t> data)
 
             default:
                 throw std::runtime_error(
-                    "binary proof: unknown TLV type " +
-                    std::to_string(type));
+                    "binary proof: unknown TLV type " + std::to_string(type));
         }
     }
 
@@ -1001,7 +1014,6 @@ decode_tlv_body(std::span<const uint8_t> data)
     return chain;
 }
 
-
 //------------------------------------------------------------------------------
 // JSON trie -> binary trie
 //------------------------------------------------------------------------------
@@ -1010,8 +1022,9 @@ decode_tlv_body(std::span<const uint8_t> data)
 // independent representations and only the builder fills both: a chain decoded
 // with from_json() has trie_json but no trie_binary, so to_binary() could not
 // serialize it. That made the canonical binary encoding producible only at
-// prove time, with live peers — which blocked offline test-vector generation and
-// left spec §8's "both forms verify identically" untestable in one direction.
+// prove time, with live peers — which blocked offline test-vector generation
+// and left spec §8's "both forms verify identically" untestable in one
+// direction.
 //
 // JSON node discrimination per §2.3:
 //   string (64 hex) -> pruned subtree hash   -> 2-bit code 11

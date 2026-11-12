@@ -1,5 +1,6 @@
 #include "xprv/proof-chain-json.h"
 #include "json-proof-loader.h"
+#include "xprv/anchor-verifier.h"
 #include "xprv/hex-utils.h"
 #include "xprv/network-config.h"
 
@@ -108,15 +109,15 @@ decoded_leaf_json(
     boost::json::value decoded;
     try
     {
-        decoded = is_tx ? catl::xdata::parse_transaction(
-                              full,
-                              protocol,
-                              {.includes_prefix = false, .json_opts = json_opts})
-                        : catl::xdata::parse_leaf(
-                              full,
-                              protocol,
-                              {.includes_prefix = false,
-                               .json_opts = json_opts});
+        decoded = is_tx
+            ? catl::xdata::parse_transaction(
+                  full,
+                  protocol,
+                  {.includes_prefix = false, .json_opts = json_opts})
+            : catl::xdata::parse_leaf(
+                  full,
+                  protocol,
+                  {.includes_prefix = false, .json_opts = json_opts});
     }
     catch (std::exception const& e)
     {
@@ -442,7 +443,8 @@ require_stobject_members(
             std::size_t index = 0;
             for (auto const& element : member.as_array())
             {
-                auto const element_at = at + "[" + std::to_string(index++) + "]";
+                auto const element_at =
+                    at + "[" + std::to_string(index++) + "]";
                 if (!element.is_object() || element.as_object().size() != 1)
                     throw std::runtime_error(
                         "map proof: leaf member " + element_at +
@@ -505,8 +507,8 @@ require_members(
     {
         if (std::find(names.begin(), names.end(), kv.key()) == names.end())
             throw std::runtime_error(
-                "proof JSON: unknown member " + std::string(kv.key()) +
-                " in " + std::string(what));
+                "proof JSON: unknown member " + std::string(kv.key()) + " in " +
+                std::string(what));
     }
     for (auto const name : names)
     {
@@ -598,7 +600,11 @@ anchor_from_json(boost::json::object const& obj)
             }))
             throw std::runtime_error(
                 "proof JSON: validation value must be a hex string");
-        a.validations[key] = from_hex(value);
+        auto const bytes = from_hex(value);
+        if (!AnchorVerifier::is_canonical_stvalidation(bytes))
+            throw std::runtime_error(
+                "proof JSON: validation is not a canonical STValidation");
+        a.validations[key] = bytes;
     }
 
     return a;
@@ -624,8 +630,7 @@ header_from_json(boost::json::object const& obj)
         "header");
     h.seq = static_cast<uint32_t>(
         integer_member(hdr, "ledger_index", kUint32Max, "header"));
-    auto const total_coins =
-        std::string(hdr.at("total_coins").as_string());
+    auto const total_coins = std::string(hdr.at("total_coins").as_string());
     if (total_coins.empty() ||
         !std::all_of(
             total_coins.begin(), total_coins.end(), [](unsigned char c) {
@@ -636,7 +641,8 @@ header_from_json(boost::json::object const& obj)
     h.drops = std::stoull(total_coins);
     h.parent_hash =
         hash_from_hex(std::string(hdr.at("parent_hash").as_string()));
-    h.tx_hash = hash_from_hex(std::string(hdr.at("transaction_hash").as_string()));
+    h.tx_hash =
+        hash_from_hex(std::string(hdr.at("transaction_hash").as_string()));
     h.account_hash =
         hash_from_hex(std::string(hdr.at("account_hash").as_string()));
     h.parent_close_time = static_cast<uint32_t>(
@@ -694,8 +700,7 @@ parse_steps_array(boost::json::array const& arr)
         }
         else
         {
-            throw std::runtime_error(
-                "proof JSON: unknown step type " + type);
+            throw std::runtime_error("proof JSON: unknown step type " + type);
         }
     }
     return chain;

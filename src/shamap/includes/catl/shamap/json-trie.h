@@ -53,6 +53,10 @@ json_trie_branches(boost::json::object const& node, size_t depth)
 inline void
 validate_json_trie(boost::json::value const& node, size_t depth = 0)
 {
+    // §2.3 / §3.7: the root is an inner node. A bare leaf or hash has no
+    // 4-byte branch header and is not a tree root.
+    if (depth == 0 && !node.is_object())
+        throw std::runtime_error("json trie: root must be an inner node");
     if (node.is_string())
     {
         if (!is_trie_hash(node.as_string()))

@@ -768,16 +768,37 @@ def describe_tx_leaves(
 
 
 def parse_validation(val_hex: str) -> ParsedValidation | None:
-    """Decode an STValidation, return signing data with VAL\\0 prefix."""
+    """Decode a canonical STValidation, or None when the bytes are not one.
+
+    A complete entry round-trips under the XRPL codec and carries LedgerHash,
+    Signature, and a 33-byte SigningPubKey with prefix ED, 02, or 03. Anything
+    else is not a vote to skip: the anchor is invalid.
+    """
     try:
+        raw = unhexlify(val_hex)
         decoded = decode(val_hex)
+        if bytes.fromhex(encode(decoded)) != raw:
+            return None
     except Exception:
         return None
 
     signing_key = decoded.get("SigningPubKey", "")
     signature = decoded.get("Signature", "")
     ledger_hash = decoded.get("LedgerHash", "")
-    if not signing_key or not signature or not ledger_hash:
+    if (
+        not isinstance(signing_key, str)
+        or not isinstance(signature, str)
+        or not isinstance(ledger_hash, str)
+    ):
+        return None
+    signing_key = signing_key.upper()
+    ledger_hash = ledger_hash.upper()
+    if (
+        len(signing_key) != 66
+        or signing_key[:2] not in {"ED", "02", "03"}
+        or len(ledger_hash) != 64
+        or not signature
+    ):
         return None
 
     # encode_for_signing strips sfSignature and prefixes with STX\0.
@@ -785,16 +806,15 @@ def parse_validation(val_hex: str) -> ParsedValidation | None:
     signing_hex = encode_for_signing(decoded)
     signing_bytes = PREFIX_VALIDATION + unhexlify(signing_hex)[4:]
 
+    flags = decoded.get("Flags")
+    seq = decoded.get("LedgerSequence")
     return ParsedValidation(
-        ledger_hash=ledger_hash.upper(),
-        signing_key=signing_key.upper(),
+        ledger_hash=ledger_hash,
+        signing_key=signing_key,
         signature=unhexlify(signature),
         signing_data=signing_bytes,
-        full=isinstance(decoded.get("Flags"), int)
-        and bool(decoded["Flags"] & FULL_VALIDATION_FLAG),
-        ledger_seq=decoded["LedgerSequence"]
-        if isinstance(decoded.get("LedgerSequence"), int)
-        else None,
+        full=isinstance(flags, int) and not isinstance(flags, bool) and bool(flags & FULL_VALIDATION_FLAG),
+        ledger_seq=seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
     )
 
 
@@ -1227,12 +1247,11 @@ def verify_anchor(
     counted_seqs: set[int | None] = set()
 
     for key_hex, val_hex in validations.items():
-        try:
-            parsed = parse_validation(val_hex) if isinstance(val_hex, str) else None
-        except Exception:
-            parsed = None
+        parsed = parse_validation(val_hex) if isinstance(val_hex, str) else None
         if not parsed:
-            continue
+            return AnchorResult(
+                ok=False, message="validation is not a canonical STValidation"
+            )
         if _upper_hex(key_hex) != parsed.signing_key:
             return AnchorResult(
                 ok=False, message="validation map key does not match SigningPubKey"
@@ -1291,6 +1310,8 @@ def verify_anchor(
 
 def validate_json_trie(node: Any, depth: int = 0) -> None:
     """Enforce the same node grammar before hashing, enumeration or display."""
+    if depth == 0 and not isinstance(node, dict):
+        raise ValueError("trie root must be an inner node")
     if isinstance(node, str):
         if len(node) != 64 or any(c not in "0123456789abcdefABCDEF" for c in node):
             raise ValueError("trie placeholder must be a 32-byte hex hash")
@@ -1975,10 +1996,12 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
 
         merged = dict(common_fields)
         merged.update(unique_fields)
+        full_hex = encode(merged)
+        if parse_validation(full_hex) is None:
+            raise ValueError("validation is not a canonical STValidation")
         if merged.get("SigningPubKey", "").upper() != vkey:
             raise ValueError("binary validation key does not match SigningPubKey")
         all_fields.append(merged)
-        full_hex = encode(merged)
         validations[vkey] = full_hex
 
     if pos != len(payload):

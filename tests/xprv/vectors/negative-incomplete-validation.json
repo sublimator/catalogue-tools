@@ -1,0 +1,17 @@
+{
+  "name": "incomplete-validation",
+  "violates": "spec §2.1: every validations entry is a canonical STValidation",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/validations/000000000000000000000000000000000000000000000000000000000000000000",
+      "value": "00"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "canonical STValidation"
+  }
+}
