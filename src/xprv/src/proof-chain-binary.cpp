@@ -163,6 +163,20 @@ hex_decode(std::string_view hex)
     return result;
 }
 
+static bool
+hex_equal_ci(std::string_view a, std::string_view b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    }
+    return true;
+}
+
 static std::string
 hex_encode(const uint8_t* data, size_t len)
 {
@@ -372,7 +386,9 @@ encode_anchor_core(AnchorData const& a)
     for (auto const& [key_hex, val_bytes] : a.validations)
     {
         Slice slice(val_bytes.data(), val_bytes.size());
-        catl::xdata::JsonVisitor visitor(protocol);
+        catl::xdata::JsonVisitor::Options options;
+        options.ascii_hints = false;
+        catl::xdata::JsonVisitor visitor(protocol, options);
         catl::xdata::ParserContext ctx(slice);
         catl::xdata::parse_with_visitor(ctx, protocol, visitor);
         auto result = visitor.get_result();
@@ -388,10 +404,7 @@ encode_anchor_core(AnchorData const& a)
     for (auto const& [_, fields] : parsed)
     {
         for (auto const& [key, val] : fields)
-        {
-            if (!key.empty() && !std::islower(key[0]))
-                all_keys.insert(std::string(key));
-        }
+            all_keys.insert(std::string(key));
     }
 
     // A field is common if it appears in ALL validations with the
@@ -442,6 +455,14 @@ encode_anchor_core(AnchorData const& a)
 
     for (auto const& [key_hex, fields] : parsed)
     {
+        auto const* embedded = fields.if_contains("SigningPubKey");
+        auto const embedded_hex = embedded && embedded->is_string()
+            ? std::string(embedded->as_string())
+            : std::string{};
+        if (!hex_equal_ci(embedded_hex, key_hex))
+            throw std::runtime_error(
+                "binary proof: validation key does not match SigningPubKey");
+
         auto key_bytes = hex_decode(key_hex);
         if (key_bytes.size() < 33)
             key_bytes.resize(33, 0);
@@ -731,7 +752,9 @@ decode_anchor_core(std::span<const uint8_t> payload)
     auto common_bytes = read_vl(payload, pos);
 
     Slice common_slice(common_bytes.data(), common_bytes.size());
-    catl::xdata::JsonVisitor common_visitor(protocol);
+    catl::xdata::JsonVisitor::Options options;
+    options.ascii_hints = false;
+    catl::xdata::JsonVisitor common_visitor(protocol, options);
     catl::xdata::ParserContext common_ctx(common_slice);
     catl::xdata::parse_with_visitor(common_ctx, protocol, common_visitor);
     auto common_json = common_visitor.get_result().as_object();
@@ -760,18 +783,14 @@ decode_anchor_core(std::span<const uint8_t> payload)
         auto unique_bytes = read_vl(payload, pos);
 
         Slice unique_slice(unique_bytes.data(), unique_bytes.size());
-        catl::xdata::JsonVisitor unique_visitor(protocol);
+        catl::xdata::JsonVisitor unique_visitor(protocol, options);
         catl::xdata::ParserContext unique_ctx(unique_slice);
         catl::xdata::parse_with_visitor(unique_ctx, protocol, unique_visitor);
         auto unique_json = unique_visitor.get_result().as_object();
 
         boost::json::object merged = common_json;
         for (auto const& [k, v] : unique_json)
-        {
-            if (!k.empty() && std::islower(k[0]))
-                continue;
             merged[k] = v;
-        }
 
         auto full_bytes =
             catl::xdata::codecs::serialize_object(merged, protocol);
@@ -782,15 +801,7 @@ decode_anchor_core(std::span<const uint8_t> payload)
         auto const embedded_hex = embedded && embedded->is_string()
             ? std::string(embedded->as_string())
             : std::string{};
-        if (embedded_hex.size() != key_hex.size() ||
-            !std::equal(
-                embedded_hex.begin(),
-                embedded_hex.end(),
-                key_hex.begin(),
-                [](char a, char b) {
-                    return std::tolower(static_cast<unsigned char>(a)) ==
-                        std::tolower(static_cast<unsigned char>(b));
-                }))
+        if (!hex_equal_ci(embedded_hex, key_hex))
             throw std::runtime_error(
                 "binary proof: validation key does not match SigningPubKey");
         a.validations[key_hex] = std::move(full_bytes);

@@ -1,12 +1,17 @@
-#include "xprv/proof-chain-json.h"
 #include "xprv/hex-utils.h"
 #include "xprv/network-config.h"
+#include "xprv/proof-chain-json.h"
 
 #include <catl/shamap/binary-trie.h>
 #include <catl/xdata/serialize.h>
 
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
+
+#include <fstream>
+#include <iterator>
+#include <sstream>
+#include <utility>
 
 namespace {
 
@@ -143,8 +148,8 @@ TEST(ProofChainJson, LeafCallbackDecodesRoundTrippingLeaf)
     }
     ASSERT_NE(tx_trie, nullptr);
     auto const& leaf = first_leaf(*tx_trie);
-    auto const bytes = catl::xdata::serialize_transaction(
-        leaf.at(1).as_object(), protocol);
+    auto const bytes =
+        catl::xdata::serialize_transaction(leaf.at(1).as_object(), protocol);
     auto const key = xprv::hash_from_hex(std::string(leaf.at(0).as_string()));
     boost::intrusive_ptr<MmapItem> const item(
         OwnedItem::create(key, Slice(bytes.data(), bytes.size())));
@@ -167,7 +172,6 @@ TEST(ProofChainJson, LeafCallbackRefusesUndecodableLeaf)
     auto const callback = xprv::make_proof_leaf_callback(protocol, false);
     EXPECT_THROW(callback(*item), xprv::JsonFormUnavailable);
 }
-
 
 namespace {
 
@@ -218,20 +222,15 @@ ledger_hashes_sle()
 TEST(ProofChainJson, BinaryTrieDecodesToObjectLeaf)
 {
     auto const protocol = xprv::NetworkConfig::for_network(0).load_protocol();
-    auto const bytes = catl::xdata::serialize_leaf(ledger_hashes_sle(), protocol);
+    auto const bytes =
+        catl::xdata::serialize_leaf(ledger_hashes_sle(), protocol);
     auto const key = xprv::hash_from_hex(std::string(64, 'A'));
     auto chain = chain_with_binary_trie(
-        0,
-        xprv::TrieData::TreeType::state,
-        one_leaf_trie(10, key, bytes));
+        0, xprv::TrieData::TreeType::state, one_leaf_trie(10, key, bytes));
 
     auto const proof = xprv::to_json(chain);
-    auto const& trie = proof.at("steps")
-                           .as_array()
-                           .front()
-                           .as_object()
-                           .at("trie")
-                           .as_object();
+    auto const& trie =
+        proof.at("steps").as_array().front().as_object().at("trie").as_object();
     EXPECT_EQ(trie.at("__depth__").as_int64(), 0);
     auto const& leaf = trie.at("A").as_array();
     EXPECT_EQ(std::string(leaf.at(0).as_string()), xprv::upper_hex(key));
@@ -259,7 +258,8 @@ TEST(ProofChainJson, BinaryTrieUndecodableLeafFails)
     {
         auto const message = std::string(e.what());
         EXPECT_NE(message.find("did not decode"), std::string::npos) << message;
-        EXPECT_EQ(message.find("did not re-encode"), std::string::npos) << message;
+        EXPECT_EQ(message.find("did not re-encode"), std::string::npos)
+            << message;
     }
 }
 
@@ -279,7 +279,8 @@ TEST(ProofChainJson, BinaryTrieRoundTripMismatchFails)
     catch (std::exception const& e)
     {
         auto const message = std::string(e.what());
-        EXPECT_NE(message.find("did not re-encode"), std::string::npos) << message;
+        EXPECT_NE(message.find("did not re-encode"), std::string::npos)
+            << message;
     }
 }
 
@@ -292,12 +293,8 @@ TEST(ProofChainJson, ExistingJsonTrieIsLeftAlone)
     trie.trie_binary = {0xFF, 0xFF, 0xFF, 0xFF};
     chain.steps.emplace_back(std::move(trie));
     auto const proof = xprv::to_json(chain);
-    auto const& node = proof.at("steps")
-                           .as_array()
-                           .front()
-                           .as_object()
-                           .at("trie")
-                           .as_object();
+    auto const& node =
+        proof.at("steps").as_array().front().as_object().at("trie").as_object();
     EXPECT_EQ(node.at("__depth__").as_int64(), 0);
     EXPECT_EQ(node.size(), 1u);
 }
@@ -340,14 +337,14 @@ TEST(ProofChainJson, XahauBinaryLeafUsesXahauProtocol)
 
     // XRPL definitions have no Invoke name. The same bytes still re-encode,
     // and the type comes back as its numeric code rather than the name.
-    auto xrpl_chain = chain_with_binary_trie(
-        0, xprv::TrieData::TreeType::tx, binary);
+    auto xrpl_chain =
+        chain_with_binary_trie(0, xprv::TrieData::TreeType::tx, binary);
     auto const xrpl_type = tx_type(xrpl_chain);
     EXPECT_FALSE(xrpl_type.is_string());
     EXPECT_EQ(xrpl_type.to_number<int>(), 99);
 
-    auto xahau_chain = chain_with_binary_trie(
-        21337, xprv::TrieData::TreeType::tx, binary);
+    auto xahau_chain =
+        chain_with_binary_trie(21337, xprv::TrieData::TreeType::tx, binary);
     auto const xahau_type = tx_type(xahau_chain);
     EXPECT_EQ(std::string(xahau_type.as_string()), "Invoke");
 }
@@ -385,8 +382,7 @@ TEST(ProofChainJson, ListLessAnchorRoundTripsThroughJsonAndBinary)
     EXPECT_TRUE(anchor.blob.empty());
 
     auto const json = xprv::to_json(chain);
-    auto const& unl =
-        json.at("steps").as_array().front().at("unl").as_object();
+    auto const& unl = json.at("steps").as_array().front().at("unl").as_object();
     EXPECT_EQ(unl.size(), 1u);
     EXPECT_TRUE(unl.contains("public_key"));
 
@@ -542,7 +538,8 @@ chain_with_binary_trie(std::vector<uint8_t> trie)
 
 TEST(ProofChainJson, BinaryTrieConversionIsDepthBounded)
 {
-    EXPECT_NO_THROW(xprv::to_json(chain_with_binary_trie(nested_binary_trie(64))));
+    EXPECT_NO_THROW(
+        xprv::to_json(chain_with_binary_trie(nested_binary_trie(64))));
     EXPECT_THROW(
         xprv::to_json(chain_with_binary_trie(nested_binary_trie(65))),
         std::runtime_error);
@@ -551,6 +548,71 @@ TEST(ProofChainJson, BinaryTrieConversionIsDepthBounded)
 // Witness for the builder's exact re-encode check: a leaf that decodes but does
 // not re-encode to its own bytes (here, a trailing byte the codec drops) has no
 // JSON form.
+namespace {
+
+boost::json::object
+load_proof_fixture()
+{
+    std::ifstream in(
+        std::string(PROJECT_ROOT) + "tests/xprv/fixture/proof.json");
+    if (!in)
+        throw std::runtime_error("cannot open XPRV proof fixture");
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    return boost::json::parse(buffer.str()).as_object();
+}
+
+}  // namespace
+
+TEST(ProofChainJson, RejectsValidationKeyThatIsNotTheSigningPubKey)
+{
+    auto proof = load_proof_fixture();
+    auto& validations = proof.at("steps")
+                            .as_array()
+                            .front()
+                            .as_object()
+                            .at("validations")
+                            .as_object();
+    auto const value = validations.begin()->value();
+    validations.erase(validations.begin());
+    validations[std::string("02") + std::string(64, 'A')] = value;
+    try
+    {
+        xprv::from_json(proof);
+        FAIL()
+            << "a validation map key other than SigningPubKey must be rejected";
+    }
+    catch (std::runtime_error const& e)
+    {
+        EXPECT_NE(
+            std::string(e.what()).find("SigningPubKey"), std::string::npos)
+            << e.what();
+    }
+}
+
+TEST(ProofChainJson, ConvertRejectsValidationKeyThatIsNotTheSigningPubKey)
+{
+    auto chain = xprv::from_json(load_proof_fixture());
+    auto& anchor = std::get<xprv::AnchorData>(chain.steps.front());
+    ASSERT_GE(anchor.validations.size(), 2u);
+    auto it = anchor.validations.begin();
+    std::swap(it->second, std::next(it)->second);
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    xprv::BinaryOptions opts;
+    opts.protocol = &protocol;
+    try
+    {
+        xprv::to_binary(chain, opts);
+        FAIL() << "convert must not emit a binary proof with a mismatched key";
+    }
+    catch (std::runtime_error const& e)
+    {
+        EXPECT_NE(
+            std::string(e.what()).find("SigningPubKey"), std::string::npos)
+            << e.what();
+    }
+}
+
 TEST(ProofChainJson, LeafCallbackRefusesLeafThatDoesNotReencodeExactly)
 {
     auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();

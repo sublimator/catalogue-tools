@@ -771,8 +771,9 @@ def parse_validation(val_hex: str) -> ParsedValidation | None:
     """Decode a canonical STValidation, or None when the bytes are not one.
 
     A complete entry round-trips under the XRPL codec and carries LedgerHash,
-    Signature, and a 33-byte SigningPubKey with prefix ED, 02, or 03. Anything
-    else is not a vote to skip: the anchor is invalid.
+    a Signature field, and a 33-byte SigningPubKey with prefix ED, 02, or 03.
+    The Signature blob may be empty: that is a vote-filter failure, not a
+    missing field. Anything else is not a vote to skip: the anchor is invalid.
     """
     try:
         raw = unhexlify(val_hex)
@@ -782,9 +783,11 @@ def parse_validation(val_hex: str) -> ParsedValidation | None:
     except Exception:
         return None
 
-    signing_key = decoded.get("SigningPubKey", "")
-    signature = decoded.get("Signature", "")
-    ledger_hash = decoded.get("LedgerHash", "")
+    if "Signature" not in decoded:
+        return None
+    signing_key = decoded.get("SigningPubKey")
+    signature = decoded.get("Signature")
+    ledger_hash = decoded.get("LedgerHash")
     if (
         not isinstance(signing_key, str)
         or not isinstance(signature, str)
@@ -797,21 +800,25 @@ def parse_validation(val_hex: str) -> ParsedValidation | None:
         len(signing_key) != 66
         or signing_key[:2] not in {"ED", "02", "03"}
         or len(ledger_hash) != 64
-        or not signature
     ):
         return None
 
-    # encode_for_signing strips sfSignature and prefixes with STX\0.
-    # Swap to VAL\0 for validation signing data.
-    signing_hex = encode_for_signing(decoded)
-    signing_bytes = PREFIX_VALIDATION + unhexlify(signing_hex)[4:]
+    # §5.1: VAL\0 || canonical object with only Signature removed.
+    # encode_for_signing also drops non-signing fields (TxnSignature among
+    # them). A validation signs every remaining field.
+    try:
+        without_sig = {k: val for k, val in decoded.items() if k != "Signature"}
+        signing_bytes = PREFIX_VALIDATION + unhexlify(encode(without_sig))
+        signature_bytes = unhexlify(signature)
+    except Exception:
+        return None
 
     flags = decoded.get("Flags")
     seq = decoded.get("LedgerSequence")
     return ParsedValidation(
         ledger_hash=ledger_hash,
         signing_key=signing_key,
-        signature=unhexlify(signature),
+        signature=signature_bytes,
         signing_data=signing_bytes,
         full=isinstance(flags, int) and not isinstance(flags, bool) and bool(flags & FULL_VALIDATION_FLAG),
         ledger_seq=seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
@@ -1405,6 +1412,11 @@ def validate_json_steps(steps: Any) -> None:
                 if len(key) != 66 or any(c not in "0123456789ABCDEF" for c in key):
                     raise ValueError("validation map keys must be uppercase 33-byte hex")
                 _require_hex(value, "validation value")
+                parsed = parse_validation(value)
+                if parsed is None:
+                    raise ValueError("validation is not a canonical STValidation")
+                if parsed.signing_key != key:
+                    raise ValueError("validation map key does not match SigningPubKey")
         elif kind == "ledger_header":
             _require_members(step, {"type", "header"}, "ledger_header step")
             header = step.get("header")

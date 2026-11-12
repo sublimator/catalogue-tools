@@ -38,7 +38,9 @@ verify_secp256k1(
     std::span<const uint8_t> signature,
     std::span<const uint8_t> hash)
 {
-    if (public_key.size() != 33 || hash.size() != 32)
+    // libsecp256k1 aborts when the DER pointer is null. An empty span's
+    // data() is null, so an empty signature has to fail before the parse.
+    if (public_key.size() != 33 || signature.empty() || hash.size() != 32)
         return false;
 
     auto* ctx = get_verify_context();
@@ -90,13 +92,13 @@ verify_message(
     auto type = detect_key_type(public_key_33);
     switch (type)
     {
-        case KeyType::secp256k1:
-        {
+        case KeyType::secp256k1: {
             // secp256k1 verifies against SHA512-Half of the message
             unsigned char full_hash[64];
             crypto_hash_sha512(full_hash, message.data(), message.size());
             return verify_secp256k1(
-                public_key_33, signature,
+                public_key_33,
+                signature,
                 std::span<const uint8_t>(full_hash, 32));
         }
         case KeyType::ed25519:

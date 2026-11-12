@@ -1,13 +1,21 @@
 #include "xprv/anchor-verifier.h"
+#include "xprv/hex-utils.h"
 
 #include <catl/core/base64.h>
+#include <catl/crypto/sig-verify.h>
+#include <catl/xdata/json-visitor.h>
+#include <catl/xdata/parser-context.h>
+#include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
+#include <catl/xdata/serialize.h>
 
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
 
+#include <cctype>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -104,6 +112,172 @@ TEST(AnchorVerifier, RejectsAnchorOnlyExpirationNotAfterEffective)
     EXPECT_FALSE(result.verified);
     EXPECT_EQ(result.error, "UNL blob validity interval is invalid")
         << result.error;
+}
+
+namespace {
+
+catl::xdata::Protocol const&
+xrpl_protocol()
+{
+    static auto const protocol =
+        catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    return protocol;
+}
+
+boost::json::object
+decode_validation(std::vector<uint8_t> const& raw)
+{
+    Slice slice(raw.data(), raw.size());
+    catl::xdata::JsonVisitor::Options options;
+    options.ascii_hints = false;
+    catl::xdata::JsonVisitor visitor(xrpl_protocol(), options);
+    catl::xdata::ParserContext ctx(slice);
+    catl::xdata::parse_with_visitor(ctx, xrpl_protocol(), visitor);
+    auto parsed = visitor.get_result();
+    if (!ctx.cursor.empty() || !parsed.is_object())
+        throw std::runtime_error("validation did not parse");
+    return parsed.as_object();
+}
+
+std::string
+upper_hex(std::vector<uint8_t> const& bytes)
+{
+    auto hex = xprv::bytes_hex(bytes);
+    for (char& c : hex)
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return hex;
+}
+
+std::vector<uint8_t>
+first_validation_bytes(boost::json::object const& anchor)
+{
+    auto const& validations = anchor.at("validations").as_object();
+    return xprv::from_hex(
+        std::string(validations.begin()->value().as_string()));
+}
+
+}  // namespace
+
+TEST(AnchorVerifier, EmptySignatureDoesNotAbortAtTheCryptoBoundary)
+{
+    std::vector<uint8_t> key(33, 0x11);
+    std::vector<uint8_t> hash(32, 0x22);
+    std::vector<uint8_t> empty;
+    key[0] = 0x02;
+    EXPECT_FALSE(catl::crypto::verify_secp256k1(key, empty, hash));
+    EXPECT_FALSE(catl::crypto::verify_message(key, empty, hash));
+    key[0] = 0x03;
+    EXPECT_FALSE(catl::crypto::verify_message(key, empty, hash));
+    key[0] = 0xED;
+    EXPECT_FALSE(catl::crypto::verify_message(key, empty, hash));
+}
+
+TEST(AnchorVerifier, ValidationPreimageDropsOnlySignature)
+{
+    auto const base =
+        decode_validation(first_validation_bytes(load_anchor_fixture()));
+    auto const expect_body = [](boost::json::object obj) {
+        obj.erase("Signature");
+        return catl::xdata::codecs::serialize_object(obj, xrpl_protocol());
+    };
+    auto const transaction_body = [](boost::json::object obj) {
+        obj.erase("Signature");
+        return catl::xdata::codecs::serialize_object(
+            obj, xrpl_protocol(), true);
+    };
+    auto const check = [&](boost::json::object const& obj, bool txn_differs) {
+        auto const bytes =
+            catl::xdata::codecs::serialize_object(obj, xrpl_protocol());
+        auto const body =
+            xprv::AnchorVerifier::validation_signing_body_for_test(bytes);
+        EXPECT_FALSE(body.empty());
+        EXPECT_EQ(body, expect_body(obj));
+        if (txn_differs)
+            EXPECT_NE(body, transaction_body(obj));
+        else
+            EXPECT_EQ(body, transaction_body(obj));
+    };
+
+    check(base, false);
+    auto with_txn = base;
+    with_txn["TxnSignature"] = "AA";
+    check(with_txn, true);
+    auto with_amendments = base;
+    std::string amendment;
+    for (int i = 0; i < 32; ++i)
+        amendment += "12";
+    with_amendments["Amendments"] =
+        boost::json::array{boost::json::string(amendment)};
+    check(with_amendments, false);
+}
+
+TEST(AnchorVerifier, TxnSignatureInjectionDropsTheQuorum)
+{
+    auto anchor = load_anchor_fixture();
+    ASSERT_TRUE(verify(anchor, xrpl_publisher).verified);
+    auto& validations = anchor.at("validations").as_object();
+    for (auto& validation : validations)
+    {
+        auto fields = decode_validation(
+            xprv::from_hex(std::string(validation.value().as_string())));
+        fields["TxnSignature"] = "DEADBEEF";
+        auto const bytes =
+            catl::xdata::codecs::serialize_object(fields, xrpl_protocol());
+        EXPECT_TRUE(xprv::AnchorVerifier::is_canonical_stvalidation(bytes));
+        validation.value() = upper_hex(bytes);
+    }
+    auto const result = verify(anchor, xrpl_publisher);
+    EXPECT_FALSE(result.verified);
+    EXPECT_EQ(result.error, "quorum not met") << result.error;
+}
+
+TEST(AnchorVerifier, PresentEmptySignatureIsAnUncountedVote)
+{
+    auto anchor = load_anchor_fixture();
+    ASSERT_TRUE(verify(anchor, xrpl_publisher).verified);
+    auto fields = decode_validation(first_validation_bytes(anchor));
+    auto const ledger_hash = std::string(fields.at("LedgerHash").as_string());
+
+    auto const add = [&](std::string key,
+                         std::optional<std::string> signature) {
+        auto trial = anchor;
+        auto obj = fields;
+        obj["SigningPubKey"] = key;
+        obj["LedgerHash"] = ledger_hash;
+        if (signature)
+            obj["Signature"] = *signature;
+        else
+            obj.erase("Signature");
+        auto const bytes =
+            catl::xdata::codecs::serialize_object(obj, xrpl_protocol());
+        trial.at("validations").as_object()[key] = upper_hex(bytes);
+        return std::pair{bytes, std::move(trial)};
+    };
+
+    auto const secp = std::string("02") + std::string(64, 'A');
+    auto const ed = std::string("ED") + std::string(64, 'B');
+    for (auto const& key : {secp, ed})
+    {
+        auto const [empty_bytes, empty_anchor] = add(key, "");
+        EXPECT_TRUE(
+            xprv::AnchorVerifier::is_canonical_stvalidation(empty_bytes));
+        auto const empty = verify(empty_anchor, xrpl_publisher);
+        EXPECT_TRUE(empty.verified) << key << " " << empty.error;
+
+        auto const [one_bytes, one_anchor] = add(key, "00");
+        EXPECT_TRUE(xprv::AnchorVerifier::is_canonical_stvalidation(one_bytes));
+        auto const one = verify(one_anchor, xrpl_publisher);
+        EXPECT_TRUE(one.verified) << key << " " << one.error;
+
+        auto const [absent_bytes, absent_anchor] = add(key, std::nullopt);
+        EXPECT_FALSE(
+            xprv::AnchorVerifier::is_canonical_stvalidation(absent_bytes));
+        auto const absent = verify(absent_anchor, xrpl_publisher);
+        EXPECT_FALSE(absent.verified);
+        EXPECT_NE(
+            absent.error.find("canonical STValidation"), std::string::npos)
+            << absent.error;
+    }
 }
 
 TEST(AnchorVerifier, RejectsIncompleteValidationBesideAQuorum)

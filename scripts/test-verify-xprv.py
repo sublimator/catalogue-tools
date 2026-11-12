@@ -43,6 +43,11 @@ def keypair(n: int) -> tuple[str, str]:
     return derive_keypair(seed)
 
 
+def secp_keypair(n: int) -> tuple[str, str]:
+    seed = generate_seed(entropy=f"{n:032x}", algorithm=CryptoAlgorithm.SECP256K1)
+    return derive_keypair(seed)
+
+
 def sign_manifest(fields: dict, master: tuple[str, str], signing: tuple[str, str] | None) -> bytes:
     """Sign arbitrary manifest fields; validly signed even when the shape is not."""
     data = v.manifest_signing_data(fields)
@@ -396,8 +401,87 @@ class AnchorVerificationTests(unittest.TestCase):
         f = Fixture()
         anchor = f.anchor()
         spare = keypair(250)
-        anchor["validations"][spare[0]] = make_validation(spare, "AB" * 32)
+        anchor["validations"][spare[0]] = make_validation(spare, anchor["ledger_hash"])
         self.assertTrue(self.verify(anchor, f.trusted_key).ok)
+
+    def test_signing_preimage_drops_only_signature(self) -> None:
+        first = next(iter(Fixture().anchor()["validations"].values()))
+        cases = (
+            ({}, False),
+            ({"TxnSignature": "AA"}, True),
+            ({"Amendments": ["12" * 32]}, False),
+        )
+        for extra, transaction_encoding_differs in cases:
+            fields = decode(first)
+            fields.update(extra)
+            raw = encode(fields)
+            self.assertEqual(decode(raw), fields)
+            parsed = v.parse_validation(raw)
+            self.assertIsNotNone(parsed)
+            unsigned = {k: val for k, val in fields.items() if k != "Signature"}
+            self.assertEqual(parsed.signing_data[4:], unhexlify(encode(unsigned)))
+            transaction_body = unhexlify(encode_for_signing(fields))[4:]
+            if transaction_encoding_differs:
+                self.assertNotEqual(parsed.signing_data[4:], transaction_body)
+            else:
+                self.assertEqual(parsed.signing_data[4:], transaction_body)
+
+    def test_txn_signature_field_is_covered_by_the_validation_preimage(self) -> None:
+        f = Fixture()
+        f.voters = f.signers[:4]  # exactly the quorum, so one lost vote fails it
+        anchor = f.anchor()
+        self.assertTrue(self.verify(anchor, f.trusted_key).ok)
+        signer = f.signers[0]
+        fields = {
+            "Flags": 0x80000001,
+            "LedgerSequence": 1000,
+            "SigningTime": 800000000,
+            "LedgerHash": anchor["ledger_hash"],
+            "SigningPubKey": signer[0],
+            "TxnSignature": "AA",
+        }
+        covered = dict(fields)
+        covered["Signature"] = sign(
+            v.PREFIX_VALIDATION + unhexlify(encode(fields)), signer[1]
+        )
+        anchor["validations"][signer[0]] = encode(covered)
+        self.assertTrue(self.verify(anchor, f.trusted_key).ok, "preimage must cover TxnSignature")
+        dropped = dict(fields)
+        dropped["Signature"] = sign(
+            v.PREFIX_VALIDATION + unhexlify(encode_for_signing(fields))[4:], signer[1]
+        )
+        anchor["validations"][signer[0]] = encode(dropped)
+        self.assertRejected(self.verify(anchor, f.trusted_key), "quorum not met")
+
+    def test_present_empty_signature_is_an_uncounted_vote(self) -> None:
+        f = Fixture()
+        anchor = f.anchor()
+        self.assertTrue(self.verify(anchor, f.trusted_key).ok)
+        base = decode(make_validation(keypair(250), anchor["ledger_hash"]))
+        keys = (keypair(250)[0], secp_keypair(251)[0])
+        self.assertTrue(keys[0].startswith("ED"))
+        self.assertIn(keys[1][:2], {"02", "03"})
+
+        def with_signature(key: str, signature: str | None) -> dict:
+            fields = dict(base)
+            fields["SigningPubKey"] = key
+            if signature is None:
+                fields.pop("Signature")
+            else:
+                fields["Signature"] = signature
+            raw = encode(fields)
+            self.assertEqual(decode(raw), fields)
+            trial = copy.deepcopy(anchor)
+            trial["validations"][key] = raw
+            return trial
+
+        for key in keys:
+            self.assertTrue(self.verify(with_signature(key, ""), f.trusted_key).ok)
+            self.assertTrue(self.verify(with_signature(key, "00"), f.trusted_key).ok)
+            self.assertRejected(
+                self.verify(with_signature(key, None), f.trusted_key),
+                "not a canonical STValidation",
+            )
 
 
 class TrustViewOverlayTests(unittest.TestCase):
@@ -677,6 +761,17 @@ class ProofBindingTests(unittest.TestCase):
         f = Fixture()
         steps = f.proof()["steps"]
         self.assertFailsWith(self.verify(steps, f.trusted_key, 0), "proof must be an object")
+
+    def test_validation_key_mismatch_is_rejected_at_parse(self) -> None:
+        f = Fixture()
+        proof = f.proof()
+        validations = proof["steps"][0]["validations"]
+        key, raw = next(iter(validations.items()))
+        del validations[key]
+        validations["ED" + "AB" * 32] = raw
+        self.assertFailsWith(
+            self.verify(proof, f.trusted_key, 0), "does not match SigningPubKey"
+        )
 
     def test_rejects_malformed_field_types(self) -> None:
         f = Fixture()

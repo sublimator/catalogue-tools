@@ -6,8 +6,12 @@
 
 #include <catl/shamap/binary-trie.h>
 #include <catl/shamap/json-trie.h>
+#include <catl/xdata/json-visitor.h>
 #include <catl/xdata/parse_leaf.h>
 #include <catl/xdata/parse_transaction.h>
+#include <catl/xdata/parser-context.h>
+#include <catl/xdata/parser.h>
+#include <catl/xdata/protocol.h>
 #include <catl/xdata/serialize.h>
 
 #include <algorithm>
@@ -497,6 +501,39 @@ to_json(ProofChain const& chain)
 //------------------------------------------------------------------------------
 
 // The JSON form is closed (§2.4): an object carries exactly its members.
+static bool
+hex_equal_ci(std::string_view a, std::string_view b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    }
+    return true;
+}
+
+static std::string
+embedded_signing_pub_key(std::vector<uint8_t> const& raw)
+{
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    Slice slice(raw.data(), raw.size());
+    catl::xdata::JsonVisitor::Options options;
+    options.ascii_hints = false;
+    catl::xdata::JsonVisitor visitor(protocol, options);
+    catl::xdata::ParserContext ctx(slice);
+    catl::xdata::parse_with_visitor(ctx, protocol, visitor);
+    auto parsed = visitor.get_result();
+    if (!ctx.cursor.empty() || !parsed.is_object())
+        return {};
+    auto const* key = parsed.as_object().if_contains("SigningPubKey");
+    if (!key || !key->is_string())
+        return {};
+    return std::string(key->as_string());
+}
+
 static void
 require_members(
     boost::json::object const& obj,
@@ -604,6 +641,9 @@ anchor_from_json(boost::json::object const& obj)
         if (!AnchorVerifier::is_canonical_stvalidation(bytes))
             throw std::runtime_error(
                 "proof JSON: validation is not a canonical STValidation");
+        if (!hex_equal_ci(embedded_signing_pub_key(bytes), key))
+            throw std::runtime_error(
+                "proof JSON: validation key does not match SigningPubKey");
         a.validations[key] = bytes;
     }
 

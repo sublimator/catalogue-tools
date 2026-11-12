@@ -73,10 +73,18 @@ public:
             std::vector<std::vector<uint8_t>>());
 
     /// True when `raw` is a complete canonical XRPL `STValidation`: it
-    /// round-trips under the XRPL codec and carries `LedgerHash`, `Signature`,
-    /// and a 33-byte `SigningPubKey` whose prefix is `0xED`, `0x02`, or `0x03`.
+    /// round-trips under the XRPL codec and carries `LedgerHash`, a `Signature`
+    /// field (the blob may be empty), and a 33-byte `SigningPubKey` whose
+    /// prefix is `0xED`, `0x02`, or `0x03`.
     static bool
     is_canonical_stvalidation(std::vector<uint8_t> const& raw);
+
+#ifdef XPRV_TESTING
+    /// §5.1 body: canonical bytes with only `Signature` removed. Empty when
+    /// `raw` is not a canonical STValidation.
+    static std::vector<uint8_t>
+    validation_signing_body_for_test(std::vector<uint8_t> const& raw);
+#endif
 
 private:
     /// Parse a raw STValidation, strip sfSignature, return components.

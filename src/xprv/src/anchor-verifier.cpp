@@ -114,8 +114,9 @@ AnchorVerifier::parse_validation(std::vector<uint8_t> const& raw)
         auto hash_bytes = from_hex(ledger_hash->as_string());
         auto key_bytes = from_hex(signing_key->as_string());
         auto sig_bytes = from_hex(signature->as_string());
-        if (hash_bytes.size() != 32 || key_bytes.size() != 33 ||
-            sig_bytes.empty())
+        // A present Signature may be empty. Canonicality of those bytes is a
+        // vote filter; only a missing Signature fails this structural check.
+        if (hash_bytes.size() != 32 || key_bytes.size() != 33)
             return result;
         auto const prefix = key_bytes[0];
         if (prefix != 0xED && prefix != 0x02 && prefix != 0x03)
@@ -157,6 +158,18 @@ AnchorVerifier::is_canonical_stvalidation(std::vector<uint8_t> const& raw)
 {
     return parse_validation(raw).valid;
 }
+
+#ifdef XPRV_TESTING
+std::vector<uint8_t>
+AnchorVerifier::validation_signing_body_for_test(
+    std::vector<uint8_t> const& raw)
+{
+    auto const parsed = parse_validation(raw);
+    if (!parsed.valid)
+        return {};
+    return parsed.without_signature;
+}
+#endif
 
 //------------------------------------------------------------------------------
 // Main verification
@@ -711,8 +724,9 @@ AnchorVerifier::verify(
     if (auto const* advisory = anchor.if_contains("ledger_index");
         advisory && advisory->is_number() && !counted_seqs.empty())
     {
-        auto const index = advisory->to_number<uint32_t>();
-        if (counted_seqs.size() != 1 || *counted_seqs.begin() != index)
+        auto const index = strict_uint32(*advisory);
+        if (index &&
+            (counted_seqs.size() != 1 || *counted_seqs.begin() != *index))
         {
             std::string signed_seqs;
             for (auto const& seq : counted_seqs)
@@ -723,7 +737,7 @@ AnchorVerifier::verify(
             }
             result.warnings.push_back(
                 "counted validations sign LedgerSequence " + signed_seqs +
-                ", not the advisory ledger_index " + std::to_string(index));
+                ", not the advisory ledger_index " + std::to_string(*index));
             narrative.push_back("   WARN: " + result.warnings.back() + ".");
         }
     }

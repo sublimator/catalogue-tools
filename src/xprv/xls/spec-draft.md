@@ -29,13 +29,19 @@ Two representations of the same proof, no mixing:
 - **Binary form** — compact TLV-encoded, for on-ledger storage, wire protocol, QR codes
 
 Both forms encode the same proof data and MUST verify identically. A proof has
-one form only in these cases. A proof whose validator list is not reproduced
-byte-for-byte by §3.5's shaped encoding — it carries `effective`, any other
-top-level key, whitespace, or other non-shaped formatting — has no binary form
-(§3.5). A proof whose anchor `STValidation` carries fields the XRPL codec
-cannot round-trip through the §3.4 decomposition has no binary form either.
-A proof with a leaf that its codec cannot decode and re-encode exactly has no
-JSON form (§2.3).
+one form only in these cases:
+
+- Its validator list is not reproduced byte-for-byte by §3.5's shaped encoding
+  — it carries `effective`, any other top-level key, whitespace, or other
+  non-shaped formatting. That proof has no binary form (§3.5) and verifies in
+  JSON.
+- A `map_proof` leaf (`0x03` / `0x04`) carries bytes its network codec cannot
+  decode and re-encode exactly. That proof has no JSON form (§2.3, §3.8) and
+  verifies in binary.
+
+An anchor `STValidation` that does not round-trip under the XRPL codec is
+invalid in both forms. It is not a JSON proof (§2.1), and it is not a §3.4
+binary payload.
 
 ## Normative Language
 
@@ -538,8 +544,12 @@ record, MUST be a complete canonical `STValidation` under the XRPL codec named
 in the normative references: the bytes round-trip, and the object contains
 `LedgerHash` (32 bytes), `Signature`, and a 33-byte `SigningPubKey` whose
 prefix is `0xED`, `0x02`, or `0x03`. The outer key MUST equal that
-`SigningPubKey`. A verifier MUST reject the anchor when any entry fails this.
-An entry that passes it counts toward quorum only when its `LedgerHash` equals
+`SigningPubKey`. `Signature` is present when the field exists, including when
+its blob is empty. A verifier MUST reject the anchor when any entry fails
+this. An empty blob is not that failure: emptiness, and any other failure of
+signature canonicality or verification, leaves the vote uncounted. Omitting
+`Signature` fails this structural check. An entry that passes it counts
+toward quorum only when its `LedgerHash` equals
 the anchor hash, its signature is canonical (§5.1) and verifies
 `VAL\0 || signing_data`, `Flags` has `vfFullValidation`, and the key is a
 primary-list master's resolved signing key (§1.3 rules 5 and 8), at most one
@@ -887,6 +897,10 @@ equal to the reconstructed validation's `SigningPubKey`. Those checks are
 parse failures. A reconstructed validation that is not a complete canonical
 `STValidation` (§2.1) is also a parse failure.
 
+An `STValidation` the XRPL codec cannot round-trip is not a complete canonical
+validation. JSON rejects that anchor (§2.1). The same bytes are not a §3.4
+payload, so the proof is invalid in both forms rather than a one-form proof.
+
 With a single validation every field is common, `SigningPubKey` and
 `Signature` included: the unique field names list is empty, and that
 validator's record carries an empty STObject.
@@ -959,10 +973,7 @@ emit a non-verifiable decomposed blob; the JSON form can still carry the raw
 blob bytes in `unl.blob`. A list that carries `effective`, whitespace, or any
 other top-level key or formatting the shaped encoding does not reproduce,
 therefore has no binary form, and every list bundled in a binary proof is in
-effect from 0. Such a proof verifies in JSON and has no §1.2 identity. An
-`STValidation` the XRPL codec cannot round-trip is not a complete canonical
-validation: the anchor is rejected (§2.1), and those bytes have no binary form
-(§3.4).
+effect from 0. Such a proof verifies in JSON and has no §1.2 identity.
 
 ### 3.6 Ledger Header Payload (0x02)
 
@@ -1268,6 +1279,9 @@ STValidation signing data is:
 ```
 VAL\0 || canonical_STObject(STValidation without Signature)
 ```
+
+That object keeps every field other than `Signature`. A field a transaction
+signing encoding would drop, such as `TxnSignature`, stays in the body.
 
 A validation that has passed the structural checks in §2.1 has its signature
 verified with the embedded `SigningPubKey`. A failed or non-canonical signature

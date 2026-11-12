@@ -411,6 +411,24 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     other = next(k for k in V.PUBLISHER_KEY_BY_NETWORK.values() if k != base["trust"]["publisher_key"])
     neg("publisher-key-mismatch", "spec §8: the anchor's publisher key MUST be the configured one",
         "trust", "publisher key mismatch", [at("/steps/0/unl/public_key", other)])
+
+    neg("incomplete-validation", "spec §2.1: every validations entry is a canonical STValidation",
+        "parse", "canonical STValidation",
+        [at("/steps/0/validations/" + "00" * 33, "00")])
+    neg("trie-root-leaf", "spec §2.3: a JSON map_proof root is an inner node",
+        "parse", "inner node",
+        [at(f"/steps/{first_map}/trie", ["A" * 64, {}])])
+
+    # A field the transaction helper would drop must stay in the validation
+    # preimage. Enough injected signatures fail to put the vote below quorum.
+    injected = []
+    for key in list(validations)[:5]:
+        fields = V.decode(validations[key])
+        fields["TxnSignature"] = "DEADBEEF"
+        injected.append(at(f"/steps/0/validations/{key}", V.encode(fields).upper()))
+    neg("validation-unsigned-field",
+        "spec §5.1: validation signing data keeps every field except Signature",
+        "trust", "quorum not met", injected)
     return fam
 
 
