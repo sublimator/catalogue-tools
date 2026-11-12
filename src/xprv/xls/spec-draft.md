@@ -452,7 +452,7 @@ parent-first linearization of the logical proof DAG.
 
 ```json
 {
-    "format_version": 8,
+    "format_version": 9,
     "network_id": 0,
     "steps": [
         { "type": "anchor", ... },
@@ -742,7 +742,7 @@ Every binary proof begins with a **10-byte file header**:
 ```
 Offset  Size  Field
   0       4   magic       "XPRV" (0x58 0x50 0x52 0x56)
-  4       1   version     0x08 (same version space as JSON format_version)
+  4       1   version     0x09 (same version space as JSON format_version)
   5       1   flags       bit 0: zlib compressed body
   6       4   network_id  big-endian uint32 (0 = XRPL, 21337 = Xahau)
 ```
@@ -1581,19 +1581,21 @@ At minimum, verifier output SHOULD expose:
 
 | Version | Status |
 |---------|--------|
-| 8 (`0x08`) | current draft |
+| 9 (`0x09`) | current draft |
+| 8 | superseded; served publicly by xprv.it until 2026-11-12 |
 | 7 | superseded; served publicly by xprv.it until 2026-11-05 |
 | 6 | superseded; served publicly by xprv.it until 2026-10-25 |
 | 5 and earlier | superseded, never released |
 
 The number changes whenever a change alters which inputs are valid, and a
 number is never reused: two verifiers claiming one version must not disagree
-about the same bytes. v6 and v7 proofs were served publicly, so current
+about the same bytes. v6, v7, and v8 proofs were served publicly, so current
 verifiers reject them by version rather than by content, and producers reissue
-them. Version 8 closed the JSON form and stated which members a leaf may carry
-(§2, §2.3); every JSON proof served under v7 carries a member that v8 refuses.
+them. Version 9 rejects an anchor whose validations are not complete canonical
+STValidations, rejects a non-integer blob uint32, and rejects a JSON trie root
+that is not an inner node (§2.1, §1.3, §2.3). Version 8 accepted those inputs.
 
-Versions other than 8 are unrecognized by this draft and MUST be rejected.
+Versions other than 9 are unrecognized by this draft and MUST be rejected.
 
 ### 9.2 Network IDs
 
