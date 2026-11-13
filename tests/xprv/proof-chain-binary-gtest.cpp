@@ -71,7 +71,7 @@ make_zlib_proof(std::vector<char> const& compressed)
 {
     std::vector<uint8_t> blob = {'X', 'P', 'R', 'V'};
     blob.push_back(static_cast<uint8_t>(XPRV_FORMAT_VERSION));
-    blob.push_back(0x01);  // FLAG_ZLIB
+    blob.push_back(0x01);                   // FLAG_ZLIB
     blob.insert(blob.end(), {0, 0, 0, 0});  // network_id (BE)
     blob.insert(blob.end(), compressed.begin(), compressed.end());
     return blob;
@@ -187,8 +187,8 @@ mentions(std::string const& error, char const* text)
 // valid TLV body, so the exact-cap case still fails, but later.
 TEST(ProofChainBinary, ZlibCapIsInclusive)
 {
-    auto const at_cap =
-        from_binary_error(make_zlib_proof(zlib_compress_zeros(XPRV_MAX_BODY_SIZE)));
+    auto const at_cap = from_binary_error(
+        make_zlib_proof(zlib_compress_zeros(XPRV_MAX_BODY_SIZE)));
     EXPECT_FALSE(mentions(at_cap, "exceeds cap")) << at_cap;
     auto const over = from_binary_error(
         make_zlib_proof(zlib_compress_zeros(XPRV_MAX_BODY_SIZE + 1)));
@@ -213,12 +213,14 @@ TEST(ProofChainBinary, RejectsZlibSuffixTruncationAndBadChecksum)
     auto suffix = stream;
     suffix.push_back(0);
     EXPECT_TRUE(mentions(
-        from_binary_error(make_zlib_proof(suffix)), "bytes after the zlib stream"));
+        from_binary_error(make_zlib_proof(suffix)),
+        "bytes after the zlib stream"));
 
     auto twice = stream;
     twice.insert(twice.end(), stream.begin(), stream.end());
     EXPECT_TRUE(mentions(
-        from_binary_error(make_zlib_proof(twice)), "bytes after the zlib stream"));
+        from_binary_error(make_zlib_proof(twice)),
+        "bytes after the zlib stream"));
 
     auto truncated = stream;
     truncated.pop_back();
@@ -323,7 +325,7 @@ TEST(ProofChainBinary, HeaderRoundTrip)
     EXPECT_EQ(binary[2], 'R');
     EXPECT_EQ(binary[3], 'V');
     EXPECT_EQ(binary[4], XPRV_FORMAT_VERSION);  // version
-    EXPECT_EQ(binary[5], 0x00);  // flags (uncompressed)
+    EXPECT_EQ(binary[5], 0x00);                 // flags (uncompressed)
     // bytes 6-9: network_id BE (0)
     EXPECT_EQ(binary[6], 0x00);
     EXPECT_EQ(binary[7], 0x00);
@@ -358,7 +360,7 @@ TEST(ProofChainBinary, NetworkIdRoundTrip)
 
     // Binary
     auto binary = to_binary(chain);
-    EXPECT_EQ(binary[6], 0x00);   // 21337 = 0x00005359 BE
+    EXPECT_EQ(binary[6], 0x00);  // 21337 = 0x00005359 BE
     EXPECT_EQ(binary[7], 0x00);
     EXPECT_EQ(binary[8], 0x53);
     EXPECT_EQ(binary[9], 0x59);
@@ -427,6 +429,45 @@ TEST(ProofChainBinary, RejectsValidatorListBlobThatCannotRoundTripExactly)
     chain.steps.emplace_back(std::move(anchor));
 
     EXPECT_THROW(to_binary(chain), std::runtime_error);
+}
+
+// In-memory AnchorData skips the collector. encode must still refuse a
+// validation the codec does not round-trip.
+TEST(ProofChainBinary, RejectsNonCanonicalValidationInAnchorData)
+{
+    auto const reordered =
+        "228000000126000003E8292FAF080051ABABABABABABABABABABABABABABABAB"
+        "ABABABABABABABABABABABABABABABAB7321ED61B8326D4C1AA05CCB31924DDF"
+        "9F4D96F78FCE041D8C78B0771704BA2F0F10F97640868E9DB08B3781039B5299"
+        "AE98380CB497C153979D813CF87687239A08D8BDAFF01B937A2589D14D70AE65"
+        "67555F5A5DCF447C7E7E5F0578903D5D0BC7AE540700";
+    std::vector<uint8_t> raw;
+    for (std::size_t i = 0; reordered[i] != '\0'; i += 2)
+    {
+        auto byte = std::string(reordered + i, 2);
+        raw.push_back(static_cast<uint8_t>(std::stoi(byte, nullptr, 16)));
+    }
+
+    ProofChain chain;
+    AnchorData anchor;
+    anchor.ledger_hash = make_hash(0x11);
+    anchor.ledger_index = 1;
+    anchor.publisher_key_hex = "ED" + std::string(64, 'A');
+    anchor.validations.emplace("ED" + std::string(64, 'B'), std::move(raw));
+    chain.steps.emplace_back(std::move(anchor));
+
+    try
+    {
+        to_binary(chain);
+        FAIL() << "a non-canonical validation was encoded";
+    }
+    catch (std::runtime_error const& error)
+    {
+        EXPECT_NE(
+            std::string(error.what()).find("canonical STValidation"),
+            std::string::npos)
+            << error.what();
+    }
 }
 
 // An anchor without its list encodes with no 0x05 record at all (§3.3).

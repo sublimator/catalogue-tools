@@ -518,7 +518,8 @@ hex_equal_ci(std::string_view a, std::string_view b)
 static std::string
 embedded_signing_pub_key(std::vector<uint8_t> const& raw)
 {
-    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    static auto const protocol =
+        catl::xdata::Protocol::load_embedded_xrpl_protocol();
     Slice slice(raw.data(), raw.size());
     catl::xdata::JsonVisitor::Options options;
     options.ascii_hints = false;

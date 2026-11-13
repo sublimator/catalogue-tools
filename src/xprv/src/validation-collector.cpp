@@ -47,7 +47,8 @@ ValidationCollector::ValidationCollector(
 {
 }
 
-//@@authority transition=prv.T0361 status=provisional scope=function bind=xprv::note_publisher_manifest@880d53227e755c3c
+//@@authority transition=prv.T0361 status=provisional scope=function
+//bind=xprv::note_publisher_manifest@880d53227e755c3c
 // owner=unresolved owner_hypothesis=validation_collector
 // commit=caller_serialized touches=prv.S0145
 // label=admit_publisher_history_or_retain_first_conflict_pair
@@ -87,7 +88,8 @@ ValidationCollector::note_publisher_manifest(catl::vl::Manifest const& manifest)
     return changed;
 }
 
-//@@authority transition=prv.T0365 status=provisional scope=function bind=xprv::admit_list_manifests@39c4103e8b729001
+//@@authority transition=prv.T0365 status=provisional scope=function
+//bind=xprv::admit_list_manifests@39c4103e8b729001
 // owner=unresolved owner_hypothesis=validation_collector
 // commit=caller_serialized touches=prv.S0146
 // label=admit_verified_list_delegations_without_promoting_membership
@@ -377,6 +379,19 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     if (!visitor.flags || !(*visitor.flags & kFullValidationFlag))
     {
         PLOGD(log_, "[", net_label_, "] dropping partial validation");
+        return;
+    }
+
+    // A listed validator can sign bytes this version's codec does not
+    // round-trip. Counting that vote would make the prover emit a proof
+    // every v9 verifier rejects. Leave it out before quorum accounting.
+    if (!AnchorVerifier::is_canonical_stvalidation(entry.raw))
+    {
+        PLOGD(
+            log_,
+            "[",
+            net_label_,
+            "] dropping validation that is not a canonical STValidation");
         return;
     }
 
@@ -1025,7 +1040,8 @@ ValidationCollector::handle_manifests_packet(std::vector<uint8_t> const& data)
     apply_peer_manifests(std::move(parsed.manifests));
 }
 
-//@@authority transition=prv.T0366 status=provisional scope=function bind=xprv::apply_manifest@c68964376c900cad
+//@@authority transition=prv.T0366 status=provisional scope=function
+//bind=xprv::apply_manifest@c68964376c900cad
 // owner=unresolved owner_hypothesis=validation_collector
 // commit=caller_serialized touches=prv.S0146
 // label=apply_verified_manifest_to_current_or_former_member

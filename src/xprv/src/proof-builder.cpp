@@ -1,4 +1,5 @@
 #include "xprv/proof-builder.h"
+#include "xprv/anchor-verifier.h"
 #include "xprv/hex-utils.h"
 #include "xprv/network-config.h"
 #include "xprv/proof-chain-json.h"
@@ -17,11 +18,11 @@
 #include <catl/xdata/parse_transaction.h>
 #include <catl/xdata/serialize.h>
 
-#include <boost/asio/redirect_error.hpp>
 #include <algorithm>
-#include <cctype>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <cctype>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -273,7 +274,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->peers,
             PeerSessionPtr{},
             ctx->cancel_token,
-            ctx->request_scope); //@@authority-target ids=prv.T0007
+            ctx->request_scope);  //@@authority-target ids=prv.T0007
         co_return require_walk_transport(std::move(result));
     };
 
@@ -298,7 +299,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->peers,
             PeerSessionPtr{},
             ctx->cancel_token,
-            ctx->request_scope); //@@authority-target ids=prv.T0008
+            ctx->request_scope);  //@@authority-target ids=prv.T0008
         co_return require_walk_transport(std::move(result));
     };
 
@@ -464,9 +465,15 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         anchor.blob_signature = vl_data.blob_signature;
 
         // §2.1: the map key is the SigningPubKey as uppercase hex; the
-        // collector keys its entries in lowercase.
+        // collector keys its entries in lowercase. The collector already
+        // drops a non-canonical validation before quorum, so this set should
+        // be clean. Refuse to copy one that slipped through: emitting it
+        // makes every v9 verifier reject the proof.
         for (auto const& v : anchor_validations)
         {
+            if (!AnchorVerifier::is_canonical_stvalidation(v.raw))
+                throw std::runtime_error(
+                    "anchor validation is not a canonical STValidation");
             auto key = v.signing_key_hex;
             std::transform(key.begin(), key.end(), key.begin(), [](char c) {
                 return static_cast<char>(
@@ -544,10 +551,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         ctx->state_proofs.emplace_back(skip_key_val, std::move(sp));
 
         ctx->target_hdr_result = co_await ctx->node_cache->get_header(
-            tx_ledger_seq,
-            ctx->peers,
-            PeerSessionPtr{},
-            ctx->request_scope);
+            tx_ledger_seq, ctx->peers, PeerSessionPtr{}, ctx->request_scope);
         ctx->target_ledger_hash = ctx->target_hdr_result->ledger_hash256();
 
         auto const& wr_leaf = wr.leaf();
@@ -601,10 +605,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         }
 
         ctx->flag_hdr_result = co_await ctx->node_cache->get_header(
-            flag_seq,
-            ctx->peers,
-            PeerSessionPtr{},
-            ctx->request_scope);
+            flag_seq, ctx->peers, PeerSessionPtr{}, ctx->request_scope);
         auto flag_hash = ctx->flag_hdr_result->ledger_hash256();
         auto flag_header = ctx->flag_hdr_result->header();
         co_await emit_step(make_header(*ctx->flag_hdr_result));
@@ -639,10 +640,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         }
 
         ctx->target_hdr_result = co_await ctx->node_cache->get_header(
-            tx_ledger_seq,
-            ctx->peers,
-            PeerSessionPtr{},
-            ctx->request_scope);
+            tx_ledger_seq, ctx->peers, PeerSessionPtr{}, ctx->request_scope);
         ctx->target_ledger_hash = ctx->target_hdr_result->ledger_hash256();
 
         auto const& wr2_leaf = wr2.leaf();
@@ -662,10 +660,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     if (!ctx->target_hdr_result)
     {
         ctx->target_hdr_result = co_await ctx->node_cache->get_header(
-            tx_ledger_seq,
-            ctx->peers,
-            PeerSessionPtr{},
-            ctx->request_scope);
+            tx_ledger_seq, ctx->peers, PeerSessionPtr{}, ctx->request_scope);
     }
     auto const& target_hdr = *ctx->target_hdr_result;
     auto target_header = target_hdr.header();
@@ -682,10 +677,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     catl::core::emit_status("walking TX tree");
 
     auto tx_walk = co_await walk_tx(
-        ledger_hash,
-        tx_ledger_seq,
-        target_header.tx_hash(),
-        tx_hash);
+        ledger_hash, tx_ledger_seq, target_header.tx_hash(), tx_hash);
 
     if (!tx_walk.found())
         throw std::runtime_error("Transaction not found in TX tree");

@@ -1,4 +1,5 @@
 #include "trust-evidence-fixture.h"
+#include "xprv/anchor-verifier.h"
 #include "xprv/manifest-utils.h"
 #include "xprv/proof-chain-json.h"
 #include "xprv/validation-collector.h"
@@ -632,6 +633,61 @@ TEST(ValidationCollector, DropsPartialValidations)
     for (auto const& [hash, entries] : collector.by_ledger)
         stored += entries.size();
     EXPECT_EQ(stored, 4u) << "the one partial validation must not be stored";
+}
+
+// A signature over bytes the codec cannot round-trip still verifies on the
+// raw excision. It must not enter quorum: the emitted proof would fail v9.
+TEST(ValidationCollector, DropsNonCanonicalValidationBeforeQuorum)
+{
+    // Same Ed25519 signer. CANON round-trips. TRAILING is that object plus
+    // a 0x00 end marker, which the parser consumes and the reserialization
+    // drops. The signature covers the marker, so it verifies.
+    auto const canon = std::string(
+        "228000000126000003E8292FAF080051ABABABABABABABABABABABABABABABAB"
+        "ABABABABABABABABABABABABABABABAB7321ED61B8326D4C1AA05CCB31924DDF"
+        "9F4D96F78FCE041D8C78B0771704BA2F0F10F97640234D1059D71FF50140E9E5"
+        "EBC6375F23890C0FB3F9A9CCDC37EE0265AA38B9B0DE5CC62752D57FEDB0D9B3"
+        "68EB15F084CD59B0D8296656D99DEDEE3E5365A905");
+    auto const trailing = std::string(
+        "228000000126000003E8292FAF080051ABABABABABABABABABABABABABABABAB"
+        "ABABABABABABABABABABABABABABABAB7321ED61B8326D4C1AA05CCB31924DDF"
+        "9F4D96F78FCE041D8C78B0771704BA2F0F10F97640868E9DB08B3781039B5299"
+        "AE98380CB497C153979D813CF87687239A08D8BDAFF01B937A2589D14D70AE65"
+        "67555F5A5DCF447C7E7E5F0578903D5D0BC7AE540700");
+    auto from_hex = [](std::string const& hex) {
+        std::vector<uint8_t> out;
+        for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+            out.push_back(
+                static_cast<uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        return out;
+    };
+    auto const canon_bytes = from_hex(canon);
+    auto const trailing_bytes = from_hex(trailing);
+    auto const protocol = test_protocol();
+    ASSERT_TRUE(xprv::AnchorVerifier::is_canonical_stvalidation(canon_bytes));
+    ASSERT_FALSE(
+        xprv::AnchorVerifier::is_canonical_stvalidation(trailing_bytes));
+    ASSERT_TRUE(xprv::ValidationCollector::verify_validation_signature(
+        canon_bytes, protocol));
+    ASSERT_TRUE(xprv::ValidationCollector::verify_validation_signature(
+        trailing_bytes, protocol));
+
+    auto stored = [](xprv::ValidationCollector const& collector) {
+        std::size_t count = 0;
+        for (auto const& [_, entries] : collector.by_ledger)
+            count += entries.size();
+        return count;
+    };
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    xprv::ValidationCollector good(protocol, 0);
+    good.on_packet(validation_type, wrap_validation(canon_bytes));
+    EXPECT_EQ(stored(good), 1u);
+
+    xprv::ValidationCollector bad(protocol, 0);
+    bad.on_packet(validation_type, wrap_validation(trailing_bytes));
+    EXPECT_EQ(stored(bad), 0u);
 }
 
 // §1.3 rule 3: a revoked list member counts toward N (unl_size, which sets the

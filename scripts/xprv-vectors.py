@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["xrpl-py>=4.0.0"]
+# dependencies = ["xrpl-py==5.2.0"]
 # ///
 """XPRV known-answer test vectors: generate, mutate, and check.
 

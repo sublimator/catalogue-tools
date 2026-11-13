@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["xrpl-py>=4.0.0"]
+# dependencies = ["xrpl-py==5.2.0"]
 # ///
 
 from __future__ import annotations
@@ -1022,6 +1022,22 @@ class JsonTextCapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds"):
             v.load_json_proof("\u00e9" * (cap // 2 + 1))
 
+    def test_json_text_is_utf8_without_bom_or_nonfinite(self) -> None:
+        self.assertEqual(v.loads_strict_json(b'{"a": 1}')["a"], 1)
+        for raw in (
+            b"\xef\xbb\xbf{}",
+            '{"a": 1}'.encode("utf-16"),
+            '{"a": NaN}',
+            '{"a": Infinity}',
+            '{"a": -Infinity}',
+            "\ufeff{}",
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    v.loads_strict_json(raw)
+                with self.assertRaises(ValueError):
+                    v.load_json_proof(raw)
+
 
 class SignatureCanonicalityTests(unittest.TestCase):
     """Python must refuse what libsecp256k1 refuses in the C++ verifier."""
@@ -1329,6 +1345,18 @@ class StrictParsingTests(unittest.TestCase):
         return (core[:69] + self.leb(len(records)) + core[count_end:names_start]
             + self.leb(len(names)) + b"".join(self.leb(len(n)) + n for n in names)
             + b"".join(records))
+
+    def test_unknown_field_is_a_value_error(self):
+        # Field id 0xFF is not in the xrpl-py 5.2.0 definitions. decode() raises
+        # KeyError; the anchor decoder must turn that into ValueError.
+        payload = bytearray(32) + (1).to_bytes(4, "big") + bytes(33)
+        payload += bytes([1])  # one validation
+        payload += bytes([2]) + b"\xff\x00"  # common VL
+        payload += bytes([0])  # no unique names
+        payload += bytes(33) + bytes([0])  # key + empty unique
+        with self.assertRaisesRegex(ValueError, "not decodable") as caught:
+            v.decode_anchor_core(bytes(payload))
+        self.assertIsInstance(caught.exception.__cause__, KeyError)
 
     def test_rejects_unknown_decomposition_name(self):
         with self.assertRaises(ValueError):

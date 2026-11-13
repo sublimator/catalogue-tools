@@ -380,11 +380,18 @@ encode_anchor_core(AnchorData const& a)
         return payload;
     }
 
-    auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    static auto const protocol =
+        catl::xdata::Protocol::load_embedded_xrpl_protocol();
 
     std::vector<std::pair<std::string, boost::json::object>> parsed;
     for (auto const& [key_hex, val_bytes] : a.validations)
     {
+        // Direct AnchorData callers never passed through the collector.
+        // A non-canonical validation must not become a binary proof.
+        if (!AnchorVerifier::is_canonical_stvalidation(val_bytes))
+            throw std::runtime_error(
+                "binary proof: validation is not a canonical STValidation");
+
         Slice slice(val_bytes.data(), val_bytes.size());
         catl::xdata::JsonVisitor::Options options;
         options.ascii_hints = false;
@@ -747,7 +754,8 @@ decode_anchor_core(std::span<const uint8_t> payload)
         return a;
     }
 
-    auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    static auto const protocol =
+        catl::xdata::Protocol::load_embedded_xrpl_protocol();
 
     auto common_bytes = read_vl(payload, pos);
 

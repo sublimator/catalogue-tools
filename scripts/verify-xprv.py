@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["xrpl-py>=4.0.0"]
+# dependencies = ["xrpl-py==5.2.0"]
 # ///
 """
 Standalone Python verifier for xprv proofs (JSON and binary).
@@ -1130,7 +1130,7 @@ def verify_anchor(
 
     # Step 4: verify validator manifests from blob → build signing→master key map
     try:
-        blob_json = json.loads(blob_bytes)
+        blob_json = loads_strict_json(blob_bytes)
     except ValueError:
         return AnchorResult(ok=False, message="invalid blob JSON")
     if not isinstance(blob_json, dict):
@@ -1338,6 +1338,28 @@ def validate_json_trie(node: Any, depth: int = 0) -> None:
         raise ValueError(f"unexpected trie node: {type(node)}")
 
 
+def loads_strict_json(raw: str | bytes, **kwargs: Any) -> Any:
+    """JSON text is UTF-8, with no byte-order mark and no NaN or Infinity.
+
+    ``json.loads`` on bytes sniffs UTF-16, UTF-32, and a BOM. The C++ parser
+    does not. A signed validator-list blob is the same text.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("JSON text is not UTF-8") from exc
+    else:
+        text = raw
+    if text.startswith("\ufeff"):
+        raise ValueError("JSON text must not start with a UTF-8 BOM")
+
+    def reject_constant(name: str) -> Any:
+        raise ValueError(f"{name} is not a JSON number")
+
+    return json.loads(text, parse_constant=reject_constant, **kwargs)
+
+
 def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:
     """Reject repeated members before a normal dict could discard their tokens.
 
@@ -1353,7 +1375,7 @@ def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:
                 raise ValueError(f"duplicate JSON member {key!r}")
             obj[key] = value
         return obj
-    return json.loads(raw, object_pairs_hook=object_members)
+    return loads_strict_json(raw, object_pairs_hook=object_members)
 
 
 HEX_DIGITS_RE = re.compile(r"(?:[0-9A-Fa-f]{2})*")
@@ -1947,6 +1969,19 @@ def decode_bin_header(payload: bytes) -> dict[str, Any]:
     }
 
 
+def _decode_fields(hex_text: str, what: str) -> dict[str, Any]:
+    """Decode an STObject. An unknown field is a ValueError, not a traceback."""
+    if not hex_text:
+        return {}
+    try:
+        fields = decode(hex_text)
+    except Exception as exc:
+        raise ValueError(f"{what} are not decodable") from exc
+    if not isinstance(fields, dict):
+        raise ValueError(f"{what} are not an STObject")
+    return fields
+
+
 def decode_anchor_core(payload: bytes) -> dict[str, Any]:
     """Decode anchor core TLV: hash + ledger_index + publisher key + validations."""
     if len(payload) < 69:
@@ -1975,7 +2010,7 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
     # Read common fields (XRPL binary → hex for decode())
     common_bytes, pos = read_vl(payload, pos)
     common_hex = hexlify(common_bytes).decode()
-    common_fields = decode(common_hex) if common_hex else {}
+    common_fields = _decode_fields(common_hex, "common validation fields")
     if bytes.fromhex(encode(common_fields)) != common_bytes:
         raise ValueError("non-canonical common STObject")
 
@@ -2000,7 +2035,7 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
         vkey = key_bytes.hex().upper()
         unique_bytes, pos = read_vl(payload, pos)
         unique_hex = hexlify(unique_bytes).decode()
-        unique_fields = decode(unique_hex) if unique_hex else {}
+        unique_fields = _decode_fields(unique_hex, "unique validation fields")
         if bytes.fromhex(encode(unique_fields)) != unique_bytes:
             raise ValueError("non-canonical unique STObject")
         if common_fields.keys() & unique_fields.keys():

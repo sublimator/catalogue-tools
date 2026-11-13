@@ -543,7 +543,10 @@ Every `validations` entry, in JSON and in a reconstructed binary `0x01`
 record, MUST be a complete canonical `STValidation` under the XRPL codec named
 in the normative references: the bytes round-trip, and the object contains
 `LedgerHash` (32 bytes), `Signature`, and a 33-byte `SigningPubKey` whose
-prefix is `0xED`, `0x02`, or `0x03`. The outer key MUST equal that
+prefix is `0xED`, `0x02`, or `0x03`. The round-trip is against that verifier's
+protocol-definitions snapshot (Appendix A). A field the snapshot decodes and
+re-encodes is part of the validation. A field it cannot decode is not. The
+check is not a closed list of field names. The outer key MUST equal that
 `SigningPubKey`. `Signature` is present when the field exists, including when
 its blob is empty. A verifier MUST reject the anchor when any entry fails
 this. An empty blob is not that failure: emptiness, and any other failure of
@@ -735,6 +738,10 @@ A JSON verifier MUST reject:
   (§2.3). This class is JSON-only: a binary trie identifies a branch by position
   in a 2-bit field (§3.7), so a branch there cannot be misspelled or repeated;
 - duplicate object members anywhere in the proof;
+- text that is not UTF-8, or that carries a UTF-8 byte-order mark. The same
+  rule applies to a signed validator-list blob;
+- a non-finite number (`NaN`, `Infinity`, `-Infinity`), in the proof and in a
+  signed validator-list blob;
 - hex-string leaf data, and a leaf member that is not a serialized field or a
   structured value outside its variant's members (§2.3);
 - a `unl` that bundles its list only in part (§2.1);
@@ -1596,14 +1603,17 @@ At minimum, verifier output SHOULD expose:
 | Version | Status |
 |---------|--------|
 | 9 (`0x09`) | current draft |
-| 8 | superseded; served publicly by xprv.it until 2026-11-12 |
+| 8 | superseded; served publicly by xprv.it until superseded by version 9 |
 | 7 | superseded; served publicly by xprv.it until 2026-11-05 |
 | 6 | superseded; served publicly by xprv.it until 2026-10-25 |
 | 5 and earlier | superseded, never released |
 
 The number changes whenever a change alters which inputs are valid, and a
 number is never reused: two verifiers claiming one version must not disagree
-about the same bytes. v6, v7, and v8 proofs were served publicly, so current
+about the same bytes. That agreement is for one protocol-definitions snapshot.
+The reference C++ and Python verifiers are known to differ on some
+non-validation fields and on synthetic out-of-range encodings; Appendix A
+records the snapshots they use. v6, v7, and v8 proofs were served publicly, so current
 verifiers reject them by version rather than by content, and producers reissue
 them. Version 9 rejects an anchor whose validations are not complete canonical
 STValidations, rejects a non-integer blob uint32, and rejects a JSON trie root
@@ -1648,6 +1658,16 @@ registered.
 What the reference verifiers implement of this draft. How the reference server
 holds and passes trust material is described in `src/xprv/README.md` in the
 reference repository.
+
+A canonical `STValidation` (§2.1) is a round-trip under the verifier's
+protocol-definitions snapshot, not a fixed list of field names. `xprv verify`
+uses the `xrpl_definitions.json` embedded in `catl::xdata`. `verify-xprv.py`
+uses xrpl-py 5.2.0. Those two snapshots differ on some non-validation fields
+and on synthetic out-of-range field encodings, and they would differ on an
+`STValidation` field defined by only one of them, including a field only
+Xahau added. §9.1 requires two verifiers of one version to agree on the bytes
+that version's snapshot defines. It does not claim these two libraries accept
+the same bytes outside the snapshot they share.
 
 | Capability | C++ `xprv verify` | Python `verify-xprv.py` |
 |---|---|---|
