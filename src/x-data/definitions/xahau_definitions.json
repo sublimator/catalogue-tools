@@ -41,26 +41,6 @@
       }
     ],
     [
-      "hash",
-      {
-        "isSerialized": false,
-        "isSigningField": false,
-        "isVLEncoded": false,
-        "nth": 257,
-        "type": "Hash256"
-      }
-    ],
-    [
-      "index",
-      {
-        "isSerialized": false,
-        "isSigningField": false,
-        "isVLEncoded": false,
-        "nth": 258,
-        "type": "Hash256"
-      }
-    ],
-    [
       "taker_gets_funded",
       {
         "isSerialized": false,
@@ -117,6 +97,26 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 4,
+        "type": "UInt16"
+      }
+    ],
+    [
+      "TradingFee",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 5,
+        "type": "UInt16"
+      }
+    ],
+    [
+      "DiscountedFee",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 6,
         "type": "UInt16"
       }
     ],
@@ -181,12 +181,32 @@
       }
     ],
     [
+      "LedgerFixType",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 22,
+        "type": "UInt16"
+      }
+    ],
+    [
       "EntropyCount",
       {
         "isSerialized": true,
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 99,
+        "type": "UInt16"
+      }
+    ],
+    [
+      "EntropyDenominator",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 100,
         "type": "UInt16"
       }
     ],
@@ -327,6 +347,16 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 14,
+        "type": "UInt32"
+      }
+    ],
+    [
+      "LastUpdateTime",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 15,
         "type": "UInt32"
       }
     ],
@@ -641,6 +671,16 @@
       }
     ],
     [
+      "VoteWeight",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 48,
+        "type": "UInt32"
+      }
+    ],
+    [
       "LockCount",
       {
         "isSerialized": true,
@@ -657,6 +697,16 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 50,
+        "type": "UInt32"
+      }
+    ],
+    [
+      "OracleDocumentID",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 51,
         "type": "UInt32"
       }
     ],
@@ -737,6 +787,16 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 100,
+        "type": "UInt32"
+      }
+    ],
+    [
+      "AppLoaderSequence",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 101,
         "type": "UInt32"
       }
     ],
@@ -897,6 +957,116 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 19,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "XChainClaimID",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 20,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "XChainAccountCreateCount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 21,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "XChainAccountClaimCount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 22,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "AssetPrice",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 23,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "MaximumAmount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 24,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "OutstandingAmount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 25,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "MPTAmount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 26,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "IssuerNode",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 27,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "SubjectNode",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 28,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "LastTxnTime",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 95,
+        "type": "UInt64"
+      }
+    ],
+    [
+      "Time",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 96,
         "type": "UInt64"
       }
     ],
@@ -1087,6 +1257,16 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 14,
+        "type": "Hash256"
+      }
+    ],
+    [
+      "AMMID",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 15,
         "type": "Hash256"
       }
     ],
@@ -1301,17 +1481,47 @@
       }
     ],
     [
+      "DomainID",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 37,
+        "type": "Hash256"
+      }
+    ],
+    [
       "NextRandomDigest",
       {
         "isSerialized": true,
         "isSigningField": true,
         "isVLEncoded": false,
-        "nth": 92,
+        "nth": 89,
         "type": "Hash256"
       }
     ],
     [
-      "LastRandomData",
+      "RandomData",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 90,
+        "type": "Hash256"
+      }
+    ],
+    [
+      "ManifestID",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 91,
+        "type": "Hash256"
+      }
+    ],
+    [
+      "HookOnOutgoing",
       {
         "isSerialized": true,
         "isSigningField": true,
@@ -1321,7 +1531,7 @@
       }
     ],
     [
-      "RandomData",
+      "HookOnIncoming",
       {
         "isSerialized": true,
         "isSigningField": true,
@@ -1383,10 +1593,20 @@
     [
       "hash",
       {
-        "isSerialized": true,
+        "isSerialized": false,
         "isSigningField": false,
         "isVLEncoded": false,
-        "nth": 1,
+        "nth": 257,
+        "type": "Hash256"
+      }
+    ],
+    [
+      "index",
+      {
+        "isSerialized": false,
+        "isSigningField": false,
+        "isVLEncoded": false,
+        "nth": 258,
         "type": "Hash256"
       }
     ],
@@ -1491,6 +1711,36 @@
       }
     ],
     [
+      "Amount2",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 11,
+        "type": "Amount"
+      }
+    ],
+    [
+      "BidMin",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 12,
+        "type": "Amount"
+      }
+    ],
+    [
+      "BidMax",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 13,
+        "type": "Amount"
+      }
+    ],
+    [
       "MinimumOffer",
       {
         "isSerialized": true,
@@ -1577,6 +1827,86 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 24,
+        "type": "Amount"
+      }
+    ],
+    [
+      "LPTokenOut",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 25,
+        "type": "Amount"
+      }
+    ],
+    [
+      "LPTokenIn",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 26,
+        "type": "Amount"
+      }
+    ],
+    [
+      "EPrice",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 27,
+        "type": "Amount"
+      }
+    ],
+    [
+      "Price",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 28,
+        "type": "Amount"
+      }
+    ],
+    [
+      "SignatureReward",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 29,
+        "type": "Amount"
+      }
+    ],
+    [
+      "MinAccountCreateAmount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 30,
+        "type": "Amount"
+      }
+    ],
+    [
+      "LPTokenBalance",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 31,
+        "type": "Amount"
+      }
+    ],
+    [
+      "TrustLineRewardAccumulator",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 99,
         "type": "Amount"
       }
     ],
@@ -1831,6 +2161,96 @@
       }
     ],
     [
+      "DIDDocument",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 27,
+        "type": "Blob"
+      }
+    ],
+    [
+      "Data",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 28,
+        "type": "Blob"
+      }
+    ],
+    [
+      "AssetClass",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 29,
+        "type": "Blob"
+      }
+    ],
+    [
+      "Provider",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 30,
+        "type": "Blob"
+      }
+    ],
+    [
+      "MPTokenMetadata",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 31,
+        "type": "Blob"
+      }
+    ],
+    [
+      "CredentialType",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 32,
+        "type": "Blob"
+      }
+    ],
+    [
+      "JsonTxDelta",
+      {
+        "isSerialized": true,
+        "isSigningField": false,
+        "isVLEncoded": true,
+        "nth": 95,
+        "type": "Blob"
+      }
+    ],
+    [
+      "AppLoader",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 96,
+        "type": "Blob"
+      }
+    ],
+    [
+      "HookName",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 97,
+        "type": "Blob"
+      }
+    ],
+    [
       "RemarkValue",
       {
         "isSerialized": true,
@@ -1941,6 +2361,16 @@
       }
     ],
     [
+      "Holder",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 11,
+        "type": "AccountID"
+      }
+    ],
+    [
       "HookAccount",
       {
         "isSerialized": true,
@@ -1951,12 +2381,72 @@
       }
     ],
     [
-      "Validator",
+      "OtherChainSource",
       {
         "isSerialized": true,
         "isSigningField": true,
         "isVLEncoded": true,
-        "nth": 98,
+        "nth": 18,
+        "type": "AccountID"
+      }
+    ],
+    [
+      "OtherChainDestination",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 19,
+        "type": "AccountID"
+      }
+    ],
+    [
+      "AttestationSignerAccount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 20,
+        "type": "AccountID"
+      }
+    ],
+    [
+      "AttestationRewardAccount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 21,
+        "type": "AccountID"
+      }
+    ],
+    [
+      "LockingChainDoor",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 22,
+        "type": "AccountID"
+      }
+    ],
+    [
+      "IssuingChainDoor",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 23,
+        "type": "AccountID"
+      }
+    ],
+    [
+      "Subject",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 24,
         "type": "AccountID"
       }
     ],
@@ -1968,6 +2458,16 @@
         "isVLEncoded": true,
         "nth": 99,
         "type": "AccountID"
+      }
+    ],
+    [
+      "Number",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 1,
+        "type": "Number"
       }
     ],
     [
@@ -2151,16 +2651,6 @@
       }
     ],
     [
-      "HookDefinition",
-      {
-        "isSerialized": true,
-        "isSigningField": true,
-        "isVLEncoded": false,
-        "nth": 22,
-        "type": "STObject"
-      }
-    ],
-    [
       "HookParameter",
       {
         "isSerialized": true,
@@ -2181,12 +2671,112 @@
       }
     ],
     [
+      "VoteEntry",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 25,
+        "type": "STObject"
+      }
+    ],
+    [
+      "AuctionSlot",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 26,
+        "type": "STObject"
+      }
+    ],
+    [
+      "AuthAccount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 27,
+        "type": "STObject"
+      }
+    ],
+    [
+      "XChainClaimProofSig",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 28,
+        "type": "STObject"
+      }
+    ],
+    [
+      "XChainCreateAccountProofSig",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 29,
+        "type": "STObject"
+      }
+    ],
+    [
+      "XChainClaimAttestationCollectionElement",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 30,
+        "type": "STObject"
+      }
+    ],
+    [
+      "XChainCreateAccountAttestationCollectionElement",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 31,
+        "type": "STObject"
+      }
+    ],
+    [
+      "PriceData",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 32,
+        "type": "STObject"
+      }
+    ],
+    [
+      "Credential",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 33,
+        "type": "STObject"
+      }
+    ],
+    [
       "RandomDigestEntry",
       {
         "isSerialized": true,
         "isSigningField": true,
         "isVLEncoded": false,
-        "nth": 89,
+        "nth": 88,
+        "type": "STObject"
+      }
+    ],
+    [
+      "Manifest",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 90,
         "type": "STObject"
       }
     ],
@@ -2257,6 +2847,26 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 97,
+        "type": "STObject"
+      }
+    ],
+    [
+      "HighReward",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 98,
+        "type": "STObject"
+      }
+    ],
+    [
+      "LowReward",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 99,
         "type": "STObject"
       }
     ],
@@ -2351,6 +2961,16 @@
       }
     ],
     [
+      "VoteSlots",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 12,
+        "type": "STArray"
+      }
+    ],
+    [
       "Majorities",
       {
         "isSerialized": true,
@@ -2397,6 +3017,76 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 20,
+        "type": "STArray"
+      }
+    ],
+    [
+      "XChainClaimAttestations",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 21,
+        "type": "STArray"
+      }
+    ],
+    [
+      "XChainCreateAccountAttestations",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 22,
+        "type": "STArray"
+      }
+    ],
+    [
+      "PriceDataSeries",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 24,
+        "type": "STArray"
+      }
+    ],
+    [
+      "AuthAccounts",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 25,
+        "type": "STArray"
+      }
+    ],
+    [
+      "AuthorizeCredentials",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 26,
+        "type": "STArray"
+      }
+    ],
+    [
+      "UnauthorizeCredentials",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 27,
+        "type": "STArray"
+      }
+    ],
+    [
+      "AcceptedCredentials",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 28,
         "type": "STArray"
       }
     ],
@@ -2501,6 +3191,26 @@
       }
     ],
     [
+      "Scale",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 4,
+        "type": "UInt8"
+      }
+    ],
+    [
+      "AssetScale",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 5,
+        "type": "UInt8"
+      }
+    ],
+    [
       "TickSize",
       {
         "isSerialized": true,
@@ -2527,6 +3237,16 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 18,
+        "type": "UInt8"
+      }
+    ],
+    [
+      "WasLockingChainSend",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 19,
         "type": "UInt8"
       }
     ],
@@ -2631,6 +3351,16 @@
       }
     ],
     [
+      "CredentialIDs",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 6,
+        "type": "Vector256"
+      }
+    ],
+    [
       "URITokenIDs",
       {
         "isSerialized": true,
@@ -2641,12 +3371,102 @@
       }
     ],
     [
+      "MPTokenIssuanceID",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 1,
+        "type": "Hash192"
+      }
+    ],
+    [
+      "LockingChainIssue",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 1,
+        "type": "Issue"
+      }
+    ],
+    [
+      "IssuingChainIssue",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 2,
+        "type": "Issue"
+      }
+    ],
+    [
+      "Asset",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 3,
+        "type": "Issue"
+      }
+    ],
+    [
+      "Asset2",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 4,
+        "type": "Issue"
+      }
+    ],
+    [
+      "ClaimCurrency",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 5,
+        "type": "Issue"
+      }
+    ],
+    [
+      "XChainBridge",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 1,
+        "type": "XChainBridge"
+      }
+    ],
+    [
+      "BaseAsset",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 1,
+        "type": "Currency"
+      }
+    ],
+    [
+      "QuoteAsset",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 2,
+        "type": "Currency"
+      }
+    ],
+    [
       "Transaction",
       {
         "isSerialized": false,
         "isSigningField": false,
         "isVLEncoded": false,
-        "nth": 1,
+        "nth": 257,
         "type": "Transaction"
       }
     ],
@@ -2656,7 +3476,7 @@
         "isSerialized": false,
         "isSigningField": false,
         "isVLEncoded": false,
-        "nth": 1,
+        "nth": 257,
         "type": "LedgerEntry"
       }
     ],
@@ -2666,7 +3486,7 @@
         "isSerialized": false,
         "isSigningField": false,
         "isVLEncoded": false,
-        "nth": 1,
+        "nth": 257,
         "type": "Validation"
       }
     ],
@@ -2676,43 +3496,1354 @@
         "isSerialized": false,
         "isSigningField": false,
         "isVLEncoded": false,
-        "nth": 1,
+        "nth": 257,
         "type": "Metadata"
       }
     ]
   ],
+  "HOOK": {
+    "API": {
+      "_g": {
+        "params": [
+          {
+            "name": "guard_id",
+            "type": "uint32_t"
+          },
+          {
+            "name": "maxiter",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int32_t"
+      },
+      "accept": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "error_code",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "dice": {
+        "amendment": "RNG",
+        "params": [
+          {
+            "name": "sides",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "emit": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "etxn_burden": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "etxn_details": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "etxn_fee_base": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "etxn_generation": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "etxn_nonce": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "etxn_reserve": {
+        "params": [
+          {
+            "name": "count",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "fee_base": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "float_compare": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "float2",
+            "type": "int64_t"
+          },
+          {
+            "name": "mode",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_divide": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "float2",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_int": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "decimal_places",
+            "type": "uint32_t"
+          },
+          {
+            "name": "abs",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_invert": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_log": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_mantissa": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_mulratio": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "round_up",
+            "type": "uint32_t"
+          },
+          {
+            "name": "numerator",
+            "type": "uint32_t"
+          },
+          {
+            "name": "denominator",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_multiply": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "float2",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_negate": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_one": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "float_root": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "n",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_set": {
+        "params": [
+          {
+            "name": "exponent",
+            "type": "int32_t"
+          },
+          {
+            "name": "mantissa",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_sign": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_sto": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "cread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "cread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "iread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "iread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "field_code",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_sto_set": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "float_sum": {
+        "params": [
+          {
+            "name": "float1",
+            "type": "int64_t"
+          },
+          {
+            "name": "float2",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "hook_account": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "hook_again": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "hook_hash": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "hook_no",
+            "type": "int32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "hook_param": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "hook_param_set": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "hread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "hread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "hook_pos": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "hook_skip": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "flags",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "ledger_keylet": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "lread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "lread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "hread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "hread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "ledger_last_hash": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "ledger_last_time": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "ledger_nonce": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "ledger_seq": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "meta_slot": {
+        "params": [
+          {
+            "name": "slot_no",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "otxn_burden": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "otxn_field": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "field_id",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "otxn_generation": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "otxn_id": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "flags",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "otxn_param": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "otxn_slot": {
+        "params": [
+          {
+            "name": "slot_no",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "otxn_type": {
+        "params": [],
+        "return": "int64_t"
+      },
+      "prepare": {
+        "amendment": "HooksUpdate2",
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "rollback": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "error_code",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "slot",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_clear": {
+        "params": [
+          {
+            "name": "slot",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_count": {
+        "params": [
+          {
+            "name": "slot",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_float": {
+        "params": [
+          {
+            "name": "slot_no",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_set": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "slot",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_size": {
+        "params": [
+          {
+            "name": "slot",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_subarray": {
+        "params": [
+          {
+            "name": "parent_slot",
+            "type": "uint32_t"
+          },
+          {
+            "name": "array_id",
+            "type": "uint32_t"
+          },
+          {
+            "name": "new_slot",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_subfield": {
+        "params": [
+          {
+            "name": "parent_slot",
+            "type": "uint32_t"
+          },
+          {
+            "name": "field_id",
+            "type": "uint32_t"
+          },
+          {
+            "name": "new_slot",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "slot_type": {
+        "params": [
+          {
+            "name": "slot_no",
+            "type": "uint32_t"
+          },
+          {
+            "name": "flags",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "state": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "state_foreign": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "nread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "nread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "aread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "aread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "state_foreign_set": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "nread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "nread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "aread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "aread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "state_set": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "sto_emplace": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "sread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "sread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "fread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "fread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "field_id",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "sto_erase": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "field_id",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "sto_subarray": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "array_id",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "sto_subfield": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "field_id",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "sto_validate": {
+        "params": [
+          {
+            "name": "tread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "tread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "trace": {
+        "params": [
+          {
+            "name": "mread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "mread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "dread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "dread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "as_hex",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "trace_float": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "float1",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "trace_num": {
+        "params": [
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "number",
+            "type": "int64_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "util_accid": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "util_keylet": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "keylet_type",
+            "type": "uint32_t"
+          },
+          {
+            "name": "a",
+            "type": "uint32_t"
+          },
+          {
+            "name": "b",
+            "type": "uint32_t"
+          },
+          {
+            "name": "c",
+            "type": "uint32_t"
+          },
+          {
+            "name": "d",
+            "type": "uint32_t"
+          },
+          {
+            "name": "e",
+            "type": "uint32_t"
+          },
+          {
+            "name": "f",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "util_raddr": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "util_random": {
+        "amendment": "RNG",
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "util_sha512h": {
+        "params": [
+          {
+            "name": "write_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "write_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "read_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "util_verify": {
+        "params": [
+          {
+            "name": "dread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "dread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "sread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "sread_len",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_ptr",
+            "type": "uint32_t"
+          },
+          {
+            "name": "kread_len",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      },
+      "xpop_slot": {
+        "amendment": "HooksUpdate1",
+        "params": [
+          {
+            "name": "slot_no_tx",
+            "type": "uint32_t"
+          },
+          {
+            "name": "slot_no_meta",
+            "type": "uint32_t"
+          }
+        ],
+        "return": "int64_t"
+      }
+    },
+    "KEYLET_TYPES": {
+      "ACCOUNT": 3,
+      "AMENDMENTS": 4,
+      "AMM": 27,
+      "BRIDGE": 28,
+      "CHECK": 15,
+      "CHILD": 5,
+      "CREDENTIAL": 35,
+      "CRON": 26,
+      "DEPOSIT_PREAUTH": 16,
+      "DID": 31,
+      "EMITTED_DIR": 12,
+      "EMITTED_TXN": 22,
+      "ESCROW": 20,
+      "FEES": 7,
+      "HOOK": 1,
+      "HOOK_DEFINITION": 24,
+      "HOOK_STATE": 2,
+      "HOOK_STATE_DIR": 25,
+      "LINE": 9,
+      "MANIFEST": 37,
+      "MPTOKEN": 34,
+      "MPTOKEN_ISSUANCE": 33,
+      "NEGATIVE_UNL": 8,
+      "NFT_OFFER": 23,
+      "OFFER": 10,
+      "ORACLE": 32,
+      "OWNER_DIR": 18,
+      "PAGE": 19,
+      "PAYCHAN": 21,
+      "PERMISSIONED_DOMAIN": 36,
+      "QUALITY": 11,
+      "SIGNERS": 14,
+      "SKIP": 6,
+      "TICKET": 13,
+      "UNCHECKED": 17,
+      "XCHAIN_OWNED_CLAIM_ID": 29,
+      "XCHAIN_OWNED_CREATE_ACCOUNT_CLAIM_ID": 30
+    },
+    "RETURN_CODES": {
+      "ALREADY_SET": -8,
+      "CANT_RETURN_NEGATIVE": -33,
+      "COMPLEX_NOT_SUPPORTED": -39,
+      "DIVISION_BY_ZERO": -25,
+      "DOESNT_EXIST": -5,
+      "DOES_NOT_MATCH": -40,
+      "EMISSION_FAILURE": -11,
+      "EXPONENT_OVERSIZED": -28,
+      "EXPONENT_UNDERSIZED": -29,
+      "FEE_TOO_LARGE": -10,
+      "GUARD_VIOLATION": -16,
+      "INTERNAL_ERROR": -2,
+      "INVALID_ACCOUNT": -15,
+      "INVALID_ARGUMENT": -7,
+      "INVALID_FIELD": -17,
+      "INVALID_FLOAT": -10024,
+      "INVALID_KEY": -41,
+      "INVALID_TXN": -37,
+      "MANTISSA_OVERSIZED": -26,
+      "MANTISSA_UNDERSIZED": -27,
+      "MEM_OVERLAP": -43,
+      "NOT_AN_AMOUNT": -32,
+      "NOT_AN_ARRAY": -22,
+      "NOT_AN_OBJECT": -23,
+      "NOT_AUTHORIZED": -34,
+      "NOT_A_STRING": -42,
+      "NOT_IMPLEMENTED": -14,
+      "NOT_IOU_AMOUNT": -31,
+      "NO_FREE_SLOTS": -6,
+      "NO_SUCH_KEYLET": -21,
+      "OUT_OF_BOUNDS": -1,
+      "PARSE_ERROR": -18,
+      "PREREQUISITE_NOT_MET": -9,
+      "PREVIOUS_FAILURE_PREVENTS_RETRY": -35,
+      "RC_ACCEPT": -20,
+      "RC_ROLLBACK": -19,
+      "RESERVE_INSUFFICIENT": -38,
+      "SUCCESS": 0,
+      "TOO_BIG": -3,
+      "TOO_LITTLE_ENTROPY": -46,
+      "TOO_MANY_EMITTED_TXN": -13,
+      "TOO_MANY_NAMESPACES": -45,
+      "TOO_MANY_NONCES": -12,
+      "TOO_MANY_PARAMS": -36,
+      "TOO_MANY_STATE_MODIFICATIONS": -44,
+      "TOO_SMALL": -4,
+      "XFL_OVERFLOW": -30
+    }
+  },
   "LEDGER_ENTRY_TYPES": {
+    "AMM": 121,
     "AccountRoot": 97,
     "Amendments": 102,
-    "Any": 0,
+    "AppLoader": 76,
+    "Bridge": 105,
     "Check": 67,
-    "Contract": 99,
+    "Credential": 129,
     "Cron": 65,
+    "DID": 141,
     "DepositPreauth": 112,
     "DirectoryNode": 100,
     "EmittedTxn": 69,
     "Escrow": 117,
     "FeeSettings": 115,
-    "GeneratorMap": 103,
     "Hook": 72,
     "HookDefinition": 68,
     "HookState": 118,
     "ImportVLSequence": 73,
     "Invalid": -1,
     "LedgerHashes": 104,
+    "MPToken": 127,
+    "MPTokenIssuance": 126,
+    "Manifest": 77,
     "NFTokenOffer": 55,
     "NFTokenPage": 80,
     "NegativeUNL": 78,
-    "Nickname": 110,
     "Offer": 111,
+    "Oracle": 128,
     "PayChannel": 120,
+    "PermissionedDomain": 130,
+    "Random": 21102,
     "RippleState": 114,
     "SignerList": 83,
     "Ticket": 84,
     "UNLReport": 82,
-    "URIToken": 85
+    "URIToken": 85,
+    "XChainOwnedClaimID": 113,
+    "XChainOwnedCreateAccountClaimID": 116
   },
   "TRANSACTION_FLAGS": {
+    "AMMClawback": {
+      "tfClawTwoAssets": 1
+    },
+    "AMMDeposit": {
+      "tfLPToken": 65536,
+      "tfLimitLPToken": 4194304,
+      "tfOneAssetLPToken": 2097152,
+      "tfSingleAsset": 524288,
+      "tfTwoAsset": 1048576,
+      "tfTwoAssetIfEmpty": 8388608
+    },
+    "AMMWithdraw": {
+      "tfLPToken": 65536,
+      "tfLimitLPToken": 4194304,
+      "tfOneAssetLPToken": 2097152,
+      "tfOneAssetWithdrawAll": 262144,
+      "tfSingleAsset": 524288,
+      "tfTwoAsset": 1048576,
+      "tfWithdrawAll": 131072
+    },
     "AccountSet": {
       "tfAllowXRP": 2097152,
       "tfDisallowXRP": 1048576,
@@ -2732,11 +4863,27 @@
       "tfLostMajority": 131072,
       "tfTestSuite": 2147483648
     },
+    "MPTokenAuthorize": {
+      "tfMPTUnauthorize": 1
+    },
+    "MPTokenIssuanceCreate": {
+      "tfMPTCanClawback": 64,
+      "tfMPTCanEscrow": 8,
+      "tfMPTCanLock": 2,
+      "tfMPTCanTrade": 16,
+      "tfMPTCanTransfer": 32,
+      "tfMPTRequireAuth": 4
+    },
+    "MPTokenIssuanceSet": {
+      "tfMPTLock": 1,
+      "tfMPTUnlock": 2
+    },
     "NFTokenCreateOffer": {
       "tfSellNFToken": 1
     },
     "NFTokenMint": {
       "tfBurnable": 1,
+      "tfMutable": 16,
       "tfOnlyXRP": 2,
       "tfStrongTSH": 32768,
       "tfTransferable": 8,
@@ -2795,20 +4942,22 @@
     }
   },
   "TRANSACTION_RESULTS": {
+    "tecAMM_ACCOUNT": 168,
     "tecAMM_BALANCE": 163,
-    "tecAMM_FAILED_BID": 167,
-    "tecAMM_FAILED_DEPOSIT": 164,
-    "tecAMM_FAILED_VOTE": 168,
-    "tecAMM_FAILED_WITHDRAW": 165,
-    "tecAMM_INVALID_TOKENS": 166,
-    "tecAMM_UNFUNDED": 162,
-    "tecBAD_XCHAIN_TRANSFER_ISSUE": 171,
+    "tecAMM_EMPTY": 166,
+    "tecAMM_FAILED": 164,
+    "tecAMM_INVALID_TOKENS": 165,
+    "tecAMM_NOT_EMPTY": 167,
+    "tecARRAY_EMPTY": 196,
+    "tecARRAY_TOO_LARGE": 197,
+    "tecBAD_CREDENTIALS": 199,
     "tecCANT_ACCEPT_OWN_NFTOKEN_OFFER": 158,
     "tecCLAIM": 100,
     "tecCRYPTOCONDITION_ERROR": 146,
     "tecDIR_FULL": 121,
     "tecDST_TAG_NEEDED": 143,
     "tecDUPLICATE": 149,
+    "tecEMPTY_DID": 193,
     "tecEXPIRED": 148,
     "tecFAILED_PROCESSING": 105,
     "tecFROZEN": 137,
@@ -2816,6 +4965,7 @@
     "tecHAS_OBLIGATIONS": 151,
     "tecHOOK_REJECTED": 153,
     "tecIMMUTABLE": 188,
+    "tecINCOMPLETE": 191,
     "tecINSUFFICIENT_FUNDS": 159,
     "tecINSUFFICIENT_PAYMENT": 161,
     "tecINSUFFICIENT_RESERVE": 141,
@@ -2824,9 +4974,10 @@
     "tecINSUF_RESERVE_OFFER": 123,
     "tecINSUF_RESERVE_SELLER": 187,
     "tecINTERNAL": 144,
+    "tecINVALID_UPDATE_TIME": 194,
     "tecINVARIANT_FAILED": 147,
     "tecKILLED": 150,
-    "tecLAST_POSSIBLE_ENTRY": 255,
+    "tecLOCKED": 198,
     "tecMAX_SEQUENCE_REACHED": 154,
     "tecNEED_MASTER_KEY": 142,
     "tecNFTOKEN_BUY_SELL_MISMATCH": 156,
@@ -2851,17 +5002,21 @@
     "tecPATH_PARTIAL": 101,
     "tecPRECISION_LOSS": 170,
     "tecREQUIRES_FLAG": 169,
+    "tecTOKEN_PAIR_NOT_FOUND": 195,
     "tecTOO_MANY_REMARKS": 189,
     "tecTOO_SOON": 152,
     "tecUNFUNDED": 129,
     "tecUNFUNDED_ADD": 102,
+    "tecUNFUNDED_AMM": 162,
     "tecUNFUNDED_OFFER": 103,
     "tecUNFUNDED_PAYMENT": 104,
     "tecXCHAIN_ACCOUNT_CREATE_PAST": 182,
     "tecXCHAIN_ACCOUNT_CREATE_TOO_MANY": 183,
     "tecXCHAIN_BAD_CLAIM_ID": 173,
-    "tecXCHAIN_BAD_PUBLIC_KEY_ACCOUNT_PAIR": 186,
+    "tecXCHAIN_BAD_PUBLIC_KEY_ACCOUNT_PAIR": 192,
+    "tecXCHAIN_BAD_TRANSFER_ISSUE": 171,
     "tecXCHAIN_CLAIM_NO_QUORUM": 174,
+    "tecXCHAIN_CREATE_ACCOUNT_DISABLED": 186,
     "tecXCHAIN_CREATE_ACCOUNT_NONXRP_ISSUE": 176,
     "tecXCHAIN_INSUFF_CREATE_AMOUNT": 181,
     "tecXCHAIN_NO_CLAIM_ID": 172,
@@ -2884,7 +5039,9 @@
     "tefFAILURE": -199,
     "tefIMPORT_BLACKHOLED": -175,
     "tefINTERNAL": -192,
+    "tefINVALID_LEDGER_FIX_TYPE": -174,
     "tefINVARIANT_FAILED": -182,
+    "tefMANIFEST_KEY_IN_USE": -171,
     "tefMASTER_DISABLED": -188,
     "tefMAX_LEDGER": -187,
     "tefNFTOKEN_IS_NOT_TRANSFERABLE": -179,
@@ -2894,7 +5051,9 @@
     "tefNO_TICKET": -180,
     "tefPAST_IMPORT_SEQ": -178,
     "tefPAST_IMPORT_VL_SEQ": -177,
+    "tefPAST_MANIFEST_SEQ": -173,
     "tefPAST_SEQ": -190,
+    "tefREVOKED_MANIFEST": -172,
     "tefTOO_BIG": -181,
     "tefWRONG_PRIOR": -189,
     "telBAD_DOMAIN": -398,
@@ -2907,16 +5066,20 @@
     "telCAN_NOT_QUEUE_FEE": -388,
     "telCAN_NOT_QUEUE_FULL": -387,
     "telCAN_NOT_QUEUE_IMPORT": -381,
+    "telENV_RPC_FAILED": -380,
     "telFAILED_PROCESSING": -395,
     "telIMPORT_VL_KEY_NOT_RECOGNISED": -382,
     "telINSUF_FEE_P": -394,
     "telLOCAL_ERROR": -399,
+    "telMANIFEST_FEE_MISMATCH": -379,
     "telNETWORK_ID_MAKES_TX_NON_CANONICAL": -384,
     "telNON_LOCAL_EMITTED_TXN": -383,
     "telNO_DST_PARTIAL": -393,
     "telREQUIRES_NETWORK_ID": -385,
     "telWRONG_NETWORK": -386,
-    "temAMM_BAD_TOKENS": -261,
+    "temARRAY_EMPTY": -251,
+    "temARRAY_TOO_LARGE": -250,
+    "temBAD_AMM_TOKENS": -261,
     "temBAD_AMOUNT": -298,
     "temBAD_CURRENCY": -297,
     "temBAD_EXPIRATION": -296,
@@ -2939,12 +5102,14 @@
     "temBAD_SIGNER": -272,
     "temBAD_SRC_ACCOUNT": -281,
     "temBAD_TICK_SIZE": -269,
+    "temBAD_TRANSFER_FEE": -249,
     "temBAD_TRANSFER_RATE": -280,
     "temBAD_WEIGHT": -270,
     "temCANNOT_PREAUTH_SELF": -267,
     "temDISABLED": -273,
     "temDST_IS_SRC": -279,
     "temDST_NEEDED": -278,
+    "temEMPTY_DID": -252,
     "temHOOK_DATA_TOO_LARGE": -253,
     "temINVALID": -277,
     "temINVALID_ACCOUNT_ID": -268,
@@ -2962,7 +5127,6 @@
     "temXCHAIN_BRIDGE_BAD_REWARD_AMOUNT": -255,
     "temXCHAIN_BRIDGE_NONDOOR_OWNER": -257,
     "temXCHAIN_EQUAL_DOOR_ACCOUNTS": -260,
-    "temXCHAIN_TOO_MANY_ATTESTATIONS": -254,
     "terFUNDS_SPENT": -98,
     "terINSUF_FEE_B": -97,
     "terLAST": -91,
@@ -2981,47 +5145,66 @@
     "tesSUCCESS": 0
   },
   "TRANSACTION_TYPES": {
+    "AMMBid": 39,
+    "AMMClawback": 31,
+    "AMMCreate": 35,
+    "AMMDelete": 40,
+    "AMMDeposit": 36,
+    "AMMVote": 38,
+    "AMMWithdraw": 37,
     "AccountDelete": 21,
     "AccountSet": 3,
-    "Amendment": 100,
     "CheckCancel": 18,
     "CheckCash": 17,
     "CheckCreate": 16,
     "ClaimReward": 98,
     "Clawback": 30,
-    "Contract": 9,
+    "CredentialAccept": 68,
+    "CredentialCreate": 67,
+    "CredentialDelete": 69,
     "Cron": 92,
     "CronSet": 93,
+    "DIDDelete": 59,
+    "DIDSet": 58,
     "DepositPreauth": 19,
     "EmitFailure": 103,
+    "EnableAmendment": 100,
     "Entropy": 89,
     "EscrowCancel": 4,
     "EscrowCreate": 1,
     "EscrowFinish": 2,
-    "Fee": 101,
     "GenesisMint": 96,
     "Import": 97,
     "Invalid": -1,
     "Invoke": 99,
+    "LedgerStateFix": 62,
+    "MPTokenAuthorize": 66,
+    "MPTokenIssuanceCreate": 63,
+    "MPTokenIssuanceDestroy": 64,
+    "MPTokenIssuanceSet": 65,
     "NFTokenAcceptOffer": 29,
     "NFTokenBurn": 26,
     "NFTokenCancelOffer": 28,
     "NFTokenCreateOffer": 27,
     "NFTokenMint": 25,
-    "NicknameSet": 6,
+    "NFTokenModify": 70,
     "OfferCancel": 8,
     "OfferCreate": 7,
+    "OracleDelete": 61,
+    "OracleSet": 60,
     "Payment": 0,
     "PaymentChannelClaim": 15,
     "PaymentChannelCreate": 13,
     "PaymentChannelFund": 14,
+    "PermissionedDomainDelete": 72,
+    "PermissionedDomainSet": 71,
     "Remit": 95,
+    "SetFee": 101,
     "SetHook": 22,
+    "SetManifest": 91,
     "SetRegularKey": 5,
     "SetRemarks": 94,
-    "Shuffle": 88,
     "SignerListSet": 12,
-    "SpinalTap": 11,
     "TicketCreate": 10,
     "TrustSet": 20,
     "UNLModify": 102,
@@ -3030,522 +5213,47 @@
     "URITokenBuy": 47,
     "URITokenCancelSellOffer": 49,
     "URITokenCreateSellOffer": 48,
-    "URITokenMint": 45
+    "URITokenMint": 45,
+    "XChainAccountCreateCommit": 53,
+    "XChainAddAccountCreateAttestation": 55,
+    "XChainAddClaimAttestation": 54,
+    "XChainClaim": 52,
+    "XChainCommit": 51,
+    "XChainCreateBridge": 57,
+    "XChainCreateClaimID": 50,
+    "XChainModifyBridge": 56
   },
   "TYPES": {
     "AccountID": 8,
     "Amount": 6,
     "Blob": 7,
+    "Currency": 26,
     "Done": -1,
     "Hash128": 4,
     "Hash160": 17,
+    "Hash192": 21,
     "Hash256": 5,
+    "Hash384": 22,
+    "Hash512": 23,
+    "Issue": 24,
     "LedgerEntry": 10002,
     "Metadata": 10004,
     "NotPresent": 0,
+    "Number": 9,
     "PathSet": 18,
     "STArray": 15,
     "STObject": 14,
     "Transaction": 10001,
     "UInt16": 1,
-    "UInt192": 21,
     "UInt32": 2,
-    "UInt384": 22,
-    "UInt512": 23,
     "UInt64": 3,
     "UInt8": 16,
     "UInt96": 20,
     "Unknown": -2,
     "Validation": 10003,
-    "Vector256": 19
+    "Vector256": 19,
+    "XChainBridge": 25
   },
-  "features": {
-    "00C1FC4A53E60AB02C864641002B3172F38677E29C26C5406685179B37E1EDAC": {
-      "enabled": true,
-      "name": "RequireFullyCanonicalSig",
-      "supported": true
-    },
-    "0134BEED89A1A1D8B2663CF9DFCDB9024A060706FDFF147AA4D203749AFD5932": {
-      "enabled": false,
-      "name": "IOUIssuerWeakTSH",
-      "supported": true,
-      "vetoed": true
-    },
-    "0285B7E5E08E1A8E4C15636F0591D87F73CB6A7B6452A932AD72BBC8E5D1CBE3": {
-      "enabled": true,
-      "name": "fixNFTokenDirV1",
-      "supported": true
-    },
-    "07D43DCE529B15A10827E5E04943B496762F9A88E3268269D69C44BE49E21104": {
-      "enabled": false,
-      "name": "Escrow",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "08DE7D96082187F6E6578530258C77FAABABE4C20474BDB82F04B021F1A68647": {
-      "enabled": false,
-      "name": "PayChan",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "0D8BF22FF7570D58598D1EF19EBB6E142AD46E59A223FD3816262FBB69345BEA": {
-      "enabled": false,
-      "name": "Remit",
-      "supported": true,
-      "vetoed": true
-    },
-    "1562511F573A19AE9BD103B5D6B9E01B3B46805AEC5D3C4805C902B514399146": {
-      "enabled": false,
-      "name": "CryptoConditions",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "157D2D480E006395B76F948E3E07A45A05FE10230D88A7993C71F97AE4B1F2D1": {
-      "enabled": true,
-      "name": "Checks",
-      "supported": true
-    },
-    "17C342EA7EFA25D809FC0DD7BC885190DAF54582E5A683ED0BBA200877A0BFDE": {
-      "enabled": false,
-      "name": "fixHookAPI20251128",
-      "supported": true,
-      "vetoed": false
-    },
-    "1D3463A5891F9E589C5AE839FFAC4A917CE96197098A1EF22304E1BC5B98A454": {
-      "enabled": false,
-      "name": "fix1528",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "1F4AFA8FA1BC8827AD4C0F682C03A8B671DCDF6B5C4DE36D44243A684103EF88": {
-      "enabled": true,
-      "name": "HardenedValidations",
-      "supported": true
-    },
-    "215181D23BF5C173314B5FDB9C872C92DE6CC918483727DE037C0C13E7E6EE9D": {
-      "enabled": false,
-      "name": "fixXahauV2",
-      "supported": true,
-      "vetoed": true
-    },
-    "22DD15A56DFD886A7B7D37B656DC4F974BB0FE4BECB83055B01AE8B5A8466D34": {
-      "enabled": false,
-      "name": "fixProvisionalDoubleThreading",
-      "supported": true,
-      "vetoed": false
-    },
-    "25BA44241B3BD880770BFA4DA21C7180576831855368CBEC6A3154FDE4A7676E": {
-      "enabled": true,
-      "name": "fix1781",
-      "supported": true
-    },
-    "2CD5286D8D687E98B41102BDD797198E81EA41DF7BD104E6561FEB104EFF2561": {
-      "enabled": true,
-      "name": "fixTakerDryOfferRemoval",
-      "supported": true
-    },
-    "2E2FB9CF8A44EB80F4694D38AADAE9B8B7ADAFD2F092E10068E61C98C4F092B0": {
-      "enabled": true,
-      "name": "fixUniversalNumber",
-      "supported": true
-    },
-    "3012E8230864E95A58C60FD61430D7E1B4D3353195F2981DC12B0C7C0950FFAC": {
-      "enabled": true,
-      "name": "FlowCross",
-      "supported": true
-    },
-    "30CD365592B8EE40489BA01AE2F7555CAC9C983145871DC82A42A31CF5BAE7D9": {
-      "enabled": true,
-      "name": "DeletableAccounts",
-      "supported": true
-    },
-    "32A122F1352A4C7B3A6D790362CC34749C5E57FCE896377BFDC6CCD14F6CD627": {
-      "enabled": true,
-      "name": "NonFungibleTokensV1_1",
-      "supported": true
-    },
-    "36799EA497B1369B170805C078AEFE6188345F9B3E324C21E9CA3FF574E3C3D6": {
-      "enabled": true,
-      "name": "fixNFTokenNegOffer",
-      "supported": true
-    },
-    "3C43D9A973AA4443EF3FC38E42DD306160FBFFDAB901CD8BAA15D09F2597EB87": {
-      "enabled": true,
-      "name": "NonFungibleTokensV1",
-      "supported": true
-    },
-    "3CBC5C4E630A1B82380295CDA84B32B49DD066602E74E39B85EF64137FA65194": {
-      "enabled": true,
-      "name": "DepositPreauth",
-      "supported": true
-    },
-    "42426C4D4F1009EE67080A9B7965B44656D7714D104A72F9B4369F97ABF044EE": {
-      "enabled": false,
-      "name": "FeeEscalation",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "42EEA5E28A97824821D4EF97081FE36A54E9593C6E4F20CBAE098C69D2E072DC": {
-      "enabled": false,
-      "name": "fix1373",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "42F8B586B357ABBAAAA1C733C3E7D3B75761395340D0CDF600179E8737E22478": {
-      "enabled": true,
-      "name": "BalanceRewards",
-      "supported": true
-    },
-    "452F5906C46D46F407883344BFDD90E672B672C5E9943DB4891E3A34FEEEB9DB": {
-      "enabled": true,
-      "name": "fixSTAmountCanonicalize",
-      "supported": true
-    },
-    "47C3002ABA31628447E8E9A8B315FAA935CE30183F9A9B86845E469CA2CDC3DF": {
-      "enabled": true,
-      "name": "DisallowIncoming",
-      "supported": true
-    },
-    "4B8466415FAB32FFA89D9DCBE166A42340115771DF611A7160F8D7439C87ECD8": {
-      "enabled": false,
-      "name": "fixNSDelete",
-      "supported": true,
-      "vetoed": true
-    },
-    "4C499D17719BB365B69010A436B64FD1A82AAB199FC1CEB06962EBD01059FB09": {
-      "enabled": false,
-      "name": "fixXahauV1",
-      "supported": true,
-      "vetoed": true
-    },
-    "4C97EBA926031A7CF7D7B36FDE3ED66DDA5421192D63DE53FFB46E43B9DC8373": {
-      "enabled": false,
-      "name": "MultiSign",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "4F46DF03559967AC60F2EB272FEFE3928A7594A45FF774B87A7E540DB0F8F068": {
-      "enabled": true,
-      "name": "fixAmendmentMajorityCalc",
-      "supported": true
-    },
-    "532651B4FD58DF8922A49BA101AB3E996E5BFBF95A913B3E392504863E63B164": {
-      "enabled": false,
-      "name": "TickSize",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "56B241D7A43D40354D02A9DC4C8DF5C7A1F930D92A9035C4E12291B3CA3E1C2B": {
-      "enabled": false,
-      "name": "Clawback",
-      "supported": true,
-      "vetoed": true
-    },
-    "586480873651E106F1D6339B0C4A8945BA705A777F3F4524626FF1FC07EFE41D": {
-      "enabled": true,
-      "name": "MultiSignReserve",
-      "supported": true
-    },
-    "58BE9B5968C4DA7C59BA900961828B113E5490699B21877DEF9A31E9D0FE5D5F": {
-      "enabled": true,
-      "name": "fix1623",
-      "supported": true
-    },
-    "5B8E5D8F3D8687D3CE567FB5BDAED152204D195ED2EAEC346E3AA0607D51752A": {
-      "enabled": false,
-      "name": "fixRewardClaimFlags",
-      "supported": true,
-      "vetoed": false
-    },
-    "5D08145F0A4983F23AFFFF514E83FAD355C5ABFBB6CAB76FB5BC8519FF5F33BE": {
-      "enabled": true,
-      "name": "fix1515",
-      "supported": true
-    },
-    "621A0B264970359869E3C0363A899909AAB7A887C8B73519E4ECF952D33258A8": {
-      "enabled": true,
-      "name": "fixPayChanRecipientOwnerDir",
-      "supported": true
-    },
-    "6781F8368C4771B83E8B821D88F580202BCB4228075297B19E4FDC5233F1EFDC": {
-      "enabled": false,
-      "name": "TrustSetAuth",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "67A34F2CF55BFC0F93AACD5B281413176FEE195269FA6D95219A2DF738671172": {
-      "enabled": true,
-      "name": "fix1513",
-      "supported": true
-    },
-    "6C92211186613F9647A89DFFBAB8F94C99D4C7E956D495270789128569177DA1": {
-      "enabled": false,
-      "name": "fix1512",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "6E739F4F8B07BED29FC9FF440DA3C301CD14A180DF45819F658FEC2F7DE31427": {
-      "enabled": true,
-      "name": "XahauGenesis",
-      "supported": true
-    },
-    "7117E2EC2DBF119CA55181D69819F1999ECEE1A0225A7FD2B9ED47940968479C": {
-      "enabled": true,
-      "name": "fix1571",
-      "supported": true
-    },
-    "717F060C0C237F122F8065781528B1CA047D82B4E787022984F26D7B997E3D9C": {
-      "enabled": false,
-      "name": "fix20250131",
-      "supported": true,
-      "vetoed": false
-    },
-    "73761231F7F3D94EC3D8C63D91BDD0D89045C6F71B917D1925C01253515A6669": {
-      "enabled": true,
-      "name": "fixNonFungibleTokensV1_2",
-      "supported": true
-    },
-    "740352F2412A9909880C23A559FCECEDA3BE2126FED62FC7660D628A06927F11": {
-      "enabled": true,
-      "name": "Flow",
-      "supported": true
-    },
-    "75A7E01C505DD5A179DFE3E000A9B6F1EDDEB55A12F95579A23E15B15DC8BE5A": {
-      "enabled": true,
-      "name": "ImmediateOfferKilled",
-      "supported": true
-    },
-    "7CA0426E7F411D39BB014E57CD9E08F61DE1750F0D41FCD428D9FB80BB7596B0": {
-      "enabled": false,
-      "name": "ZeroB2M",
-      "supported": true,
-      "vetoed": true
-    },
-    "7FE392C21A2880B3223A2CAF8DC59ADDAE5B03BD4B0500A1F63DF9893E852DBA": {
-      "enabled": false,
-      "name": "ExtendedHookState",
-      "supported": true,
-      "vetoed": true
-    },
-    "8063140E9260799D6716756B891CEC3E7006C4E4F277AB84670663A88F94B9C4": {
-      "enabled": false,
-      "name": "fixPageCap",
-      "supported": true,
-      "vetoed": false
-    },
-    "86E83A7D2ECE3AD5FA87AB2195AE015C950469ABF0B72EAACED318F74886AE90": {
-      "enabled": true,
-      "name": "CryptoConditionsSuite",
-      "supported": true
-    },
-    "88693F108C3CD8A967F3F4253A32DEF5E35F9406ACD2A11B88B11D90865763A9": {
-      "enabled": false,
-      "name": "fix240911",
-      "supported": true,
-      "vetoed": false
-    },
-    "88FEC10C8272D690124E923FBB47A95013C6AA20D9B27B871A99790D05055421": {
-      "enabled": false,
-      "name": "fixXahauV3",
-      "supported": true,
-      "vetoed": false
-    },
-    "89308AF3B8B10B7192C4E613E1D2E4D9BA64B2EE2D5232402AE82A6A7220D953": {
-      "enabled": true,
-      "name": "fixQualityUpperBound",
-      "supported": true
-    },
-    "8EC4304A06AF03BE953EA6EDA494864F6F3F30AA002BABA35869FBB8C6AE5D52": {
-      "enabled": false,
-      "name": "fixInvalidTxFlags",
-      "supported": true,
-      "vetoed": false
-    },
-    "8F81B066ED20DAECA20DF57187767685EEF3980B228E0667A650BAF24426D3B4": {
-      "enabled": true,
-      "name": "fixCheckThreading",
-      "supported": true
-    },
-    "9000B5F96F9E129D1CB42F2B07AF4CEFEFBFDF49CFCD8B6FF46E719A3F19B436": {
-      "enabled": false,
-      "name": "HookCanEmit",
-      "supported": true,
-      "vetoed": true
-    },
-    "919857E4B902A20216E4819B9BD9FD1FD19A66ECF63151C18A4C48C873DB9578": {
-      "enabled": true,
-      "name": "PaychanAndEscrowForTokens",
-      "supported": true
-    },
-    "93E516234E35E08CA689FA33A6D38E103881F8DCB53023F728C307AA89D515A7": {
-      "enabled": true,
-      "name": "XRPFees",
-      "supported": true
-    },
-    "94312150FFBA0E21B46244D7C4C6D66219C53C5F82FB7949F0832A6B56FB9631": {
-      "enabled": false,
-      "name": "Touch",
-      "supported": true,
-      "vetoed": true
-    },
-    "955DF3FA5891195A9DAEFA1DDC6BB244B545DDE1BAA84CBB25D5F12A8DA68A0C": {
-      "enabled": true,
-      "name": "TicketBatch",
-      "supported": true
-    },
-    "98DECF327BF79997AEC178323AD51A830E457BFC6D454DAF3E46E5EC42DC619F": {
-      "enabled": true,
-      "name": "CheckCashMakesTrustLine",
-      "supported": true
-    },
-    "A482912CE1E7026F8BC5F63F5A2394768455B71CD8117104F4BFE3A7EAE1AA45": {
-      "enabled": true,
-      "name": "RNG",
-      "supported": true
-    },
-    "AE35ABDEFBDE520372B31C957020B34A7A4A9DC3115A69803A44016477C84D6E": {
-      "enabled": true,
-      "name": "fixNFTokenRemint",
-      "supported": true
-    },
-    "AF8DF7465C338AE64B1E937D6C8DA138C0D63AD5134A68792BBBE1F63356C422": {
-      "enabled": true,
-      "name": "FlowSortStrands",
-      "supported": true
-    },
-    "B2A4DB846F0891BF2C76AB2F2ACC8F5B4EC64437135C6E56F3F859DE5FFD5856": {
-      "enabled": true,
-      "name": "ExpandedSignerList",
-      "supported": true
-    },
-    "B4D44CC3111ADD964E846FC57760C8B50FFCD5A82C86A72756F6B058DDDF96AD": {
-      "enabled": false,
-      "name": "fix1201",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "B4E4F5D2D6FB84DF7399960A732309C9FD530EAE5941838160042833625A6076": {
-      "enabled": true,
-      "name": "NegativeUNL",
-      "supported": true
-    },
-    "B6B3EEDC0267AB50491FDC450A398AF30DBCD977CECED8BEF2499CAB5DAC19E2": {
-      "enabled": true,
-      "name": "fixRmSmallIncreasedQOffers",
-      "supported": true
-    },
-    "B9E739B8296B4A1BB29BE990B17D66E21B62A300A909F25AC55C22D6C72E1F9D": {
-      "enabled": false,
-      "name": "fix1523",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "BA993DF6058701246DAF748BDE237B0C980164D0034CEB1D831C089A90D9000D": {
-      "enabled": false,
-      "name": "fixFloatDivide",
-      "supported": true,
-      "vetoed": false
-    },
-    "C4483A1896170C66C098DEA5B0E024309C60DC960DE5F01CD7AF986AA3D9AD37": {
-      "enabled": true,
-      "name": "fixMasterKeyAsRegularKey",
-      "supported": true
-    },
-    "C962119A75111083D118901B0D331959C620157FDEABA044398B992B829938C5": {
-      "enabled": false,
-      "name": "fixReduceImport",
-      "supported": true,
-      "vetoed": false
-    },
-    "CA7C02118BA27599528543DFE77BA6838D1B0F43B447D4D7F53523CE6A0E9AC2": {
-      "enabled": true,
-      "name": "fix1543",
-      "supported": true
-    },
-    "CC5ABAE4F3EC92E94A59B1908C2BE82D2228B6485C00AFF8F22DF930D89C194E": {
-      "enabled": false,
-      "name": "SortedDirectories",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "D686F2538F410C9D0D856788E98E3579595DAF7B38D38887F81ECAC934B06040": {
-      "enabled": true,
-      "name": "HooksUpdate1",
-      "supported": true
-    },
-    "DAF3A6EB04FA5DC51E8E4F23E9B7022B693EFA636F23F22664746C77B5786B23": {
-      "enabled": false,
-      "name": "DeepFreeze",
-      "supported": true,
-      "vetoed": true
-    },
-    "DC9CA96AEA1DCF83E527D1AFC916EFAF5D27388ECA4060A88817C1238CAEE0BF": {
-      "enabled": false,
-      "name": "EnforceInvariants",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "DD6ABC68C1F37392E521EF6FF1475A11576D87C1BC36D9C9E4F0E6C09D18C120": {
-      "enabled": false,
-      "name": "Cron",
-      "supported": true,
-      "vetoed": true
-    },
-    "DF8B4536989BDACE3F934F29423848B9F1D76D09BE6A1FCFE7E7F06AA26ABEAD": {
-      "enabled": true,
-      "name": "fixRemoveNFTokenAutoTrustLine",
-      "supported": true
-    },
-    "E2E6F2866106419B88C50045ACE96368558C345566AC8F2BDF5A5B5587F0E6FA": {
-      "enabled": false,
-      "name": "fix1368",
-      "supported": true,
-      "vetoed": "Obsolete"
-    },
-    "E331BED1F9C4F5F6B6E307D40323D81C3AAAD093A61AB8CFAC7BCFBEBE31F758": {
-      "enabled": false,
-      "name": "fixCronStacking",
-      "supported": true,
-      "vetoed": false
-    },
-    "ECE6819DBA5DB528F1A241695F5A9811EF99467CDE22510954FD357780BBD078": {
-      "enabled": true,
-      "name": "Hooks",
-      "supported": true
-    },
-    "ECF412BE0964EC2E71DCF807EEEA6EA8470D3DB15173D46F28AB6E234860AC32": {
-      "enabled": true,
-      "name": "URIToken",
-      "supported": true
-    },
-    "EDB4EE4C524E16BDD91D9A529332DED08DCAAA51CC6DC897ACFA1A0ED131C5B6": {
-      "enabled": false,
-      "name": "fix240819",
-      "supported": true,
-      "vetoed": false
-    },
-    "F5751842D26FC057B92CAA435ABF4F1428C2BCC4180D18775ADE92CB2643BBA3": {
-      "enabled": true,
-      "name": "Import",
-      "supported": true
-    },
-    "F64E1EABBE79D55B3BB82020516CEC2C582A98A6BFE20FBE9BB6A0D233418064": {
-      "enabled": true,
-      "name": "DepositAuth",
-      "supported": true
-    },
-    "FA4E4881FDB038DCD8D7DFD850A304546E0B2844CACC3AB97CA41136A03E49F5": {
-      "enabled": false,
-      "name": "Remarks",
-      "supported": true,
-      "vetoed": true
-    },
-    "FBD513F1B893AC765B78F250E6FFA6A11B573209D1842ADC787C850696741288": {
-      "enabled": true,
-      "name": "fix1578",
-      "supported": true
-    }
-  },
-  "hash": "4ACA2A39F0DDBE0F332DB3B2AE5FF27F1FAFE10A357A918036CF494FAE2E1EEB",
+  "hash": "366D622E4EF1805F7802B6FF18FB27659DD5818C4575F187CCFEBE71B0D56535",
   "native_currency_code": "XAH"
 }
