@@ -145,12 +145,19 @@ skip_array(ParserContext& ctx, const Protocol& protocol, int depth)
     while (!ctx.cursor.empty())
     {
         auto [header_slice, field_code] = read_field_header(ctx.cursor);
+        // A header that does not parse, or a field the definitions do not
+        // know, has no known length: there is nothing sound to skip to. The
+        // visiting path refuses the same bytes.
         if (field_code == 0)
-            break;
+            throw ParserError("Malformed field header in STArray");
 
         const FieldDef* field = protocol.get_field_by_code(field_code);
         if (!field)
-            break;
+        {
+            throw ParserError(
+                "Unknown field code in STArray: " +
+                std::to_string(field_code));
+        }
 
         // Check for end marker
         if (is_array_end_marker(field))
@@ -279,6 +286,14 @@ parse_with_visitor_impl(
 
                     const FieldDef* elem_field =
                         protocol.get_field_by_code(elem_code);
+                    // An element wrapper the definitions do not know. These
+                    // are untrusted bytes: refuse, never dereference.
+                    if (!elem_field)
+                    {
+                        throw ParserError(
+                            "Unknown field code in STArray: " +
+                            std::to_string(elem_code));
+                    }
                     if (is_array_end_marker(elem_field))
                     {
                         // Rewind since we'll read it again outside the loop

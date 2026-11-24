@@ -61,59 +61,42 @@ struct XChainBridgeCodec
         Slice const& data,
         std::string_view native = CurrencyCodec::default_native)
     {
+        // Every length here is read from the bytes themselves, so each step
+        // goes through the cursor's checked reads.
         boost::json::object obj;
-        size_t pos = 0;
+        SliceCursor cursor{data, 0};
+        auto const door = [&cursor]() {
+            // STAccount: a one-byte length, then the account
+            size_t const len = cursor.read_u8();
+            return AccountIDCodec::decode(cursor.read_slice(len));
+        };
 
-        // LockingChainDoor: STAccount = VL prefix + AccountID (20 bytes)
-        size_t lcd_vl = data.data()[pos];
-        pos += 1;
-        obj["LockingChainDoor"] = AccountIDCodec::decode(
-            Slice(data.data() + pos, lcd_vl));
-        pos += lcd_vl;
-
-        // LockingChainIssue: STIssue = 20 (XRP) or 40 (non-XRP) bytes
-        SliceCursor lci_cursor(Slice(data.data() + pos, data.size() - pos));
-        size_t lci_size = get_issue_size(lci_cursor);
-        obj["LockingChainIssue"] = IssueCodec::decode(
-            Slice(data.data() + pos, lci_size), native);
-        pos += lci_size;
-
-        // IssuingChainDoor: STAccount = VL prefix + AccountID
-        size_t icd_vl = data.data()[pos];
-        pos += 1;
-        obj["IssuingChainDoor"] = AccountIDCodec::decode(
-            Slice(data.data() + pos, icd_vl));
-        pos += icd_vl;
-
-        // IssuingChainIssue: STIssue = rest
+        obj["LockingChainDoor"] = door();
+        // STIssue: 20 (native), 40 (issued) or 44 (MPT) bytes
+        size_t const lci_size = get_issue_size(cursor);
+        obj["LockingChainIssue"] =
+            IssueCodec::decode(cursor.read_slice(lci_size), native);
+        obj["IssuingChainDoor"] = door();
+        // IssuingChainIssue: the rest
         obj["IssuingChainIssue"] = IssueCodec::decode(
-            Slice(data.data() + pos, data.size() - pos), native);
+            Slice(data.data() + cursor.pos, cursor.remaining_size()), native);
         return obj;
     }
 
-    /// Get the total wire size by peeking at the data.
+    /// Get the total wire size by peeking at the data. The caller's cursor
+    /// is not moved. Throws SliceCursorError if the data ends early: the
+    /// lengths are untrusted, and an unchecked walk read past the buffer.
     static size_t
-    wire_size(SliceCursor& cursor)
+    wire_size(SliceCursor const& cursor)
     {
-        size_t start = cursor.pos;
-
-        // LockingChainDoor: VL + account
-        size_t lcd_len = cursor.data.data()[cursor.pos];
-        cursor.pos += 1 + lcd_len;
-
-        // LockingChainIssue: 20 or 40
-        cursor.pos += get_issue_size(cursor);
-
-        // IssuingChainDoor: VL + account
-        size_t icd_len = cursor.data.data()[cursor.pos];
-        cursor.pos += 1 + icd_len;
-
-        // IssuingChainIssue: 20 or 40
-        cursor.pos += get_issue_size(cursor);
-
-        size_t total = cursor.pos - start;
-        cursor.pos = start;  // reset — caller will read
-        return total;
+        SliceCursor walk = cursor;
+        auto const door = [&walk]() { walk.advance(walk.read_u8()); };
+        auto const issue = [&walk]() { walk.advance(get_issue_size(walk)); };
+        door();   // LockingChainDoor
+        issue();  // LockingChainIssue
+        door();   // IssuingChainDoor
+        issue();  // IssuingChainIssue
+        return walk.pos - cursor.pos;
     }
 };
 

@@ -32,7 +32,7 @@ struct SliceCursor
     size_t
     remaining_size() const
     {
-        return data.size() - pos;
+        return pos >= data.size() ? 0 : data.size() - pos;
     }
     Slice
     remaining() const
@@ -104,15 +104,25 @@ struct SliceCursor
         return result;
     }
 
+    // Skipping is reading without looking: the bytes must be there. A
+    // length taken from untrusted data would otherwise leave the cursor past
+    // the end, and a caller that then slices "what was skipped" reads memory
+    // that is not the message.
     void
     advance(size_t n)
     {
+        if (n > remaining_size())
+        {
+            throw SliceCursorError(
+                "attempted to skip " + std::to_string(n) + " bytes, only " +
+                std::to_string(remaining_size()) + " available");
+        }
         pos += n;
     }
     Slice
     read_slice(size_t n)
     {
-        if (pos + n > data.size())
+        if (n > remaining_size())
         {
             throw SliceCursorError(
                 "attempted to read " + std::to_string(n) + " bytes, only " +
