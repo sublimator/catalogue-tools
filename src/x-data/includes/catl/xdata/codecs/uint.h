@@ -152,12 +152,86 @@ struct UInt64Codec
         s.add_u64(parse_hex_uint64(hex, "UInt64"));
     }
 
-    // From decimal string (for SPECIAL_FIELDS like MaximumAmount)
+    // The UInt64 fields rippled marks base-ten (SField::kSmdBaseTen in
+    // include/xrpl/protocol/detail/sfields.macro). They are amounts: their
+    // JSON text is decimal, where every other UInt64 is hex. Reading one as
+    // hex is a different number on the wire, not a different spelling.
+    // xahaud marks the first three the same way and defines no others.
+    //
+    // The set is by name. A field's number belongs to one network's
+    // definitions; the name is what the JSON reader sees.
+    static constexpr std::string_view base_ten_fields[] = {
+        "MaximumAmount",
+        "OutstandingAmount",
+        "MPTAmount",
+        "LockedAmount",
+        "ConfidentialOutstandingAmount",
+    };
+
+    static bool
+    is_base_ten(std::string_view field_name)
+    {
+        for (auto const name : base_ten_fields)
+            if (field_name == name)
+                return true;
+        return false;
+    }
+
+    // From decimal text, as rippled reads a base-ten field: digits and
+    // nothing else, at most 2^64 - 1. No sign, no spaces, no exponent, no hex.
     template <ByteSink Sink>
     static void
-    encode_decimal(Serializer<Sink>& s, std::string_view decimal)
+    encode_decimal(
+        Serializer<Sink>& s,
+        std::string_view decimal,
+        std::string const& path = {})
     {
-        s.add_u64(parse_uint64(decimal, "UInt64"));
+        uint64_t val = 0;
+        bool const digits = !decimal.empty() &&
+            decimal.find_first_not_of("0123456789") == std::string_view::npos;
+        auto const [ptr, ec] = digits
+            ? std::from_chars(
+                  decimal.data(), decimal.data() + decimal.size(), val)
+            : std::from_chars_result{decimal.data(), std::errc::invalid_argument};
+        if (ec != std::errc{} || ptr != decimal.data() + decimal.size())
+        {
+            throw EncodeError(
+                CodecErrorCode::invalid_value,
+                "UInt64",
+                "invalid decimal integer: " + std::string(decimal),
+                path);
+        }
+        s.add_u64(val);
+    }
+
+    template <ByteSink Sink>
+    static void
+    encode_decimal(
+        Serializer<Sink>& s,
+        boost::json::value const& v,
+        std::string const& path = {})
+    {
+        if (!v.is_string())
+        {
+            throw EncodeError(
+                CodecErrorCode::invalid_value,
+                "UInt64",
+                "expected a decimal string",
+                path);
+        }
+        encode_decimal(s, std::string_view(v.as_string()), path);
+    }
+
+    // Decode a base-ten field to decimal text, as rippled's STUInt64::getJson.
+    static boost::json::value
+    decode_decimal(Slice const& data)
+    {
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i)
+        {
+            v = (v << 8) | data.data()[i];
+        }
+        return boost::json::string(std::to_string(v));
     }
 
     // Decode to hex string (matching xrpl-py/xrpl.js)

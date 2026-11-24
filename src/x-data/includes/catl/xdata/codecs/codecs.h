@@ -127,7 +127,9 @@ decode_field_value(
     if (t == FieldTypes::UInt32)
         return UInt32Codec::decode(data);
     if (t == FieldTypes::UInt64)
-        return UInt64Codec::decode(data);
+        return UInt64Codec::is_base_ten(field.name)
+            ? UInt64Codec::decode_decimal(data)
+            : UInt64Codec::decode(data);
     if (t == FieldTypes::Int32)
         return Int32Codec::decode(data);
     if (t == FieldTypes::Int64)
@@ -214,7 +216,11 @@ encode_field_value(
     }
     else if (t == FieldTypes::UInt64)
     {
-        UInt64Codec::encode(s, v);
+        // Amount-like fields are decimal text; every other UInt64 is hex.
+        if (UInt64Codec::is_base_ten(field.name))
+            UInt64Codec::encode_decimal(s, v, path);
+        else
+            UInt64Codec::encode(s, v);
     }
     else if (t == FieldTypes::Int32)
     {
