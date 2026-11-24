@@ -16,13 +16,20 @@ from pathlib import Path
 import sys
 
 
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def generate():
-    root = Path(__file__).resolve().parents[3]
-    spec = importlib.util.spec_from_file_location(
-        "trust_fixture_helpers", root / "scripts/test-verify-xprv.py")
-    t = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = t
-    spec.loader.exec_module(t)
+    # The test keys, manifests and lists are the trust world's, which also
+    # builds the shared vectors under tests/xprv/vectors.
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    t = load("xprv_trust_world", scripts / "xprv_trust_world.py")
+    t.use(load("verify_xprv", scripts / "verify-xprv.py"))
 
     def fixture(sequence=10):
         f = t.Fixture()
