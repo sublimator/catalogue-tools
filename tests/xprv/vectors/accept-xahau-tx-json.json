@@ -1,7 +1,7 @@
 {
   "name": "xahau-tx-json",
   "states": "spec \u00a72.3: a decoded leaf equals the JSON its network's own codec writes; on Xahau that is xahaud's",
-  "notes": "Captured Xahau mainnet proof of Payment 0424F7EF85F59D25847ADAA8B1BB2F99F3980CAEF681295E1AC861FCE09EC6E5, reached through the recent skip list; 16 of 19 validators. Its transaction carries Xahau-only fields (HookParameters, NetworkID). JSON form, as the C++ prover wrote it with the Xahau definitions. The same proof as accept-xahau-tx-binary.",
+  "notes": "Captured Xahau mainnet proof of Payment 0424F7EF85F59D25847ADAA8B1BB2F99F3980CAEF681295E1AC861FCE09EC6E5, reached through the recent skip list; 16 of 19 validators. Its transaction carries Xahau-only fields (HookParameters, NetworkID). JSON form, as the C++ prover wrote it with the Xahau definitions. The same proof as accept-xahau-tx-binary. The Python verifier reads its leaves with the Xahau definitions it carries.",
   "trust": {
     "network_id": 21337,
     "publisher_key": "EDA46E9C39B1389894E690E58914DC1029602870370A0993E5B87C4A24EAF4A8E8"
@@ -599,11 +599,5 @@
   },
   "expect": {
     "verdict": "accept"
-  },
-  "known_failing": {
-    "python": {
-      "does": "reject",
-      "because": "verify-xprv.py reads leaves with xrpl-py, which holds XRPL's definitions and renderings; it declines every decoded Xahau map step at the parse layer and verifies the binary form instead (spec Appendix A)"
-    }
   }
 }

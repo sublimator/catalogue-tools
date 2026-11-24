@@ -326,58 +326,127 @@ class StructuredValueGrammarTests(unittest.TestCase):
                 self.assertEqual(self.accepted(case["field"], case["value"]), case["accept"])
 
 
-class XahauJsonLeafTests(unittest.TestCase):
-    """§2.3 wants xahaud's JSON for a Xahau leaf. This verifier's codec is
-    XRPL's, so it declines every decoded Xahau map step and says why."""
+class NetworkLeafCodecTests(unittest.TestCase):
+    """§2.3: a decoded leaf equals the JSON its own network's codec writes.
+    xrpl-py is built for XRPL; the verifier makes it each network's codec."""
 
-    MAP_STEP = {
-        "type": "map_proof",
-        "tree": "state",
-        "trie": {"0": ["00" * 32, {"LedgerEntryType": "AccountRoot", "Flags": 0}]},
-    }
+    REPO = Path(__file__).resolve().parent.parent
+    ISSUER = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+    ZERO_ACCOUNT = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
+    XAHAU = v.XAHAU_NETWORK_ID
 
-    def verify(self, proof, f, network_id):
+    def leaf(self, **tx):
+        return {
+            "tx": {"TransactionType": "Payment", "Account": self.ISSUER, **tx},
+            "meta": {"TransactionResult": "tesSUCCESS"},
+        }
+
+    def accepted(self, network, **tx) -> bool:
+        try:
+            with v.leaf_codec(network):
+                v.require_codec_members(self.leaf(**tx), is_tx=True)
+            return True
+        except ValueError:
+            return False
+
+    def verify_vector(self, name, form):
+        vector = json.loads((self.REPO / "tests" / "xprv" / "vectors" / f"{name}.json").read_text())
+        proof = (
+            v.binary_to_proof(bytes.fromhex(vector["form"]["binary_hex"]))
+            if form == "binary" else vector["form"]["json"]
+        )
         with contextlib.redirect_stdout(io.StringIO()):
-            return v.verify(proof, f.trusted_key, network_id)
+            return v.verify(proof, vector["trust"]["publisher_key"], vector["trust"]["network_id"])
 
-    def test_a_xahau_json_proof_without_a_map_step_still_verifies(self) -> None:
-        f = world.Fixture()
-        result = self.verify(f.proof(network_id=v.XAHAU_NETWORK_ID), f, v.XAHAU_NETWORK_ID)
+    def test_embedded_xahau_definitions_are_the_repositorys(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "xprv_embed_definitions", self.REPO / "scripts" / "xprv-embed-definitions.py"
+        )
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        source = json.loads(tool.SOURCE.read_text())
+        self.assertEqual(
+            v.xahau_definitions_text(), tool.canonical_text(tool.codec_table(source)),
+            "run scripts/xprv-embed-definitions.py",
+        )
+
+    def test_a_captured_xahau_proof_verifies_in_both_forms(self) -> None:
+        for name, form in (("accept-xahau-tx-json", "json"), ("accept-xahau-tx-binary", "binary")):
+            with self.subTest(form=form):
+                result = self.verify_vector(name, form)
+                self.assertTrue(result.ok, result.reason)
+                report = result.report()
+                # Leaves were read with Xahau's table, validations with XRPL's.
+                self.assertEqual(report["definitions"]["leaf"], v.definitions_fingerprint(self.XAHAU))
+                self.assertEqual(report["definitions"]["validation"], v.definitions_fingerprint(0))
+                self.assertNotEqual(report["definitions"]["leaf"], report["definitions"]["validation"])
+
+    def test_xrpl_still_verifies_after_xahau_in_one_process(self) -> None:
+        self.assertTrue(self.verify_vector("accept-xahau-tx-json", "json").ok)
+        self.assertEqual(v._native_code, "XRP")
+        self.assertIsNone(v._serialized_field("HookParameters"), "a Xahau-only field after leaving the Xahau codec")
+        result = self.verify_vector("positive-tx-issued-xah", "json")
         self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.report()["definitions"]["leaf"], v.definitions_fingerprint(0))
 
-    def test_a_decoded_xahau_map_step_is_declined(self) -> None:
-        f = world.Fixture()
-        proof = f.proof(network_id=v.XAHAU_NETWORK_ID)
-        proof["steps"].append(copy.deepcopy(self.MAP_STEP))
-        result = self.verify(proof, f, v.XAHAU_NETWORK_ID)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.layer, "parse")
-        self.assertEqual(result.reason, v.XAHAU_JSON_LEAVES_DECLINED)
+    def test_only_the_networks_own_code_is_native(self) -> None:
+        issued = lambda code: {"value": "1", "currency": code, "issuer": self.ISSUER}  # noqa: E731
+        cases = [
+            # (network, member, value, accepted)
+            (0, "Amount", issued("XAH"), True),              # XAH is an issued code on XRPL
+            (0, "Amount", issued("XRP"), False),             # the native code has no issuer
+            (self.XAHAU, "Amount", issued("XRP"), True),     # and XRP is an issued code on Xahau
+            (self.XAHAU, "Amount", issued("XAH"), False),
+            (self.XAHAU, "Paths", [[{"currency": "XAH", "type": 16}]], True),
+            (self.XAHAU, "Paths", [[{"currency": "XRP", "issuer": self.ISSUER, "type": 48}]], True),
+            (0, "Paths", [[{"currency": "XRP", "type": 16}]], True),
+            (0, "Asset", {"currency": "XRP"}, True),
+            (0, "Asset", {"currency": "XAH"}, False),        # a native issue in Xahau's spelling
+            (0, "Asset", {"currency": "XAH", "issuer": self.ISSUER}, True),
+        ]
+        for network, member, value, want in cases:
+            with self.subTest(network=network, member=member, value=value):
+                self.assertEqual(self.accepted(network, **{member: value}), want)
 
-    def test_the_same_map_step_on_xrpl_is_judged_on_its_content(self) -> None:
-        f = world.Fixture()
-        proof = f.proof(network_id=0)
-        proof["steps"].append(copy.deepcopy(self.MAP_STEP))
-        result = self.verify(proof, f, 0)
-        self.assertFalse(result.ok)
-        self.assertNotEqual(result.reason, v.XAHAU_JSON_LEAVES_DECLINED)
+    def test_xahau_fields_are_xahaus(self) -> None:
+        hook_parameters = [{"HookParameter": {"HookParameterName": "AB", "HookParameterValue": "CD"}}]
+        self.assertTrue(self.accepted(self.XAHAU, HookParameters=hook_parameters))
+        self.assertFalse(self.accepted(0, HookParameters=hook_parameters))
+        # And an XRPL-only field is not Xahau's.
+        self.assertTrue(self.accepted(0, AssetsTotal="1"))
+        self.assertFalse(self.accepted(self.XAHAU, AssetsTotal="1"))
+        # A name both define can have a different code on each, so reading
+        # one network's leaf with the other's table would misname its bytes.
+        with v.leaf_codec(0):
+            on_xrpl = v.encode({"Data": "AB"})
+        with v.leaf_codec(self.XAHAU):
+            on_xahau = v.encode({"Data": "AB"})
+        self.assertNotEqual(on_xrpl, on_xahau)
 
-    def test_a_binary_xahau_map_step_is_not_declined(self) -> None:
-        # The same proof in binary carries the leaf's bytes; no codec is
-        # asked. It is refused, and only because nothing supports its root.
+    def test_the_reserved_code_reads_as_hex_as_rippled_writes_it(self) -> None:
+        # The native code's letters in an issued code's place.
+        reserved = "0000000000000000000000005852500000000000"
+        amount = {"value": "1", "currency": reserved, "issuer": self.ISSUER}
+        raw = v.encode({"Amount": amount})
+        self.assertEqual(v.decode(raw)["Amount"]["currency"], reserved)
+
+    def test_the_zero_account_is_an_empty_field(self) -> None:
+        # As the C++ verifier's codec writes it, on both networks; a pseudo-
+        # transaction such as Xahau's Entropy has this form in the ledger.
+        for network in (0, self.XAHAU):
+            with self.subTest(network=network), v.leaf_codec(network):
+                self.assertEqual(v.encode({"Destination": self.ZERO_ACCOUNT}), "8300")
+                self.assertEqual(v.decode("8300"), {"Destination": self.ZERO_ACCOUNT})
+                self.assertEqual(len(v.encode({"Destination": self.ISSUER})), 2 * (2 + 20))
+        # In a path step an account is always twenty bytes.
+        raw = v.encode({"Paths": [[{"account": self.ZERO_ACCOUNT}]]})
+        self.assertEqual(raw, "0112" + "01" + "00" * 20 + "00")
+
+    def test_a_xahau_json_proof_without_a_map_step_verifies(self) -> None:
         f = world.Fixture()
-        proof = f.proof(network_id=v.XAHAU_NETWORK_ID)
-        leaf = bytes.fromhex(v.encode({"LedgerEntryType": "AccountRoot", "Flags": 0}))
-        proof["steps"].append({
-            "type": "map_proof",
-            "tree": "state",
-            "__binary_payload__": world.trie_with_leaves([(bytes(32), leaf)]),
-        })
-        raw = world.binary_proof(proof)
         with contextlib.redirect_stdout(io.StringIO()):
-            result = v.verify(v.binary_to_proof(raw), f.trusted_key, v.XAHAU_NETWORK_ID)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.layer, "graph", result.reason)
+            result = v.verify(f.proof(network_id=self.XAHAU), f.trusted_key, self.XAHAU)
+        self.assertTrue(result.ok, result.reason)
 
 
 class StandaloneScriptTests(unittest.TestCase):

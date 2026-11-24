@@ -40,11 +40,21 @@ from typing import Any, Literal, TypedDict
 
 import zlib
 
+import contextlib
+
 import nacl.signing
+import xrpl.core.binarycodec.definitions.definitions as _xrpl_definitions
+import xrpl.core.binarycodec.types.currency as _xrpl_currency
+import xrpl.core.binarycodec.types.issue as _xrpl_issue
 import xrpl.core.keypairs
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
+from xrpl.core.binarycodec.binary_wrappers.binary_serializer import BinarySerializer as _BinarySerializer
 from xrpl.core.binarycodec.definitions.definitions import get_field_instance
+from xrpl.core.binarycodec.definitions.field_header import FieldHeader as _FieldHeader
+from xrpl.core.binarycodec.definitions.field_info import FieldInfo as _FieldInfo
 from xrpl.core.binarycodec.exceptions import XRPLBinaryCodecException
+from xrpl.core.binarycodec.types.account_id import AccountID as _AccountID
+from xrpl.core.binarycodec.types.uint32 import UInt32 as _UInt32
 
 from decimal import Decimal as _Decimal
 
@@ -200,7 +210,7 @@ class VerifyResult:
             "network_id": self.network_id,
             "verifier": verifier_identity(),
             "definitions": {
-                "leaf": definitions_fingerprint(),
+                "leaf": definitions_fingerprint(self.network_id),
                 "validation": definitions_fingerprint(),
             },
             "anchor": self.anchor,
@@ -386,6 +396,321 @@ class UnknownLeafField(LeafFormError):
     """A decoded leaf member that the codec would not serialize."""
 
 
+# ─── xrpl-py as each network's leaf codec ────────────────────────────
+#
+# A decoded leaf must equal the JSON its network's own codec writes (§2.3):
+# rippled's on XRPL, xahaud's on Xahau. This verifier's codec is xrpl-py,
+# which is built for XRPL alone. Three things about it are fixed that the
+# rule needs to vary, and they are replaced here, once, when this file loads:
+#
+# 1. The definitions. xrpl-py reads XRPL's from its own package. Xahau's are
+#    carried below and put in place of them while a Xahau leaf is handled
+#    (leaf_codec). They are the parts a codec uses of the file the C++
+#    verifier embeds. Definitions decide which bytes a JSON leaf stands for,
+#    so they are part of what is trusted: embedded and fingerprinted, never
+#    fetched when a proof is checked.
+# 2. The native code. xrpl-py writes "XRP" for the zero currency whatever the
+#    network. Only the network's own code is native: XAH on Xahau, where XRP
+#    is an ordinary issued code, and the reverse on XRPL. The native code's
+#    letters in an issued code's place are a reserved code, which rippled
+#    writes as 40 hex digits; xrpl-py refused to read it.
+# 3. The zero account. rippled writes an account field that was never set as
+#    an empty field and one explicitly set to zero as twenty zero bytes, and
+#    prints the same address for both, so the bytes cannot be told from the
+#    JSON. The C++ verifier's codec always writes the empty field. xrpl-py
+#    wrote twenty bytes, except in UNLModify. This verifier follows the C++
+#    one, so the two re-serialize a leaf to the same bytes: a pseudo-
+#    transaction such as Xahau's Entropy verifies, and a leaf holding an
+#    explicit zero account (an XRPL SetFee, a payment to the zero account)
+#    has no JSON form in either and verifies in binary.
+
+# >>> xahau definitions (written by scripts/xprv-embed-definitions.py; do not edit)
+_XAHAU_DEFINITIONS_ZB64 = (
+    "eNq9XVlz6ziu/i95PqmK5T1vii0nmuOtZfssMzXlUtt0ookt5UrySXK7+r9fLFpoh3J3TaD7kopB"
+    "iR8JgiAAgtQfVyPXGQ8XV7f/+tfVvQpVHGyuvvxxFSQL+NffB/+rtle3O3+fqC9IDB7DIHwcBWqv"
+    "k7+NnXATbbVHw/Tp6vbmy1X6/qKubq9W4XMYvYZXf/77y7+u3PAXVLwVg7lumHFmv/9HbVIn3E78"
+    "+FnFfxsvjY+X4Eq0xZIhGM6OY/+9VjRCYLDUB4z1o0qT9e4Y4ltS3LTavQLSPkTHMNURX/z3GhD7"
+    "RsSx2j6q2AnT+H2JpR/wctb9lwxduWHa6DDWMvbDxN+kQRQKYllGLKxCxd9V8PiUCgE1qzu1U/FI"
+    "SXWoVYWzxSrEYNpGmGGQbFA61FYOqWNE+qbiBCRBSuLMIA9R9LxI/VQNnvzwUQ1I8IUQu5WIziFI"
+    "RaF61VBvanPEGeWCuniTwutX4tkvgezAWTeXB26x8fdiqsKsl1gHjoI3Sa1kVkuoaKOXd0nh6Pcv"
+    "IQ1VGB2C0E+jWEo4bswjNlXpaxQ/u8Na1pCmxSijvf+Y1LJy5AiL6Bhv1NJ/rGXZKFDU/xxVuKln"
+    "zchB5rH6FUTHZPkWjh9jgKxl6cjReBoJd6xjhBrso0Qtg4MUStfMPj9WYSqN1TPLA1chiNM34jhv"
+    "L0Hsp4IL740RJzeLPFDhUkhmjfDd3+9VuoCKpXDMemH2Cgal6Kpu1gxDlaSosNFKFlNCDbOCGPtJ"
+    "unrZwhgJCl7DrB4ewBT/7Qg1p+9uTVafAWp2rMneK1gYvYr3qvcXSIKdMmsJ6R5ZN5dg5LpjmVUE"
+    "GJKHFyfZxNFrPeZdDnQXhdvMuxbCaVaIgi/on1lm5TDb7cSXc8usG0ZBnKS12A9Wp1Lx1YPXrV4O"
+    "OfQh6ahZZk0xe1G8xo8D8ESlsMyqwlMgJchAkMdVGKRSxnnzpgIuUfEvdecnUiPWbFwCcsNNrA5K"
+    "bEI3K5wOlaJnIwXSrLCalR9LwrQqTVkV/3aM4uNBCsmsNgY+yN3e3qVKyrltdir0UxgkT6JA3Qu8"
+    "GwdJKuZHN3tVEpfu1VDt/XcpILOCWAabZyUaDmvdXACSdqzN2mE6WkbPCgz0NzFHqmXWDJMAg7EZ"
+    "npRybZkVxN0xDuWxzFqijMxKSoZZT2A8lvbdJB3flllVfItSJbrt0KryBjbPoqzrV1tmmUQIT622"
+    "eRrPYn8DiinaHHHZFVOD7UrXIE4loy7NCmviRfmiSrDfqogegEJfqA04IlITuG+eVD/8J/9og0n7"
+    "i01NyQBj3zy33MNLFEtr+H63YsRe/XgrKRm9CzjAPZpp9ewJfMBC96em7YAcy355QS9V3MFq3Jgn"
+    "MrlVU/WW1rL90GlpKHlYvZZtiBzpDtbHKTxcyy5EDkIxTUGUlrkr4KzVtW+dYzhvG9rhFYw3d4xA"
+    "4+hVkGFdIwbGLwVBekYQLc4siNU3Yg1AmANVz45DjrFAdz0Wziowa4HMHqIAmSDvGmZNgNYrWOZb"
+    "Fdaz8VBIHQySGybwMsWpasyV0BE9lYLXMRDkolnciziVaL/M4v5j8OQH4WDvBwcx+9W6uQBlbyhp"
+    "ZxArYYfKavwNVOynKKh5HthJotJ5HMjFas3zYOK/BYfjQTaOb14ZZ8c0Sf0QE7tk4cyL5GS+lIUx"
+    "L5FukhxFFaNlVh+LI2WGSgKZdQeay8u3UNIZMA+QJIJ5bJbRcfMk6oeaxybTDZKbHf3eJaQaU6rK"
+    "JQTdJ8A7Ho77GjOqyoXfD/YPfvIk7tJgpQ2rp+ft1IZjtTt6Oo0gjmXG0fbaBMGaZrBM+gSBWhXc"
+    "K3O55GJiZigWCMmp2zEDcerOONoITqauGcqLIlFl1LsoDpKD1DcjZT6IXLrljRkHvQ+euZKdajSq"
+    "0aaRYLTIqsZB70NS61VoCD6+Ise5Cv1gTyZyGBWKAWNSwyCG7kTxu3wK1wmWG/6KwNSX61OFYpgG"
+    "m+fQP9TgfZ4Oz0GFW8E8gkaFWkChntWQtnUCMgweVVKDi3kCgic2QrWX9ylPUaIwUWFyTCTtkmZV"
+    "j9RGLj/eqlAE3/Dcn5+qrWSP2peNkrn/qCZBKO9Wnk5V9ZYKI3UvLq53x3eK8cl7lya0hdrvReEu"
+    "qAjaef+q3uWTtT5ASdrgjWqYKejw5MUXsxya1gXuKVFjqFllOaAwyKFU6AvOi5WDqVAVK8+VNVib"
+    "FVpiGIHbLAjTrVZGnh9uo4PoatirmLQZlJ/6Um5FxZSd+GGwU4L5Z/3GJUtldkwfI6hLPv3CAObC"
+    "KwdBsIoZNYjFNqD67er+DPzQkUvv7XeqPSUwJkQ92oopdR/9UnGIOZ14vD+RDxtWoEmeKexXzN8n"
+    "4yr4Xx/mr+BgYI5wCNxScObMSO6hGe8luPP3vmBWvvnuA8yOF+1L04izxFsd5v57Ih4h/IByr8QS"
+    "8NtmnkWvkocKOkYQzH+QROkaUeRSUsyXeSwU3lPyJh4G1DGGah+AGpPziLQwoI7D/1vy0b+TOR9s"
+    "BTtiVWKIjUnDPN+hE7iBLOnLNcwTxQteXvZK9GRbo3tJ0JTs8baGeebk7ncMfwUvVmmY5xDbUvv9"
+    "7/7mWfBQ3U2F/tw8q63w6la1hFLa3TCOXhL5KNqJGJaHskTRmpfQipNZopDmtXU854SvYw0JGgYc"
+    "t4ZImg7jiGbRmBWGKETFAgt1+OkxVrwxLx82O1PqJ1lWsnbjzSVxkNUWTbO2WMbHJB0Hoaory6Fv"
+    "5uv8+Ps+2HwuFMmkM2/ibh/9ng2dShL/UYlhWAaM7H3ojRhM0wADbngh9X8XxeTmaTAtA8zKc2X6"
+    "0K5glWQHOgYMDgLK9KFrqH90DLefzFnVEHoGBE8dol9KDqNvwKDLYAQxNOehBMmTUsVAzFP8EH3y"
+    "9i4dwqqA+GT8VYdoVkCMovjgp0IgLaPo7nfBfv/JvWgdxTQBB1G4DT552lLHME3CiZ+kKpZWJw3T"
+    "bFxNx5NoG+zes93VT62KOphpWhYYy2gYJP7veyGxtm4ug3nKCQXRTPO02HuUm0mWVYHDJwsWafy5"
+    "iL8O1ayAmvuxf1AgjNPPZZLoWK2/woKRO0qBmdZp+k+meuMS7Q7zQ75CKCYdIShnJr1AZxIGez9J"
+    "hEBM+mAeR7+CrRJSOU2TFpiwpzFRqb8V41izYTYHtjDkULHcet00qYB/JFG4fBuq/d/vzl+sDH3T"
+    "LCnOuQqZaZ2KaS+nWfpds7npx8+CKqXfq0QR7IppumRuurQ/mZ9oGGpHZ6X9yTMM7YimtEt5hsRH"
+    "dmRAWlUg9jF9iuLPXdRo9C3PcFahL4vUqULy1ONx78diLn+vCiiLiNNlMLG0Q3iGRbdXZ/Fwcb/w"
+    "DOsh2oupzkajGiV6ltUKlRIxS59UTKcj+R5hIbzeX+OJK4tGpYTYaQpgBMUXVoky17r5G7hFlFIQ"
+    "t1J+cNMGamE2R1K+n2Vd0sY14FVq/+wgpbjjct6tcBfFB/GV/1xVHg+/y+27FihZtecnzNBiFszK"
+    "syq+e8JBtG0tF4KcIoHBrGSRWhVIFFAJRKHaFVB5njrVkojnrpyCjUAL70WRuhVIU/UqitOrwFmq"
+    "w8se5I8+EyOez3ImFeoQyeeynGLwoiXZm0bVB4syw00+qeUUBm22IaiiYJ/I57acQqExJX+WzTRA"
+    "8rkzZ6Lm/wechPRdPpnlTKVyEHcrETuuyGf5KA2csyufzPJRGIpP0Mins3wEK6Kf8jkmH8HuYZ2v"
+    "4QaQUyC8MFJSFVlVi6DN9/os9lEN93+cQ6VPn7fNK7JMTqG0u3bmcRTtoFb5rBMjJKeBcC+loft/"
+    "3VvNGRpE+72iwXX2opdV3/x9Dvx/NKdRad4FGyVohTcvmOFZ8Fr+6Ncpkn60SFI79HqViyGf+5E/"
+    "XnSmGij3R9SSrBILjJblx86ksKxLC+EhSAQvn+tXyQZfg/ptLHd+s1+1ONH9rkracOlXLVF4SXMS"
+    "JDhw8seaziYYbUXIn2g6E4vg8Uk0O7FfNX/H0assUP+ibZ58Zk+tKg6hfXu1dNECldQQiNCgcu+2"
+    "hhiEhjJVG0xDFNN6nQq+HXe7YBPILbpdM46924FEcPCmjvCDBoURgaSGqIM+OLJX3p8EHjQYXCSS"
+    "OiIOGga6E2jiJ3WEHPRRYedZbnY2KiT6g/ecyJ90+TBKhU+b1BEcOAMrfNqkjsDAGRj5tEkdcQEN"
+    "yOymJHUECD6iVnglNZyBOUEvnBBEUEkdYQNd/5YedlJH4OAMijbTS+8nqSOAoEFqO/g1gFYtaZuN"
+    "eoElrQbEismvO3lJHd6Q3ruDpKz0rQu6M3ODkjr8IA1Lc4OSOvygE9E4cYOSOvwgDU5zg5I6/CBd"
+    "BMkNSurwgzQU+oaup5JoLxkoPr2bupdbi6A4trV8mqH3YfcXunTcp7V8oiEDk/z8ecsEQBmskiht"
+    "I8+CzbPkJ3o7JpAiSZ9NRrmLXs6ur+/pOeaCAnB2c30vvyQ10fNP8FaBem6v753dVjE4xnhh/ns9"
+    "tw93bs7gPp2CWH018CkY3pEh3LfmX8CJ9q1lBpv76VMiPlZY60Kl2tdvVCKdWfuNLhQt7zaCXkmB"
+    "WFUgxX2ciXRm7RmQ/q2QRDrB9pxz+j14iXSW7RlYaSa7w0Q6z/YMq7w8LhFPHzuDyk5C4IzFQ9dy"
+    "98+eztq+9TG1kLSEOBzX+iGvUBLMMoGRYSGuX88BLHGlqiHwl01kl4q2CYgjF3dxsH2UF4CTyoub"
+    "QSSHp8QqmJV93z1KRYGsCiDNJK/lkjW9fu2K/IpdTAFAvX79mGZdHdSqz72oioNgAmBF5X/++99f"
+    "rsbO8N7x1s506f1cL3/OncXV7R94nTnGnkGysigXXuDPDqa2dN82bkAkyiNYt11YQjJJhzKYa3Tn"
+    "Mqws8J62eQ8197/wPY23HXhqCGr+toHf+h2qlygJ0nmsMAKFYXYAKO48p1RV/l6HlmN124HKskuY"
+    "4AWAGimF31cG9mAb8Tp1ypq77Vr831DtgpCPR992el/KY7H4NPzOQxvFtxNvu6AC3fAXDtPV7TU0"
+    "tPxqhyI+gALLli7sXffL+UKGVGBOsc1/24VndOMEVFO7oOA1y1e3PejnVD36GPwA5wregbZlDzdw"
+    "A4K/1YpVQwEY8fmd3UCAV+cqzkJBaptdyHDbwJwSjnthIJfGj2+xKvoPPSk/gw2NgJ7zp53hfyiD"
+    "hngK2QM/4eVig/+2B81nXYdns7b557egxuZpgR4g1p7q/AlAnj1d2IOlO5uuPWexGi9JGlO1AYFc"
+    "24PBbDVdov+JrhoT7+yxPR04SGwWRAe4/xNJnYI0sl0QdaS1Cpo7/WaP3eF6OfvqTBdY1i7KprNl"
+    "WU2XyZ5n/yyI/Y5GXM5m67Ht3WM7+vz0nT1cDzxnCDPLtcdYO1k9ajOwp0vsizNfrmffp2sYc8Rf"
+    "z0Yjx8Pb/7lzg7HtTvKv08BP7+d8ORvMpkOX2ON43gyfbnEzhq63Hq3G42zWImWxXC/t+/XUgTbQ"
+    "/GL+DFfzsTuwl9jUFreIurTmWdjnp5wfc9fj17g5zL/13JsNnMXCnd5nMxyLvNk/nSkKF/f8wV6s"
+    "H2azr+vFkmH6NwV9djd2723sAXKkzU2lhz3nH85gSZBtboM7mayW9t0Yq+hxK9zpYDaZjx2utpHR"
+    "FqvRyB24wGngwXRINfc/ls3tnxOH5cfwJsib431zMkVUlK5HDtKanZKWP7oeu1Msoy2J87J8NK2m"
+    "oXDhjMdU2utmpUvHm9o4eq1WRmHRXM2HwMP10p1Qj8tCz0UxKqS6xRV9dcf8u80sH88GX+l3n/k3"
+    "sX8A+G8rB6YMtMYePPDTXC+KynpiL6Ax668OCnmLu5aL6N3qJ7V9PXEXE3s5eMB3OyePUL9pITl5"
+    "iJs3na3tMXV16QIbGKN5U5Stlvhws5UTQIaRhfrvNXOSa8DCdl5ISxi2uajPXSxWxOZmMydlQ9Zs"
+    "64T1yehkqlorhokAYmWT6FhFT+aOBz1cgChjhf2c7Dn3K1AFeecaOX2xckmYi/k+t0ldtIumLFGB"
+    "IEaTB2t2hzOCNNEIFB8pL+7b7JvjLdx/krDy66BIgITv8ojN7eXDekj8sHolZW57qI3y7/gC1XMG"
+    "LvZhPZ4t8P0uI3ggJKAAFuvR2Map3uH+5S0HbaM3q9/OSmcgPtOfwIOJ7X3F6nr9omQxI061uYGr"
+    "KU5Vkj6rf0JZ28NhZlqcUMkk6ZxR82l20zyll3P9hqXnx+DBdqf5GoKaGefV3CYJ61kXnsl7hc81"
+    "9edIw6OWXpPm7H4onK9A2w1QEoo6kXXIMOv8WVr6cOqQ0GJ1Df0RxgEh+W0181bIie5Jv7K25jBD"
+    "d4Gyhs3qdS48N51Nf3jzEvPk2UwB5q9MssW3d9IwaJLOA+usbOHeo2DCPCJGd/t6eTZIpRbrnfQJ"
+    "1prZaL2afp3iMsnzqdvWn/Cc77Y31BVNt6eXg66C9s8mE5ca3j4tg6V0el+wQqukd6M/+N2bwWP0"
+    "PwLQ/N/ZY+DK8Ccag6xadziIILmZErvOzAAm56TOCSlTtVjCgkUlbJDT4+2CmI/6ddYJIiJv7eXK"
+    "c4jOdfNgDel1YubO+YGWBmmp62x13yHDs/fYKNm5k/nMW67vxvbg68NszDUws3fl6nSdCe4uX54y"
+    "72Hk/iCVTy+1iidO16jrbJrtYDK5IwdUOU4MYPBqwS82slJaf0oJvs4W/x0uXiV3eOnc5drUXZBG"
+    "yqcRmw3XmcDtpmg3gZdDgnCdyfkOX5iAkekSK8mmuc5kcJctR+tMETJHG3nR0oV1lapiWdmhIlln"
+    "TIQFlkB6H0q+jYvCbllY8CMva5ZlGYktqJ3nfIPODos36GlmKmqpO5d7wM1kuZ177oz5RZzYo+AM"
+    "ZxMS5usmyy4RaX3IDGwo6JYFhRajAmLdHoxY4jeYEqg5gG59pJfGOZQ3TOW5fXLdzJpnKF/Q6zeG"
+    "YjLN4NWeqYyMYSjsGgp5OKiYm+VMv629+aCU1SaP695g9kJjaF7sy0FFQcbaYTGdgSAtsiqYJWxc"
+    "QFvXc3qZ5GsPPbPHuRUPVO5+IQr4eKmRrpssx/ups/w+876CsgUZ+ArL8/IH6vA1dG82Baueu8wI"
+    "U1rUCQXEHpQCPEyDzspmn9lThUkAjeCCYu0v0eg17jWLVVZEdJKIw4l3dG2xaX/44B5BCXH2QFoQ"
+    "HK3c+bq22CrPCjJBtFhCiThYeR4YrlQ9yyeRyVWxMw1nsXxSAYuHxaNFlNwgBGKrII5d1goWd59o"
+    "uVYpVuWsLjY/6JHM8oDXShrOISI1TkgwDLM50cuuFxrd6pYPg+3I08zi6UBEXKgye7dsa69nLAcV"
+    "SaVdYymOOAzsgGvoGJ8pxcHqtSueWD7QePVaWjn7FEQu2aivUFbPOqEz87oa0RuULj48XrIFte2a"
+    "7V0YgpIz56PTMhR55IJCdSXrvzvu/QNhsLF7gNmDsxdsYVL5aDUQEnNRW4ksVs0H8kMW2GIi9gti"
+    "7mwDkQdIc61B8rmz5O6CW2efzQuuO1taqY6uTiksFS7kGEhRWPCNYx4Fne13qIvJE3s8mnkTbiMr"
+    "nYPm3sBzPOieOwc3u5zOvKofYJzX9nRYrn8WR10OKxh8b8mrisVhlENmuRGFX9dtYzTuqNv9kyLP"
+    "hQV+XUxWEjSOiBgemXy01kvNwY6p4a3MatSebBueRJNhNvPW5FnRU139KRB40Kz0RNYC1mEkUTGF"
+    "IdaLObkg16zD4nIhuEMiVRePyQO5Zo0Ro9VRTAFWZURD3+eaZ3VcOMrXrNmQgCKFTxRvsJ97zWoO"
+    "CTygSOIW5g7jNWu9GIQ/MzZYnxGhGGZWNzGtnig6rJ5izyGX+5oFKSm9S/q5WA1w0by6vTkL7elh"
+    "5juMqKL3DP8P9v4rXXtDZ82QQLFC/qoV/OTLEa5u0cOnnxQs5m9RwW/MvYYfPfrxPUiftrH/yp+Q"
+    "ysKNeQVaYBt313GDiyLVAwzV7jkVJCMkWQIK/8zagwkwFLrMznzQuRCt9Td6uJsTGznSXFLzqk5D"
+    "43kDO0V8HEcD/6N24ljhxX3ZUzh14CcV4Rz5ED3vc6B85Ad7vKGT3WS+ZbL8ImYWUA/TOHp5509g"
+    "cTQ950arIOTdzwmjIAwS3hjSzw5RuhsH0XnP4CR0jp8WfVa8CcxhdIo9j4I36LdVRM7L66puUaWd"
+    "xdML9jU/FOFNPHEEPem0PpQRqzploJ3HJoupYxyi+PRgHHJ+bEZgXuQP9ko6tSOnlzF95oNVInFq"
+    "1NUtLjn0eM7dPKaf96ibx/ULWSgi/dz6G4r189CV/2exf5JK/oTsWUE+ds3zErxMmS8D+LhjkLcB"
+    "l+mPpdQeNF88hV+LoYRKoOFXHDjABD945wVDpPCj3P7oc6l2g9dtO6NwRiQlg5YbEQSFm0G8F1H0"
+    "BhhAV6dTOe56FFloWQhJ26+gUFC+YcEjjNHzkgLvYBw1J/AIld+FvEX7oiikFuiFvbKQR79V7Iic"
+    "XF0/iA7ErXaxL2Jvt6eX25dp87wtVDx2ntMPxa0ver4/EKyCkAM1vpwk5+c7dLig6fRiMwYtdC5g"
+    "VhYv0B5NobyLi39QhrNL5TGJhO4CRDkudolpJg1BcFgDUAqG1SPNkidRkZLNczNIQeffvELBwP/B"
+    "r2FBwh/thsW3B/A2PiXq67u2qNRw+IvNTiLAQ9MI9WOSz57sXiE8mZTnWpH2z/NnaSYVJ/Bolui7"
+    "0VQrtBUT+Bod0oz4b9MinYj/dlq0vHCGHy0c+G+/k0lr+BxGryFaDl/0XWCqF14rs2NImZ/kEoB2"
+    "geEIaXtwvclYvd7QHunVD/vh6s//A/cbTwU="
+)
+# <<< xahau definitions
+
+_native_code = "XRP"  # the native code of the network whose leaf is in hand
+_ZERO_20 = bytes(20)
+
+
+def xahau_definitions_text() -> str:
+    """The embedded Xahau definitions, as their one canonical JSON text."""
+    return zlib.decompress(base64.b64decode(_XAHAU_DEFINITIONS_ZB64)).decode()
+
+
+def _definition_tables(table: dict[str, Any]) -> dict[str, Any]:
+    """xrpl-py's module-level tables, built from a definitions table.
+
+    The same tables its own loader builds from its packaged file.
+    """
+    fields = dict(table["FIELDS"])
+    types = table["TYPES"]
+    info, names = {}, {}
+    for name, entry in fields.items():
+        info[name] = _FieldInfo(
+            entry["nth"], entry["isVLEncoded"], entry["isSerialized"], entry["isSigningField"], entry["type"]
+        )
+        names[_FieldHeader(types[entry["type"]], entry["nth"])] = name
+    delegations = {name: code + 1 for name, code in table["TRANSACTION_TYPES"].items()}
+    permissions = {**delegations, **_xrpl_definitions._GRANULAR_PERMISSIONS}
+    return {
+        "_DEFINITIONS": {
+            "TYPES": types,
+            "FIELDS": fields,
+            "LEDGER_ENTRY_TYPES": table["LEDGER_ENTRY_TYPES"],
+            "TRANSACTION_RESULTS": table["TRANSACTION_RESULTS"],
+            "TRANSACTION_TYPES": table["TRANSACTION_TYPES"],
+        },
+        "_TYPE_ORDINAL_MAP": types,
+        "_TRANSACTION_TYPE_CODE_TO_STR_MAP": {c: n for n, c in table["TRANSACTION_TYPES"].items()},
+        "_TRANSACTION_RESULTS_CODE_TO_STR_MAP": {c: n for n, c in table["TRANSACTION_RESULTS"].items()},
+        "_LEDGER_ENTRY_TYPES_CODE_TO_STR_MAP": {c: n for n, c in table["LEDGER_ENTRY_TYPES"].items()},
+        "_FIELD_INFO_MAP": info,
+        "_FIELD_HEADER_NAME_MAP": names,
+        "_tx_delegations": delegations,
+        "_DELEGABLE_PERMISSIONS_STR_TO_CODE_MAP": permissions,
+        "_DELEGABLE_PERMISSIONS_CODE_TO_STR_MAP": {c: n for n, c in permissions.items()},
+    }
+
+
+_xahau_codec: tuple[dict[str, Any], str] | None = None
+
+
+@contextlib.contextmanager
+def leaf_codec(network_id: int) -> Any:
+    """xrpl-py as the codec of `network_id`'s leaves, for the body of the with.
+
+    On Xahau it holds Xahau's definitions and native code; on leaving, XRPL's
+    are back. A validation is read with XRPL's on every network (§2.1), so
+    this wraps the handling of leaves and nothing else.
+    """
+    global _native_code, _xahau_codec
+    if network_id != XAHAU_NETWORK_ID:
+        yield
+        return
+    if _xahau_codec is None:
+        table = json.loads(xahau_definitions_text())
+        _xahau_codec = (_definition_tables(table), table["native_currency_code"])
+    tables, native = _xahau_codec
+    saved = {name: getattr(_xrpl_definitions, name) for name in tables}
+    saved_native = _native_code
+    try:
+        for name, value in tables.items():
+            setattr(_xrpl_definitions, name, value)
+        _native_code = native
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(_xrpl_definitions, name, value)
+        _native_code = saved_native
+
+
+def _iso_code_of(code: bytes) -> str | None:
+    """The three-character code in a standard currency's bytes 12 to 14."""
+    try:
+        candidate = code.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    # The native code's letters here are the reserved code: hex, as rippled.
+    if candidate == _native_code or not _xrpl_currency._is_iso_code(candidate):
+        return None
+    return candidate
+
+
+def _iso_code_bytes(iso: str) -> bytes:
+    if not _xrpl_currency._is_iso_code(iso):
+        raise XRPLBinaryCodecException(f"Invalid ISO code: {iso}")
+    if iso == _native_code:
+        return _ZERO_20
+    return bytes(12) + iso.encode("ascii") + bytes(5)
+
+
+def _currency_init(self: Any, buffer: bytes | None = None) -> None:
+    _xrpl_currency.Hash160.__init__(self, buffer if buffer is not None else _ZERO_20)
+    raw = self.buffer
+    if raw == _ZERO_20:
+        self._iso = _native_code
+    elif raw[:12] == bytes(12) and raw[15:] == bytes(5):
+        # A standard code: every byte outside the three letters is zero.
+        self._iso = _iso_code_of(raw[12:15])
+    else:
+        self._iso = None
+
+
+_issue_from_value = _xrpl_issue.Issue.from_value.__func__
+_issue_to_json = _xrpl_issue.Issue.to_json
+
+
+def _issue_from_value_for_network(cls: Any, value: Any) -> Any:
+    if isinstance(value, dict) and set(value) == {"currency"}:
+        if value["currency"] != _native_code:
+            raise XRPLBinaryCodecException("an issue with no issuer names the native currency")
+        return cls(_ZERO_20)
+    if isinstance(value, dict) and set(value) == {"currency", "issuer"}:
+        currency = bytes(_xrpl_currency.Currency.from_value(value["currency"]))
+        if currency == _ZERO_20:
+            raise XRPLBinaryCodecException("the native currency has no issuer")
+        return cls(currency + bytes(_AccountID.from_value(value["issuer"])))
+    return _issue_from_value(cls, value)
+
+
+def _issue_from_parser(cls: Any, parser: Any, length_hint: int | None = None) -> Any:
+    currency = _xrpl_currency.Currency.from_parser(parser)
+    if bytes(currency) == _ZERO_20:
+        return cls(bytes(currency))
+    issuer = _AccountID.from_parser(parser)
+    if bytes(issuer) == bytes(cls.BLACK_HOLED_ACCOUNT_ID):
+        # A token (MPT) issue: issuer, the marker account, then a sequence.
+        return cls(bytes(currency) + bytes(issuer) + bytes(_UInt32.from_parser(parser)))
+    return cls(bytes(currency) + bytes(issuer))
+
+
+def _issue_to_json_for_network(self: Any) -> Any:
+    if len(self.buffer) not in (20, 40):
+        return _issue_to_json(self)
+    currency = _xrpl_currency.Currency(self.buffer[:20]).to_json()
+    if len(self.buffer) == 20:
+        return {"currency": currency}
+    return {"currency": currency, "issuer": _AccountID(self.buffer[20:]).to_json()}
+
+
+_write_field_and_value = _BinarySerializer.write_field_and_value
+
+
+def _write_field_and_value_with_empty_zero_account(
+    self: Any, field: Any, value: Any, is_unl_modify_workaround: bool = False
+) -> None:
+    # xrpl-py's own switch for UNLModify writes the account as an empty field.
+    if field.type == "AccountID" and bytes(value) == _ZERO_20:
+        is_unl_modify_workaround = True
+    _write_field_and_value(self, field, value, is_unl_modify_workaround)
+
+
+_xrpl_currency._iso_code_from_hex = _iso_code_of
+_xrpl_currency._iso_to_bytes = _iso_code_bytes
+_xrpl_currency.Currency.__init__ = _currency_init
+_xrpl_issue.Issue.from_value = classmethod(_issue_from_value_for_network)
+_xrpl_issue.Issue.from_parser = classmethod(_issue_from_parser)
+_xrpl_issue.Issue.to_json = _issue_to_json_for_network
+_BinarySerializer.write_field_and_value = _write_field_and_value_with_empty_zero_account
+
+
 def _serialized_field(name: str) -> Any:
     try:
         field_info = get_field_instance(name)
@@ -395,30 +720,12 @@ def _serialized_field(name: str) -> Any:
 
 
 def _is_native_code(value: Any) -> bool:
-    """The native asset's code as xrpl-py, an XRPL codec, serializes it: XRP.
+    """Whether `value` is the native code of the network whose leaf is in hand.
 
-    XAH is an ordinary issued currency on XRPL, and is traded there. This is
-    XRPL's rule only. No decoded leaf of another network reaches it: see
-    XAHAU_JSON_LEAVES_DECLINED.
+    XRP on XRPL, where XAH is an ordinary issued currency and is traded; XAH
+    on Xahau, where XRP is the issued one.
     """
-    return value == "XRP"
-
-
-# A decoded leaf must equal the JSON its network's own codec writes (§2.3):
-# xahaud's on Xahau. This verifier's codec is xrpl-py, which holds XRPL's
-# definitions and XRPL's renderings. Re-serializing a Xahau leaf with it can
-# reproduce the leaf's bytes, and so its hash, while the text it was given is
-# XRPL's spelling and not xahaud's: a native issue is {"currency": "XRP"} to
-# one and {"currency": "XAH"} to the other, over the same twenty zero bytes.
-# Matching the root is therefore not enough to accept the leaf, and this
-# verifier cannot check the rest. It declines every decoded Xahau map step,
-# whatever the leaf holds. A Xahau binary proof carries the leaves' bytes,
-# needs no codec, and verifies in full, as does a Xahau JSON proof that has
-# no map step (Appendix A).
-XAHAU_JSON_LEAVES_DECLINED = (
-    "this verifier cannot check a decoded Xahau leaf: it reads leaves with xrpl-py's "
-    "XRPL definitions, and section 2.3 requires xahaud's JSON; verify the binary proof instead"
-)
+    return value == _native_code
 
 
 def _not_a_value(at: str, type_name: str) -> UnknownLeafField:
@@ -540,12 +847,8 @@ def _require_stobject_members(obj: Any, path: str) -> None:
 # - an issued amount's value: rippled keeps the 16-digit mantissa
 #   (1000000000000000e-3); xrpl-py writes plain digits (1000000000000);
 # - a Number whose exponent is zero: xrpl-py appends "e0".
-# One thing it cannot do at all: an issued amount whose currency is the
-# reserved code, the three letters of the native code in the place of an
-# issued currency's (00..00 58 52 50 00..00). rippled reads and writes that
-# as 40 hex digits; xrpl-py refuses to encode or decode it. This verifier
-# refuses a JSON leaf that holds one, and such a proof verifies in its binary
-# form. None is known in a validated ledger.
+# (The definitions, the native code and the zero account are handled inside
+# xrpl-py itself: see "xrpl-py as each network's leaf codec" above.)
 _BASE_TEN_UINT64 = frozenset(
     {"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount", "ConfidentialOutstandingAmount"}
 )
@@ -1019,13 +1322,16 @@ def verifier_identity() -> str:
     return f"verify-xprv.py {digest} xrpl-py {version('xrpl-py')} pynacl {version('pynacl')}"
 
 
-def definitions_fingerprint() -> str:
-    """A fingerprint of the definitions table this verifier decodes with.
+def definitions_fingerprint(network_id: int = 0) -> str:
+    """A fingerprint of the definitions a network's leaves are read with.
 
-    It is taken over the installed table itself, so it changes when the table
-    does, whatever the package version says. This verifier reads leaves and
-    validations with the same table.
+    It is taken over the table itself, so it changes when the table does,
+    whatever a version number says: xrpl-py's packaged file for XRPL, and the
+    table carried in this script for Xahau. Validations are read with XRPL's
+    on every network.
     """
+    if network_id == XAHAU_NETWORK_ID:
+        return sha512half(xahau_definitions_text().encode()).hex().upper()[:16]
     import xrpl.core.binarycodec.definitions as definitions_package
 
     table = Path(definitions_package.__file__).parent / "definitions.json"
@@ -1950,15 +2256,6 @@ def verify(
         layer, error = "trust", f"trusted key belongs to network {key_network}, not configured network {network_id}"
     elif proof_network != network_id:
         layer, error = "trust", f"proof network_id {proof_network} does not match configured network {network_id}"
-    elif network_id == XAHAU_NETWORK_ID and any(
-        isinstance(step, dict)
-        and step.get("type") == "map_proof"
-        and not isinstance(step.get("__binary_payload__"), bytes)
-        for step in steps
-    ):
-        # The form of these leaves is the one thing this verifier cannot
-        # establish, so the refusal is at the layer that rule belongs to.
-        layer, error = "parse", XAHAU_JSON_LEAVES_DECLINED
     if error:
         print(f"\n  FAIL: {error}")
         result.refuse(layer, error)
@@ -2136,29 +2433,31 @@ def verify(
             print(f"\n  Step {i}: {'TX' if is_tx else 'STATE'} TREE")
 
             try:
-                if isinstance(binary_payload, bytes):
-                    validate_binary_trie(binary_payload)
-                    # The root comes from the payload, never from a member.
-                    root, end = hash_binary_trie(binary_payload, 0, is_tx=is_tx)
-                    if end != len(binary_payload):
-                        raise ValueError("binary trie: trailing bytes")
-                    root_hex = root.hex().upper()
-                    leaves = collect_binary_leaves(binary_payload, is_tx=is_tx)
-                    leaf_bytes = binary_leaf_bytes(binary_payload)
-                    print(f"    Binary trie, root={root_hex[:16]}...")
-                else:
-                    if trie is None:
-                        raise ValueError("no trie payload")
-                    stats = count_nodes(trie)
-                    print(
-                        f"    {stats.inners} inners, {stats.placeholders} placeholders, "
-                        f"{stats.leaves} leaves (depth {stats.max_depth})"
-                    )
-                    root_hex = hash_trie(trie, is_tx=is_tx).hex().upper()
-                    leaves = collect_json_leaves(trie)
-                    leaf_bytes = [
-                        (key_hex, serialize_leaf(leaf, is_tx=is_tx)) for key_hex, leaf in leaves
-                    ]
+                # Leaves are read and written with their own network's codec.
+                with leaf_codec(network_id):
+                    if isinstance(binary_payload, bytes):
+                        validate_binary_trie(binary_payload)
+                        # The root comes from the payload, never from a member.
+                        root, end = hash_binary_trie(binary_payload, 0, is_tx=is_tx)
+                        if end != len(binary_payload):
+                            raise ValueError("binary trie: trailing bytes")
+                        root_hex = root.hex().upper()
+                        leaves = collect_binary_leaves(binary_payload, is_tx=is_tx)
+                        leaf_bytes = binary_leaf_bytes(binary_payload)
+                        print(f"    Binary trie, root={root_hex[:16]}...")
+                    else:
+                        if trie is None:
+                            raise ValueError("no trie payload")
+                        stats = count_nodes(trie)
+                        print(
+                            f"    {stats.inners} inners, {stats.placeholders} placeholders, "
+                            f"{stats.leaves} leaves (depth {stats.max_depth})"
+                        )
+                        root_hex = hash_trie(trie, is_tx=is_tx).hex().upper()
+                        leaves = collect_json_leaves(trie)
+                        leaf_bytes = [
+                            (key_hex, serialize_leaf(leaf, is_tx=is_tx)) for key_hex, leaf in leaves
+                        ]
             except Exception as exc:
                 detail = str(exc)
                 leaf_form = isinstance(exc, LeafFormError)

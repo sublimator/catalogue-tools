@@ -1080,6 +1080,42 @@
    ],
    "accept": true,
    "why": "two paths"
+  },
+  {
+   "group": "zero account",
+   "field": "Destination",
+   "value": "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+   "accept": true,
+   "why": "the zero account: both codecs write it as an empty field and read that back as this address"
+  },
+  {
+   "group": "zero account",
+   "field": "Destination",
+   "value": "",
+   "accept": false,
+   "why": "an empty string is not an address"
+  },
+  {
+   "group": "reserved currency code",
+   "field": "Amount",
+   "value": {
+    "value": "1",
+    "currency": "0000000000000000000000005852500000000000",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the native code's letters in an issued code's place: rippled writes it as 40 hex digits"
+  },
+  {
+   "group": "reserved currency code",
+   "field": "Amount",
+   "value": {
+    "value": "1",
+    "currency": "0000000000000000000000005553440000000000",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "USD written as 40 hex digits: its reference text is the three letters"
   }
  ]
 }
