@@ -182,6 +182,33 @@ TEST(ParsingStrictness, StructuredValuesCarryExactlyTheirMembers)
     EXPECT_FALSE(leaf_accepted(tx_leaf_with("Fee", {{"value", "10"}})));
 }
 
+// The same table the Python tests read: values of one member of a Payment,
+// and whether the leaf rule accepts the leaf (§2.3). It holds the one
+// tolerance, another notation for an issued amount's value, and its edges.
+TEST(ParsingStrictness, LeafValueCasesSharedWithPython)
+{
+    auto const path = std::filesystem::path(PROJECT_ROOT) / "tests" / "xprv" /
+        "fixture" / "leaf-value-cases.json";
+    std::ifstream in(path);
+    ASSERT_TRUE(in) << path;
+    std::string const text(
+        (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto const doc = boost::json::parse(text);
+    auto const& cases = doc.at("cases").as_array();
+    ASSERT_GT(cases.size(), 40u);
+    for (auto const& entry : cases)
+    {
+        auto const& c = entry.as_object();
+        auto const field = std::string(c.at("field").as_string());
+        EXPECT_EQ(
+            leaf_accepted(tx_leaf_with(field, c.at("value"))),
+            c.at("accept").as_bool())
+            << c.at("group").as_string() << ": "
+            << boost::json::serialize(c.at("value")) << " ("
+            << c.at("why").as_string() << ")";
+    }
+}
+
 // §8: the shared loader caps the text before either parse pass. No vector
 // edit writes 16 MiB of JSON text.
 TEST(ParsingStrictness, JsonTextCapIsInclusive)

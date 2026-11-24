@@ -21,6 +21,7 @@ import contextlib
 import copy
 import importlib.util
 import io
+import json
 import sys
 import unittest
 from binascii import hexlify, unhexlify
@@ -313,6 +314,15 @@ class StructuredValueGrammarTests(unittest.TestCase):
         for name, value in refuse:
             with self.subTest(refuse=name, value=value):
                 self.assertFalse(self.accepted(name, value))
+
+    def test_cases_shared_with_cpp(self) -> None:
+        """The table the C++ tests read too: amounts, and their one tolerance."""
+        path = Path(__file__).parent.parent / "tests" / "xprv" / "fixture" / "leaf-value-cases.json"
+        cases = json.loads(path.read_text())["cases"]
+        self.assertGreater(len(cases), 40)
+        for case in cases:
+            with self.subTest(group=case["group"], value=case["value"], why=case["why"]):
+                self.assertEqual(self.accepted(case["field"], case["value"]), case["accept"])
 
 
 class JsonTextCapTests(unittest.TestCase):

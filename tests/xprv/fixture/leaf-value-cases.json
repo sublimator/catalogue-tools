@@ -1,0 +1,566 @@
+{
+ "about": "Values of one member of a Payment's tx object on XRPL, and whether the leaf rule accepts the leaf (spec section 2.3: a JSON leaf is the JSON its own bytes decode to; the decimal text of an issued amount may use another notation for exactly the same number, written as -?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]{1,9})?). The C++ and Python unit tests both read this file, so the two verifiers are asked the same questions.",
+ "cases": [
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the codec's own text"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "10",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the codec's own text"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0.5",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the codec's own text"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "zero"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "-1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "a negative value"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1e0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the same number with an exponent"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1E0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "a capital E"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1.0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the same number with a fraction"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "10e-1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the same number, scaled"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0.1e1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the same number, scaled"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1e1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "ten, written with an exponent"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1000000000000000e-15",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "the same number as a 16-digit mantissa"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0.0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "zero with a fraction"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0e5",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "zero with an exponent"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1e000000000",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "an exponent of nine digits"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "-1e0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": true,
+   "why": "negative, with an exponent"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "01",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a leading zero"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "00.5",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a leading zero before a fraction"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "+1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a plus sign"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "-0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a signed zero"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "-0.0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a signed zero"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "-0e5",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a signed zero"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1e0000000000",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "an exponent of ten digits"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1 ",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "trailing space"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": " 1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "leading space"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1e",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "an exponent with no digits"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1.",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a point with no fraction"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": ".5",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "no integer part"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0x1",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "hex"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1_0",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "an underscore"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "\u0661",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a digit that is not ASCII"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "empty"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "NaN",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "not a number"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "Infinity",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "not a number"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1.00000000000000001",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "17 significant digits: the bytes hold another number"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1e-97",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "below the smallest issued value: the bytes hold zero or nothing"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "9999999999999999e81",
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "above the largest issued value"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": 1,
+    "currency": "USD",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "a JSON number where the decimal text belongs"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "100",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": true,
+   "why": "the codec's own text"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": true,
+   "why": "zero"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1e2",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": false,
+   "why": "an integer has one spelling: no exponent"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "100.0",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": false,
+   "why": "no fraction"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "0100",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": false,
+   "why": "a leading zero"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "+100",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": false,
+   "why": "a plus sign"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "-0",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": false,
+   "why": "a signed zero"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "100 ",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": false,
+   "why": "trailing space"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "10",
+   "accept": true,
+   "why": "the codec's own text"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "0",
+   "accept": true,
+   "why": "zero"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "1e1",
+   "accept": false,
+   "why": "an integer has one spelling: no exponent"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "10.0",
+   "accept": false,
+   "why": "no fraction"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "010",
+   "accept": false,
+   "why": "a leading zero"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "+10",
+   "accept": false,
+   "why": "a plus sign"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "-0",
+   "accept": false,
+   "why": "a signed zero"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "10 ",
+   "accept": false,
+   "why": "trailing space"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": 10,
+   "accept": false,
+   "why": "a JSON number where the text belongs"
+  }
+ ]
+}
