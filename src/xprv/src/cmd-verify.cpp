@@ -1,4 +1,5 @@
 #include "commands.h"
+#include "json-proof-loader.h"
 #include "proof-file.h"
 
 #include "xprv/build-id.h"
@@ -78,7 +79,7 @@ cmd_verify(
         text << lin.rdbuf();
         try
         {
-            auto const parsed = boost::json::parse(text.str());
+            auto const parsed = xprv::detail::parse_unique_json(text.str());
             extra_lists = xprv::parse_external_validator_lists(parsed);
         }
         catch (std::exception const& e)

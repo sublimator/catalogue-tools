@@ -1015,24 +1015,31 @@ class ExternalValidatorListTests(unittest.TestCase):
                 self.assertTrue(report["verified"], label)
                 self.assertEqual(report["anchor"]["votes"], 5)
 
-            bad_lists = tmp / "bad.json"
-            bad_lists.write_text('"not-a-vl-doc"')
-            bad_run = subprocess.run(
-                [
-                    sys.executable,
-                    str(standalone),
-                    str(proof_path),
-                    "--trusted-key",
-                    f.trusted_key,
-                    "--lists",
-                    str(bad_lists),
-                ],
-                capture_output=True,
-                text=True,
-                cwd=tmp,
-            )
-            self.assertEqual(bad_run.returncode, 1)
-            self.assertIn("--lists", bad_run.stderr)
+            for label, bad_text in (
+                ("wrong-type", '"not-a-vl-doc"'),
+                ("nan", '{"version": 1, "x": NaN}'),
+                ("deep-nesting", "[" * 129 + "]" * 129),
+                ("lone-surrogate", '{"version": 1, "x": "\\ud800"}'),
+                ("duplicate-key", '{"version": 1, "version": 1}'),
+            ):
+                bad_lists = tmp / f"bad-{label}.json"
+                bad_lists.write_bytes(bad_text.encode("utf-8"))
+                bad_run = subprocess.run(
+                    [
+                        sys.executable,
+                        str(standalone),
+                        str(proof_path),
+                        "--trusted-key",
+                        f.trusted_key,
+                        "--lists",
+                        str(bad_lists),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    cwd=tmp,
+                )
+                self.assertEqual(bad_run.returncode, 1, label)
+                self.assertIn("--lists", bad_run.stderr, label)
 
 
 if __name__ == "__main__":

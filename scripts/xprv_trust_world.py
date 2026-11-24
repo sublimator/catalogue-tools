@@ -1064,6 +1064,88 @@ def cases() -> list[dict[str, Any]]:
         "spec §1.3 P1, rule 9: a v1 document's publisher manifest is retained independently of blob/signature decoding",
         f.proof(), f, lists=[v1_broken_blob_rev], reason="publisher is revoked")
 
+    # §1.3 P1 (without --lists, F01): a damaged bundled publisher manifest is ignored without
+    # poisoning a valid publisher manifest supplied via --manifests, so the bundled blob verifies.
+    f = Fixture()
+    proof = f.proof()
+    bad_man = bytearray(unhexlify(proof["steps"][0]["unl"]["manifest"]))
+    bad_man[-1] ^= 0xFF
+    proof["steps"][0]["unl"]["manifest"] = bad_man.hex().upper()
+    add("held-publisher-manifest-rescues-bad-bundled-manifest",
+        "spec §1.3 P1: a bad bundled publisher manifest does not poison a valid publisher manifest held in --manifests",
+        proof, f, manifests=[make_manifest(f.publisher, f.publisher_signing, seq=1)])
+
+    # §1.3 P1 (I1): lower-sequence publisher manifest arriving first in --lists does not win over
+    # a higher-sequence publisher manifest arriving later.
+    f = Fixture()
+    m6, s6 = keypair(105), keypair(205)
+    entries6 = f.entries + [{"validation_public_key": m6[0], "manifest": b64(make_manifest(m6, s6))}]
+    old_doc = f.vl_doc_v1(blob_fields={"sequence": 5, "expiration": 900000000})  # manifest seq 1, 5 validators
+    new_doc = f.vl_doc_v1(
+        publisher_signing=keypair(670), publisher_seq=2,
+        blob_fields={"sequence": 1, "expiration": 900000000}, entries=entries6,  # manifest seq 2, 6 validators
+    )
+    f.voters = f.signers[:4] + [s6]  # 5 of 6 -> requires the 6-validator list under manifest seq 2
+    add("publisher-manifest-lower-sequence-first",
+        "spec §1.3 P1: highest-sequence publisher manifest wins even when a lower-sequence document appears first",
+        f.proof(listless=True), f, lists=[old_doc, new_doc])
+
+    # §1.3 P3 (D08a): a higher-sequence external list that fails P3 well-formedness (non-66-hex
+    # validation_public_key) is not a candidate, so the lower-sequence valid external list is used.
+    f = Fixture()
+    good_seq1 = f.vl_doc_v1(blob_fields={"sequence": 1, "expiration": 900000000})
+    p3_bad_entries = [dict(e) for e in f.entries]
+    p3_bad_entries[0]["validation_public_key"] = "nHBtDzdRDykxiuv7uSMPTcGexNm879RUUz5GW4h1qgjbtyvWZ1LE"
+    p3_bad_seq2 = f.vl_doc_v1(blob_fields={"sequence": 2, "expiration": 900000000}, entries=p3_bad_entries)
+    add("malformed-higher-sequence-list-skipped",
+        "spec §1.3 P3: a higher-sequence list that fails P3 well-formedness is not a candidate and falls back to the valid lower list",
+        f.proof(listless=True), f, lists=[good_seq1, p3_bad_seq2])
+
+    # §1.3 P3 (E5): an anchor-only proof has no close time and never consults wall clock,
+    # so an external list whose expiration is far in the past still verifies.
+    f = Fixture()
+    ancient_doc = f.vl_doc_v1(blob_fields={"sequence": 1, "expiration": 100})
+    add("anchor-only-expired-external-list-accepted",
+        "spec §1.3 P3: an anchor-only proof skips the close-time interval check and never consults a wall clock",
+        proof_of(f.anchor(listless=True)), f, lists=[ancient_doc])
+
+    # §1.3 Rule 2 (D01): two different verified publisher manifests at the same sequence across
+    # two separate external VL documents reject the anchor.
+    f = Fixture()
+    pub_conflict_a = f.vl_doc_v1(publisher_signing=f.publisher_signing, publisher_seq=1)
+    pub_conflict_b = f.vl_doc_v1(publisher_signing=keypair(671), publisher_seq=1)
+    add("publisher-manifest-conflict-across-documents",
+        "spec §1.3 rule 2: conflicting publisher manifests at the same sequence across two external documents reject the anchor",
+        f.proof(listless=True), f, lists=[pub_conflict_a, pub_conflict_b],
+        reason="conflicting publisher manifests")
+
+    # §1.3 Rule 7 (D11 & D11d): bundled list vs external list at the same highest eligible sequence —
+    # distinct blobs reject, byte-identical blobs deduplicate and accept.
+    f = Fixture()
+    f.blob_fields = {"sequence": 2, "expiration": 900000000}
+    other_ext = f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 5, "expiration": 900000000})
+    add("conflicting-bundled-and-external-list-at-same-sequence",
+        "spec §1.3 rule 7: distinct bundled and external eligible lists at the highest sequence reject the anchor",
+        f.proof(), f, lists=[other_ext], reason="conflicting eligible validator lists")
+    same_ext = f.vl_doc_v1(blob_fields=f.blob_fields)
+    add("duplicate-identical-bundled-and-external-list-accepted",
+        "spec §1.3 rule 7: byte-identical bundled and external signed lists deduplicate as one candidate",
+        f.proof(), f, lists=[same_ext])
+
+    # §1.3 P1/Rule 11 (D15a & D15h): a foreign publisher's valid VL document in --lists is ignored
+    # when verifying the configured publisher, and a list-less anchor naming that foreign key is rejected.
+    f = Fixture()
+    foreign_pub, foreign_sign = keypair(680), keypair(681)
+    foreign_doc = f.vl_doc_v1(publisher=foreign_pub, publisher_signing=foreign_sign)
+    trusted_doc = f.vl_doc_v1()
+    add("foreign-publisher-document-ignored",
+        "spec §1.3 P1: another publisher's valid VL document in --lists is ignored when the configured publisher's list is held",
+        f.proof(listless=True), f, lists=[foreign_doc, trusted_doc])
+    wrong_key_proof = f.proof(listless=True, claimed_key=foreign_pub[0])
+    add("listless-anchor-wrong-publisher-key",
+        "spec §1.3 rule 11: a list-less anchor whose unl.public_key does not match the configured publisher key is rejected",
+        wrong_key_proof, f, lists=[foreign_doc, trusted_doc], reason="publisher key mismatch")
+
     # ── LedgerHashes links (§5.3), on headers the test keys anchor ───
     out.extend(_link_cases(add, proof_of))
     return out

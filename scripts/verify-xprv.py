@@ -3661,7 +3661,9 @@ def main() -> None:
     extra_lists: list[ExternalValidatorList] = []
     if args.lists:
         try:
-            list_obj = json.loads(Path(args.lists).read_text())
+            list_obj = loads_strict_json(
+                Path(args.lists).read_bytes(), object_pairs_hook=unique_members
+            )
             extra_lists = parse_external_validator_lists(list_obj)
         except Exception as exc:
             raise SystemExit(
