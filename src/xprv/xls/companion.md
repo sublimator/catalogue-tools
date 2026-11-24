@@ -372,9 +372,21 @@ Version 10 keeps two distinct identities separate (spec §1.2, §1.4):
 **Caching pitfall:** never treat a CAS hash as a shortcut around validating the
 exact bytes you received. A malformed JSON proof (for example, carrying an
 extra unhashed member or a wrong `__depth__`) could convert to the same binary
-bytes as a cached valid proof. A verdict cache hit is valid only after
-validating the received representation under the same policy, definitions
-snapshot, and resolved trust view.
+bytes as a cached valid proof. A sound verdict cache key therefore includes:
+1. the CAS identity **after** full parse and framing validation of the received
+   representation;
+2. the verifier's policy and protocol-definitions fingerprints
+   (`definitions.{leaf,validation}`);
+3. the **whole** resolved trust view — configured publisher key, publisher
+   manifest state, selected primary list blob (or conflict/unavailable state),
+   and every primary-list master's state (active winning manifest, revocation,
+   or lower-sequence equivocation — winning manifests alone miss a lower-sequence
+   equivocation!); and
+4. when the proof has descendants, the matching anchor ledger header's
+   `close_time` checked against the primary list window.
+
+If any of those inputs is unavailable (for example, an incomplete failure state),
+skip the cache rather than caching under a partial key.
 
 ---
 
@@ -391,24 +403,27 @@ all of them trace back to concrete bugs and reproduced failure cases.
   lowercase sibling `"a"` hung a forged `LedgerHashes` leaf off the same inner
   node and was enumerated as authenticated. Single-pass branch parsing closes
   the smuggling vector; version 10 goes further and requires **uppercase hex
-  only** across all hex-typed members and keys in JSON with no case
-  normalization anywhere.
+  only** across all proof-level hex members and trie branch keys in JSON with no
+  case normalization (while decoded leaf content follows `rippled` / `xahaud`
+  reference JSON, where ordinary `UInt64` fields are unpadded lowercase hex).
 - **Codec quirks → the leaf round-trip rule.** Earlier drafts guarded JSON
   leaves with a hand-maintained table of permitted JSON types per XRPL field
   type. Reviews quickly turned up holes: `xrpl-py` silently drops `null`
   members (so `"InvoiceID": null` hashed as if absent) and coerces booleans to
   `0`/`1` (so `"Flags": false` verified); other codecs expand X-addresses or
-  collapse unknown currency codes to native XRP. Version 10 replaces the type
-  table with one rule (spec §2.3): serialize the leaf content with the network
-  codec, decode those exact bytes into canonical reference JSON (aligned with
-  `rippled` on XRPL and `xahaud` on Xahau), and require strict structural,
-  type, and value equality. (At the current draft of `spec-draft.md`, exact
-  decimal-value comparison is still noted for IOU `Amount.value` and `Number`
-  while final codec alignment settles.) Similarly, live-ledger sampling caught
-  `catl::xdata` treating issued `XAH` on XRPL mainnet as native XRP and writing
-  native `Issue` as a bare string instead of `{"currency": "XRP"}` — establishing
-  `rippled`/`xahaud` as the reference and scoping native currency strictly to
-  each network's own system code.
+  collapse unknown currency codes to native XRP. Differential fuzzing also
+  showed that even a narrow "equivalent decimal notation" tolerance causes real
+  verifier disagreements in both directions (`catl::xdata` caps decimal input at
+  20 digits like `rippled`, while `xrpl-py` rejects written exponents above 80).
+  Version 10 replaces the type table with one rule (spec §2.3): serialize the
+  leaf content with the network codec, decode those exact bytes into exact
+  `rippled` (XRPL) or `xahaud` (Xahau) reference JSON, and require strict
+  structural, type, and exact string equality — one canonical text per amount,
+  `Number`, `UInt64`, and `PathSet` step, with no alternate-notation tolerance.
+  Similarly, live-ledger sampling caught `catl::xdata` treating issued `XAH` on
+  XRPL mainnet as native XRP and writing native `Issue` as a bare string instead
+  of `{"currency": "XRP"}` — establishing `rippled`/`xahaud` as the reference
+  and scoping native currency strictly to each network's own system code.
 - **Minimal trie shape.** Empty inner nodes `{}`, expanded subtrees with no
   descendant leaf, all-zero `00...00` placeholders standing in for empty
   branches, and leaves whose 32-byte `key` disagrees with their nibble path
@@ -452,17 +467,20 @@ the integrated v10 repository gives you a shared test corpus
    binary path against the binary form of `positive-tx-skiplist.json` and the
    binary-mutation negative vectors.
 5. **Add JSON form (`.xprv.json`)** if you need human-readable proofs:
-   enforce the closed schema, uppercase-only hex, strict integer tokens,
-   single-pass trie parsing, and the §2.3 codec round-trip check.
+   enforce the closed schema, proof-level uppercase-only hex, strict integer
+   tokens, single-pass trie parsing, and the §2.3 exact codec round-trip check.
 6. **Run the full black-box conformance suite** once both forms are working.
-   `scripts/xprv-conformance.py` feeds each vector's JSON and binary proofs to
-   a command template and checks exit `0` (accept) vs. `1` (refuse), treating
-   any crash, signal, or timeout as a failure. By default it also runs the
-   built-in `cpp` and `python` reference verifiers alongside yours (which
-   requires a built `xprv` binary, or `--use python` to skip the C++ build):
+   `scripts/xprv-conformance.py` feeds each vector's JSON and binary proofs (and
+   any held manifests file) to a command template and checks exit `0` (accept)
+   vs. `1` (refuse), treating any crash, signal, or timeout as a failure. If
+   your verifier also emits the spec §7.1 `--json` report, pass `--reports mine`
+   to check `verified`, refusal `layer`, and `reason` strictly from the report.
+   By default it also runs the built-in `cpp` and `python` reference verifiers
+   alongside yours (which requires a built `xprv` binary, or `--use python` to
+   skip the C++ build):
    ```sh
    scripts/xprv-conformance.py run \
-     --verifier mine='my-verifier {proof} --network {network_id} --key {publisher_key}'
+     --verifier mine='my-verifier {proof} --network {network_id} --key {publisher_key} --manifests {manifests}'
    ```
 
 ---
