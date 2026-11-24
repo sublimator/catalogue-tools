@@ -362,9 +362,28 @@ def build(oracle: Oracle) -> dict:
         bridge("XRP", "XRP"),
         bridge({"currency": "BTC"}, {"currency": "XRP"}),
     ]
+    # A door is an account field: one never set is an empty field and "", and
+    # one set to the zero account is twenty zero bytes and its address.
+    def doors(locking, issuing):
+        return {"LockingChainDoor": locking, "LockingChainIssue": {"currency": "XRP"},
+                "IssuingChainDoor": issuing, "IssuingChainIssue": {"currency": "XRP"}}
+
+    def door_hex(door):
+        return {"": "00", ZERO_ACCOUNT: "14" + Z20, ALICE: "14" + ALICE_HEX}[door]
+
+    unset_doors = [doors("", ALICE), doors(ALICE, ""), doors("", "")]
+    for value in unset_doors:
+        DEVIATIONS[("bridge_encode", json.dumps(value))] = (
+            door_hex(value["LockingChainDoor"]) + Z20 + door_hex(value["IssuingChainDoor"]) + Z20,
+            "rippled prints a door that was never set as \"\" and will not read that back; "
+            "x-data writes the empty field it decodes from, so the pair round-trips",
+        )
+    bridge_inputs += [doors(ZERO_ACCOUNT, ALICE), doors(ALICE, ZERO_ACCOUNT), *unset_doors]
     fx["bridge_encode"] = encode_section(oracle, "bridge", "bridge_encode", bridge_inputs, as_json=True)
     fx["bridge_decode"] = decode_section(
-        oracle, "bridge", [e["hex"] for e in fx["bridge_encode"] if "hex" in e], as_json=True)
+        oracle, "bridge",
+        [e["hex"] for e in fx["bridge_encode"] if "hex" in e] + [e["xdata"] for e in fx["bridge_encode"] if "why" in e],
+        as_json=True)
 
     # ── UInt64 ────────────────────────────────────────────────────────
     # rippled marks a few UInt64 fields base-ten: amounts, read and written
