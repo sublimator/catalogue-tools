@@ -292,7 +292,8 @@ resolve_proof_chain_impl(
     std::vector<std::vector<uint8_t>> const& extra_manifests,
     std::string* failure,
     VerifyReport* report,
-    std::vector<ExternalValidatorList> const& extra_lists = {})
+    std::vector<ExternalValidatorList> const& extra_lists =
+        std::vector<ExternalValidatorList>())
 {
     // The first refusal, for callers that report why (tests, the corpus),
     // with the layer it belongs to: "parse" for the proof's structure,
