@@ -140,8 +140,19 @@ public:
         expand_xaddresses_ = v;
     }
 
+    /// The network's native currency code, rippled's systemCurrencyCode():
+    /// "XAH" for the Xahau family, "XRP" otherwise. The zero currency reads
+    /// as this code, and only this code writes the zero currency; the other
+    /// network's symbol is an ordinary three-character code.
+    std::string const&
+    native_currency() const
+    {
+        return native_currency_;
+    }
+
 private:
     bool expand_xaddresses_ = false;
+    std::string native_currency_ = "XRP";
     // Network this protocol was loaded for (if specified)
     std::optional<uint32_t> network_id_;
 

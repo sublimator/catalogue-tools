@@ -388,11 +388,21 @@ TEST_P(NumberCodecTest, EncodeMatchesRippled)
     auto const& entry = entries[GetParam()].as_object();
 
     auto input = std::string(entry.at("input").as_string());
-    auto expected_hex = std::string(entry.at("hex").as_string());
 
     std::vector<uint8_t> buf;
     VectorSink vs(buf);
     Serializer<VectorSink> s(vs);
+
+    // rippled refuses a decimal it would have to round.
+    if (entry.contains("refused"))
+    {
+        EXPECT_THROW(
+            NumberCodec::encode(s, boost::json::value(input)), EncodeError)
+            << "Number: " << input;
+        return;
+    }
+
+    auto expected_hex = std::string(entry.at("hex").as_string());
     NumberCodec::encode(s, boost::json::value(input));
 
     auto result_hex = to_upper_hex(buf);
@@ -532,6 +542,30 @@ TEST_P(DDValueTest, ValueMatchesExpected)
     std::vector<uint8_t> buf;
     VectorSink vs(buf);
     Serializer<VectorSink> s(vs);
+
+    // These vectors are xrpl.js's. Three of them xrpl.js encodes and rippled
+    // (xrpl-codec at cd322b9811) refuses, and x-data follows rippled: a
+    // value of more digits than an unsigned 64-bit integer ("bad lexical
+    // cast"), and an MPT value written in hex ("is not a number").
+    if (type_name == "Amount" && test_json.is_object())
+    {
+        auto const* value = test_json.as_object().if_contains("value");
+        if (value && value->is_string())
+        {
+            auto const text = std::string_view(value->as_string());
+            bool const hex_text = text.starts_with("0x");
+            bool const too_long =
+                text.find_first_not_of("0123456789") ==
+                    std::string_view::npos &&
+                text.size() > 20;
+            if (hex_text || too_long)
+            {
+                EXPECT_THROW(AmountCodec::encode(s, test_json), EncodeError)
+                    << "JSON: " << boost::json::serialize(test_json);
+                return;
+            }
+        }
+    }
 
     if (type_name == "Amount")
     {
@@ -1054,6 +1088,69 @@ TEST_P(CodecRoundtripSLETest, DecodeAndReencode)
 
     EXPECT_EQ(reencoded_hex, hex_str)
         << "SLE[" << GetParam() << "] roundtrip mismatch: "
+        << entry.at("json").as_object().at("LedgerEntryType").as_string();
+}
+
+// ===========================================================================
+// Rendering: binary → decode(JSON) must BE the fixture's JSON
+//
+// The two tests above only prove x-data can read its own writing. A decoder
+// that renders a value differently from everyone else still passes them, as
+// x-data's did: it wrote a native issue as "XRP" where rippled and xrpl.js
+// write {"currency": "XRP"}, and a Number as 999999999999999900e78 where they
+// write 9999999999999999e80. This holds the rendering itself to the fixture.
+//
+// boost::json compares objects without regard to member order, arrays in
+// order, and a string to a number as unequal.
+// ===========================================================================
+
+namespace {
+
+boost::json::value
+decode_fixture_binary(std::string const& hex_str, Protocol const& protocol)
+{
+    std::vector<uint8_t> binary(hex_str.size() / 2);
+    for (size_t i = 0; i < binary.size(); ++i)
+        binary[i] = hex_byte(hex_str[i * 2], hex_str[i * 2 + 1]);
+
+    Slice slice(binary.data(), binary.size());
+    JsonVisitor visitor(protocol, {.ascii_hints = false});
+    ParserContext ctx(slice);
+    parse_with_visitor(ctx, protocol, visitor);
+    return visitor.get_result();
+}
+
+}  // namespace
+
+TEST_P(CodecRoundtripTxTest, DecodeMatchesJson)
+{
+    static auto fixtures = load_json_fixture("codec-roundtrip-fixtures.json");
+    auto const& data = FixtureData::instance();
+    auto const& entry = fixtures.as_object()
+                            .at("transactions")
+                            .as_array()[GetParam()]
+                            .as_object();
+
+    auto const decoded = decode_fixture_binary(
+        std::string(entry.at("binary").as_string()), data.protocol);
+    EXPECT_EQ(decoded, entry.at("json"))
+        << "TX[" << GetParam() << "] "
+        << entry.at("json").as_object().at("TransactionType").as_string();
+}
+
+TEST_P(CodecRoundtripSLETest, DecodeMatchesJson)
+{
+    static auto fixtures = load_json_fixture("codec-roundtrip-fixtures.json");
+    auto const& data = FixtureData::instance();
+    auto const& entry = fixtures.as_object()
+                            .at("accountState")
+                            .as_array()[GetParam()]
+                            .as_object();
+
+    auto const decoded = decode_fixture_binary(
+        std::string(entry.at("binary").as_string()), data.protocol);
+    EXPECT_EQ(decoded, entry.at("json"))
+        << "SLE[" << GetParam() << "] "
         << entry.at("json").as_object().at("LedgerEntryType").as_string();
 }
 

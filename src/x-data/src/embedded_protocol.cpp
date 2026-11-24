@@ -19,8 +19,12 @@ Protocol::load_embedded_xahau_protocol(const ProtocolOptions& opts)
             "Failed to parse embedded Xahau definitions: " + ec.message());
     }
 
-    // Use the load_from_json_value method
-    return Protocol::load_from_json_value(jv, opts);
+    // These are Xahau's definitions whatever network id the caller gave, so
+    // the native currency is XAH even with default options. network_id_ is
+    // left as the caller set it: it drives type validation, not currencies.
+    auto protocol = Protocol::load_from_json_value(jv, opts);
+    protocol.native_currency_ = "XAH";
+    return protocol;
 }
 
 Protocol

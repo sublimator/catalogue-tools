@@ -9749,7 +9749,8 @@
   },
   {
     "input": "9223372036854775808",
-    "hex": "0CCCCCCCCCCCCCCD00000001"
+    "refused": "number cannot be represented",
+    "note": "2^63 needs rounding; rippled cd322b9811 refuses it, and an earlier rippled wrote 0CCCCCCCCCCCCCCD00000001"
   },
   {
     "input": "9999999999999999e-1",
@@ -9769,7 +9770,8 @@
   },
   {
     "input": "-9223372036854775808",
-    "hex": "F33333333333333300000001"
+    "refused": "number cannot be represented",
+    "note": "-2^63 needs rounding; rippled cd322b9811 refuses it, and an earlier rippled wrote F33333333333333300000001"
   },
   {
     "input": "-9999999999999999e-1",

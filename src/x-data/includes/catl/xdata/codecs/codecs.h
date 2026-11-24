@@ -146,22 +146,24 @@ decode_field_value(
         return UInt384Codec::decode(data);
     if (t == FieldTypes::UInt512)
         return UInt512Codec::decode(data);
+    // Which currency code is native depends on the network.
+    std::string_view const native = protocol.native_currency();
     if (t == FieldTypes::Amount)
-        return AmountCodec::decode(data);
+        return AmountCodec::decode(data, native);
     if (t == FieldTypes::AccountID)
         return AccountIDCodec::decode(data);
     if (t == FieldTypes::Currency)
-        return CurrencyCodec::decode(data);
+        return CurrencyCodec::decode(data, native);
     if (t == FieldTypes::Issue)
-        return IssueCodec::decode(data);
+        return IssueCodec::decode(data, native);
     if (t == FieldTypes::Number)
         return NumberCodec::decode(data);
     if (t == FieldTypes::XChainBridge)
-        return XChainBridgeCodec::decode(data);
+        return XChainBridgeCodec::decode(data, native);
     if (t == FieldTypes::Vector256)
         return Vector256Codec::decode(data);
     if (t == FieldTypes::PathSet)
-        return PathSetCodec::decode(data);
+        return PathSetCodec::decode(data, native);
     if (t == FieldTypes::Blob)
         return BlobCodec::decode(data);
 
@@ -252,7 +254,7 @@ encode_field_value(
     }
     else if (t == FieldTypes::Amount)
     {
-        AmountCodec::encode(s, v, path);
+        AmountCodec::encode(s, v, path, protocol.native_currency());
     }
     else if (t == FieldTypes::AccountID)
     {
@@ -264,19 +266,19 @@ encode_field_value(
     }
     else if (t == FieldTypes::Currency)
     {
-        CurrencyCodec::encode(s, v, path);
+        CurrencyCodec::encode(s, v, path, protocol.native_currency());
     }
     else if (t == FieldTypes::Issue)
     {
-        IssueCodec::encode(s, v, path);
+        IssueCodec::encode(s, v, path, protocol.native_currency());
     }
     else if (t == FieldTypes::Number)
     {
-        NumberCodec::encode(s, v);
+        NumberCodec::encode(s, v, path);
     }
     else if (t == FieldTypes::XChainBridge)
     {
-        XChainBridgeCodec::encode(s, v);
+        XChainBridgeCodec::encode(s, v, protocol.native_currency());
     }
     else if (t == FieldTypes::Vector256)
     {
@@ -284,7 +286,7 @@ encode_field_value(
     }
     else if (t == FieldTypes::PathSet)
     {
-        PathSetCodec::encode(s, v);
+        PathSetCodec::encode(s, v, protocol.native_currency());
     }
     else if (t == FieldTypes::STObject)
     {
