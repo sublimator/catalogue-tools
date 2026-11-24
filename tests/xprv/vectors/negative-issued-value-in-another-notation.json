@@ -1,5 +1,5 @@
 {
-  "name": "issued-value-ten-digit-exponent",
+  "name": "issued-value-in-another-notation",
   "violates": "spec \u00a72.3: a JSON leaf equals what its serialized bytes decode to",
   "layer": "parse",
   "base": "positive-tx-issued-xah",
@@ -7,7 +7,7 @@
     {
       "op": "set",
       "path": "/steps/6/trie/E/9/1/tx/TakerGets/value",
-      "value": "130000e0000000000"
+      "value": "13e4"
     }
   ],
   "expect": {
@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "step 7: tx tree error: leaf is not the JSON its bytes decode to: member tx.TakerGets.value differs"
-  }
+  },
+  "generator": "mutate --only-issued"
 }

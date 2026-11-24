@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "step must be an object with a string type"
-  }
+  },
+  "generator": "mutate"
 }

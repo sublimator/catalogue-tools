@@ -15,5 +15,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: binary proof: reserved flag bits are set (flags=0x02)"
-  }
+  },
+  "generator": "mutate"
 }

@@ -15,5 +15,6 @@
   },
   "observed": {
     "python_reason": "proof must contain exactly one anchor, found 0; step 1: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 2: state root 72DB884ECB8F3C58... is not supported by any earlier header; step 3: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 4: state root EDCE53D36B387392... is not supported by any earlier header; step 5: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 6: tx root 48EF725280083243... is not supported by any earlier header"
-  }
+  },
+  "generator": "mutate"
 }

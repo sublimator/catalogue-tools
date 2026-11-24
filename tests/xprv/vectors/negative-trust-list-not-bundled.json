@@ -35,5 +35,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: validator list not bundled and no external list"
-  }
+  },
+  "generator": "trust"
 }

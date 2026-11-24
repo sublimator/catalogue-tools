@@ -15,5 +15,6 @@
   },
   "observed": {
     "python_reason": "proof must be an object with format_version, network_id and steps"
-  }
+  },
+  "generator": "mutate"
 }

@@ -35,5 +35,6 @@
   },
   "observed": {
     "python_reason": "unl must carry manifest, blob and signature together, or none of them"
-  }
+  },
+  "generator": "trust"
 }

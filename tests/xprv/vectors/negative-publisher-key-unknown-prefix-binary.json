@@ -15,5 +15,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: publisher key must begin with ED, 02 or 03"
-  }
+  },
+  "generator": "mutate"
 }

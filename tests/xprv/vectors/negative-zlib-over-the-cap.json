@@ -21,5 +21,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: binary proof: decompressed size exceeds cap"
-  }
+  },
+  "generator": "mutate"
 }

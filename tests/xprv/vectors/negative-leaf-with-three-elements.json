@@ -283,5 +283,6 @@
   },
   "observed": {
     "python_reason": "trie leaf must be exactly [key, data]"
-  }
+  },
+  "generator": "mutate"
 }

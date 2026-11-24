@@ -82,5 +82,6 @@
   },
   "observed": {
     "python_reason": "step 4: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf"
-  }
+  },
+  "generator": "trust"
 }

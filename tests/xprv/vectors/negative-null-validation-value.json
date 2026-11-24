@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "validation value must be a hex string"
-  }
+  },
+  "generator": "mutate"
 }

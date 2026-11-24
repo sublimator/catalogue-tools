@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "trie placeholder must be a 32-byte uppercase hex hash"
-  }
+  },
+  "generator": "mutate"
 }

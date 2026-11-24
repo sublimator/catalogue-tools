@@ -1,0 +1,21 @@
+{
+  "name": "validation-that-is-a-bridge-door-longer-than-the-bytes",
+  "violates": "spec \u00a72.1: every validations entry is a complete canonical STValidation",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/validations/ED0000000000000000000000000000000000000000000000000000000000000000",
+      "value": "0119FF"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "not a canonical STValidation"
+  },
+  "observed": {
+    "python_reason": "validation is not a canonical STValidation"
+  },
+  "generator": "mutate"
+}

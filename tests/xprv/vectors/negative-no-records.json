@@ -14,5 +14,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: binary proof: missing anchor core record"
-  }
+  },
+  "generator": "mutate"
 }

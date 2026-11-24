@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "publisher key must be uppercase hex"
-  }
+  },
+  "generator": "mutate"
 }

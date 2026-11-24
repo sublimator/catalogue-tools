@@ -49,5 +49,6 @@
   },
   "observed": {
     "python_reason": "validation map keys must be uppercase 33-byte hex"
-  }
+  },
+  "generator": "mutate"
 }

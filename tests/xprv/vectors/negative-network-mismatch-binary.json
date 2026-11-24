@@ -15,5 +15,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "proof network_id 21337 does not match configured network 0"
-  }
+  },
+  "generator": "mutate"
 }

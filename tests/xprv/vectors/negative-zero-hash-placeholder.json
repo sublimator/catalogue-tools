@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "trie placeholder is a zero hash; an empty branch is absent"
-  }
+  },
+  "generator": "mutate"
 }

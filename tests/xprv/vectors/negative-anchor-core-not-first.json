@@ -19,5 +19,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: binary proof: first record must be the anchor core"
-  }
+  },
+  "generator": "mutate"
 }

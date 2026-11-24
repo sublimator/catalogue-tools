@@ -9,5 +9,6 @@
   "expect": {
     "verdict": "accept"
   },
-  "base": "positive-tx-skiplist"
+  "base": "positive-tx-skiplist",
+  "generator": "mutate"
 }

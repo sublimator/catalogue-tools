@@ -105,7 +105,32 @@ LOG = logging.getLogger("xprv-vectors")
 
 REPO = Path(__file__).resolve().parent.parent
 VERIFIER = REPO / "scripts" / "verify-xprv.py"
-VECTOR_DIR = REPO / "tests" / "xprv" / "vectors"
+# XPRV_VECTOR_DIR points the tool at another directory, for trying a
+# generator out on a copy.
+VECTOR_DIR = Path(os.environ.get("XPRV_VECTOR_DIR") or REPO / "tests" / "xprv" / "vectors")
+
+
+def generated(vector: dict[str, Any], generator: str) -> dict[str, Any]:
+    """Mark a vector as written by one generator, which alone may remove it."""
+    vector["generator"] = generator
+    return vector
+
+
+def remove_stale(generator: str, keep: set[str], base: str | None = None) -> None:
+    """Remove this generator's own vectors that it no longer writes.
+
+    Ownership is the `generator` member a file carries, and for a derived
+    vector its base too. A file without that mark, whatever its name or base,
+    is someone's hand-written case and is never touched.
+    """
+    for path in sorted(VECTOR_DIR.glob("*.json")):
+        if path.name in keep:
+            continue
+        vector = json.loads(path.read_text())
+        if vector.get("generator") != generator or (base is not None and vector.get("base") != base):
+            continue
+        path.unlink()
+        LOG.info("removed %s (no longer generated)", path.name)
 # The encoder to shell out to; XPRV_BIN overrides the default build tree.
 XPRV_BIN = Path(os.environ.get("XPRV_BIN", REPO / "build" / "src" / "xprv" / "xprv"))
 
@@ -790,6 +815,14 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
         fields = V.decode(validations[key])
         fields["TxnSignature"] = "DEADBEEF"
         injected.append(at(f"/steps/0/validations/{key}", V.encode(fields).upper()))
+    # Bytes that are not an STValidation at all. Each of these once ended the
+    # C++ process inside the codec (an unknown field in an array; a bridge
+    # field cut short): a verifier refuses bad bytes, it does not die on them.
+    not_canonical = "spec §2.1: every validations entry is a complete canonical STValidation"
+    for what, junk in (("an-unknown-field-in-an-array", "F66F"), ("a-bridge-with-nothing-in-it", "0119"),
+                       ("a-bridge-door-longer-than-the-bytes", "0119FF")):
+        neg("validation-that-is-" + what, not_canonical, "parse", "not a canonical STValidation",
+            [at("/steps/0/validations/ED" + "00" * 32, junk)])
     neg("validation-unsigned-field",
         "spec §5.1: validation signing data keeps every field except Signature",
         "trust", "quorum not met", injected)
@@ -877,8 +910,9 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
         "graph", "supported by",
         [at(f"{tx_leaf}/1/tx/Sequence", tx["Sequence"] + 1)])
 
-    # An issued amount's value may be written in another notation for exactly
-    # the same number, and in no other way.
+    # An issued amount's value has one text, the one rippled writes. Another
+    # notation for the same number is another JSON (§2.3). Each of these
+    # names the same number as the base, or tries to.
     issued = next(
         (name for name, value in tx.items()
          if isinstance(value, dict) and {"value", "currency", "issuer"} <= value.keys()),
@@ -892,8 +926,13 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
             ("issued-value-leading-zero", "0" + value),
             ("issued-value-plus-sign", "+" + value),
             ("issued-value-trailing-text", value + " "),
-            # The exponent is written in at most nine digits.
-            ("issued-value-ten-digit-exponent", value + "e0000000000"),
+            ("issued-value-with-a-zero-exponent", value + "e0"),
+            ("issued-value-with-a-fraction", value + ".0"),
+            ("issued-value-in-another-notation",
+             value.rstrip("0") + "e" + str(len(value) - len(value.rstrip("0")))),
+            # More digits than a 64-bit mantissa holds, and the same number:
+            # one codec read this and the other did not.
+            ("issued-value-21-digit-mantissa", value + "0" * 15 + "e-15"),
         ):
             neg(name, roundtrip, "parse", differs, [at(issued_value_at, spelling)])
     neg("tx-not-an-object", "spec §2.3: a transaction leaf's tx and meta are the decoded objects",
@@ -928,6 +967,16 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("boolean-network-id", "spec §2: integer fields are integer tokens", "parse",
         "proof network_id must be an integer",
         [at("/network_id", False)])
+    # A uint32, as the binary header holds it (§3.1). Past either end it is a
+    # fault in the proof's form; inside, a network this verifier is not
+    # configured for is a question of trust.
+    uint32 = "spec §2: network_id is a uint32"
+    neg("network-id-below-zero", uint32, "parse", "network_id", [at("/network_id", -1)])
+    neg("network-id-above-uint32", uint32, "parse", "network_id", [at("/network_id", 1 << 32)])
+    neg("network-id-above-uint64", uint32, "parse", "network_id", [at("/network_id", 1 << 64)])
+    neg("network-id-above-any-integer-type", uint32, "parse", "network_id", [at("/network_id", 1 << 70)])
+    neg("network-id-largest-uint32", "spec §8: a proof whose network_id is not the configured network MUST be rejected",
+        "trust", "does not match configured network", [at("/network_id", (1 << 32) - 1)])
     neg("missing-format-version", envelope, "parse", "format_version", [remove("/format_version")])
     neg("unknown-format-version", "spec §9.1: an unrecognized version is refused", "parse", "format_version 999",
         [at("/format_version", 999)])
@@ -1045,24 +1094,6 @@ def patch_accept_family(base: dict[str, Any], base_name: str) -> list[dict[str, 
         "json_patch": [{"op": "remove", "path": pointer} for pointer in diagnostics],
         "expect": {"verdict": "accept"},
     }]
-    # An issued amount's value in another notation for exactly the same number.
-    tx_leaf = _leaf_pointer(proof, "tx")
-    tx = proof
-    for token in _pointer_tokens(f"{tx_leaf}/1/tx"):
-        tx = _step(tx, token)
-    for name, value in tx.items():
-        if isinstance(value, dict) and {"value", "currency", "issuer"} <= value.keys():
-            digits = value["value"]
-            assert digits.isdigit() and digits.endswith("0"), "the base's issued value ends in a zero"
-            family.append({
-                "name": "issued-value-in-another-notation",
-                "states": "spec §2.3: an issued amount's value may use another notation for exactly the same number",
-                "base": base_name,
-                "json_patch": [{"op": "set", "path": f"{tx_leaf}/1/tx/{name}/value",
-                                "value": digits.rstrip("0") + "e" + str(len(digits) - len(digits.rstrip("0")))}],
-                "expect": {"verdict": "accept"},
-            })
-            break
     return family
 
 
@@ -1229,11 +1260,16 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     # With --only-issued, a second base contributes just the vectors that
     # need what the first lacks: an issued amount.
     suffix = ""
+    generator = "mutate --only-issued" if args.only_issued else "mutate"
     accept_family = patch_accept_family(base, args.base)
     negative_family_json = patch_negative_family(base, args.base)
     if args.only_issued:
         accept_family = [a for a in accept_family if a["name"].startswith("issued-")]
         negative_family_json = [n for n in negative_family_json if n["name"].startswith("issued-")]
+        if not accept_family and not negative_family_json:
+            LOG.error("--only-issued: the transaction of %s carries no issued amount, "
+                      "so there is nothing to write", args.base)
+            return 1
     for derived in accept_family + negative_family_json:
         # Compared as text: 10 and 10.0 are equal numbers and different tokens.
         if patched_text(base["form"]["json"], derived["json_patch"]) == json.dumps(base["form"]["json"]):
@@ -1247,7 +1283,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
                       "not writing a vector that asserts a false claim", acc["name"], reason)
             return 1
         out = VECTOR_DIR / f"accept-{acc['name']}{suffix}.json"
-        out.write_text(json.dumps(acc, indent=2) + "\n")
+        out.write_text(json.dumps(generated(acc, generator), indent=2) + "\n")
         LOG.info("wrote %s (accepted)", out.name)
         written += 1
     for neg in negative_family_json:
@@ -1266,7 +1302,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
             return 1
         neg["observed"] = {"python_reason": "accepted" if ok else reason}
         out = VECTOR_DIR / f"negative-{neg['name']}.json"
-        out.write_text(json.dumps(neg, indent=2) + "\n")
+        out.write_text(json.dumps(generated(neg, generator), indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
         written += 1
     for acc in ([] if args.only_issued else mutation_accept_family(raw)):
@@ -1278,7 +1314,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
             return 1
         acc["base"] = args.base
         out = VECTOR_DIR / f"accept-{acc['name']}.json"
-        out.write_text(json.dumps(acc, indent=2) + "\n")
+        out.write_text(json.dumps(generated(acc, generator), indent=2) + "\n")
         LOG.info("wrote %s (accepted)", out.name)
         written += 1
     for neg in ([] if args.only_issued else negative_family(raw)):
@@ -1293,11 +1329,12 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         neg["base"] = args.base
         neg["observed"] = {"python_reason": reason}
         out = VECTOR_DIR / f"negative-{neg['name']}.json"
-        out.write_text(json.dumps(neg, indent=2) + "\n")
+        out.write_text(json.dumps(generated(neg, generator), indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
         written += 1
-    # A vector this base no longer generates would keep asserting a rule
-    # nobody maintains.
+    # A vector this run's generator wrote for this base before, and no longer
+    # writes, would keep asserting a rule nobody maintains. Nothing else is
+    # removed: not another generator's vectors, not a hand-written one.
     expected = {
         f"accept-{v['name']}.json"
         for v in accept_family + ([] if args.only_issued else mutation_accept_family(raw))
@@ -1305,10 +1342,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         f"negative-{v['name']}.json"
         for v in negative_family_json + ([] if args.only_issued else negative_family(raw))
     }
-    for stale in sorted(VECTOR_DIR.glob("*.json")):
-        if stale.name not in expected and json.loads(stale.read_text()).get("base") == args.base:
-            stale.unlink()
-            LOG.info("removed %s (no longer generated)", stale.name)
+    remove_stale(generator, expected, base=args.base)
     LOG.info("%d derived vectors written", written)
     return 0
 
@@ -1385,12 +1419,9 @@ def cmd_trust(args: argparse.Namespace) -> int:
                 vec["observed"] = {"python_reason": reasons[0]}
             wanted[f"{'accept' if accept else 'negative'}-{name}.json"] = vec
 
-    for stale in sorted(VECTOR_DIR.glob("*-trust-*.json")):
-        if stale.name not in wanted:
-            stale.unlink()
-            LOG.info("removed %s (no longer generated)", stale.name)
+    remove_stale("trust", set(wanted))
     for filename, vec in wanted.items():
-        (VECTOR_DIR / filename).write_text(json.dumps(vec, indent=2) + "\n")
+        (VECTOR_DIR / filename).write_text(json.dumps(generated(vec, "trust"), indent=2) + "\n")
     LOG.info("%d trust-world vectors written; %d binary forms compared with xprv convert",
              len(wanted), compared)
     return 0

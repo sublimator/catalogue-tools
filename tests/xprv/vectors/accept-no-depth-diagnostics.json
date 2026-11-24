@@ -66,5 +66,6 @@
   ],
   "expect": {
     "verdict": "accept"
-  }
+  },
+  "generator": "mutate"
 }

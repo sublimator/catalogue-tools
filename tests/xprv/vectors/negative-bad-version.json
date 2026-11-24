@@ -15,5 +15,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: binary proof: version 5 != expected 10"
-  }
+  },
+  "generator": "mutate"
 }

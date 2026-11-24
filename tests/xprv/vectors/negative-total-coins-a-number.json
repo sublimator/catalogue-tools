@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "header total_coins must be the decimal text of a uint64 with no leading zeros"
-  }
+  },
+  "generator": "mutate"
 }

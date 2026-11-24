@@ -38,5 +38,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: invalid validator manifest: manifest missing Signature"
-  }
+  },
+  "generator": "trust"
 }

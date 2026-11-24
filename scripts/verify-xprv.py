@@ -512,12 +512,15 @@ def _require_stobject_members(obj: Any, path: str) -> None:
             _require_value_grammar(field_info.type, value, at)
 
 
-# rippled writes these UInt64 fields in base ten. xrpl-py 5.2.0 decodes them
-# as 16 hex digits, and reads LockedAmount's text as hex. The two helpers
-# below put its input and its output into the form the reference writes.
+# The reference JSON of a leaf is the JSON rippled writes for its bytes (§2.3).
+# xrpl-py 5.2.0 differs from it in three places, and the helpers below put its
+# input and its output into the reference form:
+# - it decodes the four base-ten UInt64 fields as 16 hex digits, and reads
+#   LockedAmount's text as hex;
+# - it writes an issued amount's value as plain digits (1000000000000) where
+#   rippled keeps the 16-digit mantissa (1000000000000000e-3);
+# - it writes "e0" after a Number whose exponent is zero.
 _BASE_TEN_UINT64 = frozenset({"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount"})
-# One spelling of the integer part: no leading zero (§2.3).
-_DECIMAL_TEXT = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]{1,9})?")
 
 
 def _for_codec(value: Any) -> Any:
@@ -525,7 +528,8 @@ def _for_codec(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             k: f"{int(v):016X}"
-            if k == "LockedAmount" and isinstance(v, str) and len(v) <= 20 and v.isascii() and v.isdigit() and int(v) < 1 << 64
+            if k == "LockedAmount" and isinstance(v, str) and len(v) <= 20
+            and v.isascii() and v.isdigit() and int(v) < 1 << 64
             else _for_codec(v)
             for k, v in value.items()
         }
@@ -534,26 +538,104 @@ def _for_codec(value: Any) -> Any:
     return value
 
 
+def _plain_decimal(negative: bool, digits: str, exponent: int) -> str:
+    """`digits` with the point `exponent` places in from the right, trimmed."""
+    point = len(digits) + exponent
+    if point <= 0:
+        whole, fraction = "0", "0" * -point + digits
+    else:
+        whole, fraction = digits[:point], digits[point:]
+    fraction = fraction.rstrip("0")
+    return ("-" if negative else "") + whole + ("." + fraction if fraction else "")
+
+
+def rippled_issued_value(text: str) -> str:
+    """The text rippled writes for an issued amount's value (STAmount::getText).
+
+    The value is held as a 16-digit mantissa and an exponent. rippled writes
+    plain decimal when the exponent is 0 or from -25 to -5, and otherwise the
+    mantissa, "e" and the exponent.
+    """
+    sign, digit_tuple, exponent = _Decimal(text).as_tuple()
+    mantissa = int("".join(map(str, digit_tuple)))
+    if mantissa == 0:
+        return "0"
+    while mantissa < 10**15:
+        mantissa *= 10
+        exponent -= 1
+    while mantissa >= 10**16:
+        mantissa, rest = divmod(mantissa, 10)
+        if rest:
+            raise ValueError(f"{text} has more than 16 significant digits")
+        exponent += 1
+    if exponent != 0 and (exponent < -25 or exponent > -5):
+        return f"{'-' if sign else ''}{mantissa}e{exponent}"
+    return _plain_decimal(bool(sign), str(mantissa), exponent)
+
+
+def rippled_number(text: str) -> str:
+    """The text rippled writes for a Number field (to_string(Number)).
+
+    As for an issued value, with a 19-digit mantissa: plain decimal when the
+    normalized exponent is 0 or from -28 to -8, and otherwise the mantissa
+    without its trailing zeros, "e" and the exponent, the "e" part left off
+    when that exponent is zero.
+    """
+    sign, digit_tuple, exponent = _Decimal(text).as_tuple()
+    mantissa = int("".join(map(str, digit_tuple)))
+    if mantissa == 0:
+        return "0"
+    while mantissa < 10**18 and exponent > -32768:
+        mantissa *= 10
+        exponent -= 1
+    if mantissa < 10**18 or exponent < -32768:
+        return "0"
+    while mantissa >= 10**19 and mantissa % 10 == 0:
+        mantissa //= 10
+        exponent += 1
+    if mantissa == 1 << 63:
+        # The wire mantissa INT64_MIN: rippled rounds it into the signed range.
+        mantissa -= 1
+    negative = "-" if sign else ""
+    if exponent != 0 and (exponent < -28 or exponent > -8):
+        while mantissa % 10 == 0 and exponent < 32768:
+            mantissa //= 10
+            exponent += 1
+        return f"{negative}{mantissa}" + (f"e{exponent}" if exponent else "")
+    return _plain_decimal(bool(sign), str(mantissa), exponent)
+
+
 def _as_reference(value: Any) -> Any:
-    """xrpl-py's decoding, with the base-ten UInt64 fields in base ten."""
-    if isinstance(value, dict):
-        return {
-            k: str(int(v, 16))
-            if k in _BASE_TEN_UINT64 and isinstance(v, str) and len(v) == 16
-            else _as_reference(v)
-            for k, v in value.items()
-        }
+    """xrpl-py's decoding of a leaf, put into the reference form."""
     if isinstance(value, list):
         return [_as_reference(v) for v in value]
-    return value
+    if not isinstance(value, dict):
+        return value
+    out: dict[str, Any] = {}
+    for name, member in value.items():
+        info = _serialized_field(name)
+        kind = info.type if info else ""
+        if name in _BASE_TEN_UINT64 and isinstance(member, str) and len(member) == 16:
+            out[name] = str(int(member, 16))
+        elif kind == "Amount" and isinstance(member, dict) and "currency" in member:
+            out[name] = {**member, "value": rippled_issued_value(member["value"])}
+        elif kind == "Amount" and isinstance(member, dict) and member.get("value") == "-0":
+            # A token amount of zero with the sign bit clear: rippled reads 0.
+            out[name] = {**member, "value": "0"}
+        elif kind == "Number" and isinstance(member, str):
+            out[name] = rippled_number(member)
+        else:
+            out[name] = _as_reference(member)
+    return out
 
 
-def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -> None:
-    """`given` is the JSON `decoded`, or a ValueError says where it is not.
+def _require_same_json(given: Any, decoded: Any, at: str) -> None:
+    """`given` is the JSON `decoded`, or a LeafFormError says where it is not.
 
     The same members, the same array order, the same JSON types, equal numbers
-    and equal strings. A decimal string (an issued amount's value, a Number)
-    may use another notation for exactly the same number (§2.3).
+    and the same strings (§2.3). There is no second spelling of anything: an
+    amount's value is the text the reference writes for it, and another
+    notation for the same number is another JSON.
     """
     differs = LeafFormError(
         "leaf is not the JSON its bytes decode to: "
@@ -568,15 +650,7 @@ def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -
                 raise LeafFormError(
                     f"leaf is not the JSON its bytes decode to: member {child} is not in it"
                 )
-            if text == "amount":
-                # Only an issued amount's value is a decimal. A token (MPT)
-                # amount's value is an integer with one spelling.
-                child_text = "decimal" if name == "value" and "currency" in given else "exact"
-            else:
-                field_info = _serialized_field(name)
-                kind = field_info.type if field_info else ""
-                child_text = {"Amount": "amount", "Number": "decimal"}.get(kind, "exact")
-            _require_same_json(value, decoded[name], child, child_text)
+            _require_same_json(value, decoded[name], child)
         for name in decoded:
             if name not in given:
                 raise LeafFormError(
@@ -591,20 +665,9 @@ def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -
             _require_same_json(value, other, f"{at}[{index}]")
         return
     if isinstance(given, str):
-        if not isinstance(decoded, str):
+        if not isinstance(decoded, str) or given != decoded:
             raise differs
-        if given == decoded:
-            return
-        if (
-            text == "decimal"
-            and _DECIMAL_TEXT.fullmatch(given)
-            and _DECIMAL_TEXT.fullmatch(decoded)
-            and _Decimal(given) == _Decimal(decoded)
-            # Zero has no sign: "-0" is not a second spelling of it.
-            and not (given.startswith("-") and _Decimal(given).is_zero())
-        ):
-            return
-        raise differs
+        return
     # An integer token. A float, a boolean and null equal nothing a codec
     # decodes to.
     if (
@@ -1792,6 +1855,10 @@ def verify(
             error = f"unsupported format_version {version!r} (expected {FORMAT_VERSION})"
         elif isinstance(proof_network, bool) or not isinstance(proof_network, int):
             error = f"proof network_id must be an integer, got {proof_network!r}"
+        elif not 0 <= proof_network < 1 << 32:
+            # A uint32, as the binary header holds it (§3.1). Out of range is
+            # a fault in the proof's form, found before any trust is looked up.
+            error = f"proof network_id must be a uint32, got {proof_network}"
 
     if network_id is None:
         network_id = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper(), 0) if trusted_key else 0

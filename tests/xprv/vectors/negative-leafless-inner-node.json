@@ -18,5 +18,6 @@
   },
   "observed": {
     "python_reason": "trie inner node contains no leaves"
-  }
+  },
+  "generator": "mutate"
 }

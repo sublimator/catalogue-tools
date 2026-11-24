@@ -488,103 +488,16 @@ require_stobject_members(
 
 namespace {
 
-// Decimal text as an exact value: its sign, its significant digits and the
-// power of ten of the last digit. No floating point, so two notations of one
-// number compare equal and nothing else does.
-struct DecimalText
-{
-    bool negative = false;
-    std::string digits;
-    long long exponent = 0;
-    bool
-    operator==(DecimalText const&) const = default;
-};
-
-std::optional<DecimalText>
-parse_decimal_text(std::string_view s)
-{
-    auto const digit = [&](size_t i) {
-        return i < s.size() && s[i] >= '0' && s[i] <= '9';
-    };
-    DecimalText d;
-    size_t i = 0;
-    if (i < s.size() && s[i] == '-')
-    {
-        d.negative = true;
-        ++i;
-    }
-    if (!digit(i))
-        return std::nullopt;
-    auto const integer_at = i;
-    while (digit(i))
-        d.digits += s[i++];
-    // One spelling of the integer part: no leading zero (§2.3).
-    if (i - integer_at > 1 && s[integer_at] == '0')
-        return std::nullopt;
-    if (i < s.size() && s[i] == '.')
-    {
-        ++i;
-        if (!digit(i))
-            return std::nullopt;
-        while (digit(i))
-        {
-            d.digits += s[i++];
-            --d.exponent;
-        }
-    }
-    if (i < s.size() && (s[i] == 'e' || s[i] == 'E'))
-    {
-        ++i;
-        bool negative = false;
-        if (i < s.size() && (s[i] == '+' || s[i] == '-'))
-            negative = s[i++] == '-';
-        if (!digit(i))
-            return std::nullopt;
-        long long e = 0;
-        size_t count = 0;
-        while (digit(i))
-        {
-            if (++count > 9)
-                return std::nullopt;
-            e = e * 10 + (s[i++] - '0');
-        }
-        d.exponent += negative ? -e : e;
-    }
-    if (i != s.size())
-        return std::nullopt;
-    auto const first = d.digits.find_first_not_of('0');
-    if (first == std::string::npos)
-    {
-        // Zero has no sign: "-0" is not a second spelling of it.
-        if (d.negative)
-            return std::nullopt;
-        return DecimalText{false, "0", 0};
-    }
-    d.digits.erase(0, first);
-    while (d.digits.size() > 1 && d.digits.back() == '0')
-    {
-        d.digits.pop_back();
-        ++d.exponent;
-    }
-    return d;
-}
-
-// What kind of text a string is, for the one place two spellings are equal.
-enum class Text { exact, amount, decimal };
-
 // Throw unless `given` is the JSON `decoded`: the same members, the same
-// array order, the same JSON types, equal numbers and equal strings. A decimal
-// string (an issued amount's value, a Number) may use another notation for
-// exactly the same number (§2.3).
+// array order, the same JSON types, equal numbers and the same strings (§2.3).
+// There is no second spelling of anything. An amount's value is the text the
+// codec writes for it; another notation for the same number is another JSON.
 void
 require_same_json(
     boost::json::value const& given,
     boost::json::value const& decoded,
-    std::string const& at,
-    catl::xdata::Protocol const& protocol,
-    Text text)
+    std::string const& at)
 {
-    namespace types = catl::xdata::FieldTypes;
     auto const differs = [&]() {
         throw std::runtime_error(
             "map proof: leaf is not the JSON its bytes decode to: " +
@@ -606,21 +519,7 @@ require_same_json(
                     "map proof: leaf is not the JSON its bytes decode to: "
                     "member " +
                     child + " is not in it");
-            auto child_text = Text::exact;
-            // Only an issued amount's value is a decimal. A token (MPT)
-            // amount's value is an integer with one spelling.
-            if (text == Text::amount)
-                child_text = name == "value" && g.contains("currency")
-                    ? Text::decimal
-                    : Text::exact;
-            else if (auto const field = protocol.find_field(name))
-            {
-                if (field->meta.type == types::Amount)
-                    child_text = Text::amount;
-                else if (field->meta.type == types::Number)
-                    child_text = Text::decimal;
-            }
-            require_same_json(value, *other, child, protocol, child_text);
+            require_same_json(value, *other, child);
         }
         for (auto const& [key, value] : d)
             if (!g.contains(key))
@@ -640,9 +539,7 @@ require_same_json(
             require_same_json(
                 given.as_array()[i],
                 decoded.as_array()[i],
-                at + "[" + std::to_string(i) + "]",
-                protocol,
-                Text::exact);
+                at + "[" + std::to_string(i) + "]");
         return;
     }
     if (given.is_string())
@@ -651,15 +548,6 @@ require_same_json(
             differs();
         if (given.as_string() == decoded.as_string())
             return;
-        // A drops string is a decimal too, but it has one spelling; only an
-        // issued value and a Number are written two ways by real codecs.
-        if (text == Text::decimal)
-        {
-            auto const a = parse_decimal_text(given.as_string());
-            auto const b = parse_decimal_text(decoded.as_string());
-            if (a && b && *a == *b)
-                return;
-        }
         differs();
     }
     // An integer token. A float, a boolean and null equal nothing a codec
@@ -751,7 +639,7 @@ try
             "not serialize (" +
             std::string(e.what()) + ")");
     }
-    require_same_json(leaf, decoded, "", protocol, Text::exact);
+    require_same_json(leaf, decoded, "");
 }
 catch (LeafFormError const&)
 {

@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "step 7: tx tree error: leaf member tx.TransactionType is not a serialized UInt16 value"
-  }
+  },
+  "generator": "mutate"
 }

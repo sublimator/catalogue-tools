@@ -38,5 +38,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: publisher manifest master key does not match trusted key"
-  }
+  },
+  "generator": "trust"
 }

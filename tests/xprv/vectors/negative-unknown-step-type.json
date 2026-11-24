@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "unknown step type: 'banana'"
-  }
+  },
+  "generator": "mutate"
 }

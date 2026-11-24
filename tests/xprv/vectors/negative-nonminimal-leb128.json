@@ -19,5 +19,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: LEB128: non-minimal encoding"
-  }
+  },
+  "generator": "mutate"
 }

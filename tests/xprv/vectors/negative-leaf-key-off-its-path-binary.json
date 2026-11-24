@@ -19,5 +19,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: binary trie: leaf key does not match its trie path"
-  }
+  },
+  "generator": "mutate"
 }

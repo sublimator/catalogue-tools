@@ -33,5 +33,6 @@
   },
   "expect": {
     "verdict": "accept"
-  }
+  },
+  "generator": "trust"
 }

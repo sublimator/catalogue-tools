@@ -1,0 +1,21 @@
+{
+  "name": "network-id-above-any-integer-type",
+  "violates": "spec \u00a72: network_id is a uint32",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/network_id",
+      "value": 1180591620717411303424
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "network_id"
+  },
+  "observed": {
+    "python_reason": "proof network_id must be a uint32, got 1180591620717411303424"
+  },
+  "generator": "mutate"
+}

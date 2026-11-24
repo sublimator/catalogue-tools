@@ -1,0 +1,21 @@
+{
+  "name": "network-id-below-zero",
+  "violates": "spec \u00a72: network_id is a uint32",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/network_id",
+      "value": -1
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "network_id"
+  },
+  "observed": {
+    "python_reason": "proof network_id must be a uint32, got -1"
+  },
+  "generator": "mutate"
+}

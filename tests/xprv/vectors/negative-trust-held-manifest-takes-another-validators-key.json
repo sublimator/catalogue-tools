@@ -41,5 +41,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: resolved signing key collides with another validator key"
-  }
+  },
+  "generator": "trust"
 }

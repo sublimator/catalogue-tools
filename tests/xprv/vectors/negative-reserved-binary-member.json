@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "map_proof carries a member reserved for binary decoding"
-  }
+  },
+  "generator": "mutate"
 }

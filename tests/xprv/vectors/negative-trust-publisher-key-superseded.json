@@ -41,5 +41,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: validator list is signed by a superseded publisher key"
-  }
+  },
+  "generator": "trust"
 }

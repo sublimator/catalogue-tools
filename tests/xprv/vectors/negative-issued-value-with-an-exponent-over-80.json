@@ -1,0 +1,18 @@
+{
+  "name": "issued-value-with-an-exponent-over-80",
+  "violates": "spec \u00a72.3: a JSON leaf is the JSON its own bytes decode to; an issued amount's value has one text",
+  "notes": "Found by Neon's differential run at code 19a04df5 (reviews/xprv-v10-code-claude/neon-fuzz-19a04df5.md). 1e81 is a value the format can hold (1000000000000000e66). x-data read it and xrpl-py refused it for its written exponent, so the C++ verifier went on to the root check and the Python one stopped at the leaf.",
+  "layer": "parse",
+  "base": "positive-tx-in-anchor-parent",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/3/trie/0/0/5/1/tx/RawTransactions/0/RawTransaction/Amount/value",
+      "value": "1e81"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "not the JSON its bytes decode to"
+  }
+}

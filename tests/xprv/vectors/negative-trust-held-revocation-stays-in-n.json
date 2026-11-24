@@ -40,5 +40,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: quorum not met: 4/6 (need 5)"
-  }
+  },
+  "generator": "trust"
 }

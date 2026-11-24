@@ -27,5 +27,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: a bundled list needs a non-empty manifest, list and signature"
-  }
+  },
+  "generator": "mutate"
 }

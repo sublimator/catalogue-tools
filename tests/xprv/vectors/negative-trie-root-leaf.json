@@ -19,5 +19,6 @@
   },
   "observed": {
     "python_reason": "trie root must be an inner node"
-  }
+  },
+  "generator": "mutate"
 }

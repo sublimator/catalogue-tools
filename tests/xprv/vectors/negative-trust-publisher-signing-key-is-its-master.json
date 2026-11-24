@@ -38,5 +38,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: publisher manifest: manifest signing key equals its master key"
-  }
+  },
+  "generator": "trust"
 }

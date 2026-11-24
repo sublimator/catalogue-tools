@@ -22,14 +22,18 @@ a file holding a JSON array of base64 raw manifests the verifier is to hold
 from outside the proof (spec §1.3); it is an empty array for most vectors. A
 verifier that ignores it fails the vectors that need it.
 
-For the built-in verifiers a refusal must also print the vector's
-`reason_contains`, so refusing for the wrong reason fails too. Another
-verifier's wording is its own; --check-reasons applies the check to it.
+The built-in verifiers are run with --json and print a report (spec §7) as
+their standard output. For them the report is what is judged:
+- its `verified` must agree with the exit status, or the run is abnormal;
+- a refusal's `reason` must contain the vector's `reason_contains`, so refusing
+  for the wrong reason fails too. Only the report's reason counts: the phrase
+  turning up in a log line does not;
+- a refusal's `layer` must be the vector's `layer`: parse, trust or graph.
 
-The built-in verifiers are also run with --json, and a refusal's report (spec
-§7) must name the vector's `layer`: parse, trust or graph. --check-layers asks
-the same of another verifier, which must then print that report, a JSON object
-with a `layer` member, as its standard output.
+Another verifier's wording is its own. --check-reasons looks for
+`reason_contains` anywhere in what it prints, standard error included.
+--reports says it prints the report too, and it is then judged as the
+built-in ones are.
 
 A vector may carry `known_failing`: an object naming verifiers that do not yet
 meet its expectation, each with what it `does` instead (accept, reject,
@@ -190,19 +194,37 @@ def run_verifier(template: list[str], case: Case, proof: Path, manifests: Path, 
     return Outcome(ABNORMAL, f"exit status {r.returncode}", text)
 
 
-def reported_layer(stdout: str) -> str | None:
-    """The `layer` of the report a verifier printed, or None if it printed none."""
+def read_report(got: Outcome) -> tuple[dict[str, Any] | None, str]:
+    """(report, fault). The report a verifier printed, checked against its exit.
+
+    The report is the whole of standard output: one JSON object whose
+    `verified` says what the exit status says. Anything else is a fault, and
+    the verdict cannot be trusted either way.
+    """
     try:
-        report = json.loads(stdout)
+        report = json.loads(got.stdout)
     except ValueError:
-        return None
-    layer = report.get("layer") if isinstance(report, dict) else None
-    return layer if isinstance(layer, str) else None
+        return None, "printed no JSON report on standard output"
+    if not isinstance(report, dict) or not isinstance(report.get("verified"), bool):
+        return None, "printed a report with no boolean `verified`"
+    if report["verified"] != (got.verdict == ACCEPT):
+        return None, (f"exit status says {got.verdict} and the report says "
+                      f"verified={str(report['verified']).lower()}")
+    return report, ""
 
 
 def judge(case: Case, verifier: str, got: Outcome, check_reasons: bool,
-          check_layer: bool = False) -> tuple[str, str]:
-    """(status, note). Status is pass, known, fixed or FAIL."""
+          reports: bool = False) -> tuple[str, str]:
+    """(status, note). Status is pass, known, fixed or FAIL.
+
+    `reports` says the verifier prints a spec §7 report; its reason and layer
+    are then read from that report and from nowhere else.
+    """
+    report: dict[str, Any] | None = None
+    if reports and got.verdict in (ACCEPT, REJECT):
+        report, fault = read_report(got)
+        if report is None:
+            got = Outcome(ABNORMAL, fault, got.output, got.stdout)
     met = got.verdict == case.expect
     does = got.verdict
     note = got.verdict + (f" ({got.detail})" if got.detail else "")
@@ -210,17 +232,21 @@ def judge(case: Case, verifier: str, got: Outcome, check_reasons: bool,
     # picks the form from the magic, so its stated binary reason cannot appear.
     recognisable = case.form == "json" or case.data[:4] == b"XPRV"
     if met and check_reasons and recognisable and case.expect == REJECT and case.reason_contains:
-        if case.reason_contains.lower() not in got.output.lower():
+        # A reporting verifier is held to the reason it reports. For any
+        # other, the phrase may be anywhere in what it printed.
+        said = str(report.get("reason", "")) if report is not None else got.output
+        if case.reason_contains.lower() not in said.lower():
             met = False
             does = WRONG_REASON
             note = f"refused, but not for {case.reason_contains!r}"
-    if met and check_layer and case.expect == REJECT and case.layer:
-        layer = reported_layer(got.stdout)
+            if report is not None:
+                note += f"; its report says {said[:100]!r}"
+    if met and report is not None and case.expect == REJECT and case.layer:
+        layer = report.get("layer")
         if layer != case.layer:
             met = False
             does = WRONG_LAYER
-            note = (f"refused at layer {layer}, and the vector says {case.layer}" if layer
-                    else "refused, but printed no report naming a layer")
+            note = f"refused at layer {layer!r}, and the vector says {case.layer!r}"
     if verifier in case.known_failing:
         tag = case.known_failing[verifier]
         if met:
@@ -262,10 +288,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     reasoned = set(verifiers) if args.check_reasons else set()
     if args.check_reasons is None:
         reasoned = set(verifiers) & set(builtin)
-    # Likewise the layer: the built-in ones print a report (spec §7).
-    layered = set(verifiers) if args.check_layers else set()
-    if args.check_layers is None:
-        layered = set(verifiers) & set(builtin)
+    # The built-in ones print a report (spec §7), and are judged by it.
+    reporting = set(verifiers) & set(builtin)
+    for name in args.reports or []:
+        if name not in verifiers:
+            raise SystemExit(f"--reports {name}: no such verifier")
+        reporting.add(name)
     if "cpp" in verifiers and not xprv_bin.exists():
         raise SystemExit(f"{xprv_bin} not found; build xprv or pass --xprv-bin / XPRV_BIN")
 
@@ -316,7 +344,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         }
         cells = []
         for name in verifiers:
-            status, note = judge(c, name, by_case[i][name], name in reasoned, name in layered)
+            status, note = judge(c, name, by_case[i][name], name in reasoned, name in reporting)
             counts[status] += 1
             row["verifiers"][name] = {
                 "verdict": by_case[i][name].verdict, "status": status, "note": note,
@@ -341,6 +369,52 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 1 if counts["FAIL"] or counts["fixed"] else 0
 
 
+def cmd_selftest(args: argparse.Namespace) -> int:
+    """The judge, asked about outcomes whose right answer is known.
+
+    Each control is a way a runner could pass a verifier that should fail.
+    No proof and no verifier is involved.
+    """
+    case = Case(vector="control", form="json", data=b"{}", expect=REJECT, network_id=0,
+                publisher_key="ED", reason_contains="quorum not met", layer="trust")
+
+    def refusal(reason: str, layer: str = "trust", stderr: str = "", verified: bool = False,
+                verdict: str = REJECT) -> Outcome:
+        stdout = json.dumps({"verified": verified, "layer": layer, "reason": reason})
+        return Outcome(verdict, output=stdout + stderr, stdout=stdout)
+
+    controls = [
+        ("the stated reason at the stated layer", refusal("anchor: quorum not met"), True, "pass"),
+        ("the phrase only in a log line, another reason in the report",
+         refusal("header is not supported", stderr="\nlog: quorum not met"), True, "FAIL"),
+        ("the same output from a verifier with no report contract",
+         refusal("header is not supported", stderr="\nlog: quorum not met"), False, "pass"),
+        ("the stated reason at another layer", refusal("anchor: quorum not met", layer="graph"), True, "FAIL"),
+        ("a report that says verified, with a refusing exit status",
+         refusal("anchor: quorum not met", verified=True), True, "FAIL"),
+        ("a report that says refused, with an accepting exit status",
+         refusal("anchor: quorum not met", verdict=ACCEPT), True, "FAIL"),
+        ("no report at all", Outcome(REJECT, output="quorum not met", stdout="quorum not met"), True, "FAIL"),
+    ]
+    wrong = 0
+    for what, got, reports, want in controls:
+        status, note = judge(case, "control", got, check_reasons=True, reports=reports)
+        ok = status == want
+        wrong += not ok
+        print(f"{'ok  ' if ok else 'WRONG'}  {what}: {status} ({note})")
+    accept = Case(vector="control", form="json", data=b"{}", expect=ACCEPT, network_id=0, publisher_key="ED")
+    for what, got, want in [
+        ("an accepting report with an accepting exit", Outcome(ACCEPT, stdout='{"verified": true}'), "pass"),
+        ("an accepting exit with no report", Outcome(ACCEPT, stdout="verified"), "FAIL"),
+    ]:
+        status, note = judge(accept, "control", got, check_reasons=True, reports=True)
+        ok = status == want
+        wrong += not ok
+        print(f"{'ok  ' if ok else 'WRONG'}  {what}: {status} ({note})")
+    print(f"{wrong} control(s) judged wrongly")
+    return 1 if wrong else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -356,14 +430,16 @@ def main() -> int:
     r.add_argument("--check-reasons", action=argparse.BooleanOptionalAction, default=None,
                    help="require expect.reason_contains in a refusing verifier's output "
                         "(default: for the built-in verifiers only)")
-    r.add_argument("--check-layers", action=argparse.BooleanOptionalAction, default=None,
-                   help="require a refusal's printed report to name the vector's layer "
-                        "(default: for the built-in verifiers only)")
+    r.add_argument("--reports", action="append", metavar="NAME",
+                   help="a --verifier that prints the spec §7 report as its standard output; "
+                        "it is then judged by that report, as the built-in ones are")
     r.add_argument("--timeout", type=float, default=60.0, help="seconds per proof")
     r.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     r.add_argument("--json", help="write a machine-readable report here")
     r.add_argument("-v", "--verbose", action="store_true", help="print passing proofs too")
     r.set_defaults(fn=cmd_run)
+    t = sub.add_parser("selftest", help="check the judge itself against made-up outcomes")
+    t.set_defaults(fn=cmd_selftest)
     args = ap.parse_args()
     return args.fn(args)
 

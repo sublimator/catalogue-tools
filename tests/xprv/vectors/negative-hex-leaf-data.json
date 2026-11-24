@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "trie leaf data must be a decoded object, not hex (\u00a72.3)"
-  }
+  },
+  "generator": "mutate"
 }

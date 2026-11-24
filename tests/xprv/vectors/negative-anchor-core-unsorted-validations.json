@@ -19,5 +19,6 @@
   "base": "positive-tx-skiplist",
   "observed": {
     "python_reason": "ValueError: anchor core validations must be distinct and sorted by SigningPubKey"
-  }
+  },
+  "generator": "mutate"
 }

@@ -1,0 +1,21 @@
+{
+  "name": "network-id-largest-uint32",
+  "violates": "spec \u00a78: a proof whose network_id is not the configured network MUST be rejected",
+  "layer": "trust",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/network_id",
+      "value": 4294967295
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "does not match configured network"
+  },
+  "observed": {
+    "python_reason": "proof network_id 4294967295 does not match configured network 0"
+  },
+  "generator": "mutate"
+}

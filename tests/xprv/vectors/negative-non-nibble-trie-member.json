@@ -16,5 +16,6 @@
   },
   "observed": {
     "python_reason": "trie inner node has non-branch member '10' \u2014 branch keys are uppercase 0-9A-F (spec \u00a72.3)"
-  }
+  },
+  "generator": "mutate"
 }

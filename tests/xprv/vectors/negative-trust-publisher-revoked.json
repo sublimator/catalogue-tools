@@ -41,5 +41,6 @@
   },
   "observed": {
     "python_reason": "step 1: anchor: the validator list publisher is revoked"
-  }
+  },
+  "generator": "trust"
 }
