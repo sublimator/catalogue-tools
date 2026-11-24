@@ -41,20 +41,13 @@ from typing import Any, Literal, TypedDict
 import zlib
 
 import contextlib
+import contextvars
+import importlib
 
 import nacl.signing
-import xrpl.core.binarycodec.definitions.definitions as _xrpl_definitions
-import xrpl.core.binarycodec.types.currency as _xrpl_currency
-import xrpl.core.binarycodec.types.issue as _xrpl_issue
+import xrpl.core.binarycodec  # noqa: F401  (copied privately below; never changed)
 import xrpl.core.keypairs
-from xrpl.core.binarycodec import decode, encode, encode_for_signing
-from xrpl.core.binarycodec.binary_wrappers.binary_serializer import BinarySerializer as _BinarySerializer
-from xrpl.core.binarycodec.definitions.definitions import get_field_instance
-from xrpl.core.binarycodec.definitions.field_header import FieldHeader as _FieldHeader
-from xrpl.core.binarycodec.definitions.field_info import FieldInfo as _FieldInfo
 from xrpl.core.binarycodec.exceptions import XRPLBinaryCodecException
-from xrpl.core.binarycodec.types.account_id import AccountID as _AccountID
-from xrpl.core.binarycodec.types.uint32 import UInt32 as _UInt32
 
 from decimal import Decimal as _Decimal
 
@@ -396,33 +389,38 @@ class UnknownLeafField(LeafFormError):
     """A decoded leaf member that the codec would not serialize."""
 
 
-# ─── xrpl-py as each network's leaf codec ────────────────────────────
+# ─── xrpl-py as each network's codec ─────────────────────────────────
 #
 # A decoded leaf must equal the JSON its network's own codec writes (§2.3):
 # rippled's on XRPL, xahaud's on Xahau. This verifier's codec is xrpl-py,
-# which is built for XRPL alone. Three things about it are fixed that the
-# rule needs to vary, and they are replaced here, once, when this file loads:
+# which is built for XRPL alone and keeps its definitions in module globals.
 #
-# 1. The definitions. xrpl-py reads XRPL's from its own package. Xahau's are
-#    carried below and put in place of them while a Xahau leaf is handled
-#    (leaf_codec). They are the parts a codec uses of the file the C++
-#    verifier embeds. Definitions decide which bytes a JSON leaf stands for,
-#    so they are part of what is trusted: embedded and fingerprinted, never
-#    fetched when a proof is checked.
-# 2. The native code. xrpl-py writes "XRP" for the zero currency whatever the
-#    network. Only the network's own code is native: XAH on Xahau, where XRP
-#    is an ordinary issued code, and the reverse on XRPL. The native code's
-#    letters in an issued code's place are a reserved code, which rippled
-#    writes as 40 hex digits; xrpl-py refused to read it.
-# 3. The zero account. rippled writes an account field that was never set as
-#    an empty field and one explicitly set to zero as twenty zero bytes, and
-#    prints the same address for both, so the bytes cannot be told from the
-#    JSON. The C++ verifier's codec always writes the empty field. xrpl-py
-#    wrote twenty bytes, except in UNLModify. This verifier follows the C++
-#    one, so the two re-serialize a leaf to the same bytes: a pseudo-
-#    transaction such as Xahau's Entropy verifies, and a leaf holding an
-#    explicit zero account (an XRPL SetFee, a payment to the zero account)
-#    has no JSON form in either and verifies in binary.
+# So the verifier does not use the xrpl-py codec that everything else in the
+# process shares. It imports the codec package a second and a third time into
+# private module objects, one copy per network, sets each copy up once, and
+# never changes it again. The public xrpl-py is left exactly as installed: a
+# program that imports this file and calls xrpl-py itself sees no difference.
+# Which copy handles a value is held in a context variable, so two threads,
+# one on an XRPL proof and one on a Xahau proof, cannot see each other's.
+#
+# What a copy is given that xrpl-py does not have:
+#
+# 1. The definitions (Xahau's copy). They are carried below: the parts a
+#    codec uses of the file the C++ verifier embeds. Definitions decide which
+#    bytes a JSON leaf stands for, and the two networks give some names
+#    different codes, so they are part of what is trusted: embedded and
+#    fingerprinted, never fetched when a proof is checked.
+# 2. The native code. Only the network's own code names the zero currency:
+#    XAH on Xahau, where XRP is an ordinary issued code, and the reverse on
+#    XRPL. xrpl-py writes "XRP" whatever the network.
+# 3. rippled's rules for a currency and an issue where xrpl-py's differ: the
+#    native code's letters in an issued code's place (hex in an amount, and
+#    refused in an issue), the noCurrency value ("1"), and an issue's issuer.
+# 4. An account field that was never set. rippled writes it as an empty
+#    field and prints "", and writes the zero account, when one was set, as
+#    twenty zero bytes and prints its address. xrpl-py printed the address
+#    for both and wrote twenty bytes for both, except that it wrote
+#    UNLModify's Account as an empty field whatever its value.
 
 # >>> xahau definitions (written by scripts/xprv-embed-definitions.py; do not edit)
 _XAHAU_DEFINITIONS_ZB64 = (
@@ -545,8 +543,11 @@ _XAHAU_DEFINITIONS_ZB64 = (
 )
 # <<< xahau definitions
 
-_native_code = "XRP"  # the native code of the network whose leaf is in hand
+_CODEC_PACKAGE = "xrpl.core.binarycodec"
+# One exceptions module for every copy, so one class is raised and caught.
+_CODEC_SHARED = frozenset({_CODEC_PACKAGE + ".exceptions"})
 _ZERO_20 = bytes(20)
+_NO_CURRENCY = bytes(19) + b"\x01"
 
 
 def xahau_definitions_text() -> str:
@@ -554,166 +555,321 @@ def xahau_definitions_text() -> str:
     return zlib.decompress(base64.b64decode(_XAHAU_DEFINITIONS_ZB64)).decode()
 
 
-def _definition_tables(table: dict[str, Any]) -> dict[str, Any]:
-    """xrpl-py's module-level tables, built from a definitions table.
+def _private_copy_of_xrpl_codec() -> dict[str, Any]:
+    """Import xrpl-py's codec package again, into module objects of our own.
 
-    The same tables its own loader builds from its packaged file.
+    The public modules are taken out of sys.modules for the length of the
+    import and put back, with the parent package's attribute, before this
+    returns. The copy's modules refer to each other, to the shared exceptions
+    module and to the packages the codec builds on.
+
+    xrpl-py 5.2.0 also imports from its own package inside two functions,
+    which would find the public modules when they run. NetworkCodec deals
+    with both: the lookup of a field's type class is replaced with the
+    copy's own, and the serializer class that STObject fetches is the public
+    one, which holds no definitions and is used as it is. A unit test fails
+    if the installed xrpl-py has any other such import.
     """
+
+    def codec_module(name: str) -> bool:
+        return (name == _CODEC_PACKAGE or name.startswith(_CODEC_PACKAGE + ".")) and name not in _CODEC_SHARED
+
+    public = {name: module for name, module in sys.modules.items() if codec_module(name)}
+    parent = sys.modules["xrpl.core"]
+    for name in public:
+        del sys.modules[name]
+    try:
+        importlib.import_module(_CODEC_PACKAGE)
+        for name in sorted(public):
+            importlib.import_module(name)
+        private = {name: module for name, module in sys.modules.items() if codec_module(name)}
+    finally:
+        for name in [name for name in sys.modules if codec_module(name)]:
+            del sys.modules[name]
+        sys.modules.update(public)
+        parent.binarycodec = public[_CODEC_PACKAGE]
+    return private
+
+
+def _install_definitions(definitions: Any, field_info: Any, field_header: Any, table: dict[str, Any]) -> None:
+    """Give a private copy the tables its own loader builds from its packaged file."""
     fields = dict(table["FIELDS"])
     types = table["TYPES"]
     info, names = {}, {}
     for name, entry in fields.items():
-        info[name] = _FieldInfo(
+        info[name] = field_info(
             entry["nth"], entry["isVLEncoded"], entry["isSerialized"], entry["isSigningField"], entry["type"]
         )
-        names[_FieldHeader(types[entry["type"]], entry["nth"])] = name
+        names[field_header(types[entry["type"]], entry["nth"])] = name
     delegations = {name: code + 1 for name, code in table["TRANSACTION_TYPES"].items()}
-    permissions = {**delegations, **_xrpl_definitions._GRANULAR_PERMISSIONS}
-    return {
-        "_DEFINITIONS": {
-            "TYPES": types,
-            "FIELDS": fields,
-            "LEDGER_ENTRY_TYPES": table["LEDGER_ENTRY_TYPES"],
-            "TRANSACTION_RESULTS": table["TRANSACTION_RESULTS"],
-            "TRANSACTION_TYPES": table["TRANSACTION_TYPES"],
-        },
-        "_TYPE_ORDINAL_MAP": types,
-        "_TRANSACTION_TYPE_CODE_TO_STR_MAP": {c: n for n, c in table["TRANSACTION_TYPES"].items()},
-        "_TRANSACTION_RESULTS_CODE_TO_STR_MAP": {c: n for n, c in table["TRANSACTION_RESULTS"].items()},
-        "_LEDGER_ENTRY_TYPES_CODE_TO_STR_MAP": {c: n for n, c in table["LEDGER_ENTRY_TYPES"].items()},
-        "_FIELD_INFO_MAP": info,
-        "_FIELD_HEADER_NAME_MAP": names,
-        "_tx_delegations": delegations,
-        "_DELEGABLE_PERMISSIONS_STR_TO_CODE_MAP": permissions,
-        "_DELEGABLE_PERMISSIONS_CODE_TO_STR_MAP": {c: n for n, c in permissions.items()},
+    permissions = {**delegations, **definitions._GRANULAR_PERMISSIONS}
+    definitions._DEFINITIONS = {
+        "TYPES": types,
+        "FIELDS": fields,
+        "LEDGER_ENTRY_TYPES": table["LEDGER_ENTRY_TYPES"],
+        "TRANSACTION_RESULTS": table["TRANSACTION_RESULTS"],
+        "TRANSACTION_TYPES": table["TRANSACTION_TYPES"],
     }
+    definitions._TYPE_ORDINAL_MAP = types
+    definitions._TRANSACTION_TYPE_CODE_TO_STR_MAP = {c: n for n, c in table["TRANSACTION_TYPES"].items()}
+    definitions._TRANSACTION_RESULTS_CODE_TO_STR_MAP = {c: n for n, c in table["TRANSACTION_RESULTS"].items()}
+    definitions._LEDGER_ENTRY_TYPES_CODE_TO_STR_MAP = {c: n for n, c in table["LEDGER_ENTRY_TYPES"].items()}
+    definitions._FIELD_INFO_MAP = info
+    definitions._FIELD_HEADER_NAME_MAP = names
+    definitions._tx_delegations = delegations
+    definitions._DELEGABLE_PERMISSIONS_STR_TO_CODE_MAP = permissions
+    definitions._DELEGABLE_PERMISSIONS_CODE_TO_STR_MAP = {c: n for n, c in permissions.items()}
 
 
-_xahau_codec: tuple[dict[str, Any], str] | None = None
+def _install_account_rule(account_id: Any, serialized_type: Any, st_object: Any) -> None:
+    """An account field that was never set is an empty field, and "" in JSON.
+
+    Inside the copy it is an AccountID whose buffer is empty, so it serializes
+    to a length of 0 and nothing after it with no special case.
+    """
+    init, to_json = account_id.__init__, account_id.to_json
+    from_value = account_id.from_value.__func__
+
+    def account_init(self: Any, buffer: bytes | None = None) -> None:
+        if buffer is not None and len(buffer) == 0:
+            serialized_type.__init__(self, b"")
+        else:
+            init(self, buffer)
+
+    def account_to_json(self: Any) -> str:
+        return "" if len(self.buffer) == 0 else to_json(self)
+
+    def account_from_value(cls: Any, value: Any) -> Any:
+        return cls(b"") if value == "" else from_value(cls, value)
+
+    account_id.__init__ = account_init
+    account_id.to_json = account_to_json
+    account_id.from_value = classmethod(account_from_value)
+    # xrpl-py writes UNLModify's Account as an empty field whatever it holds,
+    # by comparing the transaction type with this code. Here the value says
+    # which form it is, so the comparison is made never to match.
+    st_object._UNL_MODIFY_TX = ""
+
+
+def _install_currency_rules(native: str, currency: Any, issue: Any, account_id: Any, uint32: Any) -> Any:
+    """rippled's rules for a currency and an issue, for a network whose
+    native code is `native` (to_string(Currency), to_currency, issueFromJson,
+    currencyFromJson). Returns the class of a Currency-typed field."""
+    is_iso = currency._is_iso_code
+    no_account = account_id.from_value("0000000000000000000000000000000000000001")
+
+    def iso_code_of(code: bytes) -> str | None:
+        try:
+            candidate = code.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        # The native code's letters in an issued code's place are a reserved
+        # code: rippled writes it as hex.
+        if candidate == native or not is_iso(candidate):
+            return None
+        return candidate
+
+    def iso_code_bytes(iso: str) -> bytes:
+        if not is_iso(iso):
+            raise XRPLBinaryCodecException(f"Invalid ISO code: {iso}")
+        if iso == native:
+            return _ZERO_20
+        return bytes(12) + iso.encode("ascii") + bytes(5)
+
+    def currency_init(self: Any, buffer: bytes | None = None) -> None:
+        currency.Hash160.__init__(self, buffer if buffer is not None else _ZERO_20)
+        raw = self.buffer
+        if raw == _ZERO_20:
+            self._iso = native
+        elif raw == _NO_CURRENCY:
+            self._iso = "1"
+        elif raw[:12] == bytes(12) and raw[15:] == bytes(5):
+            # A standard code: every byte outside the three letters is zero.
+            self._iso = iso_code_of(raw[12:15])
+        else:
+            self._iso = None
+
+    currency._iso_code_from_hex = iso_code_of
+    currency._iso_to_bytes = iso_code_bytes
+    currency.Currency.__init__ = currency_init
+
+    reserved = bytes(12) + native.encode("ascii") + bytes(5)
+    mpt_from_value = issue.Issue.from_value.__func__
+    mpt_to_json = issue.Issue.to_json
+
+    def issue_from_value(cls: Any, value: Any) -> Any:
+        if isinstance(value, dict) and set(value) == {"currency"}:
+            if value["currency"] != native:
+                raise XRPLBinaryCodecException("an issue with no issuer names the native currency")
+            return cls(_ZERO_20)
+        if isinstance(value, dict) and set(value) == {"currency", "issuer"}:
+            code = bytes(currency.Currency.from_value(value["currency"]))
+            if code == _ZERO_20:
+                raise XRPLBinaryCodecException("the native currency has no issuer")
+            if code in (reserved, _NO_CURRENCY):
+                raise XRPLBinaryCodecException("an issue cannot name a reserved currency code")
+            issuer = bytes(account_id.from_value(value["issuer"]))
+            if issuer in (_ZERO_20, bytes(no_account)) or len(issuer) != 20:
+                raise XRPLBinaryCodecException("an issue's issuer is an account, and not the zero or the one account")
+            return cls(code + issuer)
+        return mpt_from_value(cls, value)
+
+    def issue_from_parser(cls: Any, parser: Any, length_hint: int | None = None) -> Any:
+        code = currency.Currency.from_parser(parser)
+        if bytes(code) == _ZERO_20:
+            return cls(bytes(code))
+        issuer = account_id.from_parser(parser)
+        if bytes(issuer) == bytes(no_account):
+            # A token (MPT) issue: issuer, the marker account, then a sequence.
+            return cls(bytes(code) + bytes(issuer) + bytes(uint32.from_parser(parser)))
+        return cls(bytes(code) + bytes(issuer))
+
+    def issue_to_json(self: Any) -> Any:
+        if len(self.buffer) not in (20, 40):
+            return mpt_to_json(self)
+        text = currency.Currency(self.buffer[:20]).to_json()
+        if len(self.buffer) == 20:
+            return {"currency": text}
+        return {"currency": text, "issuer": account_id(self.buffer[20:]).to_json()}
+
+    issue.Issue.from_value = classmethod(issue_from_value)
+    issue.Issue.from_parser = classmethod(issue_from_parser)
+    issue.Issue.to_json = issue_to_json
+
+    class FieldCurrency(currency.Currency):
+        """A field whose type is Currency. Inside an amount or a path step
+        rippled reads the reserved code; as a field of its own it does not."""
+
+        @classmethod
+        def from_value(cls: Any, value: Any) -> Any:
+            made = super().from_value(value)
+            if bytes(made) == reserved:
+                raise XRPLBinaryCodecException("a currency field cannot hold the reserved code")
+            return made
+
+    return FieldCurrency
+
+
+def _install_amount_rules(amount: Any, currency: Any, account_id: Any) -> None:
+    """rippled's rules for an amount where xrpl-py's differ (amountFromJson,
+    STAmount::add)."""
+    from_value = amount.Amount.from_value.__func__
+    serialize_native = amount._serialize_xrp_amount
+
+    def native_amount(value: str, allow_negative: bool = False) -> bytes:
+        # rippled keeps a native amount's sign in any field; xrpl-py only in
+        # the fields it lists.
+        return serialize_native(value, True)
+
+    def amount_from_value(cls: Any, value: Any, field_name: str = "") -> Any:
+        if isinstance(value, dict) and "currency" in value:
+            if bytes(currency.Currency.from_value(value["currency"])) == _ZERO_20:
+                raise XRPLBinaryCodecException("an issued amount cannot name the native currency")
+            issuer = value.get("issuer")
+            if isinstance(issuer, str) and bytes(account_id.from_value(issuer)) in (_ZERO_20, b""):
+                # rippled writes this and then cannot read it back.
+                raise XRPLBinaryCodecException("an issued amount's issuer cannot be the zero account")
+        token = isinstance(value, dict) and "mpt_issuance_id" in value
+        if token and isinstance(value.get("value"), str) and value["value"].startswith("-"):
+            # A negative token amount: the magnitude, with the positive bit
+            # of the leading byte clear. xrpl-py refuses the sign.
+            raw = bytearray(bytes(from_value(cls, {**value, "value": value["value"][1:]}, field_name)))
+            raw[0] &= 0xBF
+            return cls(bytes(raw))
+        return from_value(cls, value, field_name)
+
+    amount._serialize_xrp_amount = native_amount
+    amount.Amount.from_value = classmethod(amount_from_value)
+
+
+class NetworkCodec:
+    """xrpl-py's codec, privately copied and set up for one network."""
+
+    def __init__(self, native: str, definitions: dict[str, Any] | None = None) -> None:
+        modules = _private_copy_of_xrpl_codec()
+
+        def module(name: str) -> Any:
+            return modules[f"{_CODEC_PACKAGE}.{name}"]
+
+        if definitions is not None:
+            _install_definitions(
+                module("definitions.definitions"),
+                module("definitions.field_info").FieldInfo,
+                module("definitions.field_header").FieldHeader,
+                definitions,
+            )
+        _install_account_rule(
+            module("types.account_id").AccountID,
+            module("types.serialized_type").SerializedType,
+            module("types.st_object"),
+        )
+        field_currency = _install_currency_rules(
+            native,
+            module("types.currency"),
+            module("types.issue"),
+            module("types.account_id").AccountID,
+            module("types.uint32").UInt32,
+        )
+        _install_amount_rules(module("types.amount"), module("types.currency"), module("types.account_id").AccountID)
+        # A field's type class, from this copy's own types.
+        types = module("types")
+        type_of = {name: getattr(types, name) for name in types.__all__}
+        type_of["Currency"] = field_currency
+        module("definitions.field_instance")._get_type_by_name = type_of.__getitem__
+        package = modules[_CODEC_PACKAGE]
+        self.native = native
+        self.encode = package.encode
+        self.decode = package.decode
+        self.encode_for_signing = package.encode_for_signing
+        self.get_field_instance = module("definitions.definitions").get_field_instance
+
+
+XRPL_CODEC = NetworkCodec("XRP")
+_xahau_codec: NetworkCodec | None = None
+# The codec of the value in hand. XRPL's unless a Xahau leaf is being handled:
+# a validation and a manifest are read with XRPL's on every network (§2.1).
+_codec: contextvars.ContextVar[NetworkCodec] = contextvars.ContextVar("xprv_codec", default=XRPL_CODEC)
+
+
+def network_codec(network_id: int) -> NetworkCodec:
+    global _xahau_codec
+    if network_id != XAHAU_NETWORK_ID:
+        return XRPL_CODEC
+    if _xahau_codec is None:
+        table = json.loads(xahau_definitions_text())
+        _xahau_codec = NetworkCodec(table["native_currency_code"], table)
+    return _xahau_codec
 
 
 @contextlib.contextmanager
 def leaf_codec(network_id: int) -> Any:
-    """xrpl-py as the codec of `network_id`'s leaves, for the body of the with.
+    """Handle leaves with `network_id`'s codec for the body of the with.
 
-    On Xahau it holds Xahau's definitions and native code; on leaving, XRPL's
-    are back. A validation is read with XRPL's on every network (§2.1), so
-    this wraps the handling of leaves and nothing else.
+    It wraps the handling of a map step's leaves and nothing else. The choice
+    is this context's alone: another thread keeps its own.
     """
-    global _native_code, _xahau_codec
-    if network_id != XAHAU_NETWORK_ID:
-        yield
-        return
-    if _xahau_codec is None:
-        table = json.loads(xahau_definitions_text())
-        _xahau_codec = (_definition_tables(table), table["native_currency_code"])
-    tables, native = _xahau_codec
-    saved = {name: getattr(_xrpl_definitions, name) for name in tables}
-    saved_native = _native_code
+    token = _codec.set(network_codec(network_id))
     try:
-        for name, value in tables.items():
-            setattr(_xrpl_definitions, name, value)
-        _native_code = native
         yield
     finally:
-        for name, value in saved.items():
-            setattr(_xrpl_definitions, name, value)
-        _native_code = saved_native
+        _codec.reset(token)
 
 
-def _iso_code_of(code: bytes) -> str | None:
-    """The three-character code in a standard currency's bytes 12 to 14."""
-    try:
-        candidate = code.decode("ascii")
-    except UnicodeDecodeError:
-        return None
-    # The native code's letters here are the reserved code: hex, as rippled.
-    if candidate == _native_code or not _xrpl_currency._is_iso_code(candidate):
-        return None
-    return candidate
+def encode(value: Any) -> str:
+    return _codec.get().encode(value)
 
 
-def _iso_code_bytes(iso: str) -> bytes:
-    if not _xrpl_currency._is_iso_code(iso):
-        raise XRPLBinaryCodecException(f"Invalid ISO code: {iso}")
-    if iso == _native_code:
-        return _ZERO_20
-    return bytes(12) + iso.encode("ascii") + bytes(5)
+def decode(hex_text: str) -> Any:
+    return _codec.get().decode(hex_text)
 
 
-def _currency_init(self: Any, buffer: bytes | None = None) -> None:
-    _xrpl_currency.Hash160.__init__(self, buffer if buffer is not None else _ZERO_20)
-    raw = self.buffer
-    if raw == _ZERO_20:
-        self._iso = _native_code
-    elif raw[:12] == bytes(12) and raw[15:] == bytes(5):
-        # A standard code: every byte outside the three letters is zero.
-        self._iso = _iso_code_of(raw[12:15])
-    else:
-        self._iso = None
-
-
-_issue_from_value = _xrpl_issue.Issue.from_value.__func__
-_issue_to_json = _xrpl_issue.Issue.to_json
-
-
-def _issue_from_value_for_network(cls: Any, value: Any) -> Any:
-    if isinstance(value, dict) and set(value) == {"currency"}:
-        if value["currency"] != _native_code:
-            raise XRPLBinaryCodecException("an issue with no issuer names the native currency")
-        return cls(_ZERO_20)
-    if isinstance(value, dict) and set(value) == {"currency", "issuer"}:
-        currency = bytes(_xrpl_currency.Currency.from_value(value["currency"]))
-        if currency == _ZERO_20:
-            raise XRPLBinaryCodecException("the native currency has no issuer")
-        return cls(currency + bytes(_AccountID.from_value(value["issuer"])))
-    return _issue_from_value(cls, value)
-
-
-def _issue_from_parser(cls: Any, parser: Any, length_hint: int | None = None) -> Any:
-    currency = _xrpl_currency.Currency.from_parser(parser)
-    if bytes(currency) == _ZERO_20:
-        return cls(bytes(currency))
-    issuer = _AccountID.from_parser(parser)
-    if bytes(issuer) == bytes(cls.BLACK_HOLED_ACCOUNT_ID):
-        # A token (MPT) issue: issuer, the marker account, then a sequence.
-        return cls(bytes(currency) + bytes(issuer) + bytes(_UInt32.from_parser(parser)))
-    return cls(bytes(currency) + bytes(issuer))
-
-
-def _issue_to_json_for_network(self: Any) -> Any:
-    if len(self.buffer) not in (20, 40):
-        return _issue_to_json(self)
-    currency = _xrpl_currency.Currency(self.buffer[:20]).to_json()
-    if len(self.buffer) == 20:
-        return {"currency": currency}
-    return {"currency": currency, "issuer": _AccountID(self.buffer[20:]).to_json()}
-
-
-_write_field_and_value = _BinarySerializer.write_field_and_value
-
-
-def _write_field_and_value_with_empty_zero_account(
-    self: Any, field: Any, value: Any, is_unl_modify_workaround: bool = False
-) -> None:
-    # xrpl-py's own switch for UNLModify writes the account as an empty field.
-    if field.type == "AccountID" and bytes(value) == _ZERO_20:
-        is_unl_modify_workaround = True
-    _write_field_and_value(self, field, value, is_unl_modify_workaround)
-
-
-_xrpl_currency._iso_code_from_hex = _iso_code_of
-_xrpl_currency._iso_to_bytes = _iso_code_bytes
-_xrpl_currency.Currency.__init__ = _currency_init
-_xrpl_issue.Issue.from_value = classmethod(_issue_from_value_for_network)
-_xrpl_issue.Issue.from_parser = classmethod(_issue_from_parser)
-_xrpl_issue.Issue.to_json = _issue_to_json_for_network
-_BinarySerializer.write_field_and_value = _write_field_and_value_with_empty_zero_account
+def encode_for_signing(value: Any) -> str:
+    return _codec.get().encode_for_signing(value)
 
 
 def _serialized_field(name: str) -> Any:
     try:
-        field_info = get_field_instance(name)
+        field_info = _codec.get().get_field_instance(name)
     except (KeyError, XRPLBinaryCodecException):
         return None
     return field_info if field_info.is_serialized else None
@@ -725,7 +881,7 @@ def _is_native_code(value: Any) -> bool:
     XRP on XRPL, where XAH is an ordinary issued currency and is traded; XAH
     on Xahau, where XRP is the issued one.
     """
-    return value == _native_code
+    return value == _codec.get().native
 
 
 def _not_a_value(at: str, type_name: str) -> UnknownLeafField:

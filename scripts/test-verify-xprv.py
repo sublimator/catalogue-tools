@@ -383,11 +383,112 @@ class NetworkLeafCodecTests(unittest.TestCase):
 
     def test_xrpl_still_verifies_after_xahau_in_one_process(self) -> None:
         self.assertTrue(self.verify_vector("accept-xahau-tx-json", "json").ok)
-        self.assertEqual(v._native_code, "XRP")
-        self.assertIsNone(v._serialized_field("HookParameters"), "a Xahau-only field after leaving the Xahau codec")
+        self.assertIs(v._codec.get(), v.XRPL_CODEC)
+        self.assertIsNone(v._serialized_field("HookParameters"), "a Xahau-only field outside the Xahau codec")
         result = self.verify_vector("positive-tx-issued-xah", "json")
         self.assertTrue(result.ok, result.reason)
         self.assertEqual(result.report()["definitions"]["leaf"], v.definitions_fingerprint(0))
+
+    def test_the_choice_of_codec_ends_with_its_block_even_on_an_error(self) -> None:
+        with self.assertRaises(RuntimeError):
+            with v.leaf_codec(self.XAHAU):
+                self.assertIs(v._codec.get(), v.network_codec(self.XAHAU))
+                raise RuntimeError("inside")
+        self.assertIs(v._codec.get(), v.XRPL_CODEC)
+
+    def test_two_threads_keep_their_own_codec(self) -> None:
+        # Data is field 27 on XRPL and 28 on Xahau. One thread sits inside a
+        # Xahau block while this one, and a third, encode as XRPL.
+        import threading
+
+        inside, release = threading.Event(), threading.Event()
+        seen: dict[str, str] = {}
+
+        def xahau_worker() -> None:
+            with v.leaf_codec(self.XAHAU):
+                inside.set()
+                release.wait(10)
+                seen["xahau"] = v.encode({"Data": "AB"})
+
+        def xrpl_worker() -> None:
+            seen["other thread"] = v.encode({"Data": "AB"})
+
+        worker = threading.Thread(target=xahau_worker)
+        worker.start()
+        self.assertTrue(inside.wait(10))
+        seen["this thread"] = v.encode({"Data": "AB"})
+        other = threading.Thread(target=xrpl_worker)
+        other.start()
+        other.join(10)
+        release.set()
+        worker.join(10)
+        self.assertEqual(seen, {"xahau": "701C01AB", "this thread": "701B01AB", "other thread": "701B01AB"})
+
+    def test_the_public_xrpl_py_is_left_as_installed(self) -> None:
+        # In a fresh interpreter: what xrpl-py itself does, before this file
+        # is loaded and after it has verified a Xahau proof.
+        import subprocess
+
+        program = """
+import importlib.util, io, json, sys, contextlib
+import xrpl.core, xrpl.core.binarycodec as codec
+def snapshot():
+    zero = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
+    return [
+        codec.encode({"Destination": zero}), codec.encode({"Data": "AB"}), codec.decode("8100"),
+        codec.encode({"TransactionType": "UNLModify", "Account": zero}),
+        codec.encode({"Asset": {"currency": "XRP"}}),
+        id(sys.modules["xrpl.core.binarycodec"]), id(sys.modules["xrpl.core.binarycodec.types.currency"]),
+        xrpl.core.binarycodec is codec,
+    ]
+before = snapshot()
+spec = importlib.util.spec_from_file_location("verify_xprv", sys.argv[1])
+v = importlib.util.module_from_spec(spec); sys.modules["verify_xprv"] = v; spec.loader.exec_module(v)
+vector = json.load(open(sys.argv[2]))
+with contextlib.redirect_stdout(io.StringIO()):
+    result = v.verify(vector["form"]["json"], vector["trust"]["publisher_key"], vector["trust"]["network_id"])
+print(json.dumps({"same": before == snapshot(), "verified": result.ok, "before": before[:5]}))
+"""
+        run = subprocess.run(
+            [sys.executable, "-c", program, str(self.REPO / "scripts" / "verify-xprv.py"),
+             str(self.REPO / "tests" / "xprv" / "vectors" / "accept-xahau-tx-json.json")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr[-800:])
+        outcome = json.loads(run.stdout)
+        self.assertTrue(outcome["verified"])
+        self.assertTrue(outcome["same"], "importing or using the verifier changed what xrpl-py does")
+        # And xrpl-py's own behaviour is the one this verifier does not share:
+        # the zero address as twenty bytes, an unset account as the address.
+        self.assertEqual(outcome["before"][0], "8314" + "00" * 20)
+        self.assertEqual(outcome["before"][2], {"Account": "rrrrrrrrrrrrrrrrrrrrrhoLvTp"})
+
+    def test_xrpl_py_imports_its_own_package_lazily_in_two_known_places(self) -> None:
+        # A private copy of the codec is complete only if no function inside
+        # it imports the package again when it runs: that import would find
+        # the public modules. xrpl-py 5.2.0 has two such places and
+        # NetworkCodec handles both. Any other fails here.
+        import inspect
+        import pkgutil
+        import re
+
+        import xrpl.core.binarycodec as package
+
+        lazy = set()
+        for info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+            source = inspect.getsource(importlib.import_module(info.name))
+            guarded = False
+            for line in source.splitlines():
+                if re.match(r"if TYPE_CHECKING", line):
+                    guarded = True
+                elif line and not line[0].isspace():
+                    guarded = False
+                if not guarded and re.match(r"\s+(from|import) xrpl\.core\.binarycodec", line):
+                    lazy.add((info.name.rsplit(".", 1)[-1], line.split()[1]))
+        self.assertEqual(lazy, {
+            ("field_instance", "xrpl.core.binarycodec.types"),
+            ("st_object", "xrpl.core.binarycodec.binary_wrappers.binary_serializer"),
+        })
 
     def test_only_the_networks_own_code_is_native(self) -> None:
         issued = lambda code: {"value": "1", "currency": code, "issuer": self.ISSUER}  # noqa: E731
@@ -423,30 +524,109 @@ class NetworkLeafCodecTests(unittest.TestCase):
             on_xahau = v.encode({"Data": "AB"})
         self.assertNotEqual(on_xrpl, on_xahau)
 
-    def test_the_reserved_code_reads_as_hex_as_rippled_writes_it(self) -> None:
-        # The native code's letters in an issued code's place.
+    def test_the_reserved_code_is_hex_in_an_amount_and_refused_elsewhere(self) -> None:
+        # The native code's letters in an issued code's place (rippled's
+        # badCurrency). An amount may hold it; an issue and a currency field
+        # may not.
         reserved = "0000000000000000000000005852500000000000"
         amount = {"value": "1", "currency": reserved, "issuer": self.ISSUER}
-        raw = v.encode({"Amount": amount})
-        self.assertEqual(v.decode(raw)["Amount"]["currency"], reserved)
+        self.assertEqual(v.decode(v.encode({"Amount": amount}))["Amount"]["currency"], reserved)
+        self.assertTrue(self.accepted(0, Amount=amount))
+        self.assertFalse(self.accepted(0, Asset={"currency": reserved, "issuer": self.ISSUER}))
+        self.assertFalse(self.accepted(0, BaseAsset=reserved))
+        self.assertTrue(self.accepted(0, BaseAsset="USD"))
 
-    def test_the_zero_account_is_an_empty_field(self) -> None:
-        # As the C++ verifier's codec writes it, on both networks; a pseudo-
-        # transaction such as Xahau's Entropy has this form in the ledger.
+    def test_an_unset_account_and_the_zero_account_are_two_things(self) -> None:
+        # rippled prints an account field that was never set as "" and writes
+        # it as an empty field; the zero account, once set, is its address and
+        # twenty zero bytes. Xahau's Entropy and XRPL's UNLModify have the
+        # first in the ledger; an XRPL SetFee has the second.
         for network in (0, self.XAHAU):
             with self.subTest(network=network), v.leaf_codec(network):
-                self.assertEqual(v.encode({"Destination": self.ZERO_ACCOUNT}), "8300")
-                self.assertEqual(v.decode("8300"), {"Destination": self.ZERO_ACCOUNT})
-                self.assertEqual(len(v.encode({"Destination": self.ISSUER})), 2 * (2 + 20))
+                self.assertEqual(v.encode({"Destination": ""}), "8300")
+                self.assertEqual(v.decode("8300"), {"Destination": ""})
+                self.assertEqual(v.encode({"Destination": self.ZERO_ACCOUNT}), "8314" + "00" * 20)
+                self.assertEqual(v.decode("8314" + "00" * 20), {"Destination": self.ZERO_ACCOUNT})
+        self.assertTrue(self.accepted(0, Destination=""))
+        self.assertTrue(self.accepted(0, Destination=self.ZERO_ACCOUNT))
+        # xrpl-py's special case for UNLModify is not applied: the value says
+        # which form it is, there as anywhere.
+        self.assertTrue(v.encode({"TransactionType": "UNLModify", "Account": ""}).endswith("8100"))
+        self.assertTrue(
+            v.encode({"TransactionType": "UNLModify", "Account": self.ZERO_ACCOUNT}).endswith("8114" + "00" * 20)
+        )
         # In a path step an account is always twenty bytes.
-        raw = v.encode({"Paths": [[{"account": self.ZERO_ACCOUNT}]]})
-        self.assertEqual(raw, "0112" + "01" + "00" * 20 + "00")
+        self.assertEqual(v.encode({"Paths": [[{"account": self.ZERO_ACCOUNT}]]}), "0112" + "01" + "00" * 20 + "00")
 
     def test_a_xahau_json_proof_without_a_map_step_verifies(self) -> None:
         f = world.Fixture()
         with contextlib.redirect_stdout(io.StringIO()):
             result = v.verify(f.proof(network_id=self.XAHAU), f.trusted_key, self.XAHAU)
         self.assertTrue(result.ok, result.reason)
+
+
+class RippledReferenceTests(unittest.TestCase):
+    """The XRPL leaf codec held to rippled's own, over every section of
+    tests/x-data/fixture/rippled-reference-fixtures.json, which records what
+    rippled's codec printed and which the C++ suite holds x-data to. The steps
+    are the leaf rule's: _for_codec, encode, decode, _as_reference."""
+
+    REPO = Path(__file__).resolve().parent.parent
+    FIELD = {"currency": "BaseAsset", "issue": "Asset", "amount": "Amount", "number": "AssetsTotal",
+             "pathset": "Paths", "bridge": "XChainBridge"}
+
+    @staticmethod
+    def to_json(hex_text):
+        return v._as_reference(v.decode(hex_text))
+
+    @staticmethod
+    def to_hex(value):
+        return v.encode(v._for_codec(value)).upper()
+
+    def test_every_section(self) -> None:
+        fixture = json.loads(
+            (self.REPO / "tests" / "x-data" / "fixture" / "rippled-reference-fixtures.json").read_text()
+        )
+        rows_checked = 0
+        for section, rows in fixture.items():
+            if not isinstance(rows, list) or section == "uint64_fields":
+                continue
+            kind, _, direction = section.rpartition("_")
+            for row in rows:
+                rows_checked += 1
+                value = row.get("json", row.get("text"))
+                if kind in self.FIELD:
+                    field = self.FIELD[kind]
+                    obj = {field: value}
+                    prefix = bytes(v.XRPL_CODEC.get_field_instance(field).header).hex().upper()
+                else:
+                    # A whole object of one field, bytes and all.
+                    obj, prefix = value, ""
+                with self.subTest(section=section, value=value):
+                    if direction == "decode":
+                        # The bytes decode to rippled's JSON.
+                        self.assertEqual(self.to_json(prefix + row["hex"]), obj)
+                        continue
+                    own = row.get("xdata")
+                    refuse = own == "refuses" or (own is None and "refused" in row)
+                    try:
+                        written = self.to_hex(obj)
+                        accepted = self.to_json(written) == obj
+                    except Exception:
+                        written, accepted = None, False
+                    if refuse:
+                        # rippled refuses it, or writes bytes it cannot read
+                        # back: the leaf rule must not accept it.
+                        self.assertFalse(accepted, f"accepted, as {written}")
+                        continue
+                    wanted = prefix + (own if own is not None else row["hex"])
+                    if accepted:
+                        self.assertEqual(written, wanted)
+                    else:
+                        # Refusing is right only for a spelling other than
+                        # the one these bytes decode to.
+                        self.assertNotEqual(self.to_json(wanted), obj, "refused the reference rendering")
+        self.assertGreater(rows_checked, 2500)
 
 
 class StandaloneScriptTests(unittest.TestCase):

@@ -1082,20 +1082,6 @@
    "why": "two paths"
   },
   {
-   "group": "zero account",
-   "field": "Destination",
-   "value": "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
-   "accept": true,
-   "why": "the zero account: both codecs write it as an empty field and read that back as this address"
-  },
-  {
-   "group": "zero account",
-   "field": "Destination",
-   "value": "",
-   "accept": false,
-   "why": "an empty string is not an address"
-  },
-  {
    "group": "reserved currency code",
    "field": "Amount",
    "value": {
@@ -1116,6 +1102,83 @@
    },
    "accept": false,
    "why": "USD written as 40 hex digits: its reference text is the three letters"
+  },
+  {
+   "group": "account field",
+   "field": "Destination",
+   "value": "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+   "accept": true,
+   "why": "the zero account, set: its address, and twenty zero bytes"
+  },
+  {
+   "group": "account field",
+   "field": "Destination",
+   "value": "",
+   "accept": true,
+   "why": "an account field that was never set: rippled prints \"\" for it and writes an empty field"
+  },
+  {
+   "group": "account field",
+   "field": "Destination",
+   "value": " ",
+   "accept": false,
+   "why": "a space is neither"
+  },
+  {
+   "group": "account field",
+   "field": "Destination",
+   "value": "0000000000000000000000000000000000000000",
+   "accept": false,
+   "why": "the zero account as hex: its reference text is the address"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1",
+    "currency": "USD",
+    "issuer": "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
+   },
+   "accept": false,
+   "why": "the zero account as issuer: rippled writes it and cannot read it back"
+  },
+  {
+   "group": "issued amount value",
+   "field": "Amount",
+   "value": {
+    "value": "1",
+    "currency": "USD",
+    "issuer": ""
+   },
+   "accept": false,
+   "why": "an unset account as issuer"
+  },
+  {
+   "group": "native amount (drops)",
+   "field": "Amount",
+   "value": "-10",
+   "accept": true,
+   "why": "a negative native amount: the sign is a bit of the amount in any field"
+  },
+  {
+   "group": "token (MPT) amount value",
+   "field": "Amount",
+   "value": {
+    "value": "-100",
+    "mpt_issuance_id": "00000001ABABABABABABABABABABABABABABABABABABABAB"
+   },
+   "accept": true,
+   "why": "a negative token amount"
+  },
+  {
+   "group": "reserved currency code",
+   "field": "Asset",
+   "value": {
+    "currency": "0000000000000000000000005852500000000000",
+    "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+   },
+   "accept": false,
+   "why": "the reserved code in an issue: rippled refuses it there"
   }
  ]
 }
