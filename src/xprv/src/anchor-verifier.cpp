@@ -1,6 +1,7 @@
 #include "xprv/anchor-verifier.h"
 #include "json-proof-loader.h"
 #include "xprv/hex-utils.h"
+#include "xprv/proof-resolver.h"
 #include "xprv/manifest-utils.h"
 
 #include <catl/core/base64.h>
@@ -158,6 +159,13 @@ bool
 AnchorVerifier::is_canonical_stvalidation(std::vector<uint8_t> const& raw)
 {
     return parse_validation(raw).valid;
+}
+
+std::string
+AnchorVerifier::validation_definitions_fingerprint()
+{
+    static auto const fingerprint = definitions_fingerprint(xrpl_protocol());
+    return fingerprint;
 }
 
 std::optional<std::vector<uint8_t>>

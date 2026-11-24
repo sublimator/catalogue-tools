@@ -1,6 +1,8 @@
 #include "commands.h"
 #include "proof-file.h"
 
+#include "xprv/build-id.h"
+
 #include "xprv/proof-chain-binary.h"
 #include "xprv/proof-chain-json.h"
 #include "xprv/proof-resolver.h"
@@ -64,6 +66,17 @@ cmd_verify(
     auto const raw = xprv::read_proof_file(proof_path, read_error);
     if (!raw)
     {
+        // A proof over the size cap is a refusal like any other (§8). A file
+        // that cannot be opened is a mistake in the invocation, with no
+        // report.
+        if (json_report && read_error.find("exceeds") != std::string::npos)
+        {
+            xprv::VerifyReport refused;
+            refused.layer = "parse";
+            refused.reason = read_error;
+            std::cout << boost::json::serialize(xprv::to_json(refused))
+                      << "\n";
+        }
         std::cerr << read_error << "\n";
         return 1;
     }
@@ -88,7 +101,10 @@ cmd_verify(
         });
 
     if (json_report)
-        std::cout << boost::json::serialize(xprv::to_json(report)) << "\n";
+        std::cout << boost::json::serialize(xprv::to_json(
+                         report,
+                         "catl-xprv " + std::string(xprv::xprv_build_id())))
+                  << "\n";
     else if (!report.verified)
         std::cerr << "Refused (" << report.layer << "): " << report.reason
                   << "\n";

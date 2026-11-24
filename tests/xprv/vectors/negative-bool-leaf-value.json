@@ -14,17 +14,7 @@
     "verdict": "reject",
     "reason_contains": "must be a string or a number"
   },
-  "known_failing": {
-    "python": {
-      "does": "accept",
-      "because": "false and true serialize as 0 and 1"
-    },
-    "cpp": {
-      "does": "wrong-reason",
-      "because": "refuses through a codec type error, not through the \u00a72.3 value rule"
-    }
-  },
   "observed": {
-    "python_reason": "accepted"
+    "python_reason": "step 5: state tree error: leaf member Flags must be a string or a number; step 6: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 7: tx root 48EF725280083243... is not supported by any earlier header"
   }
 }

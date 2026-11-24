@@ -19,6 +19,7 @@
 #include <charconv>
 #include <cstring>
 #include <initializer_list>
+#include <optional>
 #include <span>
 
 namespace xprv {
@@ -425,6 +426,12 @@ require_value_grammar(
     }
     if (v.is_object() || v.is_array())
         not_a_value(at, type.name);
+    // A plain field's value is a string or an integer number. A codec can
+    // drop a null member or read true as 1, and the reader would then see
+    // something nothing hashed.
+    if (!v.is_string() && !v.is_int64() && !v.is_uint64())
+        throw std::runtime_error(
+            "map proof: leaf member " + at + " must be a string or a number");
 }
 
 static void
@@ -479,6 +486,215 @@ require_stobject_members(
     }
 }
 
+namespace {
+
+// Decimal text as an exact value: its sign, its significant digits and the
+// power of ten of the last digit. No floating point, so two notations of one
+// number compare equal and nothing else does.
+struct DecimalText
+{
+    bool negative = false;
+    std::string digits;
+    long long exponent = 0;
+    bool
+    operator==(DecimalText const&) const = default;
+};
+
+std::optional<DecimalText>
+parse_decimal_text(std::string_view s)
+{
+    auto const digit = [&](size_t i) {
+        return i < s.size() && s[i] >= '0' && s[i] <= '9';
+    };
+    DecimalText d;
+    size_t i = 0;
+    if (i < s.size() && s[i] == '-')
+    {
+        d.negative = true;
+        ++i;
+    }
+    if (!digit(i))
+        return std::nullopt;
+    while (digit(i))
+        d.digits += s[i++];
+    if (i < s.size() && s[i] == '.')
+    {
+        ++i;
+        if (!digit(i))
+            return std::nullopt;
+        while (digit(i))
+        {
+            d.digits += s[i++];
+            --d.exponent;
+        }
+    }
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E'))
+    {
+        ++i;
+        bool negative = false;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-'))
+            negative = s[i++] == '-';
+        if (!digit(i))
+            return std::nullopt;
+        long long e = 0;
+        size_t count = 0;
+        while (digit(i))
+        {
+            if (++count > 9)
+                return std::nullopt;
+            e = e * 10 + (s[i++] - '0');
+        }
+        d.exponent += negative ? -e : e;
+    }
+    if (i != s.size())
+        return std::nullopt;
+    auto const first = d.digits.find_first_not_of('0');
+    if (first == std::string::npos)
+        return DecimalText{false, "0", 0};
+    d.digits.erase(0, first);
+    while (d.digits.size() > 1 && d.digits.back() == '0')
+    {
+        d.digits.pop_back();
+        ++d.exponent;
+    }
+    return d;
+}
+
+// What kind of text a string is, for the one place two spellings are equal.
+enum class Text { exact, amount, decimal };
+
+// Throw unless `given` is the JSON `decoded`: the same members, the same
+// array order, the same JSON types, equal numbers and equal strings. A decimal
+// string (an issued amount's value, a Number) may use another notation for
+// exactly the same number (§2.3).
+void
+require_same_json(
+    boost::json::value const& given,
+    boost::json::value const& decoded,
+    std::string const& at,
+    catl::xdata::Protocol const& protocol,
+    Text text)
+{
+    namespace types = catl::xdata::FieldTypes;
+    auto const differs = [&]() {
+        throw std::runtime_error(
+            "map proof: leaf is not the JSON its bytes decode to: " +
+            (at.empty() ? std::string("it") : "member " + at) + " differs");
+    };
+    if (given.is_object())
+    {
+        if (!decoded.is_object())
+            differs();
+        auto const& g = given.as_object();
+        auto const& d = decoded.as_object();
+        for (auto const& [key, value] : g)
+        {
+            auto const name = std::string(key);
+            auto const child = at.empty() ? name : at + "." + name;
+            auto const* other = d.if_contains(key);
+            if (!other)
+                throw std::runtime_error(
+                    "map proof: leaf is not the JSON its bytes decode to: "
+                    "member " +
+                    child + " is not in it");
+            auto child_text = Text::exact;
+            if (text == Text::amount)
+                child_text = name == "value" ? Text::decimal : Text::exact;
+            else if (auto const field = protocol.find_field(name))
+            {
+                if (field->meta.type == types::Amount)
+                    child_text = Text::amount;
+                else if (field->meta.type == types::Number)
+                    child_text = Text::decimal;
+            }
+            require_same_json(value, *other, child, protocol, child_text);
+        }
+        for (auto const& [key, value] : d)
+            if (!g.contains(key))
+                throw std::runtime_error(
+                    "map proof: leaf is not the JSON its bytes decode to: "
+                    "member " +
+                    (at.empty() ? std::string(key) : at + "." + std::string(key)) +
+                    " is missing");
+        return;
+    }
+    if (given.is_array())
+    {
+        if (!decoded.is_array() ||
+            decoded.as_array().size() != given.as_array().size())
+            differs();
+        for (size_t i = 0; i < given.as_array().size(); ++i)
+            require_same_json(
+                given.as_array()[i],
+                decoded.as_array()[i],
+                at + "[" + std::to_string(i) + "]",
+                protocol,
+                Text::exact);
+        return;
+    }
+    if (given.is_string())
+    {
+        if (!decoded.is_string())
+            differs();
+        if (given.as_string() == decoded.as_string())
+            return;
+        // A drops string is a decimal too, but it has one spelling; only an
+        // issued value and a Number are written two ways by real codecs.
+        if (text == Text::decimal)
+        {
+            auto const a = parse_decimal_text(given.as_string());
+            auto const b = parse_decimal_text(decoded.as_string());
+            if (a && b && *a == *b)
+                return;
+        }
+        differs();
+    }
+    // An integer token. A float, a boolean and null equal nothing a codec
+    // decodes to.
+    auto const integer = [](boost::json::value const& v)
+        -> std::optional<std::pair<bool, uint64_t>> {
+        if (v.is_uint64())
+            return std::pair{false, v.get_uint64()};
+        if (!v.is_int64())
+            return std::nullopt;
+        auto const i = v.get_int64();
+        return i < 0 ? std::pair{true, static_cast<uint64_t>(-(i + 1))}
+                     : std::pair{false, static_cast<uint64_t>(i)};
+    };
+    auto const a = integer(given);
+    auto const b = integer(decoded);
+    if (!a || !b || *a != *b)
+        differs();
+}
+
+// The leaf's bytes decoded by this network's codec. The parsers want the
+// key after the item; it plays no part in the decoded content.
+boost::json::value
+decode_leaf_bytes(
+    std::vector<uint8_t> bytes,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol)
+{
+    bytes.insert(bytes.end(), 32, 0);
+    Slice full(bytes.data(), bytes.size());
+    catl::xdata::JsonVisitor::Options json_opts;
+    json_opts.ascii_hints = false;
+    auto decoded = is_tx
+        ? catl::xdata::parse_transaction(
+              full, protocol, {.includes_prefix = false, .json_opts = json_opts})
+        : catl::xdata::parse_leaf(
+              full, protocol, {.includes_prefix = false, .json_opts = json_opts});
+    if (!decoded.is_object())
+        throw std::runtime_error("map proof: leaf did not decode to an object");
+    auto& obj = decoded.as_object();
+    obj.erase("index");
+    obj.erase("hash");
+    obj.erase("blob");
+    return decoded;
+}
+
+}  // namespace
+
 void
 require_codec_members(
     boost::json::value const& leaf,
@@ -486,13 +702,42 @@ require_codec_members(
     catl::xdata::Protocol const& protocol)
 {
     if (!is_tx)
-        return require_stobject_members(leaf, protocol, "");
-    if (!leaf.is_object() || leaf.as_object().size() != 2 ||
-        !leaf.as_object().contains("tx") || !leaf.as_object().contains("meta"))
+        require_stobject_members(leaf, protocol, "");
+    else
+    {
+        if (!leaf.is_object() || leaf.as_object().size() != 2 ||
+            !leaf.as_object().contains("tx") ||
+            !leaf.as_object().contains("meta"))
+            throw std::runtime_error(
+                "map proof: a tx leaf must be exactly {tx, meta}");
+        require_stobject_members(leaf.at("tx"), protocol, "tx");
+        require_stobject_members(leaf.at("meta"), protocol, "meta");
+    }
+
+    // The rule that makes the rest hold (§2.3): a JSON leaf is valid only
+    // if it is the JSON its own bytes decode to. A member the codec drops, a
+    // number where a name belongs, an address or an amount in a spelling the
+    // codec would not write: each serializes to bytes whose decoding is some
+    // other JSON, and is refused here.
+    auto const& object = leaf.as_object();
+    boost::json::value decoded;
+    try
+    {
+        decoded = decode_leaf_bytes(
+            is_tx ? catl::xdata::serialize_transaction(object, protocol)
+                  : catl::xdata::serialize_leaf(object, protocol),
+            is_tx,
+            protocol);
+    }
+    catch (std::exception const& e)
+    {
+        // A leaf the codec will not serialize has no bytes to decode.
         throw std::runtime_error(
-            "map proof: a tx leaf must be exactly {tx, meta}");
-    require_stobject_members(leaf.at("tx"), protocol, "tx");
-    require_stobject_members(leaf.at("meta"), protocol, "meta");
+            "map proof: leaf is not the JSON its bytes decode to: it does "
+            "not serialize (" +
+            std::string(e.what()) + ")");
+    }
+    require_same_json(leaf, decoded, "", protocol, Text::exact);
 }
 
 boost::json::object

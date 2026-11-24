@@ -45,15 +45,12 @@ from xrpl.core.binarycodec import decode, encode, encode_for_signing
 from xrpl.core.binarycodec.definitions.definitions import get_field_instance
 from xrpl.core.binarycodec.exceptions import XRPLBinaryCodecException
 
-# Monkey-patch xrpl-py's broken _calculate_precision (XRPLF/xrpl-py#923).
-# It expands e-notation to full decimal form then counts ALL digits instead
-# of significant figures, rejecting valid values like 9999999999999999e79.
-import xrpl.core.binarycodec.types.amount as _amt
 from decimal import Decimal as _Decimal
 
-_amt._calculate_precision = (
-    lambda v: len(_Decimal(v).as_tuple().digits) if not _Decimal(v).is_zero() else 0
-)
+# xrpl-py 5.2.0, which this verifier pins, counts an issued value's
+# significant digits correctly. An earlier workaround for XRPLF/xrpl-py#923
+# replaced that count with one over all digits, which refused the plain
+# decimal text xrpl-py itself decodes a large amount to.
 
 # ─── JSON proof shape ────────────────────────────────────────────────
 #
@@ -200,7 +197,11 @@ class VerifyResult:
             "verified": True,
             "format_version": FORMAT_VERSION,
             "network_id": self.network_id,
-            "definitions": definitions_identity(),
+            "verifier": verifier_identity(),
+            "definitions": {
+                "leaf": definitions_fingerprint(),
+                "validation": definitions_fingerprint(),
+            },
             "anchor": self.anchor,
             "headers": self.headers,
             "leaves": self.leaves,
@@ -463,6 +464,16 @@ def _require_value_grammar(type_name: str, value: Any, at: str) -> None:
         return
     if isinstance(value, (dict, list)):
         raise _not_a_value(at, type_name)
+    # A plain field's value is a string or an integer number. The codec drops
+    # a null member and reads true as 1, and the reader would then see
+    # something nothing hashed. bool is an int in Python, so it is named.
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise UnknownLeafField(f"leaf member {at} must be a string or a number")
+
+
+def encode_transaction_type(name: str) -> int:
+    """The numeric code of a transaction type name, for building test proofs."""
+    return int.from_bytes(bytes.fromhex(encode({"TransactionType": name}))[1:3], "big")
 
 
 def _require_stobject_members(obj: Any, path: str) -> None:
@@ -493,20 +504,139 @@ def _require_stobject_members(obj: Any, path: str) -> None:
             _require_value_grammar(field_info.type, value, at)
 
 
-def require_codec_members(leaf: Any, *, is_tx: bool) -> None:
-    """Every member of a decoded leaf is a serialized field, at every depth.
+# rippled writes these UInt64 fields in base ten. xrpl-py 5.2.0 decodes them
+# as 16 hex digits, and reads LockedAmount's text as hex. The two helpers
+# below put its input and its output into the form the reference writes.
+_BASE_TEN_UINT64 = frozenset({"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount"})
+_DECIMAL_TEXT = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]{1,9})?")
 
-    Leaf data is the decoded XRPL content and nothing else (§2.3). The codec
-    drops known non-serialized names such as `hash` and `index` without a word,
-    so an unchecked member would be shown but never hashed.
+
+def _for_codec(value: Any) -> Any:
+    """A leaf as xrpl-py serializes it correctly: LockedAmount as hex."""
+    if isinstance(value, dict):
+        return {
+            k: f"{int(v):016X}"
+            if k == "LockedAmount" and isinstance(v, str) and v.isascii() and v.isdigit() and int(v) < 1 << 64
+            else _for_codec(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_for_codec(v) for v in value]
+    return value
+
+
+def _as_reference(value: Any) -> Any:
+    """xrpl-py's decoding, with the base-ten UInt64 fields in base ten."""
+    if isinstance(value, dict):
+        return {
+            k: str(int(v, 16))
+            if k in _BASE_TEN_UINT64 and isinstance(v, str) and len(v) == 16
+            else _as_reference(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_as_reference(v) for v in value]
+    return value
+
+
+def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -> None:
+    """`given` is the JSON `decoded`, or a ValueError says where it is not.
+
+    The same members, the same array order, the same JSON types, equal numbers
+    and equal strings. A decimal string (an issued amount's value, a Number)
+    may use another notation for exactly the same number (§2.3).
+    """
+    differs = UnknownLeafField(
+        "leaf is not the JSON its bytes decode to: "
+        + (f"member {at} differs" if at else "it differs")
+    )
+    if isinstance(given, dict):
+        if not isinstance(decoded, dict):
+            raise differs
+        for name, value in given.items():
+            child = f"{at}.{name}" if at else name
+            if name not in decoded:
+                raise UnknownLeafField(
+                    f"leaf is not the JSON its bytes decode to: member {child} is not in it"
+                )
+            if text == "amount":
+                child_text = "decimal" if name == "value" else "exact"
+            else:
+                field_info = _serialized_field(name)
+                kind = field_info.type if field_info else ""
+                child_text = {"Amount": "amount", "Number": "decimal"}.get(kind, "exact")
+            _require_same_json(value, decoded[name], child, child_text)
+        for name in decoded:
+            if name not in given:
+                raise UnknownLeafField(
+                    "leaf is not the JSON its bytes decode to: "
+                    f"member {at + '.' if at else ''}{name} is missing"
+                )
+        return
+    if isinstance(given, list):
+        if not isinstance(decoded, list) or len(decoded) != len(given):
+            raise differs
+        for index, (value, other) in enumerate(zip(given, decoded)):
+            _require_same_json(value, other, f"{at}[{index}]")
+        return
+    if isinstance(given, str):
+        if not isinstance(decoded, str):
+            raise differs
+        if given == decoded:
+            return
+        if (
+            text == "decimal"
+            and _DECIMAL_TEXT.fullmatch(given)
+            and _DECIMAL_TEXT.fullmatch(decoded)
+            and _Decimal(given) == _Decimal(decoded)
+        ):
+            return
+        raise differs
+    # An integer token. A float, a boolean and null equal nothing a codec
+    # decodes to.
+    if (
+        isinstance(given, bool)
+        or isinstance(decoded, bool)
+        or not isinstance(given, int)
+        or not isinstance(decoded, int)
+        or given != decoded
+    ):
+        raise differs
+
+
+def require_codec_members(leaf: Any, *, is_tx: bool) -> None:
+    """A decoded leaf is exactly the JSON its own bytes decode to (§2.3).
+
+    First the members: every one is a serialized field, at every depth, with
+    a value of its type's shape. The codec drops known non-serialized names
+    such as `hash` and `index` without a word, so an unchecked member would be
+    shown but never hashed.
+
+    Then the rule that makes the rest hold: the leaf is serialized, those
+    bytes are decoded, and the two JSON values must be the same. A member the
+    codec drops, a number where a name belongs, an address or an amount in a
+    spelling the codec would not write: each serializes to bytes whose
+    decoding is some other JSON, and is refused here.
     """
     if not is_tx:
         _require_stobject_members(leaf, "")
-        return
-    if not isinstance(leaf, dict) or set(leaf) != {"tx", "meta"}:
-        raise ValueError("a tx leaf must be exactly {tx, meta}")
-    _require_stobject_members(leaf["tx"], "tx")
-    _require_stobject_members(leaf["meta"], "meta")
+        parts = [("", leaf)]
+    else:
+        if not isinstance(leaf, dict) or set(leaf) != {"tx", "meta"}:
+            raise ValueError("a tx leaf must be exactly {tx, meta}")
+        _require_stobject_members(leaf["tx"], "tx")
+        _require_stobject_members(leaf["meta"], "meta")
+        parts = [("tx", leaf["tx"]), ("meta", leaf["meta"])]
+    for at, part in parts:
+        try:
+            decoded = _as_reference(decode(encode(_for_codec(part))))
+        except Exception as exc:
+            # A leaf the codec will not serialize has no bytes to decode.
+            raise UnknownLeafField(
+                "leaf is not the JSON its bytes decode to: it does not serialize "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+        _require_same_json(part, decoded, at)
 
 
 def serialize_leaf(leaf_json: dict[str, Any], *, is_tx: bool) -> bytes:
@@ -517,10 +647,10 @@ def serialize_leaf(leaf_json: dict[str, Any], *, is_tx: bool) -> bytes:
     """
     require_codec_members(leaf_json, is_tx=is_tx)
     if is_tx:
-        tx_bytes = bytes.fromhex(encode(leaf_json["tx"]))
-        meta_bytes = bytes.fromhex(encode(leaf_json["meta"]))
+        tx_bytes = bytes.fromhex(encode(_for_codec(leaf_json["tx"])))
+        meta_bytes = bytes.fromhex(encode(_for_codec(leaf_json["meta"])))
         return vl_encode(tx_bytes) + vl_encode(meta_bytes)
-    return bytes.fromhex(encode(leaf_json))
+    return bytes.fromhex(encode(_for_codec(leaf_json)))
 
 
 def trie_branches(node: dict[str, Any], depth: int) -> dict[int, Any]:
@@ -735,11 +865,24 @@ def binary_leaf_bytes(data: bytes) -> list[tuple[str, bytes]]:
     return out
 
 
-def definitions_identity() -> str:
-    """Which field definitions this verifier decodes with (§7)."""
+def verifier_identity() -> str:
+    """The program and codec library that produced a report (§7)."""
     from importlib.metadata import version
 
-    return f"xrpl-py {version('xrpl-py')}"
+    return f"verify-xprv.py xrpl-py {version('xrpl-py')}"
+
+
+def definitions_fingerprint() -> str:
+    """A fingerprint of the definitions table this verifier decodes with.
+
+    It is taken over the installed table itself, so it changes when the table
+    does, whatever the package version says. This verifier reads leaves and
+    validations with the same table.
+    """
+    import xrpl.core.binarycodec.definitions as definitions_package
+
+    table = Path(definitions_package.__file__).parent / "definitions.json"
+    return sha512half(table.read_bytes()).hex().upper()[:16]
 
 
 def is_hash_hex(value: Any) -> bool:
@@ -1632,9 +1775,15 @@ def verify(
         trusted_key = PUBLISHER_KEY_BY_NETWORK.get(network_id)
     key_network = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper()) if trusted_key else None
 
-    # A malformed proof is a parse refusal; a proof this verifier is not
+    # A malformed proof is a parse refusal, and it is found first, as the
+    # C++ verifier finds it. A well-formed proof this verifier is not
     # configured to trust is a trust refusal.
     layer = "parse"
+    if not error:
+        try:
+            validate_json_steps(steps)
+        except ValueError as exc:
+            error = str(exc)
     if error:
         pass
     elif not trusted_key:
@@ -1643,11 +1792,6 @@ def verify(
         layer, error = "trust", f"trusted key belongs to network {key_network}, not configured network {network_id}"
     elif proof_network != network_id:
         layer, error = "trust", f"proof network_id {proof_network} does not match configured network {network_id}"
-    if not error:
-        try:
-            validate_json_steps(steps)
-        except ValueError as exc:
-            error = str(exc)
     if error:
         print(f"\n  FAIL: {error}")
         result.refuse(layer, error)
@@ -1675,6 +1819,9 @@ def verify(
     # Every authenticated ledger a root belongs to, for the leaves' report.
     ledgers_of_tx_root: dict[str, list[tuple[str, int]]] = defaultdict(list)
     ledgers_of_state_root: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    # The root each reported leaf hangs from. Its ledgers are filled in at the
+    # end, so a header that comes after the map proof still counts.
+    leaf_roots: list[str] = []
 
     print(f"\n{'=' * 60}")
     print(f"  PROOF VERIFICATION ({len(steps)} steps)")
@@ -1869,14 +2016,14 @@ def verify(
 
             print(f"    [PASS] root {root_hex[:16]}... supported by {root_source}")
             print(f"    leaves: {len(leaves)}")
-            ledgers = (ledgers_of_tx_root if is_tx else ledgers_of_state_root)[root_hex]
             for key_hex, data in leaf_bytes:
                 result.leaves.append({
                     "tree": tree,
                     "key": key_hex.upper(),
                     "bytes": data.hex().upper(),
-                    "ledgers": [{"ledger_hash": h, "ledger_index": n} for h, n in ledgers],
+                    "ledgers": [],
                 })
+                leaf_roots.append(root_hex)
             for key_hex, leaf_data in leaves:
                 if not isinstance(leaf_data, dict):
                     print(f"    leaf {key_hex[:16]}... authenticated, decode failed")
@@ -1930,6 +2077,14 @@ def verify(
             msg = f"unknown step type: {step_type!r}"
             print(f"\n  Step {i}: UNKNOWN\n    [FAIL] {msg}")
             result.refuse("parse", f"step {i}: {msg}")
+
+    # Every authenticated ledger whose root holds a leaf, wherever its header
+    # sits in the proof, once each.
+    for leaf, root_hex in zip(result.leaves, leaf_roots):
+        every = (ledgers_of_tx_root if leaf["tree"] == "tx" else ledgers_of_state_root)[root_hex]
+        leaf["ledgers"] = [
+            {"ledger_hash": h, "ledger_index": n} for h, n in dict.fromkeys(every)
+        ]
 
     # Nothing is reported as authenticated unless the whole proof verified.
     if not result.ok:
@@ -2355,12 +2510,19 @@ def main() -> None:
     # Bounded read: no file larger than any proof can be is loaded whole.
     with path.open("rb") as handle:
         raw = handle.read(MAX_JSON_PROOF_SIZE + 1)
+    def too_large(reason: str) -> None:
+        # A proof over the size cap is a refusal like any other (§8).
+        print(reason, file=sys.stderr)
+        if args.json:
+            refused = VerifyResult()
+            refused.refuse("parse", reason)
+            print(json.dumps(refused.report()), file=report_out)
+        sys.exit(1)
+
     if len(raw) > MAX_JSON_PROOF_SIZE:
-        print(f"Proof file exceeds {MAX_JSON_PROOF_SIZE} bytes", file=sys.stderr)
-        sys.exit(1)
+        too_large(f"proof file exceeds {MAX_JSON_PROOF_SIZE} bytes")
     if is_binary_proof(raw) and len(raw) > 10 + MAX_DECOMPRESSED_PROOF_SIZE:
-        print("Binary proof body exceeds the size cap", file=sys.stderr)
-        sys.exit(1)
+        too_large("binary proof body exceeds the size cap")
     extra: list[bytes] = []
     if args.manifests:
         items = json.loads(Path(args.manifests).read_text())

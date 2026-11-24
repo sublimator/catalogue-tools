@@ -2538,11 +2538,17 @@ HttpServer::handle_session(
                 auto const& body = req.body();
                 if (body.empty())
                 {
+                    // An empty body is a proof that does not parse: the same
+                    // report, with the status the endpoint always gave it.
+                    VerifyReport refused;
+                    refused.layer = "parse";
+                    refused.reason = "empty request body";
+                    auto result = to_json(refused);
+                    result["error"] = refused.reason;
                     stream.expires_after(opts_.write_timeout);
                     co_await http::async_write(
                         stream,
-                        error_response(
-                            400, "empty request body", version, keep_alive),
+                        json_response(400, result, version, keep_alive),
                         asio::redirect_error(asio::use_awaitable, ec));
                 }
                 else
@@ -2569,7 +2575,8 @@ HttpServer::handle_session(
                     // The report (§7): the authenticated headers and leaves
                     // when verified, the layer and reason when refused.
                     // `error` repeats the reason for older clients.
-                    auto result = to_json(vr.report);
+                    auto result =
+                        to_json(vr.report, "catl-xprv " + opts_.build_id);
                     if (!vr.error.empty())
                     {
                         result["error"] = vr.error;

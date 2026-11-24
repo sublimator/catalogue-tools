@@ -728,17 +728,25 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     # member nothing authenticated.
     value_rule = "spec §2.3: a leaf field that is not structured has a string or a number as its value"
     neg("null-leaf-value", value_rule, "graph", "must be a string or a number",
-        [at(f"{tx_leaf}/1/tx/InvoiceID", None)],
-        known_failing={
-            "python": {"does": "accept", "because": "xrpl-py drops a null member, so the leaf hashes as if it were absent"},
-            "cpp": {"does": "wrong-reason", "because": "refuses through a codec type error, not through the §2.3 value rule"},
-        })
+        [at(f"{tx_leaf}/1/tx/InvoiceID", None)])
     neg("bool-leaf-value", value_rule, "graph", "must be a string or a number",
-        [at(f"{state_leaf}/1/Flags", False)],
-        known_failing={
-            "python": {"does": "accept", "because": "false and true serialize as 0 and 1"},
-            "cpp": {"does": "wrong-reason", "because": "refuses through a codec type error, not through the §2.3 value rule"},
-        })
+        [at(f"{state_leaf}/1/Flags", False)])
+
+    # §2.3: a JSON leaf is the JSON its own bytes decode to. Each of these
+    # serializes to the leaf's real bytes, so only the round trip sees it.
+    roundtrip = "spec §2.3: a JSON leaf equals what its serialized bytes decode to"
+    differs = "not the JSON its bytes decode to"
+    tx = proof
+    for token in _pointer_tokens(f"{tx_leaf}/1/tx"):
+        tx = _step(tx, token)
+    neg("enum-as-a-number", roundtrip, "graph", differs,
+        [at(f"{tx_leaf}/1/tx/TransactionType", V.encode_transaction_type(tx["TransactionType"]))])
+    neg("number-as-a-string", roundtrip, "graph", differs,
+        [at(f"{tx_leaf}/1/tx/Sequence", str(tx["Sequence"]))])
+    neg("drops-with-a-leading-zero", roundtrip, "graph", differs,
+        [at(f"{tx_leaf}/1/tx/Fee", "0" + tx["Fee"])])
+    neg("lowercase-hex-in-a-leaf", roundtrip, "graph", differs,
+        [at(f"{tx_leaf}/1/tx/SigningPubKey", tx["SigningPubKey"].lower())])
     neg("tx-not-an-object", "spec §2.3: a transaction leaf's tx and meta are the decoded objects",
         "graph", "tx must be an object", [at(f"{tx_leaf}/1/tx", 123)])
     # A verifier that describes a leaf it has just refused can trip over it.

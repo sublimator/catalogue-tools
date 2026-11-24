@@ -53,7 +53,11 @@ struct VerifyReport
     std::string layer;   // on refusal: "parse", "graph" or "trust"
     std::string reason;  // on refusal
     uint32_t network_id = 0;
-    std::string definitions;  // identity of the field definitions used
+    // Fingerprints of the loaded field definitions (§7): the table the
+    // leaves were decoded with, and the table the validations were read
+    // with. They differ on Xahau, whose validations use the XRPL table.
+    std::string leaf_definitions;
+    std::string validation_definitions;
     Hash256 anchor_hash;
     int votes = 0;      // list masters whose validation counted
     int list_size = 0;  // N
@@ -103,15 +107,18 @@ VerifyReport
 verify_proof(std::span<const uint8_t> data, TrustForNetworkFn const& trust_for);
 
 /// The report as JSON (§7): `verified`, then the outputs, or `layer` and
-/// `reason`.
+/// `reason`. `verifier` names the program and build that produced an
+/// accepted report; it is kept apart from the definitions fingerprints.
 boost::json::object
-to_json(VerifyReport const& report);
+to_json(VerifyReport const& report, std::string_view verifier = {});
 
-/// A short identity for a set of field definitions, so a report says which
-/// table produced it. Two verifiers with different tables can disagree about
-/// a JSON leaf; this makes that visible.
+/// A fingerprint of a loaded set of definitions, so a report says which
+/// table produced it: every field with its code, type and flags, the type
+/// table, the transaction, ledger-entry, result and permission names, and
+/// the native currency. Any change to what the table decodes changes it. It
+/// is taken over the loaded table, not over a file, so formatting does not.
 std::string
-definitions_identity(catl::xdata::Protocol const& protocol);
+definitions_fingerprint(catl::xdata::Protocol const& protocol);
 
 #ifdef XPRV_TESTING
 /// Test-only entry point for exercising the post-anchor capability graph.

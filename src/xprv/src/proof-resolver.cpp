@@ -384,6 +384,9 @@ resolve_proof_chain_impl(
         ledgers_of_tx_root;
     std::map<std::string, std::vector<std::pair<Hash256, uint32_t>>>
         ledgers_of_state_root;
+    // The root each reported leaf hangs from. Its ledgers are filled in at
+    // the end, so a header that comes after the map proof still counts.
+    std::vector<std::string> leaf_roots;
 
     std::map<std::string, std::vector<std::string>> trusted_ledger_hashes;
     std::map<std::string, std::vector<std::string>> trusted_tx_roots;
@@ -1045,10 +1048,6 @@ resolve_proof_chain_impl(
                                 // the bytes that were hashed (§7).
                                 if (report)
                                 {
-                                    auto const& ledgers = is_state
-                                        ? ledgers_of_state_root
-                                              [computed_root_hex]
-                                        : ledgers_of_tx_root[computed_root_hex];
                                     reconstructed->walk_abbreviated(
                                         [&](catl::shamap::SHAMapNodeID const&,
                                             Hash256 const&,
@@ -1075,7 +1074,9 @@ resolve_proof_chain_impl(
                                                         item->slice().data() +
                                                             item->slice()
                                                                 .size()),
-                                                    ledgers});
+                                                    {}});
+                                            leaf_roots.push_back(
+                                                computed_root_hex);
                                         });
                                 }
 
@@ -1244,6 +1245,20 @@ resolve_proof_chain_impl(
     }
     PLOGI(verify_log, "");
 
+    // Every authenticated ledger whose root holds a leaf, wherever its header
+    // sits in the proof, once each.
+    if (report)
+        for (size_t i = 0; i < report->leaves.size(); ++i)
+        {
+            auto& leaf = report->leaves[i];
+            auto const& all = leaf.is_tx ? ledgers_of_tx_root[leaf_roots[i]]
+                                         : ledgers_of_state_root[leaf_roots[i]];
+            for (auto const& ledger : all)
+                if (std::find(leaf.ledgers.begin(), leaf.ledgers.end(), ledger) ==
+                    leaf.ledgers.end())
+                    leaf.ledgers.push_back(ledger);
+        }
+
     // Nothing is reported as authenticated unless the whole proof verified.
     if (report)
     {
@@ -1279,15 +1294,28 @@ resolve_proof_chain(
 }
 
 std::string
-definitions_identity(catl::xdata::Protocol const& protocol)
+definitions_fingerprint(catl::xdata::Protocol const& protocol)
 {
-    // The table as (code, name, type) lines in code order, hashed. It does
-    // not depend on how the definitions file was formatted.
+    // One line per thing the table says, sorted, hashed.
     std::vector<std::string> lines;
     for (auto const& field : protocol.fields())
         lines.push_back(
-            std::to_string(field.code) + " " + field.name + " " +
-            std::string(field.meta.type.name));
+            "field " + std::to_string(field.code) + " " + field.name + " " +
+            std::string(field.meta.type.name) + " " +
+            (field.meta.is_serialized ? "s" : "-") +
+            (field.meta.is_signing_field ? "g" : "-") +
+            (field.meta.is_vl_encoded ? "v" : "-"));
+    auto const names = [&](char const* kind, auto const& map) {
+        for (auto const& [name, code] : map)
+            lines.push_back(
+                std::string(kind) + " " + name + " " + std::to_string(code));
+    };
+    names("type", protocol.types());
+    names("ledger-entry", protocol.ledgerEntryTypes());
+    names("transaction", protocol.transactionTypes());
+    names("result", protocol.transactionResults());
+    names("permission", protocol.permissions());
+    lines.push_back("native " + protocol.native_currency());
     std::sort(lines.begin(), lines.end());
     catl::crypto::Sha512HalfHasher hasher;
     for (auto const& line : lines)
@@ -1296,9 +1324,7 @@ definitions_identity(catl::xdata::Protocol const& protocol)
             reinterpret_cast<uint8_t const*>(line.data()), line.size());
         hasher.update(reinterpret_cast<uint8_t const*>("\n"), 1);
     }
-    return "catl-xdata " + protocol.native_currency() + " " +
-        std::to_string(lines.size()) + " fields " +
-        upper_hex(hasher.finalize()).substr(0, 16);
+    return upper_hex(hasher.finalize()).substr(0, 16);
 }
 
 VerifyReport
@@ -1359,12 +1385,14 @@ verify_proof(std::span<const uint8_t> data, TrustForNetworkFn const& trust_for)
         return refused("graph", e.what());
     }
     report.network_id = chain.network_id;
-    report.definitions = definitions_identity(*trust->protocol);
+    report.leaf_definitions = definitions_fingerprint(*trust->protocol);
+    report.validation_definitions =
+        AnchorVerifier::validation_definitions_fingerprint();
     return report;
 }
 
 boost::json::object
-to_json(VerifyReport const& report)
+to_json(VerifyReport const& report, std::string_view verifier)
 {
     boost::json::object out;
     out["verified"] = report.verified;
@@ -1376,7 +1404,11 @@ to_json(VerifyReport const& report)
     }
     out["format_version"] = XPRV_FORMAT_VERSION;
     out["network_id"] = report.network_id;
-    out["definitions"] = report.definitions;
+    if (!verifier.empty())
+        out["verifier"] = verifier;
+    out["definitions"] = boost::json::object{
+        {"leaf", report.leaf_definitions},
+        {"validation", report.validation_definitions}};
     out["anchor"] = boost::json::object{
         {"ledger_hash", upper_hex(report.anchor_hash)},
         {"votes", report.votes},

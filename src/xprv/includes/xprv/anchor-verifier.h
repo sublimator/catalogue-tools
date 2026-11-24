@@ -79,6 +79,12 @@ public:
     static bool
     is_canonical_stvalidation(std::vector<uint8_t> const& raw);
 
+    /// Fingerprint of the definitions validations and manifests are read
+    /// with: the XRPL table, on every network (definitions_fingerprint in
+    /// proof-resolver.h).
+    static std::string
+    validation_definitions_fingerprint();
+
     /// The 33-byte `SigningPubKey` of a complete canonical `STValidation`,
     /// or nullopt when `raw` is not one.
     static std::optional<std::vector<uint8_t>>
