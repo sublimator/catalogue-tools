@@ -14,10 +14,22 @@ struct AccountIDCodec
     static constexpr std::string_view ZERO_ACCOUNT_B58 =
         "rrrrrrrrrrrrrrrrrrrrrhoLvTp";
 
+    // An account field has two wire forms, and rippled's JSON tells them
+    // apart (STAccount::getText):
+    //   - a field that was never set is an empty field (length 0), and its
+    //     JSON is the empty string. Pseudo-transactions whose Account nothing
+    //     assigns have it: UNLModify, and Xahau's Entropy in every ledger;
+    //   - a field set to an account is twenty bytes, and its JSON is the
+    //     base58 address. That includes the zero account, when it was set:
+    //     an EnableAmendment or SetFee, a payment to the zero account.
+    // So "" is the empty field and every address, the zero one too, is twenty
+    // bytes. rippled's own JSON reader refuses ""; this codec reads it,
+    // because it is what the empty field decodes to and a leaf has to
+    // serialize back to the bytes it came from.
     static size_t
     encoded_size(boost::json::value const& v)
     {
-        if (v.is_string() && v.as_string() == ZERO_ACCOUNT_B58)
+        if (v.is_string() && v.as_string().empty())
             return 0;
         return 20;
     }
@@ -44,9 +56,9 @@ struct AccountIDCodec
         return true;
     }
 
-    // From base58 string.
-    // Zero account (rrrrrrrrrrrrrrrrrrrrrhoLvTp) writes nothing — the caller
-    // (STObjectCodec) writes VL(0). Non-zero accounts write 20 bytes.
+    // From its JSON string. The empty string writes nothing: the caller
+    // (STObjectCodec) has written a length of 0. An address writes its
+    // twenty bytes.
     template <ByteSink Sink>
     static void
     encode(
@@ -54,8 +66,7 @@ struct AccountIDCodec
         std::string_view base58_addr,
         std::string const& path = {})
     {
-        // Zero account → write nothing (VL prefix will be 0)
-        if (base58_addr == ZERO_ACCOUNT_B58)
+        if (base58_addr.empty())
             return;
 
         auto decoded = base58::decode_account_id(base58_addr);
@@ -92,13 +103,10 @@ struct AccountIDCodec
     static boost::json::value
     decode(Slice const& data)
     {
-        // Empty VL = zero/default account (e.g. pseudo-transactions)
+        // An empty field is an account that was never set: "", as rippled
+        // prints it. Twenty zero bytes are the zero account's address.
         if (data.empty())
-        {
-            static const uint8_t zeros[20] = {};
-            return boost::json::string(
-                base58::encode_account_id(zeros, 20));
-        }
+            return boost::json::string("");
         return boost::json::string(
             base58::encode_account_id(data.data(), data.size()));
     }

@@ -1181,6 +1181,12 @@ TEST(LedgerSHAMap, Ledger40000)
 
 // ===========================================================================
 // Transaction type fixtures from xrpl.js — encode tx_json, compare to binary
+//
+// One value is rippled's and not xrpl.js's: the UNLModify (negative_unl)
+// entry's Account is "", which is what rippled prints for that transaction's
+// never-set account field. xrpl.js writes the zero address there and
+// special-cases the transaction type when it encodes; x-data follows rippled,
+// where "" is the empty field and the zero address is twenty zero bytes.
 // ===========================================================================
 
 class TxTypeTest : public ::testing::TestWithParam<size_t>

@@ -373,6 +373,31 @@ TEST(RippledReference, UInt64HexFromText)
         });
 }
 
+// An account field that was never set is "" and an empty field; one set to
+// the zero account is its address and twenty zero bytes.
+TEST(RippledReference, AccountText)
+{
+    auto const protocol = Protocol::load_embedded_xrpl_protocol();
+    auto const rows = section("account_decode");
+    ASSERT_EQ(rows.size(), 5u);
+    for (auto const& e : rows)
+    {
+        EXPECT_EQ(decode_object(bytes_of(e.at("hex")), protocol), e.at("json"))
+            << e.at("hex").as_string();
+    }
+}
+
+TEST(RippledReference, AccountFromText)
+{
+    auto const protocol = Protocol::load_embedded_xrpl_protocol();
+    auto const rows = section("account_encode");
+    ASSERT_EQ(rows.size(), 5u);
+    for (auto const& e : rows)
+        expect_encodes(e.as_object(), [&](auto& s) {
+            STObjectCodec::encode(s, e.at("json"), protocol, false, {});
+        });
+}
+
 // A UInt64 field that is not base ten is lowercase hex without padding.
 TEST(RippledReference, UInt64HexText)
 {

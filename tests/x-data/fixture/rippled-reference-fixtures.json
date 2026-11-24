@@ -2750,5 +2750,19 @@
     {"hex": "301400000000000000FF", "json": {"XChainClaimID": "ff"}},
     {"hex": "364F0415EB4EA0C727", "json": {"ExchangeRate": "4f0415eb4ea0c727"}},
     {"hex": "340000000000000000", "json": {"OwnerNode": "0"}}
+  ],
+  "account_decode": [
+    {"hex": "8100", "json": {"Account": ""}},
+    {"hex": "81140000000000000000000000000000000000000000", "json": {"Account": "rrrrrrrrrrrrrrrrrrrrrhoLvTp"}},
+    {"hex": "8300", "json": {"Destination": ""}},
+    {"hex": "83140000000000000000000000000000000000000000", "json": {"Destination": "rrrrrrrrrrrrrrrrrrrrrhoLvTp"}},
+    {"hex": "8114F667B0CA50CC7709A220B0561B85E53A48461FA8", "json": {"Account": "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"}}
+  ],
+  "account_encode": [
+    {"json": {"Account": "rrrrrrrrrrrrrrrrrrrrrhoLvTp"}, "hex": "81140000000000000000000000000000000000000000"},
+    {"json": {"Destination": "rrrrrrrrrrrrrrrrrrrrrhoLvTp"}, "hex": "83140000000000000000000000000000000000000000"},
+    {"json": {"Account": "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"}, "hex": "8114F667B0CA50CC7709A220B0561B85E53A48461FA8"},
+    {"json": {"Account": ""}, "refused": "Field 'input.Account' has invalid data.", "xdata": "8100", "why": "rippled prints an account field that was never set as \"\" and will not read that back; x-data writes the empty field it decodes from, so the pair round-trips"},
+    {"json": {"Destination": ""}, "refused": "Field 'input.Destination' has invalid data.", "xdata": "8300", "why": "rippled prints an account field that was never set as \"\" and will not read that back; x-data writes the empty field it decodes from, so the pair round-trips"}
   ]
 }

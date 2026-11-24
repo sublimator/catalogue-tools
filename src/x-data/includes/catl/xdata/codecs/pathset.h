@@ -38,9 +38,8 @@ struct PathSetCodec
         return size;
     }
 
-    /// A step's account or issuer is always 20 bytes on the wire. The zero
-    /// account is 20 zero bytes here, not the empty value AccountIDCodec
-    /// writes for a top-level account field.
+    /// A step's account or issuer is always 20 bytes on the wire: the zero
+    /// account is 20 zero bytes, and a step has no "never set" form.
     template <ByteSink Sink>
     static void
     encode_step_account(Serializer<Sink>& s, std::string_view base58_addr)

@@ -18,6 +18,8 @@ What it covers, and why:
              cutovers, trailing-zero mantissas, values that need rounding.
   pathset    a step's currency through the same currency rules.
   bridge     both issues of an XChainBridge.
+  account    a field never set ("" and an empty field) against one set to the
+             zero account (its address and twenty zero bytes).
   uint64     which UInt64 fields rippled treats as base-ten, and their decimal
              text at 0, 1, 255, 2^63 - 1, 2^63 and 2^64 - 1, with what it
              refuses. Then every other UInt64 field as hex: x-data reads those
@@ -416,6 +418,25 @@ def build(oracle: Oracle) -> dict:
     fx["uint64_hex_encode"] = encode_section(oracle, "stobject", "uint64_hex_encode", hex_inputs, as_json=True)
     fx["uint64_hex_decode"] = decode_section(
         oracle, "stobject", [e["hex"] for e in fx["uint64_hex_encode"] if "hex" in e], as_json=True)
+
+    # ── account fields: one never set, and one set to the zero account ──
+    # STAccount writes a field that was never set as an empty field and
+    # prints it as "", and writes the zero account, once set, as twenty zero
+    # bytes and prints its address. 0x81 is Account, 0x83 Destination.
+    fx["account_decode"] = decode_section(
+        oracle, "stobject",
+        ["8100", "8114" + Z20, "8300", "8314" + Z20, "8114" + ALICE_HEX], as_json=True)
+    for name, header in (("Account", "81"), ("Destination", "83")):
+        DEVIATIONS[("account_encode", json.dumps({name: ""}))] = (
+            header + "00",
+            "rippled prints an account field that was never set as \"\" and will not read "
+            "that back; x-data writes the empty field it decodes from, so the pair round-trips",
+        )
+    fx["account_encode"] = encode_section(
+        oracle, "stobject", "account_encode",
+        [{"Account": ZERO_ACCOUNT}, {"Destination": ZERO_ACCOUNT}, {"Account": ALICE},
+         {"Account": ""}, {"Destination": ""}],
+        as_json=True)
     return fx
 
 
