@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["xrpl-py==5.2.0"]
+# dependencies = ["xrpl-py==5.2.0", "pynacl>=1.5,<2"]
 # ///
 """
 Standalone Python verifier for xprv proofs (JSON and binary).
@@ -40,6 +40,7 @@ from typing import Any, Literal, TypedDict
 
 import zlib
 
+import nacl.signing
 import xrpl.core.keypairs
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
 from xrpl.core.binarycodec.definitions.definitions import get_field_instance
@@ -526,6 +527,12 @@ def _require_stobject_members(obj: Any, path: str) -> None:
 # - an issued amount's value: rippled keeps the 16-digit mantissa
 #   (1000000000000000e-3); xrpl-py writes plain digits (1000000000000);
 # - a Number whose exponent is zero: xrpl-py appends "e0".
+# One thing it cannot do at all: an issued amount whose currency is the
+# reserved code, the three letters of the native code in the place of an
+# issued currency's (00..00 58 52 50 00..00). rippled reads and writes that
+# as 40 hex digits; xrpl-py refuses to encode or decode it. This verifier
+# refuses a JSON leaf that holds one, and such a proof verifies in its binary
+# form. None is known in a validated ledger.
 _BASE_TEN_UINT64 = frozenset({"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount"})
 _RIPPLED_HEX_UINT64 = re.compile(r"[0-9a-f]{1,16}")
 _STEP_TYPE = {"account": 0x01, "currency": 0x10, "issuer": 0x20}
@@ -992,7 +999,7 @@ def verifier_identity() -> str:
     from importlib.metadata import version
 
     digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
-    return f"verify-xprv.py {digest} xrpl-py {version('xrpl-py')}"
+    return f"verify-xprv.py {digest} xrpl-py {version('xrpl-py')} pynacl {version('pynacl')}"
 
 
 def definitions_fingerprint() -> str:
@@ -1244,24 +1251,31 @@ def secp256k1_signature_is_canonical(sig: bytes) -> bool:
     return 0 < r[0] < SECP256K1_ORDER and 0 < s_[0] <= SECP256K1_ORDER // 2
 
 
-def ed25519_signature_is_canonical(sig: bytes) -> bool:
-    """64 bytes with S < L, as libsodium requires.
+def ed25519_verify(data: bytes, signature: bytes, key: bytes) -> bool:
+    """Ed25519 as libsodium verifies it (§5.1), which is what rippled and the
+    C++ verifier use.
 
-    S and S + L verify identically under the group law, so without this the
-    same signature has two encodings and Python accepts one C++ rejects.
+    The group equation alone leaves room: S and S + L satisfy it alike, and
+    so does a signature whose R, or a key whose A, is a point of small order.
+    libsodium refuses each of those, and a point that is not in its canonical
+    encoding. A verifier that checks only the equation accepts bytes this one
+    refuses, so the check is libsodium's own, not a description of it.
     """
-    return len(sig) == 64 and int.from_bytes(sig[32:], "little") < ED25519_ORDER
+    if len(key) != 32 or len(signature) != 64:
+        return False
+    try:
+        nacl.signing.VerifyKey(key).verify(data, signature)
+    except Exception:
+        return False
+    return True
 
 
 def verify_signature(data: bytes, signature: bytes, key_hex: str) -> bool:
     """The one signature check for every XRPL signature this verifier sees."""
     try:
-        canonical = (
-            ed25519_signature_is_canonical(signature)
-            if key_hex.upper().startswith("ED")
-            else secp256k1_signature_is_canonical(signature)
-        )
-        if not canonical:
+        if key_hex.upper().startswith("ED"):
+            return ed25519_verify(data, signature, bytes.fromhex(key_hex)[1:])
+        if not secp256k1_signature_is_canonical(signature):
             return False
         return xrpl.core.keypairs.is_valid_message(data, signature, key_hex)
     except Exception:

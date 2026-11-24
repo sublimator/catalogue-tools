@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["xrpl-py==5.2.0"]
+# dependencies = ["xrpl-py==5.2.0", "pynacl>=1.5,<2"]
 # ///
 """Tests of the Python verifier that no shared vector carries.
 

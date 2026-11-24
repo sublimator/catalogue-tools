@@ -15,6 +15,7 @@ Call `use(verifier)` first: the helpers need the Python verifier's primitives.
 from __future__ import annotations
 
 import base64
+import hashlib
 import copy
 import json
 import struct
@@ -23,7 +24,7 @@ from typing import Any
 
 from xrpl import CryptoAlgorithm
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
-from xrpl.core.keypairs import derive_keypair, generate_seed, sign
+from xrpl.core.keypairs import derive_keypair, generate_seed, is_valid_message, sign
 
 v: Any = None  # scripts/verify-xprv.py, set by use()
 
@@ -204,6 +205,37 @@ def padded_r(sig: bytes) -> bytes:
 def s_plus_l(sig: bytes) -> bytes:
     s = int.from_bytes(sig[32:], "little") + v.ED25519_ORDER
     return sig[:32] + s.to_bytes(32, "little")
+
+
+# The neutral point of the curve, in its canonical encoding. Its order is 1,
+# so it is the simplest point of small order.
+NEUTRAL_POINT = b"\x01" + bytes(31)
+
+
+def ed25519_scalar(private_hex: str) -> int:
+    """The secret scalar behind a test key (RFC 8032 §5.1.5)."""
+    h = bytearray(hashlib.sha512(unhexlify(private_hex)[-32:]).digest()[:32])
+    h[0] &= 248
+    h[31] = (h[31] & 127) | 64
+    return int.from_bytes(h, "little")
+
+
+def neutral_r_signature(data: bytes, key: tuple[str, str]) -> bytes:
+    """A signature by `key` over `data` whose R is the neutral point.
+
+    Verification checks [S]B = R + [k]A. With R neutral and S = k * a that
+    holds for the real key, so a verifier that checks only the equation
+    accepts it. libsodium refuses an R of small order.
+    """
+    public = unhexlify(key[0])[1:]
+    k = int.from_bytes(hashlib.sha512(NEUTRAL_POINT + public + data).digest(), "little")
+    s = k * ed25519_scalar(key[1]) % v.ED25519_ORDER
+    return NEUTRAL_POINT + s.to_bytes(32, "little")
+
+
+def validation_signing_data(fields: dict) -> bytes:
+    unsigned = {k: val for k, val in fields.items() if k != "Signature"}
+    return v.PREFIX_VALIDATION + unhexlify(encode_for_signing(unsigned))[4:]
 
 
 # ─── the binary form of a synthetic proof ────────────────────────────
@@ -459,6 +491,50 @@ def cases() -> list[dict[str, Any]]:
     for key in list(anchor["validations"])[:2]:
         anchor["validations"][key] = with_signature(anchor["validations"][key], s_plus_l)
     add("ed25519-s-plus-l-signatures", canonical, proof_of(anchor), f, reason="quorum not met")
+
+    # What libsodium refuses beyond S >= L (§5.1). Both of these satisfy the
+    # verification equation [S]B = R + [k]A. For the first that is asserted
+    # here with xrpl-py's own verifier, which checks the equation and accepts
+    # it: without libsodium the Python verifier counted these votes.
+    def equation_holds(data: bytes, signature: bytes, key_hex: str) -> bool:
+        return is_valid_message(data, signature, key_hex)
+
+    f = Fixture()
+    anchor = f.anchor()
+    for signer in f.signers[:2]:
+        fields = decode(anchor["validations"][signer[0]])
+        data = validation_signing_data(fields)
+        signature = neutral_r_signature(data, signer)
+        assert equation_holds(data, signature, signer[0]), "the neutral-R signature should satisfy the equation"
+        anchor["validations"][signer[0]] = encode({**fields, "Signature": hexlify(signature).decode().upper()})
+    add("ed25519-small-order-r-signatures",
+        "spec §5.1: an Ed25519 signature whose R is a point of small order is not canonical; its vote is uncounted",
+        proof_of(anchor), f, reason="quorum not met")
+
+    # A listed master delegates to the neutral point as its signing key. Under
+    # the equation alone, (neutral, 0) is then a signature of anything by that
+    # key, since [0]B and neutral + [k]neutral are both the neutral point: of
+    # the manifest, and of a validation of any ledger. Three honest votes and
+    # this one make four of five. (xrpl-py's verifier happens to refuse this
+    # key, so the equation is not asserted here; one that follows ZIP 215 or
+    # checks the equation directly accepts it.)
+    f = Fixture()
+    neutral_key = "ED" + hexlify(NEUTRAL_POINT).decode().upper()
+    forged = NEUTRAL_POINT + bytes(32)
+    master = f.masters[0]
+    fields = {"Sequence": 1, "PublicKey": master[0], "SigningPubKey": neutral_key}
+    data = v.manifest_signing_data(fields)
+    fields["Signature"] = hexlify(forged).decode().upper()
+    fields["MasterSignature"] = sign(data, master[1])
+    f.entries[0]["manifest"] = b64(unhexlify(encode(fields)))
+    f.voters = f.signers[1:4]
+    anchor = f.anchor()
+    vote = {k: val for k, val in decode(make_validation(f.signers[0], ANCHOR_HASH)).items() if k != "Signature"}
+    vote["SigningPubKey"] = neutral_key
+    anchor["validations"][neutral_key] = encode({**vote, "Signature": hexlify(forged).decode().upper()})
+    add("manifest-delegating-to-a-small-order-key",
+        "spec §5.1: an Ed25519 key of small order signs nothing; a manifest that delegates to one is invalid",
+        proof_of(anchor), f, reason="manifest")
 
     # ── the closed unl object ────────────────────────────────────────
     f = Fixture()
