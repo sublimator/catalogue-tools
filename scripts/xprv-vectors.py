@@ -40,6 +40,28 @@ is recorded.
 Accept vectors are the same shape with the opposite assertion: an edit of a
 positive vector that a verifier MUST still accept.
 
+The edits. `json_patch` is a list of {op, path, ...} on the base's JSON form:
+`set` and `remove` at a JSON pointer, `select` (the value at a pointer becomes
+the document) and `duplicate` (the object at `path` gets a second member named
+`key`, with `value`; only text can say that, so it is applied to the text).
+`mutations` is a list of byte edits on the base's binary form: {at, set_hex},
+{insert_at, insert_hex}, {delete_at, delete_len}, {truncate_to}, {append_hex},
+{append_zeros: N}, {compress_body: level}, {append_zlib_zeros: N} (one whole
+zlib stream of N zero bytes), {drop_last: N} and {xor_last: hex}.
+
+Trust-layer rules cannot be edits of a captured proof: every edit breaks a
+real signature. Those vectors are inline. Each carries its whole proof under
+`form` (`json`, and `binary_hex` where the proof has a binary form), built by
+scripts/xprv_trust_world.py from test keys, and its own `trust`. A runner
+checks every form a vector carries. `trust` is {network_id, publisher_key} and
+may list `manifests`: base64 raw manifests the verifier holds from outside the
+proof (spec §1.3). A derived vector takes its base's trust unless it names its
+own.
+
+`reason_contains` is the longest phrase both verifiers give for the refusal.
+Where they share no phrase it is the narrowest word they share, and the rule
+is then carried by the verdict alone.
+
 A vector may carry `known_failing`, an object naming the verifiers ("cpp",
 "python") that do not yet meet its expectation. Each entry says what the
 verifier `does` instead (accept, reject, wrong-reason, abnormal or timeout)
@@ -54,7 +76,11 @@ Commands
 --------
 annotate  derive intermediates from a proof and write a positive vector
 mutate    generate the accept and negative families from a positive vector
+trust     generate the inline trust-world vectors (accept-trust-*, negative-trust-*)
 check     verify every vector; assert verdicts AND recorded intermediates
+
+`mutate` and `trust` are deterministic: a second run changes no file. Each
+removes a vector it no longer generates.
 """
 from __future__ import annotations
 
