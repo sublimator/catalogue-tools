@@ -356,11 +356,15 @@ def _serialized_field(name: str) -> Any:
 
 
 def _is_native_code(value: Any) -> bool:
-    """The native asset's code. xrpl-py is an XRPL codec, so it is XRP.
+    """The native asset's code as xrpl-py, an XRPL codec, serializes it: XRP.
 
-    XAH is an ordinary issued currency on XRPL, and is traded there. This
-    verifier checks no Xahau JSON leaves (Appendix A), so it never needs XAH
-    as the native code.
+    XAH is an ordinary issued currency on XRPL, and is traded there. On a
+    Xahau JSON proof this verifier still re-serializes each leaf with the
+    XRPL codec and compares the result with the authenticated root, so it
+    accepts a Xahau leaf only when that codec reproduces its exact bytes, and
+    refuses the rest: a field xrpl-py does not define, or a native XAH issue.
+    It cannot accept a leaf whose bytes it got wrong. A Xahau binary proof
+    needs no codec and verifies in full (Appendix A).
     """
     return value == "XRP"
 
