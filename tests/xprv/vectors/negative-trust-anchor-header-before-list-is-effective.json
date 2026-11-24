@@ -51,7 +51,7 @@
     "reason_contains": "anchor close time is outside the"
   },
   "observed": {
-    "python_reason": "step 2: anchor close time is outside the signed list interval"
+    "python_reason": "step 1: anchor: anchor close time is outside the signed list interval; step 2: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf"
   },
   "generator": "trust"
 }

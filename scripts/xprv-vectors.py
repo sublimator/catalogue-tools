@@ -54,9 +54,9 @@ real signature. Those vectors are inline. Each carries its whole proof under
 `form` (`json`, and `binary_hex` where the proof has a binary form), built by
 scripts/xprv_trust_world.py from test keys, and its own `trust`. A runner
 checks every form a vector carries. `trust` is {network_id, publisher_key} and
-may list `manifests`: base64 raw manifests the verifier holds from outside the
-proof (spec §1.3). A derived vector is checked under its base's trust unless
-it names its own; no vector does yet.
+may list `manifests` (base64 raw manifests) and `lists` (XRPL v1/v2 VL site
+documents) the verifier holds from outside the proof (spec §1.3, §3.3). A
+derived vector is checked under its base's trust unless it names its own.
 
 `reason_contains` is the longest phrase both verifiers give for the refusal.
 Where they share no phrase it is the narrowest word they share, and the rule
@@ -238,13 +238,20 @@ def python_verdict(
     """
     buf = io.StringIO()
     trust = trust or {}
-    # Validator and publisher manifests the verifier holds from outside the
-    # proof (§1.3), as base64 raw manifests.
+    # Validator and publisher manifests and external signed lists the verifier
+    # holds from outside the proof (§1.3, §3.3).
     held = [base64.b64decode(m) for m in trust.get("manifests", [])]
+    held_lists = V.parse_external_validator_lists(trust.get("lists", []))
     try:
         with redirect_stdout(buf):
             proof = V.binary_to_proof(raw) if binary or V.is_binary_proof(raw) else V.load_json_proof(raw)
-            res = V.verify(proof, trust.get("publisher_key"), trust.get("network_id"), held)
+            res = V.verify(
+                proof,
+                trust.get("publisher_key"),
+                trust.get("network_id"),
+                held,
+                extra_lists=held_lists,
+            )
         return bool(res.ok), "; ".join(res.errors) or "ok"
     except Exception as exc:  # a parse refusal is a legitimate reject
         return False, f"{type(exc).__name__}: {exc}"
@@ -507,7 +514,19 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
     return fam
 
 
-def mutation_accept_family(raw: bytes) -> list[dict[str, Any]]:
+def _vl_v1_doc_from_base(base: dict[str, Any]) -> dict[str, Any]:
+    """Build an XRPL v1 VL site document from the base proof's bundled UNL."""
+    unl = base["form"]["json"]["steps"][0]["unl"]
+    return {
+        "version": 1,
+        "public_key": unl["public_key"],
+        "manifest": base64.b64encode(bytes.fromhex(unl["manifest"])).decode(),
+        "blob": base64.b64encode(bytes.fromhex(unl["blob"])).decode(),
+        "signature": unl["signature"],
+    }
+
+
+def mutation_accept_family(raw: bytes, base: dict[str, Any]) -> list[dict[str, Any]]:
     """Byte edits of a valid binary proof that a verifier MUST still accept."""
     return [
         {
@@ -517,6 +536,14 @@ def mutation_accept_family(raw: bytes) -> list[dict[str, Any]]:
             "expect": {"verdict": "accept"},
         }
         for level in (1, 9)
+    ] + [
+        {
+            "name": "listless-binary",
+            "states": "spec §3.3: a 0x05-omitted binary proof verifies when the verifier holds the primary list externally",
+            "mutations": [{"truncate_to": _record_offsets(raw)[-1][1]}],
+            "trust": {**base["trust"], "lists": [_vl_v1_doc_from_base(base)]},
+            "expect": {"verdict": "accept"},
+        }
     ]
 
 
@@ -1087,13 +1114,27 @@ def patch_accept_family(base: dict[str, Any], base_name: str) -> list[dict[str, 
         for pointer in depth_pointers(step["trie"], f"/steps/{i}/trie")
     ]
     assert diagnostics, "the base carries no __depth__ to remove"
-    family = [{
-        "name": "no-depth-diagnostics",
-        "states": "spec §2.3: __depth__ is an optional diagnostic; a trie without any verifies",
-        "base": base_name,
-        "json_patch": [{"op": "remove", "path": pointer} for pointer in diagnostics],
-        "expect": {"verdict": "accept"},
-    }]
+    family = [
+        {
+            "name": "no-depth-diagnostics",
+            "states": "spec §2.3: __depth__ is an optional diagnostic; a trie without any verifies",
+            "base": base_name,
+            "json_patch": [{"op": "remove", "path": pointer} for pointer in diagnostics],
+            "expect": {"verdict": "accept"},
+        },
+        {
+            "name": "listless-json",
+            "states": "spec §2.1, §3.3: a list-less JSON proof (unl with public_key only) verifies when the verifier holds the primary list externally",
+            "base": base_name,
+            "trust": {**base["trust"], "lists": [_vl_v1_doc_from_base(base)]},
+            "json_patch": [
+                {"op": "remove", "path": "/steps/0/unl/manifest"},
+                {"op": "remove", "path": "/steps/0/unl/blob"},
+                {"op": "remove", "path": "/steps/0/unl/signature"},
+            ],
+            "expect": {"verdict": "accept"},
+        },
+    ]
     return family
 
 
@@ -1277,7 +1318,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
             return 1
     for acc in accept_family:
         data = patched_text(base["form"]["json"], acc["json_patch"]).encode()
-        ok, reason = python_verdict(data, trust=base["trust"])
+        ok, reason = python_verdict(data, trust=acc.get("trust") or base["trust"])
         if not ok:
             LOG.error("accept vector %r was REFUSED by the reference verifier (%s); "
                       "not writing a vector that asserts a false claim", acc["name"], reason)
@@ -1288,7 +1329,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         written += 1
     for neg in negative_family_json:
         data = patched_text(base["form"]["json"], neg["json_patch"]).encode()
-        ok, reason = python_verdict(data, trust=base["trust"])
+        ok, reason = python_verdict(data, trust=neg.get("trust") or base["trust"])
         tagged = "python" in neg.get("known_failing", {})
         want = neg["expect"]["reason_contains"].lower()
         met = not ok and want in reason.lower()
@@ -1305,9 +1346,9 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         out.write_text(json.dumps(generated(neg, generator), indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
         written += 1
-    for acc in ([] if args.only_issued else mutation_accept_family(raw)):
+    for acc in ([] if args.only_issued else mutation_accept_family(raw, base)):
         mutated = apply_mutations(raw, acc["mutations"])
-        ok, reason = python_verdict(mutated, binary=True, trust=base["trust"])
+        ok, reason = python_verdict(mutated, binary=True, trust=acc.get("trust") or base["trust"])
         if mutated == raw or not ok:
             LOG.error("accept vector %r %s; not writing a vector that asserts a false claim",
                       acc["name"], "changes nothing" if mutated == raw else f"was REFUSED ({reason})")
@@ -1319,7 +1360,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         written += 1
     for neg in ([] if args.only_issued else negative_family(raw)):
         mutated = apply_mutations(raw, neg["mutations"])
-        ok, reason = python_verdict(mutated, binary=True, trust=base["trust"])
+        ok, reason = python_verdict(mutated, binary=True, trust=neg.get("trust") or base["trust"])
         if ok:
             LOG.error("mutation %r was ACCEPTED by the reference verifier — "
                       "either the mutation does not land or there is a real "
@@ -1337,7 +1378,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     # removed: not another generator's vectors, not a hand-written one.
     expected = {
         f"accept-{v['name']}.json"
-        for v in accept_family + ([] if args.only_issued else mutation_accept_family(raw))
+        for v in accept_family + ([] if args.only_issued else mutation_accept_family(raw, base))
     } | {
         f"negative-{v['name']}.json"
         for v in negative_family_json + ([] if args.only_issued else negative_family(raw))

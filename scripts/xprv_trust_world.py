@@ -129,26 +129,97 @@ class Fixture:
     def trusted_key(self) -> str:
         return self.publisher[0]
 
-    def anchor(self, *, publisher=None, publisher_signing=None, claimed_key=None, ledger_hash=None) -> dict:
+    def anchor(
+        self,
+        *,
+        publisher=None,
+        publisher_signing=None,
+        publisher_seq: int = 1,
+        claimed_key=None,
+        ledger_hash=None,
+        listless: bool = False,
+    ) -> dict:
         publisher = publisher or self.publisher
         publisher_signing = publisher_signing or self.publisher_signing
         ledger_hash = ledger_hash or ANCHOR_HASH
-        text = self.blob_text or json.dumps({**self.blob_fields, "validators": self.entries})
-        blob = text.encode()
+        if listless:
+            unl: dict[str, str] = {"public_key": claimed_key or publisher[0]}
+        else:
+            text = self.blob_text or json.dumps({**self.blob_fields, "validators": self.entries})
+            blob = text.encode()
+            unl = {
+                "public_key": claimed_key or publisher[0],
+                "manifest": hexlify(make_manifest(publisher, publisher_signing, seq=publisher_seq)).decode().upper(),
+                "blob": hexlify(blob).decode().upper(),
+                "signature": sign(blob, publisher_signing[1]),
+            }
         return {
             "type": "anchor",
             "ledger_hash": ledger_hash,
-            "unl": {
-                "public_key": claimed_key or publisher[0],
-                "manifest": hexlify(make_manifest(publisher, publisher_signing)).decode().upper(),
-                "blob": hexlify(blob).decode().upper(),
-                "signature": sign(blob, publisher_signing[1]),
-            },
+            "unl": unl,
             "validations": {
                 **{s[0]: make_validation(s, ledger_hash) for s in self.voters},
                 **{s[0]: make_validation(s, ledger_hash, full=False) for s in self.partial_voters},
             },
         }
+
+    def vl_doc_v1(
+        self,
+        *,
+        publisher=None,
+        publisher_signing=None,
+        publisher_seq: int = 1,
+        manifest_bytes: bytes | None = None,
+        blob_fields: dict | None = None,
+        entries: list[dict] | None = None,
+        blob_bytes: bytes | None = None,
+        signer=None,
+        include_public_key: bool = True,
+    ) -> dict[str, Any]:
+        """Build an XRPL v1 VL site document (base64 manifest & blob, hex signature)."""
+        publisher = publisher or self.publisher
+        publisher_signing = publisher_signing or self.publisher_signing
+        signer = signer or publisher_signing
+        m_raw = manifest_bytes if manifest_bytes is not None else make_manifest(
+            publisher, publisher_signing, seq=publisher_seq
+        )
+        if blob_bytes is None:
+            fields = blob_fields if blob_fields is not None else self.blob_fields
+            ents = entries if entries is not None else self.entries
+            blob_bytes = json.dumps({**fields, "validators": ents}).encode()
+        doc: dict[str, Any] = {
+            "version": 1,
+            "manifest": base64.b64encode(m_raw).decode(),
+            "blob": base64.b64encode(blob_bytes).decode(),
+            "signature": sign(blob_bytes, signer[1]),
+        }
+        if include_public_key:
+            doc["public_key"] = publisher[0]
+        return doc
+
+    def vl_doc_v2(
+        self,
+        blobs: list[dict[str, Any]],
+        *,
+        publisher=None,
+        publisher_signing=None,
+        publisher_seq: int = 1,
+        manifest_bytes: bytes | None = None,
+        include_doc_manifest: bool = True,
+        include_public_key: bool = True,
+    ) -> dict[str, Any]:
+        """Build an XRPL v2 VL site document with blobs_v2."""
+        publisher = publisher or self.publisher
+        publisher_signing = publisher_signing or self.publisher_signing
+        doc: dict[str, Any] = {"version": 2, "blobs_v2": blobs}
+        if include_public_key:
+            doc["public_key"] = publisher[0]
+        if include_doc_manifest:
+            m_raw = manifest_bytes if manifest_bytes is not None else make_manifest(
+                publisher, publisher_signing, seq=publisher_seq
+            )
+            doc["manifest"] = base64.b64encode(m_raw).decode()
+        return doc
 
     def proof(self, network_id: int = 0, header: dict | None = None, **anchor_kw) -> dict:
         return {
@@ -317,7 +388,8 @@ def cases() -> list[dict[str, Any]]:
         return {"format_version": v.FORMAT_VERSION, "network_id": 0, "steps": list(steps)}
 
     def add(name: str, rule: str, proof: dict, f: Fixture, *, reason: str | None = None,
-            layer: str = "trust", manifests: list[bytes] | None = None, binary: bool = False,
+            layer: str = "trust", manifests: list[bytes] | None = None,
+            lists: list[dict[str, Any]] | None = None, binary: bool = False,
             known_failing: dict[str, dict[str, str]] | None = None) -> None:
         accept = reason is None
         vec: dict[str, Any] = {"name": f"trust-{name}"}
@@ -327,6 +399,8 @@ def cases() -> list[dict[str, Any]]:
         vec["trust"] = {"network_id": 0, "publisher_key": f.trusted_key}
         if manifests is not None:
             vec["trust"]["manifests"] = [base64.b64encode(m).decode() for m in manifests]
+        if lists is not None:
+            vec["trust"]["lists"] = lists
         vec["form"] = {"binary_hex": binary_proof(proof).hex().upper()} if binary else {"json": proof}
         vec["expect"] = {"verdict": "accept"} if accept else {"verdict": "reject", "reason_contains": reason}
         if known_failing:
@@ -760,6 +834,191 @@ def cases() -> list[dict[str, Any]]:
     f = Fixture()
     f.blob_fields["effective"] = HEADER["close_time"]
     add("anchor-header-as-list-becomes-effective", window, f.proof(), f)
+
+    # ── external primary validator lists & list-less proofs (§1.3, §3.3) ──
+    ext_rule = "spec §1.3, §3.3: a list-less proof verifies when the verifier holds a valid primary list externally"
+    f = Fixture()
+    add("listless-from-external-v1", ext_rule, f.proof(listless=True), f, lists=[f.vl_doc_v1()])
+
+    # XRPL v2 VL document with blobs_v2 and per-entry manifest override.
+    f = Fixture()
+    v2_blob = json.dumps({**f.blob_fields, "validators": f.entries}).encode()
+    v2_doc = f.vl_doc_v2(
+        [
+            {
+                "manifest": b64(make_manifest(f.publisher, f.publisher_signing, seq=2)),
+                "blob": b64(v2_blob),
+                "signature": sign(v2_blob, f.publisher_signing[1]),
+            }
+        ],
+        include_doc_manifest=False,
+    )
+    add("listless-from-external-v2",
+        "spec §1.3, §3.3: a list-less proof verifies against an external XRPL v2 (blobs_v2) VL document",
+        f.proof(listless=True), f, lists=[v2_doc])
+
+    # Anchor-only list-less proof: skips close-time filter, picks highest sequence.
+    f = Fixture()
+    alt_masters = [keypair(600 + i) for i in range(5)]
+    alt_signers = [keypair(605 + i) for i in range(5)]
+    alt_entries = [
+        {"validation_public_key": m[0], "manifest": b64(make_manifest(m, s))}
+        for m, s in zip(alt_masters, alt_signers)
+    ]
+    f.voters = alt_signers
+    doc_seq1 = f.vl_doc_v1(blob_fields={"sequence": 1, "expiration": 900000000})
+    doc_seq2 = f.vl_doc_v1(blob_fields={"sequence": 2, "expiration": 900000000}, entries=alt_entries)
+    add("listless-anchor-only-picks-highest-sequence",
+        "spec §1.3 P3: an anchor-only list-less proof selects the highest-sequence external candidate",
+        proof_of(f.anchor(listless=True)), f, lists=[doc_seq1, doc_seq2])
+
+    # §1.3 P2/P3 non-poisoning: a bad bundled list never poisons a valid held list.
+    rescue = "spec §1.3 P2/P3: an invalid bundled list is not a candidate and does not poison a held primary list"
+    f = Fixture()
+    ext_good = f.vl_doc_v1()
+    proof = f.proof()
+    bad_sig = bytearray(unhexlify(proof["steps"][0]["unl"]["signature"]))
+    bad_sig[0] ^= 0xFF
+    proof["steps"][0]["unl"]["signature"] = bad_sig.hex().upper()
+    add("external-list-rescues-corrupt-bundled-blob", rescue, proof, f, lists=[ext_good])
+
+    f = Fixture()
+    ext_good = f.vl_doc_v1()
+    clean_b64 = _padded_manifest(f)
+    f.entries[0]["manifest"] = clean_b64.rstrip("=")  # fails P3 well-formedness
+    add("external-list-rescues-bad-bundled-p3-base64", rescue, f.proof(), f, lists=[ext_good])
+
+    f = Fixture()
+    ext_good = f.vl_doc_v1()
+    proof = f.proof()
+    bad_man = bytearray(unhexlify(proof["steps"][0]["unl"]["manifest"]))
+    bad_man[-1] ^= 0xFF
+    proof["steps"][0]["unl"]["manifest"] = bad_man.hex().upper()
+    add("external-list-rescues-bad-bundled-manifest", rescue, proof, f, lists=[ext_good])
+
+    # §1.3 P3 close-time selection: seq 3 is future at close_time=800000000, so seq 2 wins over seq 1.
+    f = Fixture()
+    s2_masters = [keypair(610 + i) for i in range(5)]
+    s2_signers = [keypair(615 + i) for i in range(5)]
+    s3_masters = [keypair(620 + i) for i in range(5)]
+    s3_signers = [keypair(625 + i) for i in range(5)]
+    s2_entries = [
+        {"validation_public_key": m[0], "manifest": b64(make_manifest(m, s))}
+        for m, s in zip(s2_masters, s2_signers)
+    ]
+    s3_entries = [
+        {"validation_public_key": m[0], "manifest": b64(make_manifest(m, s))}
+        for m, s in zip(s3_masters, s3_signers)
+    ]
+    f.voters = s2_signers
+    add("external-list-selects-window-at-close-time",
+        "spec §1.3 P3: primary selection picks the highest sequence active at anchor close_time, ignoring future lists",
+        f.proof(listless=True), f,
+        lists=[
+            f.vl_doc_v1(blob_fields={"sequence": 1, "effective": 0, "expiration": 900000000}),
+            f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 700000000, "expiration": 850000000}, entries=s2_entries),
+            f.vl_doc_v1(blob_fields={"sequence": 3, "effective": 850000000, "expiration": 950000000}, entries=s3_entries),
+        ])
+
+    # §1.3 P4: non-primary lower-sequence list contributes its validator manifests to delegation resolution.
+    f = Fixture()
+    rotated_p4 = keypair(630)
+    low_entries = [dict(e) for e in f.entries]
+    low_entries[0]["manifest"] = b64(make_manifest(f.masters[0], rotated_p4, seq=2))
+    f.voters = [rotated_p4] + f.signers[1:4]
+    add("lower-sequence-list-refreshes-delegation",
+        "spec §1.3 P4: a lower-sequence list from the same publisher contributes its validator manifests",
+        f.proof(listless=True), f,
+        lists=[
+            f.vl_doc_v1(blob_fields={"sequence": 1, "expiration": 900000000}, entries=low_entries),
+            f.vl_doc_v1(blob_fields={"sequence": 2, "expiration": 900000000}),
+        ])
+
+    # §1.3 P2: superseded-key list is not a primary candidate, but its validator manifests still refresh delegations.
+    f = Fixture()
+    pub_new = keypair(640)
+    rotated_p2 = keypair(641)
+    old_entries = [dict(e) for e in f.entries]
+    old_entries[0]["manifest"] = b64(make_manifest(f.masters[0], rotated_p2, seq=2))
+    f.voters = [rotated_p2] + f.signers[1:4]
+    old_doc = f.vl_doc_v1(
+        publisher_signing=f.publisher_signing, publisher_seq=1,
+        blob_fields={"sequence": 1, "expiration": 900000000}, entries=old_entries,
+    )
+    new_doc = f.vl_doc_v1(
+        publisher_signing=pub_new, publisher_seq=2,
+        blob_fields={"sequence": 2, "expiration": 900000000},
+    )
+    add("superseded-key-list-refreshes-delegation",
+        "spec §1.3 P2: a list signed by a superseded publisher key still contributes its verified validator manifests",
+        f.proof(listless=True), f, lists=[old_doc, new_doc])
+
+    # §1.3 Rule 7: conflicting eligible lists at the highest eligible sequence MUST reject.
+    rule7 = "spec §1.3 rule 7: two distinct eligible lists at the highest eligible sequence are publisher equivocation"
+    f = Fixture()
+    doc_a = f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 0, "expiration": 900000000})
+    doc_b = f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 100, "expiration": 900000000})
+    add("conflicting-eligible-lists-at-same-sequence", rule7,
+        f.proof(listless=True), f, lists=[doc_a, doc_b],
+        reason="conflicting eligible validator lists")
+
+    # §1.3 Rule 7: conflict at a lower sequence is overridden by a unique higher eligible sequence.
+    f = Fixture()
+    doc_1a = f.vl_doc_v1(blob_fields={"sequence": 1, "effective": 0, "expiration": 900000000})
+    doc_1b = f.vl_doc_v1(blob_fields={"sequence": 1, "effective": 100, "expiration": 900000000})
+    doc_2 = f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 0, "expiration": 900000000})
+    add("conflict-at-lower-sequence-overridden",
+        "spec §1.3 rule 7: conflicts at lower sequences do not reject when a higher eligible sequence is unique",
+        f.proof(listless=True), f, lists=[doc_1a, doc_1b, doc_2])
+
+    # §1.3 Rule 7: an ineligible list at the same sequence does not conflict with an eligible one.
+    f = Fixture()
+    doc_elig = f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 0, "expiration": 900000000})
+    doc_expired = f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 0, "expiration": 700000000})
+    add("ineligible-conflict-at-same-sequence-ignored",
+        "spec §1.3 rule 7: an ineligible list at the highest sequence does not conflict with an eligible list",
+        f.proof(listless=True), f, lists=[doc_elig, doc_expired])
+
+    # §1.3 Rule 7: byte-identical signed blobs are one list, not a conflict.
+    f = Fixture()
+    doc_same = f.vl_doc_v1(blob_fields={"sequence": 2, "effective": 0, "expiration": 900000000})
+    add("duplicate-identical-external-lists-accepted",
+        "spec §1.3 rule 7: byte-identical signed blobs are deduplicated as one candidate list",
+        f.proof(listless=True), f, lists=[doc_same, copy.deepcopy(doc_same)])
+
+    # §1.3 P3: list-less proof with header outside the only external list's window MUST reject.
+    f = Fixture()
+    expired_doc = f.vl_doc_v1(blob_fields={"sequence": 1, "effective": 0, "expiration": HEADER["close_time"]})
+    add("external-list-outside-window", window,
+        f.proof(listless=True), f, lists=[expired_doc], reason=OUTSIDE_WINDOW)
+
+    # §1.3 Rules 10/11: unsound selected primary list MUST reject with NO fallback to a lower-sequence list.
+    f = Fixture()
+    good_seq1 = f.vl_doc_v1(blob_fields={"sequence": 1, "expiration": 900000000})
+    bad_entries = list(f.entries) + [dict(f.entries[0])]  # duplicate master key
+    bad_seq2 = f.vl_doc_v1(blob_fields={"sequence": 2, "expiration": 900000000}, entries=bad_entries)
+    add("unsound-primary-does-not-fall-back",
+        "spec §1.3 rules 10/11: an unsound selected primary list rejects with no fallback to a lower sequence",
+        f.proof(listless=True), f, lists=[good_seq1, bad_seq2], reason="duplicate validator master")
+
+    # §1.3 P1: a valid bundled publisher manifest at seq 2 supersedes an external list signed under seq 1.
+    f = Fixture()
+    pub_rot = keypair(650)
+    ext_old = f.vl_doc_v1(publisher_signing=f.publisher_signing, publisher_seq=1)
+    proof = f.proof(publisher_signing=pub_rot, publisher_seq=2)
+    # Re-sign the bundled blob with the OLD publisher key so it is superseded too.
+    raw_bundled_blob = unhexlify(proof["steps"][0]["unl"]["blob"])
+    proof["steps"][0]["unl"]["signature"] = sign(raw_bundled_blob, f.publisher_signing[1])
+    add("bundled-manifest-supersedes-external-list",
+        "spec §1.3 P1: a newer bundled publisher manifest advances the publisher key, superseding external lists under the old key",
+        proof, f, lists=[ext_old], reason="superseded publisher key")
+
+    # §1.3 Rule 9: a v2 external VL document carrying a publisher revocation (with empty blobs_v2) revokes the publisher.
+    f = Fixture()
+    rev_v2 = f.vl_doc_v2([], manifest_bytes=revocation(f.publisher))
+    add("external-v2-revocation-without-blobs",
+        "spec §1.3 rule 9: an external v2 VL document with a publisher revocation manifest revokes the publisher even with empty blobs_v2",
+        f.proof(), f, lists=[rev_v2], reason="publisher is revoked")
 
     # ── LedgerHashes links (§5.3), on headers the test keys anchor ───
     out.extend(_link_cases(add, proof_of))

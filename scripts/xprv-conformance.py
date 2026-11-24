@@ -17,10 +17,12 @@ unchanged.
 
 The two reference verifiers are built in as `cpp` and `python`. Name others
 with --verifier NAME=TEMPLATE; the template is split like a shell command and
-may use {proof}, {network_id}, {publisher_key} and {manifests}. {manifests} is
-a file holding a JSON array of base64 raw manifests the verifier is to hold
-from outside the proof (spec §1.3); it is an empty array for most vectors. A
-verifier that ignores it fails the vectors that need it.
+may use {proof}, {network_id}, {publisher_key}, {manifests} and {lists}.
+{manifests} is a file holding a JSON array of base64 raw manifests, and {lists}
+is a file holding a JSON array of XRPL VL site documents (v1 or v2) the
+verifier is to hold from outside the proof (spec §1.3, §3.3); both are empty
+arrays for most vectors. A verifier that ignores them fails the vectors that
+need them.
 
 The built-in verifiers are run with --json and print a report (spec §7) as
 their standard output. For them the report is what is judged:
@@ -93,6 +95,8 @@ class Case:
     publisher_key: str
     # Base64 raw manifests the verifier holds from outside the proof (§1.3).
     manifests: list[str] = field(default_factory=list)
+    # XRPL VL site documents (v1/v2) held from outside the proof (§1.3, §3.3).
+    lists: list[dict[str, Any]] = field(default_factory=list)
     reason_contains: str | None = None
     # The layer a refusal's report must name (§7): parse, trust or graph.
     layer: str | None = None
@@ -134,6 +138,7 @@ def expand(path: Path, tool: Any) -> list[Case]:
             network_id=int(trust["network_id"]),
             publisher_key=str(trust["publisher_key"]),
             manifests=list(trust.get("manifests", [])),
+            lists=list(trust.get("lists", [])),
             reason_contains=expect.get("reason_contains"),
             layer=layer if verdict == REJECT else None,
             known_failing=dict(known),
@@ -167,10 +172,22 @@ class Outcome:
     stdout: str = ""
 
 
-def run_verifier(template: list[str], case: Case, proof: Path, manifests: Path, timeout: float) -> Outcome:
+def run_verifier(
+    template: list[str],
+    case: Case,
+    proof: Path,
+    manifests: Path,
+    lists: Path,
+    timeout: float,
+) -> Outcome:
     cmd = [
-        part.format(proof=str(proof), network_id=case.network_id, publisher_key=case.publisher_key,
-                    manifests=str(manifests))
+        part.format(
+            proof=str(proof),
+            network_id=case.network_id,
+            publisher_key=case.publisher_key,
+            manifests=str(manifests),
+            lists=str(lists),
+        )
         for part in template
     ]
     try:
@@ -267,11 +284,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     xprv_bin = Path(args.xprv_bin)
     builtin = {
         "cpp": [str(xprv_bin), "verify", "{proof}", "{publisher_key}", "--network", "{network_id}",
-                "--manifests", "{manifests}", "--json"],
+                "--manifests", "{manifests}", "--lists", "{lists}", "--json"],
         "python": [
             "uv", "run", "--script", str(REPO / "scripts" / "verify-xprv.py"),
             "{proof}", "--trusted-key", "{publisher_key}", "--network", "{network_id}",
-            "--manifests", "{manifests}", "--json",
+            "--manifests", "{manifests}", "--lists", "{lists}", "--json",
         ],
     }
     for name in args.use or ["cpp", "python"]:
@@ -308,20 +325,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     rows: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="xprv-conformance-") as td:
         tmp = Path(td)
-        files, held = [], []
+        files, held, held_lists = [], [], []
         for i, c in enumerate(cases):
             f = tmp / f"{i:04d}.{'json' if c.form == 'json' else 'bin'}"
             f.write_bytes(c.data)
             files.append(f)
             # Always a file, so a template can name it unconditionally: a
-            # vector with no held manifests gets an empty array.
+            # vector with no held manifests or lists gets an empty array.
             m = tmp / f"{i:04d}.manifests.json"
             m.write_text(json.dumps(c.manifests))
             held.append(m)
+            l = tmp / f"{i:04d}.lists.json"
+            l.write_text(json.dumps(c.lists))
+            held_lists.append(l)
 
         def one(job: tuple[int, str]) -> tuple[int, str, Outcome]:
             i, name = job
-            return i, name, run_verifier(verifiers[name], cases[i], files[i], held[i], args.timeout)
+            return i, name, run_verifier(
+                verifiers[name], cases[i], files[i], held[i], held_lists[i], args.timeout
+            )
 
         jobs = [(i, name) for i in range(len(cases)) for name in verifiers]
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -424,7 +446,7 @@ def main() -> int:
     r.add_argument("--use", action="append", choices=["cpp", "python"],
                    help="built-in verifiers to run (default: both)")
     r.add_argument("--verifier", action="append", metavar="NAME=TEMPLATE",
-                   help="another verifier; template uses {proof} {network_id} {publisher_key}")
+                   help="another verifier; template uses {proof} {network_id} {publisher_key} {manifests} {lists}")
     r.add_argument("--xprv-bin", default=os.environ.get("XPRV_BIN", str(REPO / "build" / "src" / "xprv" / "xprv")),
                    help="the C++ verifier (default: XPRV_BIN or build/src/xprv/xprv)")
     r.add_argument("--check-reasons", action=argparse.BooleanOptionalAction, default=None,
