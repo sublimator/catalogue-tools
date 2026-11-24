@@ -55,8 +55,8 @@ real signature. Those vectors are inline. Each carries its whole proof under
 scripts/xprv_trust_world.py from test keys, and its own `trust`. A runner
 checks every form a vector carries. `trust` is {network_id, publisher_key} and
 may list `manifests`: base64 raw manifests the verifier holds from outside the
-proof (spec §1.3). A derived vector takes its base's trust unless it names its
-own.
+proof (spec §1.3). A derived vector is checked under its base's trust unless
+it names its own; no vector does yet.
 
 `reason_contains` is the longest phrase both verifiers give for the refusal.
 Where they share no phrase it is the narrowest word they share, and the rule
@@ -1388,7 +1388,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if "base" in vec:
             base = json.loads((VECTOR_DIR / f"{vec['base']}.json").read_text())
             # A derived vector is checked under its base's trust unless it
-            # names its own.
+            # names its own, as scripts/xprv-conformance.py reads it.
             trust = vec.get("trust") or base.get("trust")
             if "json_patch" in vec:
                 raw = patched_text(base["form"]["json"], vec["json_patch"]).encode()
