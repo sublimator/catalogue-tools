@@ -740,10 +740,10 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
             "cpp": {"does": "wrong-reason", "because": "refuses through a codec type error, not through the §2.3 value rule"},
         })
     neg("tx-not-an-object", "spec §2.3: a transaction leaf's tx and meta are the decoded objects",
-        "graph", "tx must be an object", [at(f"{tx_leaf}/1/tx", 123)],
-        known_failing={
-            "cpp": {"does": "abnormal", "because": "xprv verify refuses the leaf, then aborts on an uncaught exception while describing it"},
-        })
+        "graph", "tx must be an object", [at(f"{tx_leaf}/1/tx", 123)])
+    # A verifier that describes a leaf it has just refused can trip over it.
+    neg("tx-type-not-a-string", "spec §2.3: a leaf is refused, never fatal, when a member has the wrong JSON type",
+        "graph", "", [at(f"{tx_leaf}/1/tx/TransactionType", [])])
     return fam
 
 

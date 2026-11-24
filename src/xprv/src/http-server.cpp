@@ -2547,22 +2547,23 @@ HttpServer::handle_session(
                 }
                 else
                 {
-                    // Use default engine for verify (it's a static
-                    // function that auto-detects network from the proof)
-                    // Ambient trust material (§1.3): the engine for the
-                    // proof's network supplies the newer manifests it holds.
-                    auto vr = default_engine()->verify(
+                    // The engine serving the proof's network supplies its
+                    // configured publisher key, its definitions and the newer
+                    // manifests it holds (§1.3, §8), so a proof is checked
+                    // under the trust it was built under. A network this
+                    // server has no engine for is refused.
+                    auto vr = ProofEngine::verify(
                         std::span<const uint8_t>(body.data(), body.size()),
-                        "",
                         [this](uint32_t network_id)
-                            -> std::shared_ptr<
-                                std::vector<std::vector<uint8_t>> const> {
+                            -> std::optional<ProofEngine::VerifyTrust> {
                             auto const it = engines_.find(network_id);
                             if (it == engines_.end() || !it->second)
-                                return nullptr;
+                                return std::nullopt;
                             auto tracker = it->second->quorum_tracker();
-                            return tracker ? tracker->held_manifests()
-                                           : nullptr;
+                            return ProofEngine::VerifyTrust{
+                                it->second->config().publisher_key,
+                                &it->second->protocol(),
+                                tracker ? tracker->held_manifests() : nullptr};
                         });
 
                     boost::json::object result;

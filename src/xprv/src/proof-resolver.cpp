@@ -697,26 +697,30 @@ resolve_proof_chain_impl(
                     // --- JSON trie path ---
                     if (!data.trie_json.is_null())
                     {
-                        TrieStats stats;
-                        count_trie_nodes(data.trie_json, 0, stats);
-                        map_step.inners = stats.inners;
-                        map_step.leaves = stats.leaves;
-                        map_step.placeholders = stats.placeholders;
-                        map_step.max_depth = stats.max_depth;
-
-                        PLOGI(
-                            verify_log,
-                            "  Trie: ",
-                            stats.inners,
-                            " inners, ",
-                            stats.leaves,
-                            " leaves, ",
-                            stats.placeholders,
-                            " placeholders, max_depth=",
-                            stats.max_depth);
-
                         try
                         {
+                            // A chain built in memory has not been through
+                            // from_json, so the shape rules run here too.
+                            catl::shamap::validate_json_trie(data.trie_json);
+
+                            TrieStats stats;
+                            count_trie_nodes(data.trie_json, 0, stats);
+                            map_step.inners = stats.inners;
+                            map_step.leaves = stats.leaves;
+                            map_step.placeholders = stats.placeholders;
+                            map_step.max_depth = stats.max_depth;
+
+                            PLOGI(
+                                verify_log,
+                                "  Trie: ",
+                                stats.inners,
+                                " inners, ",
+                                stats.leaves,
+                                " leaves, ",
+                                stats.placeholders,
+                                " placeholders, max_depth=",
+                                stats.max_depth);
+
                             reconstructed = AbbrevMap::from_trie_json(
                                 data.trie_json,
                                 node_type,
@@ -758,8 +762,13 @@ resolve_proof_chain_impl(
                             reconstruct_error = e.what();
                         }
 
-                        // Extract narrative info from JSON trie
-                        if (is_state)
+                        // The narrative describes leaves that passed the
+                        // leaf checks. A trie that was not reconstructed has
+                        // none, and nothing is read from it.
+                        if (!reconstructed)
+                        {
+                        }
+                        else if (is_state)
                         {
                             if (!ledger_hashes_leaves.empty())
                             {
@@ -777,35 +786,33 @@ resolve_proof_chain_impl(
                         {
                             auto const* leaf =
                                 extract_trie_leaf(data.trie_json);
-                            if (leaf && leaf->is_array() &&
-                                leaf->as_array().size() >= 2)
+                            auto const* content = leaf && leaf->is_array() &&
+                                    leaf->as_array().size() == 2
+                                ? leaf->as_array()[1].if_object()
+                                : nullptr;
+                            auto const* tx_value =
+                                content ? content->if_contains("tx") : nullptr;
+                            if (auto const* tx =
+                                    tx_value ? tx_value->if_object() : nullptr)
                             {
-                                auto const& ld = leaf->as_array()[1];
-                                if (ld.is_object() &&
-                                    ld.as_object().contains("tx"))
-                                {
-                                    auto const& tx =
-                                        ld.as_object().at("tx").as_object();
-                                    if (tx.contains("TransactionType"))
-                                    {
-                                        map_step.tx_type =
-                                            std::string(tx.at("TransactionType")
-                                                            .as_string());
-                                        PLOGI(
-                                            verify_log,
-                                            "  TX type:      ",
-                                            map_step.tx_type);
-                                    }
-                                    if (tx.contains("Account"))
-                                    {
-                                        map_step.tx_account = std::string(
-                                            tx.at("Account").as_string());
-                                        PLOGI(
-                                            verify_log,
-                                            "  TX account:   ",
-                                            map_step.tx_account);
-                                    }
-                                }
+                                auto const text = [&](char const* name) {
+                                    auto const* v = tx->if_contains(name);
+                                    return v && v->is_string()
+                                        ? std::string(v->as_string())
+                                        : std::string{};
+                                };
+                                map_step.tx_type = text("TransactionType");
+                                map_step.tx_account = text("Account");
+                                if (!map_step.tx_type.empty())
+                                    PLOGI(
+                                        verify_log,
+                                        "  TX type:      ",
+                                        map_step.tx_type);
+                                if (!map_step.tx_account.empty())
+                                    PLOGI(
+                                        verify_log,
+                                        "  TX account:   ",
+                                        map_step.tx_account);
                             }
                         }
                     }

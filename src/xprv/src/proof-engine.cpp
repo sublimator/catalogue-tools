@@ -906,8 +906,7 @@ ProofEngine::cache_stats() const
 VerifyResult
 ProofEngine::verify(
     std::span<const uint8_t> data,
-    std::string const& trusted_key,
-    HeldManifestsFn const& held_manifests)
+    TrustForNetworkFn const& trust_for)
 {
     VerifyResult result;
     try
@@ -924,22 +923,27 @@ ProofEngine::verify(
                 reinterpret_cast<const char*>(data.data()), data.size()));
         }
 
-        // Use the proof's embedded network_id to select protocol and
-        // publisher key, unless the caller explicitly overrides the key.
-        auto proof_config = NetworkConfig::for_network(chain.network_id);
-        auto protocol = proof_config.load_protocol();
-        auto key =
-            trusted_key.empty() ? proof_config.publisher_key : trusted_key;
-
-        std::vector<std::vector<uint8_t>> extra;
-        if (held_manifests)
+        // §8: network_id selects the configured primary key. It is the
+        // deployment's key for that network, not a built-in default.
+        auto const trust =
+            trust_for ? trust_for(chain.network_id) : std::nullopt;
+        if (!trust || !trust->protocol || trust->publisher_key.empty())
         {
-            if (auto held = held_manifests(chain.network_id))
-                extra = *held;
+            result.error = "network " + std::to_string(chain.network_id) +
+                " is not configured on this verifier";
+            return result;
         }
-        result.ok = resolve_proof_chain(chain, protocol, key, extra);
+
+        static std::vector<std::vector<uint8_t>> const none;
+        std::string why;
+        result.ok = resolve_proof_chain(
+            chain,
+            *trust->protocol,
+            trust->publisher_key,
+            trust->held_manifests ? *trust->held_manifests : none,
+            &why);
         if (!result.ok)
-            result.error = "verification failed";
+            result.error = why.empty() ? "verification failed" : why;
     }
     catch (std::exception const& e)
     {

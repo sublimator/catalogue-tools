@@ -248,18 +248,27 @@ public:
         StepCallback on_step = nullptr,
         std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
-    /// Held manifests for a network (§1.3 ambient trust material), or null.
-    using HeldManifestsFn =
-        std::function<std::shared_ptr<std::vector<std::vector<uint8_t>> const>(
-            uint32_t)>;
+    /// What a deployment trusts for one network (§1.3, §8): its configured
+    /// primary publisher key, the definitions it decodes that network with,
+    /// and the newer validator manifests it holds.
+    struct VerifyTrust
+    {
+        std::string publisher_key;
+        catl::xdata::Protocol const* protocol = nullptr;
+        std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests;
+    };
 
-    /// Verify a proof chain. `held_manifests` supplies newer validator
-    /// manifests this server holds for the proof's network (§1.3).
-    VerifyResult
-    verify(
-        std::span<const uint8_t> data,
-        std::string const& trusted_key = "",
-        HeldManifestsFn const& held_manifests = HeldManifestsFn());
+    /// The trust configured for a network, or nullopt when the deployment
+    /// does not serve it.
+    using TrustForNetworkFn =
+        std::function<std::optional<VerifyTrust>(uint32_t network_id)>;
+
+    /// Verify a proof against the trust configured for the network it names.
+    /// The key and definitions come from `trust_for`, never from built-in
+    /// defaults: a deployment with its own publisher proves and verifies
+    /// under the same key. A network `trust_for` does not know is refused.
+    static VerifyResult
+    verify(std::span<const uint8_t> data, TrustForNetworkFn const& trust_for);
 
     /// Look up which ledger a transaction is in (RPC only, no proof
     /// building). Returns the ledger sequence, or 0 if not found on

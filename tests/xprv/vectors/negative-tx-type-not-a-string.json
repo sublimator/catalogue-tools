@@ -1,0 +1,20 @@
+{
+  "name": "tx-type-not-a-string",
+  "violates": "spec \u00a72.3: a leaf is refused, never fatal, when a member has the wrong JSON type",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1/tx/TransactionType",
+      "value": []
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": ""
+  },
+  "observed": {
+    "python_reason": "step 7: tx tree error: leaf member tx.TransactionType is not a serialized UInt16 value"
+  }
+}

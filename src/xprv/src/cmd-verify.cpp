@@ -154,7 +154,17 @@ cmd_verify(
         trusted_key.substr(0, 16),
         "...)");
 
-    bool ok = xprv::resolve_proof_chain(
-        proof, protocol, trusted_key, extra_manifests);
-    return ok ? 0 : 1;
+    // Bad input is refused, never fatal: whatever verification throws is a
+    // refusal with a reason, and the exit status stays 0 or 1.
+    try
+    {
+        bool ok = xprv::resolve_proof_chain(
+            proof, protocol, trusted_key, extra_manifests);
+        return ok ? 0 : 1;
+    }
+    catch (std::exception const& e)
+    {
+        std::cerr << "Verification refused: " << e.what() << "\n";
+        return 1;
+    }
 }

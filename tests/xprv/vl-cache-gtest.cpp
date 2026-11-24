@@ -1901,11 +1901,16 @@ protected:
     {
         auto const bytes = test::trust_proof_bytes(name);
         size_t calls = 0;
-        auto const result = verifier->verify(
-            bytes, test::trust_publisher_key(), [&](uint32_t network) -> Held {
+        auto const result = xprv::ProofEngine::verify(
+            bytes,
+            [&](uint32_t network)
+                -> std::optional<xprv::ProofEngine::VerifyTrust> {
                 EXPECT_EQ(network, 0u);
                 ++calls;
-                return held ? held : tracker->held_manifests();
+                return xprv::ProofEngine::VerifyTrust{
+                    test::trust_publisher_key(),
+                    &verifier->protocol(),
+                    held ? held : tracker->held_manifests()};
             });
         EXPECT_EQ(calls, 1u);
         return result.ok;
