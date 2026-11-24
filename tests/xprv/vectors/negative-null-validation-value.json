@@ -1,0 +1,20 @@
+{
+  "name": "null-validation-value",
+  "violates": "spec \u00a72.1: a validation value is hex text",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/validations/ED0000000000000000000000000000000000000000000000000000000000000000",
+      "value": null
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "validation"
+  },
+  "observed": {
+    "python_reason": "validation value must be a hex string"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "compressed-level-1",
+  "states": "spec \u00a73.1: compression is a container option; the same proof verifies at any level",
+  "mutations": [
+    {
+      "compress_body": 1
+    }
+  ],
+  "expect": {
+    "verdict": "accept"
+  },
+  "base": "positive-tx-skiplist"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "tx-hash-member",
+  "violates": "spec \u00a72.3: leaf data is the decoded content and nothing else",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1/tx/hash",
+      "value": "DF2B3DE0FD737AEECCB13CC59E030D81C6128FFC0DF4166DD1F1CEF1728D5031"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "not a serialized field"
+  },
+  "observed": {
+    "python_reason": "step 7: tx tree error: leaf member tx.hash is not a serialized field"
+  }
+}

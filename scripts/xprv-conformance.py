@@ -17,15 +17,23 @@ unchanged.
 
 The two reference verifiers are built in as `cpp` and `python`. Name others
 with --verifier NAME=TEMPLATE; the template is split like a shell command and
-may use {proof}, {network_id} and {publisher_key}.
+may use {proof}, {network_id}, {publisher_key} and {manifests}. {manifests} is
+a file holding a JSON array of base64 raw manifests the verifier is to hold
+from outside the proof (spec §1.3); it is an empty array for most vectors. A
+verifier that ignores it fails the vectors that need it.
 
 For the built-in verifiers a refusal must also print the vector's
 `reason_contains`, so refusing for the wrong reason fails too. Another
 verifier's wording is its own; --check-reasons applies the check to it.
 
+The built-in verifiers are also run with --json, and a refusal's report (spec
+§7) must name the vector's `layer`: parse, trust or graph. --check-layers asks
+the same of another verifier, which must then print that report, a JSON object
+with a `layer` member, as its standard output.
+
 A vector may carry `known_failing`: an object naming verifiers that do not yet
 meet its expectation, each with what it `does` instead (accept, reject,
-wrong-reason, abnormal or timeout) and `because` of what. Such a verifier is
+wrong-reason, wrong-layer, abnormal or timeout) and `because` of what. Such a verifier is
 expected to miss in exactly that way. A different failure fails the run, and
 so does meeting the expectation while still tagged, so a tag can neither hide
 a new defect nor outlive the one it records.
@@ -56,6 +64,7 @@ VECTOR_TOOL = REPO / "scripts" / "xprv-vectors.py"
 
 ACCEPT, REJECT, ABNORMAL, TIMEOUT = "accept", "reject", "abnormal", "timeout"
 WRONG_REASON = "wrong-reason"
+WRONG_LAYER = "wrong-layer"
 
 
 def load_vector_tool() -> Any:
@@ -78,7 +87,11 @@ class Case:
     expect: str  # accept or reject
     network_id: int
     publisher_key: str
+    # Base64 raw manifests the verifier holds from outside the proof (§1.3).
+    manifests: list[str] = field(default_factory=list)
     reason_contains: str | None = None
+    # The layer a refusal's report must name (§7): parse, trust or graph.
+    layer: str | None = None
     known_failing: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
@@ -95,7 +108,10 @@ def expand(path: Path, tool: Any) -> list[Case]:
     if verdict not in (ACCEPT, REJECT):
         raise SystemExit(f"{path.name}: expect.verdict must be accept or reject")
     known = vec.get("known_failing", {})
-    kinds = {ACCEPT, REJECT, WRONG_REASON, ABNORMAL, TIMEOUT}
+    kinds = {ACCEPT, REJECT, WRONG_REASON, WRONG_LAYER, ABNORMAL, TIMEOUT}
+    layer = vec.get("layer")
+    if verdict == REJECT and layer not in ("parse", "trust", "graph"):
+        raise SystemExit(f"{path.name}: a reject vector names its layer: parse, trust or graph")
     if not isinstance(known, dict) or not all(
         isinstance(tag, dict) and tag.get("does") in kinds and isinstance(tag.get("because"), str)
         for tag in known.values()
@@ -113,7 +129,9 @@ def expand(path: Path, tool: Any) -> list[Case]:
             expect=verdict,
             network_id=int(trust["network_id"]),
             publisher_key=str(trust["publisher_key"]),
+            manifests=list(trust.get("manifests", [])),
             reason_contains=expect.get("reason_contains"),
+            layer=layer if verdict == REJECT else None,
             known_failing=dict(known),
         )
 
@@ -121,8 +139,8 @@ def expand(path: Path, tool: Any) -> list[Case]:
         base = json.loads((path.parent / f"{vec['base']}.json").read_text())
         trust = vec.get("trust") or base["trust"]
         if "json_patch" in vec:
-            doc = tool.apply_json_patch(base["form"]["json"], vec["json_patch"])
-            return [case("json", json.dumps(doc).encode(), trust)]
+            text = tool.patched_text(base["form"]["json"], vec["json_patch"])
+            return [case("json", text.encode(), trust)]
         raw = tool.apply_mutations(bytes.fromhex(base["form"]["binary_hex"]), vec["mutations"])
         return [case("binary", raw, trust)]
 
@@ -141,11 +159,14 @@ class Outcome:
     verdict: str
     detail: str = ""
     output: str = ""
+    # Standard output alone: a reporting verifier prints its report there.
+    stdout: str = ""
 
 
-def run_verifier(template: list[str], case: Case, proof: Path, timeout: float) -> Outcome:
+def run_verifier(template: list[str], case: Case, proof: Path, manifests: Path, timeout: float) -> Outcome:
     cmd = [
-        part.format(proof=str(proof), network_id=case.network_id, publisher_key=case.publisher_key)
+        part.format(proof=str(proof), network_id=case.network_id, publisher_key=case.publisher_key,
+                    manifests=str(manifests))
         for part in template
     ]
     try:
@@ -155,10 +176,11 @@ def run_verifier(template: list[str], case: Case, proof: Path, timeout: float) -
     except OSError as exc:
         raise SystemExit(f"cannot run {cmd[0]}: {exc}") from None
     text = (r.stdout + r.stderr).decode(errors="replace")
+    stdout = r.stdout.decode(errors="replace")
     if r.returncode == 0:
-        return Outcome(ACCEPT, output=text)
+        return Outcome(ACCEPT, output=text, stdout=stdout)
     if r.returncode == 1:
-        return Outcome(REJECT, output=text)
+        return Outcome(REJECT, output=text, stdout=stdout)
     if r.returncode < 0:
         try:
             what = signal.Signals(-r.returncode).name
@@ -168,7 +190,18 @@ def run_verifier(template: list[str], case: Case, proof: Path, timeout: float) -
     return Outcome(ABNORMAL, f"exit status {r.returncode}", text)
 
 
-def judge(case: Case, verifier: str, got: Outcome, check_reasons: bool) -> tuple[str, str]:
+def reported_layer(stdout: str) -> str | None:
+    """The `layer` of the report a verifier printed, or None if it printed none."""
+    try:
+        report = json.loads(stdout)
+    except ValueError:
+        return None
+    layer = report.get("layer") if isinstance(report, dict) else None
+    return layer if isinstance(layer, str) else None
+
+
+def judge(case: Case, verifier: str, got: Outcome, check_reasons: bool,
+          check_layer: bool = False) -> tuple[str, str]:
     """(status, note). Status is pass, known, fixed or FAIL."""
     met = got.verdict == case.expect
     does = got.verdict
@@ -181,6 +214,13 @@ def judge(case: Case, verifier: str, got: Outcome, check_reasons: bool) -> tuple
             met = False
             does = WRONG_REASON
             note = f"refused, but not for {case.reason_contains!r}"
+    if met and check_layer and case.expect == REJECT and case.layer:
+        layer = reported_layer(got.stdout)
+        if layer != case.layer:
+            met = False
+            does = WRONG_LAYER
+            note = (f"refused at layer {layer}, and the vector says {case.layer}" if layer
+                    else "refused, but printed no report naming a layer")
     if verifier in case.known_failing:
         tag = case.known_failing[verifier]
         if met:
@@ -200,10 +240,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     verifiers: dict[str, list[str]] = {}
     xprv_bin = Path(args.xprv_bin)
     builtin = {
-        "cpp": [str(xprv_bin), "verify", "{proof}", "{publisher_key}", "--network", "{network_id}"],
+        "cpp": [str(xprv_bin), "verify", "{proof}", "{publisher_key}", "--network", "{network_id}",
+                "--manifests", "{manifests}", "--json"],
         "python": [
             "uv", "run", "--script", str(REPO / "scripts" / "verify-xprv.py"),
             "{proof}", "--trusted-key", "{publisher_key}", "--network", "{network_id}",
+            "--manifests", "{manifests}", "--json",
         ],
     }
     for name in args.use or ["cpp", "python"]:
@@ -220,6 +262,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     reasoned = set(verifiers) if args.check_reasons else set()
     if args.check_reasons is None:
         reasoned = set(verifiers) & set(builtin)
+    # Likewise the layer: the built-in ones print a report (spec §7).
+    layered = set(verifiers) if args.check_layers else set()
+    if args.check_layers is None:
+        layered = set(verifiers) & set(builtin)
     if "cpp" in verifiers and not xprv_bin.exists():
         raise SystemExit(f"{xprv_bin} not found; build xprv or pass --xprv-bin / XPRV_BIN")
 
@@ -234,15 +280,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     rows: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="xprv-conformance-") as td:
         tmp = Path(td)
-        files = []
+        files, held = [], []
         for i, c in enumerate(cases):
             f = tmp / f"{i:04d}.{'json' if c.form == 'json' else 'bin'}"
             f.write_bytes(c.data)
             files.append(f)
+            # Always a file, so a template can name it unconditionally: a
+            # vector with no held manifests gets an empty array.
+            m = tmp / f"{i:04d}.manifests.json"
+            m.write_text(json.dumps(c.manifests))
+            held.append(m)
 
         def one(job: tuple[int, str]) -> tuple[int, str, Outcome]:
             i, name = job
-            return i, name, run_verifier(verifiers[name], cases[i], files[i], args.timeout)
+            return i, name, run_verifier(verifiers[name], cases[i], files[i], held[i], args.timeout)
 
         jobs = [(i, name) for i in range(len(cases)) for name in verifiers]
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -265,7 +316,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         }
         cells = []
         for name in verifiers:
-            status, note = judge(c, name, by_case[i][name], name in reasoned)
+            status, note = judge(c, name, by_case[i][name], name in reasoned, name in layered)
             counts[status] += 1
             row["verifiers"][name] = {
                 "verdict": by_case[i][name].verdict, "status": status, "note": note,
@@ -304,6 +355,9 @@ def main() -> int:
                    help="the C++ verifier (default: XPRV_BIN or build/src/xprv/xprv)")
     r.add_argument("--check-reasons", action=argparse.BooleanOptionalAction, default=None,
                    help="require expect.reason_contains in a refusing verifier's output "
+                        "(default: for the built-in verifiers only)")
+    r.add_argument("--check-layers", action=argparse.BooleanOptionalAction, default=None,
+                   help="require a refusal's printed report to name the vector's layer "
                         "(default: for the built-in verifiers only)")
     r.add_argument("--timeout", type=float, default=60.0, help="seconds per proof")
     r.add_argument("--jobs", type=int, default=os.cpu_count() or 4)

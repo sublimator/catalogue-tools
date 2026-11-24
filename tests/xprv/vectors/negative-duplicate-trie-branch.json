@@ -1,0 +1,21 @@
+{
+  "name": "duplicate-trie-branch",
+  "violates": "spec \u00a72.4: no object in a proof repeats a member",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "duplicate",
+      "path": "/steps/2/trie",
+      "key": "0",
+      "value": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "duplicate"
+  },
+  "observed": {
+    "python_reason": "ValueError: duplicate JSON member '0'"
+  }
+}

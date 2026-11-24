@@ -1,0 +1,27 @@
+{
+  "name": "header-trailing-byte",
+  "violates": "spec \u00a73.6: a ledger header payload is exactly 118 bytes",
+  "layer": "parse",
+  "mutations": [
+    {
+      "insert_at": 7702,
+      "insert_hex": "00"
+    },
+    {
+      "delete_at": 7583,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 7583,
+      "insert_hex": "77"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "ledger header payload must be exactly 118 bytes"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: ledger header payload must be exactly 118 bytes"
+  }
+}

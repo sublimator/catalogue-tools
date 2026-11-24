@@ -1,0 +1,21 @@
+{
+  "name": "plain-body-over-the-cap",
+  "violates": "spec \u00a78: the cap holds before parsing, compressed or not",
+  "layer": "parse",
+  "mutations": [
+    {
+      "truncate_to": 10
+    },
+    {
+      "append_zeros": 16777217
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "body exceeds"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: body exceeds size cap"
+  }
+}

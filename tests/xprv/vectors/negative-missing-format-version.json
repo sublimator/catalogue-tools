@@ -1,0 +1,19 @@
+{
+  "name": "missing-format-version",
+  "violates": "spec \u00a72: a proof is an object with format_version, network_id and steps",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "remove",
+      "path": "/format_version"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "format_version"
+  },
+  "observed": {
+    "python_reason": "unsupported format_version None (expected 10)"
+  }
+}

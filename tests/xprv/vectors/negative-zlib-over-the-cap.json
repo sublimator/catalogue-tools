@@ -1,0 +1,25 @@
+{
+  "name": "zlib-over-the-cap",
+  "violates": "spec \u00a78: a compressed body is bounded while it inflates",
+  "layer": "parse",
+  "mutations": [
+    {
+      "truncate_to": 10
+    },
+    {
+      "at": 5,
+      "set_hex": "01"
+    },
+    {
+      "append_zlib_zeros": 16777217
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "decompressed size exceeds cap"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: decompressed size exceeds cap"
+  }
+}

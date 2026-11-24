@@ -3,25 +3,31 @@
 # requires-python = ">=3.12"
 # dependencies = ["xrpl-py==5.2.0"]
 # ///
+"""Tests of the Python verifier that no shared vector carries.
+
+A rule that a verdict can show lives in tests/xprv/vectors, where the C++
+verifier is asked the same question: `scripts/xprv-vectors.py check` runs this
+verifier over every vector, and `scripts/xprv-conformance.py run` runs both.
+
+What stays here is what a verdict cannot show: a helper's output, the type of
+an exception, a reason only this verifier words, a check no proof reaches,
+JSON text no vector edit writes, and trust configuration that a vector always
+states.
+"""
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import copy
 import importlib.util
 import io
-import json
 import sys
-import tempfile
 import unittest
-from unittest import mock
 from binascii import hexlify, unhexlify
 from pathlib import Path
 
-from xrpl import CryptoAlgorithm
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
-from xrpl.core.keypairs import derive_keypair, generate_seed, sign
+from xrpl.core.keypairs import sign
 
 
 def load_verifier():
@@ -35,111 +41,18 @@ def load_verifier():
 
 
 v = load_verifier()
+
+# Keys, manifests, lists and validations come from the module that also
+# builds the shared trust-world vectors.
+sys.path.insert(0, str(Path(__file__).parent))
+import xprv_trust_world as world  # noqa: E402
+
+world.use(v)
+Fixture = world.Fixture
+keypair = world.keypair
+sign_manifest = world.sign_manifest
+
 CHILD_HASH = "AB" * 32
-
-
-def keypair(n: int) -> tuple[str, str]:
-    seed = generate_seed(entropy=f"{n:032x}", algorithm=CryptoAlgorithm.ED25519)
-    return derive_keypair(seed)
-
-
-def secp_keypair(n: int) -> tuple[str, str]:
-    seed = generate_seed(entropy=f"{n:032x}", algorithm=CryptoAlgorithm.SECP256K1)
-    return derive_keypair(seed)
-
-
-def sign_manifest(fields: dict, master: tuple[str, str], signing: tuple[str, str] | None) -> bytes:
-    """Sign arbitrary manifest fields; validly signed even when the shape is not."""
-    data = v.manifest_signing_data(fields)
-    if signing is not None:
-        fields["Signature"] = sign(data, signing[1])
-    fields["MasterSignature"] = sign(data, master[1])
-    return unhexlify(encode(fields))
-
-
-def make_manifest(master: tuple[str, str], signing: tuple[str, str], seq: int = 1) -> bytes:
-    fields = {"Sequence": seq, "PublicKey": master[0], "SigningPubKey": signing[0]}
-    return sign_manifest(fields, master, signing)
-
-
-def make_validation(signing: tuple[str, str], ledger_hash: str, *, full: bool = True) -> str:
-    fields = {
-        "Flags": 0x80000001 if full else 0x80000000,
-        "LedgerSequence": 1000,
-        "SigningTime": 800000000,
-        "LedgerHash": ledger_hash,
-        "SigningPubKey": signing[0],
-    }
-    data = v.PREFIX_VALIDATION + unhexlify(encode_for_signing(fields))[4:]
-    fields["Signature"] = sign(data, signing[1])
-    return encode(fields)
-
-
-HEADER = {
-    "ledger_index": 1000,
-    "total_coins": "99999999999000000",
-    "parent_hash": "11" * 32,
-    "transaction_hash": "22" * 32,
-    "account_hash": "33" * 32,
-    "parent_close_time": 799999990,
-    "close_time": 800000000,
-    "close_time_resolution": 10,
-    "close_flags": 0,
-}
-ANCHOR_HASH = v.hash_header(HEADER).hex().upper()
-
-
-class Fixture:
-    """A signed publisher, list and validations; tests mutate one part."""
-
-    def __init__(self, validators: int = 5) -> None:
-        self.publisher = keypair(1)
-        self.publisher_signing = keypair(2)
-        self.masters = [keypair(100 + i) for i in range(validators)]
-        self.signers = [keypair(200 + i) for i in range(validators)]
-        self.blob_fields: dict = {"sequence": 1, "expiration": 900000000}
-        self.entries = [
-            {
-                "validation_public_key": m[0],
-                "manifest": base64.b64encode(make_manifest(m, s)).decode(),
-            }
-            for m, s in zip(self.masters, self.signers)
-        ]
-        self.voters = list(self.signers)
-        self.partial_voters: list[tuple[str, str]] = []
-
-    @property
-    def trusted_key(self) -> str:
-        return self.publisher[0]
-
-    def anchor(self, *, publisher=None, publisher_signing=None, claimed_key=None) -> dict:
-        publisher = publisher or self.publisher
-        publisher_signing = publisher_signing or self.publisher_signing
-        blob = json.dumps({**self.blob_fields, "validators": self.entries}).encode()
-        return {
-            "type": "anchor",
-            "ledger_hash": ANCHOR_HASH,
-            "unl": {
-                "public_key": claimed_key or publisher[0],
-                "manifest": hexlify(make_manifest(publisher, publisher_signing)).decode().upper(),
-                "blob": hexlify(blob).decode().upper(),
-                "signature": sign(blob, publisher_signing[1]),
-            },
-            "validations": {
-                **{s[0]: make_validation(s, ANCHOR_HASH) for s in self.voters},
-                **{s[0]: make_validation(s, ANCHOR_HASH, full=False) for s in self.partial_voters},
-            },
-        }
-
-    def proof(self, network_id: int = 0, header: dict | None = None, **anchor_kw) -> dict:
-        return {
-            "format_version": v.FORMAT_VERSION,
-            "network_id": network_id,
-            "steps": [
-                self.anchor(**anchor_kw),
-                {"type": "ledger_header", "header": header or HEADER},
-            ],
-        }
 
 
 def quietly(fn, *args, **kwargs):
@@ -148,37 +61,16 @@ def quietly(fn, *args, **kwargs):
 
 
 class LedgerHashesRecognitionTests(unittest.TestCase):
-    def test_rejects_generic_state_leaf_with_hashes(self) -> None:
-        leaves = [
-            (
-                v.short_skip_key_hex(),
-                {
-                    "LedgerEntryType": "AccountRoot",
-                    "Hashes": [CHILD_HASH],
-                },
-            )
-        ]
-        self.assertEqual(v.extract_ledger_hashes_leaves(leaves), [])
+    """What the leaf recogniser returns; the verdicts are trust-*-link vectors."""
 
     def test_rejects_malformed_hash_vector(self) -> None:
+        # No proof reaches this: such a leaf would not encode, so it has no hash.
         leaves = [
             (
                 v.short_skip_key_hex(),
                 {
                     "LedgerEntryType": "LedgerHashes",
                     "Hashes": ["not-a-hash"],
-                },
-            )
-        ]
-        self.assertEqual(v.extract_ledger_hashes_leaves(leaves), [])
-
-    def test_rejects_oversized_hash_vector(self) -> None:
-        leaves = [
-            (
-                v.short_skip_key_hex(),
-                {
-                    "LedgerEntryType": "LedgerHashes",
-                    "Hashes": [CHILD_HASH] * 257,
                 },
             )
         ]
@@ -200,62 +92,17 @@ class LedgerHashesRecognitionTests(unittest.TestCase):
         self.assertEqual(recognized[0].hashes, (CHILD_HASH,))
 
 
-class LedgerHashesLinkTests(unittest.TestCase):
-    def support(
-        self,
-        *,
-        key: str,
-        containing: int,
-        last: int | None,
-    ):
-        return {
-            CHILD_HASH: [
-                v.LedgerHashesSupport(
-                    leaf_key_hex=key,
-                    containing_ledger_sequence=containing,
-                    last_ledger_sequence=last,
-                    hashes_count=1,
-                    source="test leaf",
-                )
-            ]
-        }
-
-    def test_accepts_recent_boundary(self) -> None:
-        candidates = self.support(key=v.short_skip_key_hex(), containing=1000, last=999)
-        resolved = v.find_ledger_hashes_support(candidates, CHILD_HASH, 744)
-        self.assertIsNotNone(resolved)
-        self.assertEqual(resolved.list_type, "recent")
-
-    def test_rejects_recent_outside_range(self) -> None:
-        candidates = self.support(key=v.short_skip_key_hex(), containing=1000, last=999)
-        self.assertIsNone(v.find_ledger_hashes_support(candidates, CHILD_HASH, 743))
-
-    def test_rejects_wrong_key(self) -> None:
-        candidates = self.support(key="00" * 32, containing=1000, last=999)
-        self.assertIsNone(v.find_ledger_hashes_support(candidates, CHILD_HASH, 900))
-
-    def test_accepts_flag_in_matching_era(self) -> None:
-        child = 131072
-        candidates = self.support(
-            key=v.long_skip_key_hex(child), containing=200000, last=196352
-        )
-        resolved = v.find_ledger_hashes_support(candidates, CHILD_HASH, child)
-        self.assertIsNotNone(resolved)
-        self.assertEqual(resolved.list_type, "flag")
-
-    def test_rejects_non_flag_and_wrong_era(self) -> None:
-        candidates = self.support(
-            key=v.long_skip_key_hex(131072), containing=200000, last=196352
-        )
-        self.assertIsNone(v.find_ledger_hashes_support(candidates, CHILD_HASH, 131073))
-
-        wrong_era = self.support(
-            key=v.long_skip_key_hex(65536), containing=200000, last=196352
-        )
-        self.assertIsNone(v.find_ledger_hashes_support(wrong_era, CHILD_HASH, 131072))
-
-
 class AnchorVerificationTests(unittest.TestCase):
+    """The anchor verifier called directly: its counts and its own checks.
+
+    verify() refuses the anchors below earlier, while it reads the proof, and
+    that is what the shared vectors show (trust-validations-under-each-others-
+    keys, trust-unknown-unl-member, trust-list-bundled-in-part,
+    incomplete-validation, trust-absent-signature-*). verify_anchor refuses
+    them again on its own; no proof reaches that second check, so no vector
+    does.
+    """
+
     def verify(self, anchor: dict, trusted_key: str):
         return quietly(v.verify_anchor, anchor, trusted_key)
 
@@ -264,46 +111,11 @@ class AnchorVerificationTests(unittest.TestCase):
         self.assertIn(reason, result.message)
 
     def test_accepts_bound_anchor(self) -> None:
+        # The counts; that it is accepted is the vector trust-bound-anchor.
         f = Fixture()
         result = self.verify(f.anchor(), f.trusted_key)
         self.assertTrue(result.ok, result.message)
         self.assertEqual((result.matched_unl, result.unl_size), (5, 5))
-
-    def test_rejects_publisher_manifest_not_bound_to_trusted_key(self) -> None:
-        f = Fixture()
-        anchor = f.anchor(
-            publisher=keypair(9), publisher_signing=keypair(10), claimed_key=f.trusted_key
-        )
-        self.assertRejected(self.verify(anchor, f.trusted_key), "does not match trusted key")
-
-    def test_rejects_empty_validator_list(self) -> None:
-        f = Fixture()
-        f.entries, f.voters = [], []
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "no verified validators")
-
-    def test_rejects_invalid_validator_manifest(self) -> None:
-        f = Fixture()
-        forged = (f.masters[0][0], keypair(999)[1])
-        f.entries[0]["manifest"] = base64.b64encode(make_manifest(forged, f.signers[0])).decode()
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "invalid validator manifest")
-
-    def test_rejects_advertised_key_not_bound_to_manifest(self) -> None:
-        f = Fixture()
-        f.entries[0]["validation_public_key"] = f.masters[1][0]
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "master key mismatch")
-
-    def test_rejects_duplicate_master(self) -> None:
-        f = Fixture()
-        f.entries.append(dict(f.entries[0]))
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "duplicate validator master")
-
-    def test_rejects_signing_key_reused_as_master(self) -> None:
-        f = Fixture()
-        f.entries[0]["manifest"] = base64.b64encode(
-            make_manifest(f.masters[0], f.masters[1])
-        ).decode()
-        f.voters = f.signers[1:]
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "reused across roles")
 
     def test_rejects_validation_map_key_mismatch(self) -> None:
         f = Fixture()
@@ -312,30 +124,6 @@ class AnchorVerificationTests(unittest.TestCase):
         first, second = list(validations)[:2]
         validations[first], validations[second] = validations[second], validations[first]
         self.assertRejected(self.verify(anchor, f.trusted_key), "does not match SigningPubKey")
-
-    def test_quorum_is_ceil_eighty_percent_of_masters(self) -> None:
-        f = Fixture()
-        f.voters = f.signers[:3]
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 3/5 (need 4)")
-        f.voters = f.signers[:4]
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
-
-    def test_partial_validations_do_not_count_toward_quorum(self) -> None:
-        f = Fixture()
-        f.voters, f.partial_voters = [], list(f.signers)
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 0/5 (need 4)")
-        f.voters, f.partial_voters = f.signers[:3], f.signers[3:]
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 3/5 (need 4)")
-        f.voters, f.partial_voters = f.signers[:4], f.signers[4:]
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
-
-    def test_list_less_anchor_needs_an_external_list(self) -> None:
-        f = Fixture()
-        anchor = f.anchor()
-        anchor["unl"] = {"public_key": anchor["unl"]["public_key"]}
-        self.assertRejected(
-            self.verify(anchor, f.trusted_key), "validator list not bundled and no external list"
-        )
 
     def test_unl_members_are_closed_and_bundled_whole(self) -> None:
         f = Fixture()
@@ -346,48 +134,6 @@ class AnchorVerificationTests(unittest.TestCase):
         del anchor["unl"]["blob"], anchor["unl"]["signature"]
         self.assertRejected(self.verify(anchor, f.trusted_key), "together, or none of them")
 
-    def test_hex_leaf_is_not_leaf_data(self) -> None:
-        trie = {"A": ["AB" * 32, "ABCDEF"]}
-        with self.assertRaisesRegex(ValueError, "not hex"):
-            v.hash_trie(trie, is_tx=True)
-
-    def test_revoked_master_stays_in_n_and_never_votes(self) -> None:
-        f = Fixture()
-        revocation = sign_manifest(
-            {"Sequence": v.MANIFEST_REVOKED, "PublicKey": f.masters[0][0]}, f.masters[0], None
-        )
-        f.entries[0]["manifest"] = base64.b64encode(revocation).decode()
-        f.voters = f.signers[1:]  # 4 of N=5: quorum 4 is still met
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
-        f.voters = f.signers[:4]  # the revoked validator's vote must not count
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 3/5 (need 4)")
-
-    def test_quorum_rounds_up_when_eighty_percent_is_fractional(self) -> None:
-        f = Fixture(validators=6)  # 80% of 6 is 4.8: floor would accept 4
-        f.voters = f.signers[:4]
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "quorum not met: 4/6 (need 5)")
-        f.voters = f.signers[:5]
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key).ok)
-
-    def test_rejects_invalid_validity_interval(self) -> None:
-        f = Fixture()
-        f.blob_fields = {"sequence": 1, "effective": 10, "expiration": 5}
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "validity interval is invalid")
-
-    def test_rejects_anchor_only_when_expiration_is_not_after_effective(self) -> None:
-        f = Fixture()
-        f.blob_fields = {"sequence": 1, "expiration": 0}
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "validity interval is invalid")
-
-    def test_rejects_integral_float_blob_fields(self) -> None:
-        f = Fixture()
-        f.blob_fields = {"sequence": 100.0, "expiration": 900000000}
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "malformed")
-        f.blob_fields = {"sequence": 1, "expiration": 900000000.0}
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "malformed")
-        f.blob_fields = {"sequence": 1, "effective": 0.0, "expiration": 900000000}
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key), "malformed")
-
     def test_rejects_incomplete_validation_even_when_quorum_is_present(self) -> None:
         f = Fixture()
         anchor = f.anchor()
@@ -396,68 +142,12 @@ class AnchorVerificationTests(unittest.TestCase):
             self.verify(anchor, f.trusted_key), "not a canonical STValidation"
         )
 
-    def test_bad_signature_does_not_reject_a_quorum(self) -> None:
-        f = Fixture()
-        anchor = f.anchor()
-        spare = keypair(250)
-        anchor["validations"][spare[0]] = make_validation(spare, anchor["ledger_hash"])
-        self.assertTrue(self.verify(anchor, f.trusted_key).ok)
-
-    def test_signing_preimage_drops_only_signature(self) -> None:
-        first = next(iter(Fixture().anchor()["validations"].values()))
-        cases = (
-            ({}, False),
-            ({"TxnSignature": "AA"}, True),
-            ({"Amendments": ["12" * 32]}, False),
-        )
-        for extra, transaction_encoding_differs in cases:
-            fields = decode(first)
-            fields.update(extra)
-            raw = encode(fields)
-            self.assertEqual(decode(raw), fields)
-            parsed = v.parse_validation(raw)
-            self.assertIsNotNone(parsed)
-            unsigned = {k: val for k, val in fields.items() if k != "Signature"}
-            self.assertEqual(parsed.signing_data[4:], unhexlify(encode(unsigned)))
-            transaction_body = unhexlify(encode_for_signing(fields))[4:]
-            if transaction_encoding_differs:
-                self.assertNotEqual(parsed.signing_data[4:], transaction_body)
-            else:
-                self.assertEqual(parsed.signing_data[4:], transaction_body)
-
-    def test_txn_signature_field_is_covered_by_the_validation_preimage(self) -> None:
-        f = Fixture()
-        f.voters = f.signers[:4]  # exactly the quorum, so one lost vote fails it
-        anchor = f.anchor()
-        self.assertTrue(self.verify(anchor, f.trusted_key).ok)
-        signer = f.signers[0]
-        fields = {
-            "Flags": 0x80000001,
-            "LedgerSequence": 1000,
-            "SigningTime": 800000000,
-            "LedgerHash": anchor["ledger_hash"],
-            "SigningPubKey": signer[0],
-            "TxnSignature": "AA",
-        }
-        covered = dict(fields)
-        covered["Signature"] = sign(
-            v.PREFIX_VALIDATION + unhexlify(encode(fields)), signer[1]
-        )
-        anchor["validations"][signer[0]] = encode(covered)
-        self.assertTrue(self.verify(anchor, f.trusted_key).ok, "preimage must cover TxnSignature")
-        dropped = dict(fields)
-        dropped["Signature"] = sign(
-            v.PREFIX_VALIDATION + unhexlify(encode_for_signing(fields))[4:], signer[1]
-        )
-        anchor["validations"][signer[0]] = encode(dropped)
-        self.assertRejected(self.verify(anchor, f.trusted_key), "quorum not met")
-
     def test_present_empty_signature_is_an_uncounted_vote(self) -> None:
         f = Fixture()
         anchor = f.anchor()
         self.assertTrue(self.verify(anchor, f.trusted_key).ok)
-        base = decode(make_validation(keypair(250), anchor["ledger_hash"]))
-        keys = (keypair(250)[0], secp_keypair(251)[0])
+        base = decode(world.make_validation(keypair(250), anchor["ledger_hash"]))
+        keys = (keypair(250)[0], world.secp_keypair(251)[0])
         self.assertTrue(keys[0].startswith("ED"))
         self.assertIn(keys[1][:2], {"02", "03"})
 
@@ -482,183 +172,40 @@ class AnchorVerificationTests(unittest.TestCase):
                 "not a canonical STValidation",
             )
 
-
-class TrustViewOverlayTests(unittest.TestCase):
-    """§1.3: manifests held outside the proof re-point listed masters only."""
-
-    def verify(self, anchor: dict, trusted_key: str, extras: list[bytes]):
-        return quietly(v.verify_anchor, anchor, trusted_key, extras)
-
-    def assertRejected(self, result, fragment: str) -> None:
-        self.assertFalse(result.ok)
-        self.assertIn(fragment, result.message)
-
-    def setUp(self) -> None:
-        self.f = Fixture()
-        self.rotated_key = keypair(300)
-        self.rotation = make_manifest(self.f.masters[0], self.rotated_key, seq=2)
-
-    def test_rotated_validator_counts_only_with_the_newer_manifest(self) -> None:
-        f = self.f
-        f.voters = [self.rotated_key] + f.signers[1:4]  # 4 of 5 if the rotation is known
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key, []), "quorum not met: 3/5")
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [self.rotation]).ok)
-
-    def test_superseded_key_stops_counting(self) -> None:
-        f = self.f
-        f.voters = f.signers[:4]  # validator 0 signs with its listed, now superseded key
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key, []).ok)
-        self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [self.rotation]), "quorum not met: 3/5"
+    def test_signing_preimage_drops_only_signature(self) -> None:
+        # The signing bytes themselves; the verdicts are the vectors
+        # trust-signature-covers-every-other-field and
+        # trust-signature-over-the-transaction-preimage.
+        first = next(iter(Fixture().anchor()["validations"].values()))
+        cases = (
+            ({}, False),
+            ({"TxnSignature": "AA"}, True),
+            ({"Amendments": ["12" * 32]}, False),
         )
-
-    def test_equal_sequence_conflict_drops_that_validator(self) -> None:
-        # Equivocation (rule 2): the validator is treated as revoked, so its
-        # vote stops counting and N stays 5; the rest of the anchor stands.
-        f = self.f
-        twin = make_manifest(f.masters[0], self.rotated_key, seq=1)  # list has seq 1
-        f.voters = f.signers[:4]
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key, [twin]), "quorum not met: 3/5")
-        f.voters = f.signers[1:]
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [twin]).ok)
-
-    def test_equal_sequence_conflict_between_held_manifests_drops_the_validator(self) -> None:
-        # Both held manifests are newer than the list's (seq 1) and disagree at
-        # seq 2; the conflict rejects whichever is processed first.
-        f = self.f
-        a = make_manifest(f.masters[0], self.rotated_key, seq=2)
-        b = make_manifest(f.masters[0], keypair(301), seq=2)
-        f.voters = [self.rotated_key] + f.signers[1:4]
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key, [a, b]), "quorum not met: 3/5")
-
-    def test_equal_sequence_conflict_below_the_winner_still_drops_the_validator(self) -> None:
-        # Two different seq-2 manifests both lose to a seq-3 one; rule 2 still
-        # applies to every candidate, not only the winner.
-        f = self.f
-        a = make_manifest(f.masters[0], keypair(301), seq=2)
-        b = make_manifest(f.masters[0], keypair(302), seq=2)
-        winner = make_manifest(f.masters[0], self.rotated_key, seq=3)
-        f.voters = [self.rotated_key] + f.signers[1:4]
-        self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [winner, a, b]), "quorum not met: 3/5"
-        )
-
-    def test_held_manifest_with_a_bad_signature_grants_nothing(self) -> None:
-        # Skipping held signature checks would make this 4/5.
-        f = self.f
-        bad = bytearray(self.rotation)
-        bad[-1] ^= 0x01  # MasterSignature is the last field
-        f.voters = [self.rotated_key] + f.signers[1:4]
-        self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [bytes(bad)]), "quorum not met: 3/5"
-        )
-
-    def test_highest_sequence_wins_not_last_seen(self) -> None:
-        # "Last wins" would pick seq 2 and make this 3/5.
-        f = self.f
-        key_a, key_b = keypair(310), keypair(311)
-        high = make_manifest(f.masters[0], key_a, seq=3)
-        low = make_manifest(f.masters[0], key_b, seq=2)
-        f.voters = [key_a] + f.signers[1:4]
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [high, low]).ok)
-
-    def test_resolved_key_collision_rejects(self) -> None:
-        f = self.f
-        stolen = make_manifest(f.masters[0], f.signers[1], seq=2)
-        self.assertRejected(self.verify(f.anchor(), f.trusted_key, [stolen]), "collides")
-
-    def test_held_revocation_removes_the_vote_and_keeps_n(self) -> None:
-        f = self.f
-        revocation = sign_manifest(
-            {"Sequence": v.MANIFEST_REVOKED, "PublicKey": f.masters[0][0]}, f.masters[0], None
-        )
-        f.voters = f.signers[:4]
-        self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [revocation]), "quorum not met: 3/5"
-        )
-
-    def test_manifest_for_an_unlisted_master_grants_nothing(self) -> None:
-        f = self.f
-        stranger = make_manifest(keypair(400), keypair(401), seq=9)
-        f.voters = [keypair(401)] + f.signers[1:4]
-        self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [stranger]), "quorum not met: 3/5"
-        )
-
-    def test_newer_publisher_manifest_with_the_same_key_keeps_the_list(self) -> None:
-        # A re-issued publisher manifest naming the same signing key doesn't
-        # invalidate a list that key signed.
-        f = self.f
-        same = make_manifest(f.publisher, f.publisher_signing, seq=2)
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key, [same]).ok)
-
-    def test_conflict_outcome_is_independent_of_manifest_order(self) -> None:
-        # The same held set in any order gives one verdict.
-        f = self.f
-        a = make_manifest(f.masters[0], keypair(301), seq=2)
-        b = make_manifest(f.masters[0], keypair(302), seq=2)
-        h = make_manifest(f.masters[0], self.rotated_key, seq=3)
-        f.voters = [self.rotated_key] + f.signers[1:4]
-        verdicts = {
-            self.verify(f.anchor(), f.trusted_key, order).ok
-            for order in ([a, b, h], [h, a, b], [b, h, a])
-        }
-        self.assertEqual(verdicts, {False})
-
-    def test_newer_publisher_manifest_supersedes_the_list(self) -> None:
-        f = self.f
-        newer = make_manifest(f.publisher, keypair(500), seq=2)
-        self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [newer]), "superseded publisher key"
-        )
-
-    def test_held_publisher_revocation_rejects_the_list(self) -> None:
-        # Same laws for the publisher as for validators (Nicholas): a
-        # revoked publisher key signs nothing.
-        f = self.f
-        revocation = sign_manifest(
-            {"Sequence": v.MANIFEST_REVOKED, "PublicKey": f.publisher[0]}, f.publisher, None
-        )
-        self.assertTrue(self.verify(f.anchor(), f.trusted_key, []).ok)
-        self.assertRejected(
-            self.verify(f.anchor(), f.trusted_key, [revocation]), "publisher is revoked"
-        )
+        for extra, transaction_encoding_differs in cases:
+            fields = decode(first)
+            fields.update(extra)
+            raw = encode(fields)
+            self.assertEqual(decode(raw), fields)
+            parsed = v.parse_validation(raw)
+            self.assertIsNotNone(parsed)
+            unsigned = {k: val for k, val in fields.items() if k != "Signature"}
+            self.assertEqual(parsed.signing_data[4:], unhexlify(encode(unsigned)))
+            transaction_body = unhexlify(encode_for_signing(fields))[4:]
+            if transaction_encoding_differs:
+                self.assertNotEqual(parsed.signing_data[4:], transaction_body)
+            else:
+                self.assertEqual(parsed.signing_data[4:], transaction_body)
 
 
 class ManifestTemplateTests(unittest.TestCase):
-    """Validly signed manifests whose shape the C++ verifier rejects."""
+    """Reasons only this verifier words.
 
-    def assertValidatorManifestRejected(self, manifest: bytes) -> None:
-        f = Fixture()
-        f.entries[0]["manifest"] = base64.b64encode(manifest).decode()
-        result = quietly(v.verify_anchor, f.anchor(), f.trusted_key)
-        self.assertFalse(result.ok)
-        self.assertIn("invalid validator manifest", result.message)
-
-    def fields(self, f: Fixture, **extra) -> dict:
-        return {"Sequence": 1, "PublicKey": f.masters[0][0], "SigningPubKey": f.signers[0][0], **extra}
-
-    def test_rejects_missing_signing_signature(self) -> None:
-        f = Fixture()
-        self.assertValidatorManifestRejected(sign_manifest(self.fields(f), f.masters[0], None))
-
-    def test_rejects_missing_sequence(self) -> None:
-        f = Fixture()
-        fields = self.fields(f)
-        del fields["Sequence"]
-        self.assertValidatorManifestRejected(sign_manifest(fields, f.masters[0], f.signers[0]))
-
-    def test_rejects_nonzero_version(self) -> None:
-        f = Fixture()
-        self.assertValidatorManifestRejected(
-            sign_manifest(self.fields(f, Version=1), f.masters[0], f.signers[0])
-        )
-
-    def test_rejects_revocation_carrying_signing_fields(self) -> None:
-        f = Fixture()
-        self.assertValidatorManifestRejected(
-            sign_manifest(self.fields(f, Sequence=0xFFFFFFFF), f.masters[0], f.signers[0])
-        )
+    That each of these manifests is refused is a shared vector
+    (trust-manifest-*, trust-revocation-*, trust-publisher-signing-key-is-its-
+    master). The two verifiers share no wording for why, so those vectors
+    assert no more than the word "manifest"; the reason is asserted here.
+    """
 
     def test_revocation_refuses_even_empty_signing_fields(self) -> None:
         f = Fixture()
@@ -674,26 +221,6 @@ class ManifestTemplateTests(unittest.TestCase):
         ok, err, _ = v.verify_manifest(sign_manifest(clean, f.masters[0], None))
         self.assertTrue(ok, err)
 
-    def test_rejects_field_outside_template(self) -> None:
-        f = Fixture()
-        self.assertValidatorManifestRejected(
-            sign_manifest(self.fields(f, LedgerSequence=1000), f.masters[0], f.signers[0])
-        )
-
-    def test_rejects_malformed_domain(self) -> None:
-        f = Fixture()
-        domain = hexlify(b"nodot").decode().upper()
-        self.assertValidatorManifestRejected(
-            sign_manifest(self.fields(f, Domain=domain), f.masters[0], f.signers[0])
-        )
-
-    def test_accepts_well_formed_domain(self) -> None:
-        f = Fixture()
-        domain = hexlify(b"validator.example.com").decode().upper()
-        manifest = sign_manifest(self.fields(f, Domain=domain), f.masters[0], f.signers[0])
-        f.entries[0]["manifest"] = base64.b64encode(manifest).decode()
-        self.assertTrue(quietly(v.verify_anchor, f.anchor(), f.trusted_key).ok)
-
     def test_rejects_publisher_signing_key_equal_to_master(self) -> None:
         f = Fixture()
         result = quietly(v.verify_anchor, f.anchor(publisher_signing=f.publisher), f.trusted_key)
@@ -702,35 +229,18 @@ class ManifestTemplateTests(unittest.TestCase):
 
 
 class ProofBindingTests(unittest.TestCase):
+    """Trust configuration. A vector always names its key and its network."""
+
     def verify(self, proof: dict, trusted_key: str | None, network_id: int | None):
         return quietly(v.verify, proof, trusted_key, network_id)
-
-    def test_accepts_anchor_header_inside_list_window(self) -> None:
-        f = Fixture()
-        result = self.verify(f.proof(), f.trusted_key, 0)
-        self.assertTrue(result.ok, result.errors)
-
-    def test_rejects_anchor_header_outside_list_window(self) -> None:
-        f = Fixture()
-        f.blob_fields["expiration"] = HEADER["close_time"]
-        result = self.verify(f.proof(), f.trusted_key, 0)
-        self.assertFalse(result.ok)
-        self.assertTrue(any("outside the signed list interval" in e for e in result.errors))
-
-    def test_rejects_proof_from_other_network(self) -> None:
-        f = Fixture()
-        result = self.verify(f.proof(network_id=21337), f.trusted_key, 0)
-        self.assertFalse(result.ok)
-        self.assertTrue(any("does not match configured network" in e for e in result.errors))
-
-    def test_rejects_known_key_configured_for_wrong_network(self) -> None:
-        result = self.verify(Fixture().proof(), v.XAHAU_VL_KEY, 0)
-        self.assertFalse(result.ok)
-        self.assertTrue(any("belongs to network 21337" in e for e in result.errors))
 
     def assertFailsWith(self, result, reason: str) -> None:
         self.assertFalse(result.ok)
         self.assertTrue(any(reason in e for e in result.errors), result.errors)
+
+    def test_rejects_known_key_configured_for_wrong_network(self) -> None:
+        result = self.verify(Fixture().proof(), v.XAHAU_VL_KEY, 0)
+        self.assertFailsWith(result, "belongs to network 21337")
 
     def test_custom_key_without_network_defaults_to_xrpl(self) -> None:
         f = Fixture()
@@ -740,215 +250,14 @@ class ProofBindingTests(unittest.TestCase):
             "does not match configured network 0",
         )
 
-    def test_rejects_missing_or_boolean_network_id(self) -> None:
-        f = Fixture()
-        proof = f.proof()
-        del proof["network_id"]
-        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "network_id must be an integer")
-        proof["network_id"] = False
-        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "network_id must be an integer")
-
-    def test_rejects_missing_or_unknown_format_version(self) -> None:
-        f = Fixture()
-        proof = f.proof()
-        del proof["format_version"]
-        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "unsupported format_version")
-        proof["format_version"] = 999
-        self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "unsupported format_version")
-
-    def test_rejects_bare_step_list(self) -> None:
-        f = Fixture()
-        steps = f.proof()["steps"]
-        self.assertFailsWith(self.verify(steps, f.trusted_key, 0), "proof must be an object")
-
-    def test_validation_key_mismatch_is_rejected_at_parse(self) -> None:
-        f = Fixture()
-        proof = f.proof()
-        validations = proof["steps"][0]["validations"]
-        key, raw = next(iter(validations.items()))
-        del validations[key]
-        validations["ED" + "AB" * 32] = raw
-        self.assertFailsWith(
-            self.verify(proof, f.trusted_key, 0), "does not match SigningPubKey"
-        )
-
-    def test_rejects_malformed_field_types(self) -> None:
-        f = Fixture()
-        cases = {
-            "validation value": lambda p: p["steps"][0]["validations"].update({"ED" + "00" * 32: "ZZ"}),
-            "validation value ": lambda p: p["steps"][0]["validations"].update({"ED" + "00" * 32: None}),
-            "header total_coins": lambda p: p["steps"][1]["header"].update(
-                total_coins=int(p["steps"][1]["header"]["total_coins"])
-            ),
-            "header close_flags": lambda p: p["steps"][1]["header"].update(close_flags=256),
-            "header parent_hash": lambda p: p["steps"][1]["header"].update(parent_hash="AB CD"),
-        }
-        for reason, mutate in cases.items():
-            with self.subTest(reason=reason):
-                proof = f.proof()
-                proof["steps"][1]["header"] = dict(proof["steps"][1]["header"])
-                mutate(proof)
-                self.assertFailsWith(self.verify(proof, f.trusted_key, 0), reason.strip())
-
     def test_json_map_proof_cannot_carry_binary_members(self) -> None:
+        # The names are this verifier's own channel from its binary decoder.
+        # That the proof is refused is the vector reserved-binary-member; the
+        # C++ verifier refuses it as any unknown member.
         f = Fixture()
         proof = f.proof()
         proof["steps"].append({"type": "map_proof", "tree": "tx", "__binary_root__": "00" * 32})
         self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "reserved for binary decoding")
-
-
-def _der(r: int, s: int) -> bytes:
-    def integer(x: int) -> bytes:
-        body = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
-        if body[0] & 0x80:
-            body = b"\x00" + body
-        return b"\x02" + bytes([len(body)]) + body
-
-    seq = integer(r) + integer(s)
-    return b"\x30" + bytes([len(seq)]) + seq
-
-
-def _der_parts(sig: bytes) -> tuple[int, int]:
-    rlen = sig[3]
-    r = int.from_bytes(sig[4 : 4 + rlen], "big")
-    slen = sig[5 + rlen]
-    s = int.from_bytes(sig[6 + rlen : 6 + rlen + slen], "big")
-    return r, s
-
-
-class DecompressionBoundTests(unittest.TestCase):
-    def test_truncated_zlib_body_is_refused(self) -> None:
-        # Witness for the EOF guard: an intact recompressed vector parses; the
-        # same stream missing its trailer does not.
-        import json as _json
-        import zlib
-        vec = _json.loads(
-            (Path(__file__).parent.parent / "tests/xprv/vectors/positive-tx-skiplist.json").read_text()
-        )
-        raw = bytes.fromhex(vec["form"]["binary_hex"])
-        header, body = bytearray(raw[:10]), raw[10:]
-        header[5] = 1  # zlib flag
-        packed = bytes(header) + zlib.compress(body, 9)
-        v.binary_to_proof(packed)
-        with self.assertRaisesRegex(ValueError, "truncated zlib body"):
-            v.binary_to_proof(packed[:-1])
-
-    def test_zlib_body_over_the_cap_is_refused(self) -> None:
-        import zlib
-        bomb = zlib.compress(b"\x00" * (v.MAX_DECOMPRESSED_PROOF_SIZE + 1), 9)
-        data = b"XPRV" + bytes([v.FORMAT_VERSION, 1]) + (0).to_bytes(4, "big") + bomb
-        with self.assertRaisesRegex(ValueError, "exceeds cap"):
-            v.binary_to_proof(data)
-
-
-    def packed(self, body: bytes, flags: int) -> bytes:
-        return b"XPRV" + bytes([v.FORMAT_VERSION, flags]) + (0).to_bytes(4, "big") + body
-
-    def test_cap_is_inclusive_plain_and_inflated(self) -> None:
-        import zlib
-        cap = v.MAX_DECOMPRESSED_PROOF_SIZE
-        for flags, make in ((0, lambda n: b"\x00" * n), (1, lambda n: zlib.compress(b"\x00" * n, 9))):
-            with self.subTest(flags=flags):
-                # Zeros are no TLV body, so exactly the cap still fails, but later.
-                with self.assertRaises(ValueError) as at_cap:
-                    v.binary_to_proof(self.packed(make(cap), flags))
-                self.assertNotIn("exceeds", str(at_cap.exception))
-                with self.assertRaisesRegex(ValueError, "exceeds"):
-                    v.binary_to_proof(self.packed(make(cap + 1), flags))
-
-    def test_one_zlib_stream_and_nothing_after_it(self) -> None:
-        import zlib
-        stream = zlib.compress(b"\x00" * 1024, 9)
-        for name, body, reason in (
-            ("suffix", stream + b"\x00", "bytes after the zlib stream"),
-            ("second stream", stream + stream, "bytes after the zlib stream"),
-            ("bad checksum", stream[:-1] + bytes([stream[-1] ^ 1]), "invalid zlib body"),
-        ):
-            with self.subTest(name):
-                with self.assertRaisesRegex(ValueError, reason):
-                    v.binary_to_proof(self.packed(body, 1))
-
-    def test_real_proof_round_trips_at_levels_one_and_nine(self) -> None:
-        import json as _json
-        import zlib
-        vec = _json.loads(
-            (Path(__file__).parent.parent / "tests/xprv/vectors/positive-tx-skiplist.json").read_text()
-        )
-        raw = bytes.fromhex(vec["form"]["binary_hex"])
-        plain = v.binary_to_proof(raw)
-        for level in (1, 9):
-            with self.subTest(level=level):
-                packed = raw[:5] + b"\x01" + raw[6:10] + zlib.compress(raw[10:], level)
-                self.assertEqual(v.binary_to_proof(packed)["steps"][1], plain["steps"][1])
-
-
-class ClosedJsonTests(unittest.TestCase):
-    """D12: the JSON form is closed; §2.3: leaves hold only what is hashed."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        vector = json.loads((Path(__file__).parents[1] / "tests/xprv/vectors/positive-tx-skiplist.json").read_text())
-        cls.base = vector["form"]["json"]
-
-    def proof(self) -> dict:
-        return copy.deepcopy(self.base)
-
-    def verify(self, proof):
-        return quietly(v.verify, proof)
-
-    @staticmethod
-    def first_leaf(proof: dict, tree: str) -> list:
-        node = [s for s in proof["steps"] if s["type"] == "map_proof" and s["tree"] == tree][-1]["trie"]
-        while isinstance(node, dict):
-            node = next(child for key, child in node.items() if key != "__depth__" and not isinstance(child, str))
-        return node
-
-    def test_corpus_proof_verifies(self) -> None:
-        self.assertTrue(self.verify(self.proof()).ok)
-
-    def test_rejects_unknown_members_at_every_level(self) -> None:
-        picks = {
-            "proof": lambda p: p,
-            "anchor": lambda p: p["steps"][0],
-            "ledger_header step": lambda p: p["steps"][1],
-            "header": lambda p: p["steps"][1]["header"],
-            "map_proof step": lambda p: p["steps"][2],
-        }
-        for what, pick in picks.items():
-            with self.subTest(what):
-                proof = self.proof()
-                pick(proof)["note"] = "not part of the proof"
-                result = self.verify(proof)
-                self.assertFalse(result.ok)
-                self.assertTrue(any(f"unknown member note in {what}" in e for e in result.errors), result.errors)
-
-    def test_rejects_integral_float_version(self) -> None:
-        proof = self.proof()
-        proof["format_version"] = float(v.FORMAT_VERSION)
-        self.assertFalse(self.verify(proof).ok)
-
-    def test_rejects_leaf_members_the_codec_would_skip(self) -> None:
-        def state_extra(p):
-            self.first_leaf(p, "state")[1]["DisplayedButNotHashed"] = 1
-        def state_index(p):
-            leaf = self.first_leaf(p, "state")
-            leaf[1]["index"] = leaf[0]
-        def tx_hash(p):
-            leaf = self.first_leaf(p, "tx")
-            leaf[1]["tx"]["hash"] = leaf[0]
-        def meta_extra(p):
-            self.first_leaf(p, "tx")[1]["meta"]["not_a_field"] = "1"
-        def wrapper_extra(p):
-            leaf = self.first_leaf(p, "tx")
-            leaf[1]["hash"] = leaf[0]
-        def nested_extra(p):
-            node = self.first_leaf(p, "tx")[1]["meta"]["AffectedNodes"][0]
-            next(iter(node.values()))["DisplayedButNotHashed"] = 1
-        for mutate in (state_extra, state_index, tx_hash, meta_extra, wrapper_extra, nested_extra):
-            with self.subTest(mutate.__name__):
-                proof = self.proof()
-                mutate(proof)
-                self.assertFalse(self.verify(proof).ok)
 
 
 class StructuredValueGrammarTests(unittest.TestCase):
@@ -1007,6 +316,8 @@ class StructuredValueGrammarTests(unittest.TestCase):
 
 
 class JsonTextCapTests(unittest.TestCase):
+    """The text itself: its size and its encoding, before any JSON is read."""
+
     def test_cap_is_inclusive_and_counts_utf8_bytes(self) -> None:
         cap = v.MAX_JSON_PROOF_SIZE
         with self.assertRaises(ValueError) as at_cap:
@@ -1016,7 +327,7 @@ class JsonTextCapTests(unittest.TestCase):
             v.load_json_proof(b" " * (cap + 1))
         # Fewer characters than the cap, more bytes: the bytes are what count.
         with self.assertRaisesRegex(ValueError, "exceeds"):
-            v.load_json_proof("\u00e9" * (cap // 2 + 1))
+            v.load_json_proof("é" * (cap // 2 + 1))
 
     def test_json_text_is_utf8_without_bom_or_nonfinite(self) -> None:
         self.assertEqual(v.loads_strict_json(b'{"a": 1}')["a"], 1)
@@ -1026,7 +337,7 @@ class JsonTextCapTests(unittest.TestCase):
             '{"a": NaN}',
             '{"a": Infinity}',
             '{"a": -Infinity}',
-            "\ufeff{}",
+            "﻿{}",
         ):
             with self.subTest(raw=raw):
                 with self.assertRaises(ValueError):
@@ -1035,133 +346,10 @@ class JsonTextCapTests(unittest.TestCase):
                     v.load_json_proof(raw)
 
 
-class SignatureCanonicalityTests(unittest.TestCase):
-    """Python must refuse what libsecp256k1 refuses in the C++ verifier."""
-
-    def setUp(self) -> None:
-        seed = generate_seed(entropy="ab" * 16, algorithm=CryptoAlgorithm.SECP256K1)
-        self.public, self.private = derive_keypair(seed)
-        self.data = b"VAL\x00" + b"xprv canonicality"
-        self.low = unhexlify(sign(self.data, self.private))
-
-    def test_low_s_signature_verifies(self) -> None:
-        r, s = _der_parts(self.low)
-        self.assertLessEqual(s, v.SECP256K1_ORDER // 2)
-        self.assertTrue(v.verify_signature(self.data, self.low, self.public))
-
-    def test_high_s_twin_is_refused(self) -> None:
-        r, s = _der_parts(self.low)
-        high = _der(r, v.SECP256K1_ORDER - s)
-        self.assertFalse(v.secp256k1_signature_is_canonical(high))
-        self.assertFalse(v.verify_signature(self.data, high, self.public))
-
-    def test_ed25519_s_plus_l_twin_is_refused(self) -> None:
-        public, private = keypair(7)
-        sig = unhexlify(sign(self.data, private))
-        self.assertTrue(v.verify_signature(self.data, sig, public))
-        s = int.from_bytes(sig[32:], "little") + v.ED25519_ORDER
-        twin = sig[:32] + s.to_bytes(32, "little")
-        self.assertFalse(v.ed25519_signature_is_canonical(twin))
-        self.assertFalse(v.verify_signature(self.data, twin, public))
-
-    def test_non_minimal_der_is_refused(self) -> None:
-        r, s = _der_parts(self.low)
-        canonical = _der(r, s)
-        padded_r = b"\x02" + bytes([canonical[3] + 1]) + b"\x00" + canonical[4 : 4 + canonical[3]]
-        rest = canonical[4 + canonical[3] :]
-        body = padded_r + rest
-        self.assertFalse(v.secp256k1_signature_is_canonical(b"\x30" + bytes([len(body)]) + body))
-        self.assertFalse(v.secp256k1_signature_is_canonical(canonical + b"\x00"))
-
-
-
-def leb128(value: int) -> bytes:
-    out = bytearray()
-    while True:
-        byte = value & 0x7F
-        value >>= 7
-        if value:
-            out.append(byte | 0x80)
-        else:
-            out.append(byte)
-            return bytes(out)
-
-
-def vl_prefix(blob: bytes) -> bytes:
-    if len(blob) > 192:
-        raise AssertionError("test blob needs a multi-byte VL prefix")
-    return bytes([len(blob)]) + blob
-
-
-def trie_with_leaves(leaves: list[tuple[bytes, bytes]]) -> bytes:
-    """One inner node. Body order is branch order, which is the binary walk."""
-    by_branch: dict[int, tuple[bytes, bytes]] = {}
-    for key, data in leaves:
-        branch = key[0] >> 4
-        if branch in by_branch:
-            raise AssertionError("two test leaves share a first nibble")
-        by_branch[branch] = (key, data)
-    header = 0
-    body = bytearray()
-    for branch in range(16):
-        item = by_branch.get(branch)
-        if item is None:
-            continue
-        header |= v.BR_LEAF << (branch * 2)
-        key, data = item
-        body += key + leb128(len(data)) + data
-    return header.to_bytes(4, "little") + bytes(body)
-
-
-def proof_over_binary_trie(payload: bytes, *, tree: str) -> tuple[Fixture, dict]:
-    f = Fixture()
-    root, end = v.hash_binary_trie(payload, 0, is_tx=(tree == "tx"))
-    if end != len(payload):
-        raise AssertionError("test trie was not consumed by the hash walk")
-    header = dict(HEADER)
-    root_hex = root.hex().upper()
-    if tree == "tx":
-        header["transaction_hash"] = root_hex
-    else:
-        header["account_hash"] = root_hex
-    ledger_hash = v.hash_header(header).hex().upper()
-    anchor = f.anchor()
-    anchor["ledger_hash"] = ledger_hash
-    anchor["validations"] = {s[0]: make_validation(s, ledger_hash) for s in f.voters}
-    proof = {
-        "format_version": v.FORMAT_VERSION,
-        "network_id": 0,
-        "steps": [
-            anchor,
-            {"type": "ledger_header", "header": header},
-            {
-                "type": "map_proof",
-                "tree": tree,
-                "__binary_payload__": payload,
-            },
-        ],
-    }
-    return f, proof
-
-
 class BinaryLeafAuthenticationTests(unittest.TestCase):
-    def verify(self, proof: dict, trusted_key: str):
-        return quietly(v.verify, proof, trusted_key, 0)
-
-    def test_undecodable_state_leaf_still_verifies(self) -> None:
-        payload = trie_with_leaves([(b"\x11" * 32, b"\xff\x00")])
-        f, proof = proof_over_binary_trie(payload, tree="state")
-        result = self.verify(proof, f.trusted_key)
-        self.assertTrue(result.ok, result.errors)
-        self.assertFalse(any("decodable" in e for e in result.errors))
-
-    def test_undecodable_tx_leaf_still_verifies(self) -> None:
-        payload = trie_with_leaves([(b"\x21" * 32, b"\xff\x00")])
-        f, proof = proof_over_binary_trie(payload, tree="tx")
-        result = self.verify(proof, f.trusted_key)
-        self.assertTrue(result.ok, result.errors)
-
     def test_collect_keeps_an_undecoded_leaf_beside_a_decoded_one(self) -> None:
+        # What the collector returns; that such a proof verifies is the
+        # vectors trust-opaque-state-leaf and trust-opaque-tx-leaf.
         decoded = unhexlify(
             encode(
                 {
@@ -1173,7 +361,7 @@ class BinaryLeafAuthenticationTests(unittest.TestCase):
                 }
             )
         )
-        payload = trie_with_leaves(
+        payload = world.trie_with_leaves(
             [
                 (b"\x11" * 32, b"\xff\x00"),
                 (b"\x22" * 32, decoded),
@@ -1186,120 +374,11 @@ class BinaryLeafAuthenticationTests(unittest.TestCase):
         self.assertIsInstance(by_key["22" * 32], dict)
         self.assertEqual(by_key["22" * 32]["LedgerEntryType"], "AccountRoot")
 
-    def test_unknown_bytes_do_not_create_a_skip_link(self) -> None:
-        payload = trie_with_leaves([(unhexlify(v.short_skip_key_hex()), b"\xff\x00")])
-        f, proof = proof_over_binary_trie(payload, tree="state")
-        child = dict(HEADER)
-        child["ledger_index"] = 900
-        child["parent_hash"] = "44" * 32
-        proof["steps"].append({"type": "ledger_header", "header": child})
-        result = self.verify(proof, f.trusted_key)
-        self.assertFalse(result.ok)
-        self.assertFalse(any("decodable" in e for e in result.errors), result.errors)
-        self.assertTrue(
-            any("not supported" in e for e in result.errors), result.errors
-        )
-
-    def test_decoded_ledger_hashes_leaf_still_supports_a_header(self) -> None:
-        child = dict(HEADER)
-        child["ledger_index"] = 900
-        child["parent_hash"] = "44" * 32
-        child_hash = v.hash_header(child).hex().upper()
-        leaf = unhexlify(
-            encode(
-                {
-                    "LedgerEntryType": "LedgerHashes",
-                    "Flags": 0,
-                    "LastLedgerSequence": 999,
-                    "Hashes": [child_hash],
-                }
-            )
-        )
-        payload = trie_with_leaves([(unhexlify(v.short_skip_key_hex()), leaf)])
-        f, proof = proof_over_binary_trie(payload, tree="state")
-        proof["steps"].append({"type": "ledger_header", "header": child})
-        result = self.verify(proof, f.trusted_key)
-        self.assertTrue(result.ok, result.errors)
-
-    def test_placeholder_only_trie_has_no_leaves(self) -> None:
-        payload = (v.BR_HASH).to_bytes(4, "little") + (b"\xab" * 32)
-        f, proof = proof_over_binary_trie(payload, tree="state")
-        result = self.verify(proof, f.trusted_key)
-        self.assertFalse(result.ok)
-        self.assertTrue(any("no leaves" in e for e in result.errors), result.errors)
-
-
 
 class StrictParsingTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        vector = json.loads((Path(__file__).parents[1] / "tests/xprv/vectors/positive-tx-skiplist.json").read_text())
-        cls.proof = vector["form"]["json"]
-        cls.raw = bytes.fromhex(vector["form"]["binary_hex"])
-        cls.records = v.parse_tlv_records(cls.raw[10:])
-
-    @staticmethod
-    def leb(value):
-        result = bytearray()
-        while value >= 128:
-            result.append((value & 127) | 128)
-            value >>= 7
-        return bytes(result + bytes([value]))
-
-    def packed(self, records):
-        return self.raw[:10] + b"".join(bytes([t]) + self.leb(len(p)) + p for t, p in records)
-
-    def test_rejects_payload_trailers(self):
-        for index, (kind, payload) in enumerate(self.records):
-            with self.subTest(kind=kind):
-                changed = list(self.records)
-                changed[index] = kind, payload + b"\x00"
-                with self.assertRaises(ValueError):
-                    v.binary_to_proof(self.packed(changed))
-
     def test_rejects_truncated_vl_data(self):
         with self.assertRaises(ValueError):
             v.read_vl(b"\x05x", 0)
-
-    def test_rejects_extra_leaf_element(self):
-        with self.assertRaises(ValueError):
-            v.hash_trie(["A" * 64, {}, "ignored"], is_tx=False)
-
-    def cli_ok(self, text):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "proof.json"
-            path.write_text(text)
-            with mock.patch.object(sys, "argv", ["verify-xprv", str(path)]), contextlib.redirect_stdout(io.StringIO()):
-                try:
-                    v.main()
-                except SystemExit as exc:
-                    return exc.code == 0
-                except ValueError:
-                    return False
-        return True
-
-    def test_rejects_duplicate_raw_branches(self):
-        text = json.dumps(self.proof)
-        self.assertTrue(self.cli_ok(text))
-        trie = next(s["trie"] for s in self.proof["steps"] if s["type"] == "map_proof")
-        key = next(k for k in trie if len(k) == 1)
-        changed = text.replace('"trie": {', '"trie": {' + json.dumps(key) + ': "' + "0" * 64 + '", ', 1)
-        self.assertFalse(self.cli_ok(changed))
-
-    def test_rejects_duplicate_raw_validations(self):
-        key = next(iter(self.proof["steps"][0]["validations"]))
-        changed = json.dumps(self.proof).replace('"validations": {', '"validations": {' + json.dumps(key) + ': "00", ', 1)
-        self.assertFalse(self.cli_ok(changed))
-
-    def test_rejects_lowercase_validation_keys(self):
-        proof = copy.deepcopy(self.proof)
-        proof["steps"][0]["validations"] = {k.lower(): value for k, value in proof["steps"][0]["validations"].items()}
-        self.assertFalse(quietly(v.verify, proof).ok)
-
-    def test_rejects_unknown_tree(self):
-        proof = copy.deepcopy(self.proof)
-        next(s for s in proof["steps"] if s["type"] == "map_proof")["tree"] = "banana"
-        self.assertFalse(quietly(v.verify, proof).ok)
 
     def test_unknown_field_in_a_validation_is_a_value_error(self):
         # Field id 0xFF is not in the xrpl-py 5.2.0 definitions, so decode()
@@ -1309,27 +388,18 @@ class StrictParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canonical STValidation"):
             v.decode_anchor_core(payload)
 
-    # Record order, a repeated record, an empty record and payload trailers in
-    # the anchor core are shared vectors: tests/xprv/vectors/negative-anchor-*.
-
 
 class StructuralParityTests(unittest.TestCase):
     def test_zero_validation_core_parses(self):
+        # The decoder's output. A proof with no validations is refused for its
+        # quorum: the vector anchor-core-no-validations.
         # 32-byte hash, 33-byte publisher key and a zero count: 66 bytes.
         payload = bytes(32) + b"\xed" + bytes(32) + bytes([0])
         self.assertEqual(len(payload), 66)
         self.assertEqual(v.decode_anchor_core(payload)["validations"], {})
 
-    def test_root_leaf_is_rejected_at_parse(self):
-        leaf = ["AB" * 32, {"LedgerEntryType": "AccountRoot"}]
-        with self.assertRaisesRegex(ValueError, "inner node"):
-            v.validate_json_trie(leaf)
-        with self.assertRaisesRegex(ValueError, "inner node"):
-            v.hash_trie(leaf, is_tx=False)
-        with self.assertRaisesRegex(ValueError, "inner node"):
-            v.validate_json_trie("AB" * 32)
-
     def test_manifest_outside_the_template_or_with_a_bad_domain_is_rejected(self):
+        # The reasons, which only this verifier words: see ManifestTemplateTests.
         master, signing = keypair(100), keypair(200)
         extra = sign_manifest(
             {
@@ -1351,7 +421,7 @@ class StructuralParityTests(unittest.TestCase):
                     "Sequence": 1,
                     "PublicKey": master[0],
                     "SigningPubKey": signing[0],
-                    "Domain": domain.hex().upper(),
+                    "Domain": hexlify(domain).decode().upper(),
                 },
                 master,
                 signing,

@@ -22,6 +22,7 @@
 #include "xprv/proof-chain.h"
 #include "xprv/proof-resolver.h"
 
+#include <catl/core/base64.h>
 #include <catl/core/types.h>
 #include <catl/crypto/sha512-half-hasher.h>
 #include <catl/xdata/protocol.h>
@@ -35,6 +36,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <optional>
 #include <set>
@@ -128,6 +130,48 @@ apply_mutations(
             raw.insert(raw.end(), bytes.begin(), bytes.end());
             continue;
         }
+        if (auto const* zeros = o.if_contains("append_zeros"))
+        {
+            // This many zero bytes: a body too large to store in a vector.
+            raw.resize(
+                raw.size() + static_cast<size_t>(zeros->to_number<uint64_t>()),
+                0);
+            continue;
+        }
+        if (auto const* zeros = o.if_contains("append_zlib_zeros"))
+        {
+            // A whole RFC 1950 stream that inflates to this many zero bytes:
+            // too large an input to store, and any valid stream will do.
+            std::vector<uint8_t> const plain(
+                static_cast<size_t>(zeros->to_number<uint64_t>()), 0);
+            uLongf size = compressBound(static_cast<uLong>(plain.size()));
+            std::vector<uint8_t> packed(size);
+            if (compress2(
+                    packed.data(),
+                    &size,
+                    plain.data(),
+                    static_cast<uLong>(plain.size()),
+                    9) != Z_OK)
+                throw std::runtime_error("append_zlib_zeros failed");
+            raw.insert(raw.end(), packed.begin(), packed.begin() + size);
+            continue;
+        }
+        if (auto const* drop = o.if_contains("drop_last"))
+        {
+            auto const n = static_cast<size_t>(drop->to_number<uint64_t>());
+            if (n > raw.size())
+                throw std::runtime_error("drop_last exceeds file length");
+            raw.resize(raw.size() - n);
+            continue;
+        }
+        if (auto const* mask = o.if_contains("xor_last"))
+        {
+            if (raw.empty())
+                throw std::runtime_error("xor_last on an empty file");
+            auto const bytes = from_hex(std::string(mask->as_string()));
+            raw.back() ^= bytes.at(0);
+            continue;
+        }
         if (auto const* t = o.if_contains("truncate_to"))
         {
             auto n = static_cast<size_t>(t->to_number<uint64_t>());
@@ -167,13 +211,21 @@ apply_mutations(
     return raw;
 }
 
+std::string
+duplicate_placeholder(size_t n)
+{
+    return "__xprv_duplicate_member_" + std::to_string(n) + "__";
+}
+
 /// Apply a negative's edits to its base's JSON form. Mirrors
 /// apply_json_patch() in scripts/xprv-vectors.py: `set` writes a value at a
-/// JSON pointer, `remove` deletes the member or element there, and `select`
-/// makes the value at a pointer the whole document.
+/// JSON pointer, `remove` deletes the member or element there, `select`
+/// makes the value at a pointer the whole document, and `duplicate` repeats
+/// a member name (see patched_text).
 boost::json::value
 apply_json_patch(boost::json::value doc, boost::json::array const& ops)
 {
+    size_t duplicates = 0;
     auto const tokens = [](std::string const& pointer) {
         std::vector<std::string> out;
         if (pointer.empty())
@@ -238,10 +290,48 @@ apply_json_patch(boost::json::value doc, boost::json::array const& ops)
                 throw std::runtime_error(
                     "json_patch remove: no member " + path.back());
         }
+        else if (kind == "duplicate")
+        {
+            // A parsed document cannot hold one member twice, so the second
+            // copy goes in under a placeholder name that patched_text renames.
+            boost::json::value* node = &doc;
+            for (auto const& token : path)
+                node = &step(*node, token);
+            auto& object = node->as_object();
+            if (!object.contains(op.at("key").as_string()))
+                throw std::runtime_error("json_patch duplicate: no such member");
+            object[duplicate_placeholder(duplicates++)] = op.at("value");
+        }
         else
             throw std::runtime_error("unknown json_patch op " + kind);
     }
     return doc;
+}
+
+/// The JSON text a patched vector hands a verifier. Mirrors patched_text()
+/// in scripts/xprv-vectors.py: a `duplicate` op writes a member name a
+/// second time, which only text can carry.
+std::string
+patched_text(boost::json::value const& doc, boost::json::array const& ops)
+{
+    auto text = boost::json::serialize(apply_json_patch(doc, ops));
+    size_t n = 0;
+    for (auto const& op_value : ops)
+    {
+        auto const& op = op_value.as_object();
+        if (op.at("op").as_string() != "duplicate")
+            continue;
+        auto const placeholder = boost::json::serialize(
+            boost::json::value(duplicate_placeholder(n++)));
+        auto const at = text.find(placeholder);
+        if (at == std::string::npos ||
+            text.find(placeholder, at + 1) != std::string::npos)
+            throw std::runtime_error(
+                "json_patch duplicate: placeholder not found exactly once");
+        text.replace(
+            at, placeholder.size(), boost::json::serialize(op.at("key")));
+    }
+    return text;
 }
 
 /// Uppercase hex of a byte vector. `bytes_hex` emits lowercase and the vectors
@@ -277,12 +367,14 @@ protocol_for(uint32_t network_id)
 // The production path as a configured verifier runs it: the proof's network
 // must be the configured one (§8), then the chain resolves under that
 // network's publisher key. resolve_proof_chain itself takes the key only.
+// `held` is the manifests the verifier holds from outside the proof (§1.3).
 bool
 verify_configured(
     ProofChain const& chain,
     uint32_t network_id,
     std::string const& publisher_key,
-    std::string& why)
+    std::string& why,
+    std::vector<std::vector<uint8_t>> const& held = {})
 {
     if (chain.network_id != network_id)
     {
@@ -291,7 +383,7 @@ verify_configured(
         return false;
     }
     return resolve_proof_chain(
-        chain, protocol_for(network_id), publisher_key, {}, &why);
+        chain, protocol_for(network_id), publisher_key, held, &why);
 }
 
 
@@ -535,6 +627,8 @@ struct Negative
     std::string layer;           // parse, graph or trust; empty on an accept
     std::string trust_key;
     uint32_t network_id = 0;
+    // Manifests the verifier holds from outside the proof (trust.manifests).
+    std::vector<std::vector<uint8_t>> held;
 };
 
 // A vector tagged known_failing for "cpp" records a defect this verifier
@@ -587,6 +681,9 @@ derived_vectors(std::string const& prefix)
         if (auto const* layer = n.vector.if_contains("layer"))
             n.layer = std::string(layer->as_string());
         boost::json::object trust;
+        // An inline vector may carry its proof in both forms; each is a
+        // proof a verifier receives, so each is checked.
+        std::vector<std::pair<bool, std::vector<uint8_t>>> forms;
         if (n.vector.contains("base"))
         {
             auto const base =
@@ -595,39 +692,52 @@ derived_vectors(std::string const& prefix)
                     .as_object();
             if (n.vector.contains("json_patch"))
             {
-                auto const text = boost::json::serialize(apply_json_patch(
+                auto const text = patched_text(
                     base.at("form").at("json"),
-                    n.vector.at("json_patch").as_array()));
-                n.bytes.assign(text.begin(), text.end());
+                    n.vector.at("json_patch").as_array());
+                forms.emplace_back(
+                    false, std::vector<uint8_t>(text.begin(), text.end()));
             }
             else
-            {
-                n.bytes = apply_mutations(
-                    from_hex(std::string(
-                        base.at("form").at("binary_hex").as_string())),
-                    n.vector.at("mutations").as_array());
-                n.binary = true;
-            }
+                forms.emplace_back(
+                    true,
+                    apply_mutations(
+                        from_hex(std::string(
+                            base.at("form").at("binary_hex").as_string())),
+                        n.vector.at("mutations").as_array()));
             trust = base.at("trust").as_object();
         }
         else
         {
             auto const& form = n.vector.at("form").as_object();
-            n.binary = form.contains("binary_hex");
-            if (n.binary)
-                n.bytes = from_hex(
-                    std::string(form.at("binary_hex").as_string()));
-            else
+            if (form.contains("json"))
             {
                 auto const text = boost::json::serialize(form.at("json"));
-                n.bytes.assign(text.begin(), text.end());
+                forms.emplace_back(
+                    false, std::vector<uint8_t>(text.begin(), text.end()));
             }
-            trust = n.vector.at("trust").as_object();
+            if (form.contains("binary_hex"))
+                forms.emplace_back(
+                    true,
+                    from_hex(std::string(form.at("binary_hex").as_string())));
         }
+        // A vector's own trust replaces its base's.
+        if (auto const* own = n.vector.if_contains("trust"))
+            trust = own->as_object();
         n.trust_key = std::string(trust.at("publisher_key").as_string());
         n.network_id =
             static_cast<uint32_t>(trust.at("network_id").to_number<uint64_t>());
-        out.push_back(std::move(n));
+        if (auto const* manifests = trust.if_contains("manifests"))
+            for (auto const& m : manifests->as_array())
+                n.held.push_back(
+                    catl::base64_decode(std::string(m.as_string())));
+        for (auto& [binary, bytes] : forms)
+        {
+            auto each = n;
+            each.binary = binary;
+            each.bytes = std::move(bytes);
+            out.push_back(std::move(each));
+        }
     }
     return out;
 }
@@ -647,7 +757,7 @@ refusal(Negative const& n, bool production)
         auto const protocol = protocol_for(n.network_id);
         std::string why;
         bool const ok = production
-            ? verify_configured(chain, n.network_id, n.trust_key, why)
+            ? verify_configured(chain, n.network_id, n.trust_key, why, n.held)
             : resolve_proof_chain_with_pretrusted_anchor_for_testing(
                   chain, protocol, &why);
         if (ok)
@@ -677,6 +787,12 @@ void
 expect_refused_for_its_reason(Negative const& n, bool production)
 {
     auto const why = refusal(n, production);
+    // XPRV_VECTOR_REASONS=1 lists what this verifier says of each negative,
+    // for choosing a reason_contains that both verifiers print.
+    if (production && std::getenv("XPRV_VECTOR_REASONS"))
+        std::cout << "[ REASON   ] " << n.path.filename().string() << '\t'
+                  << (n.binary ? "binary" : "json") << '\t'
+                  << why.value_or("ACCEPTED") << "\n";
     EXPECT_TRUE(why) << n.path.filename() << " ("
                      << std::string(n.vector.at("violates").as_string())
                      << "): ACCEPTED, which is a hole, not a test failure";
@@ -765,8 +881,7 @@ TEST(XprvVectors, PatchesChangeTheirBase)
                     .as_object();
             auto const& original = base.at("form").at("json");
             EXPECT_NE(
-                boost::json::serialize(apply_json_patch(
-                    original, obj.at("json_patch").as_array())),
+                patched_text(original, obj.at("json_patch").as_array()),
                 boost::json::serialize(original))
                 << path.filename();
         }

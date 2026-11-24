@@ -1826,9 +1826,14 @@ def verify(
         result.refuse("parse", "proof has no steps")
         return result
 
+    # Spec §1: exactly one anchor, and it is the first step. Both are faults in
+    # the proof's structure, so they are named before the walk can report the
+    # unsupported header that a misplaced anchor leaves behind it.
     anchor_count = sum(1 for step in steps if step.get("type") == "anchor")
     if anchor_count != 1:
         result.refuse("parse", f"proof must contain exactly one anchor, found {anchor_count}")
+    elif steps[0].get("type") != "anchor":
+        result.refuse("parse", "anchor must be the first serialized step")
 
     trusted_ledger_hashes: dict[str, list[str]] = defaultdict(list)
     trusted_tx_roots: dict[str, list[str]] = defaultdict(list)

@@ -1,0 +1,20 @@
+{
+  "name": "non-nibble-trie-member",
+  "violates": "spec \u00a72.3: an inner node's members are its branch keys",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie/10",
+      "value": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "branch keys"
+  },
+  "observed": {
+    "python_reason": "trie inner node has non-branch member '10' \u2014 branch keys are uppercase 0-9A-F (spec \u00a72.3)"
+  }
+}

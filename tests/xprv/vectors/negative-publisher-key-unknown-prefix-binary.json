@@ -1,0 +1,19 @@
+{
+  "name": "publisher-key-unknown-prefix-binary",
+  "violates": "spec \u00a75.1: a public key is 33 bytes beginning ED, 02 or 03",
+  "layer": "parse",
+  "mutations": [
+    {
+      "at": 45,
+      "set_hex": "04"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "must begin with ED, 02 or 03"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: publisher key must begin with ED, 02 or 03"
+  }
+}

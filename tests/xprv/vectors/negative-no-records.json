@@ -1,0 +1,18 @@
+{
+  "name": "no-records",
+  "violates": "spec \u00a73.8: a body carries exactly one anchor core",
+  "layer": "parse",
+  "mutations": [
+    {
+      "truncate_to": 10
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "missing anchor core record"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: missing anchor core record"
+  }
+}

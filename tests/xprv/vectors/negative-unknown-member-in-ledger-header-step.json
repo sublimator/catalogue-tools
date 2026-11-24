@@ -1,0 +1,20 @@
+{
+  "name": "unknown-member-in-ledger-header-step",
+  "violates": "spec \u00a72: the JSON form is closed; an object carries its listed members and no other",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/note",
+      "value": "x"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "unknown member note in ledger_header step"
+  },
+  "observed": {
+    "python_reason": "unknown member note in ledger_header step"
+  }
+}
