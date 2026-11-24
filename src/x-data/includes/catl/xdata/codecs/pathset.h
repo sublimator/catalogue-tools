@@ -3,6 +3,7 @@
 #include "catl/base58/base58.h"
 #include "catl/xdata/codecs/account_id.h"
 #include "catl/xdata/codecs/currency.h"
+#include "catl/xdata/parser-error.h"
 #include "catl/xdata/serializer.h"
 #include "catl/xdata/types/pathset.h"
 #include <boost/json.hpp>
@@ -65,16 +66,34 @@ struct PathSetCodec
         boost::json::value const& v,
         std::string_view native = CurrencyCodec::default_native)
     {
+        // A path set holds at least one path, and a path at least one step.
+        // rippled's JSON reader takes an empty one and writes bytes that its
+        // own STPathSet reader then refuses ("empty path"), so there is no
+        // serialized form of it to write.
+        auto const refuse = [](char const* what) {
+            throw EncodeError(CodecErrorCode::invalid_value, "PathSet", what);
+        };
         auto const& paths = v.as_array();
+        if (paths.empty())
+            refuse("a path set holds at least one path");
         for (size_t p = 0; p < paths.size(); ++p)
         {
             if (p > 0)
             {
                 s.add_path_separator();
             }
+            if (paths[p].as_array().empty())
+                refuse("a path holds at least one step");
             for (auto const& hop : paths[p].as_array())
             {
                 auto const& obj = hop.as_object();
+                // A step with none of the three would be written as the
+                // byte that ends the set.
+                if (!obj.contains("account") && !obj.contains("currency") &&
+                    !obj.contains("issuer"))
+                    refuse(
+                        "a path step names an account, a currency or an "
+                        "issuer");
                 uint8_t type_byte = 0;
                 if (obj.contains("account"))
                     type_byte |= PathSet::TYPE_ACCOUNT;
@@ -123,22 +142,18 @@ struct PathSetCodec
         {
             uint8_t type_byte = data.data()[pos++];
 
-            if (type_byte == PathSet::END_BYTE)
+            // A path that ends with no step in it, whether at a separator
+            // or at the end of the set: rippled's STPathSet reader refuses
+            // it ("empty path"), and so does this one.
+            if (type_byte == PathSet::END_BYTE ||
+                type_byte == PathSet::PATH_SEPARATOR)
             {
-                if (!current_path.empty())
-                {
-                    paths.push_back(std::move(current_path));
-                }
-                break;
-            }
-
-            if (type_byte == PathSet::PATH_SEPARATOR)
-            {
-                if (!current_path.empty())
-                {
-                    paths.push_back(std::move(current_path));
-                    current_path = boost::json::array();
-                }
+                if (current_path.empty())
+                    throw ParserError("PathSet: empty path");
+                paths.push_back(std::move(current_path));
+                current_path = boost::json::array();
+                if (type_byte == PathSet::END_BYTE)
+                    break;
                 continue;
             }
 

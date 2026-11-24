@@ -3,12 +3,16 @@
 // the message.
 
 #include <catl/core/types.h>
+#include <catl/xdata/codec-error.h>
+#include <catl/xdata/codecs/pathset.h>
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
+#include <catl/xdata/serializer.h>
 #include <catl/xdata/slice-cursor.h>
 #include <catl/xdata/slice-visitor.h>
 
+#include <boost/json.hpp>
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -142,6 +146,56 @@ TEST(MalformedInput, TruncatedBridgeIsRefused)
         EXPECT_THROW(parse<SkipObjects>(inside, protocol), std::runtime_error)
             << bytes.size() << " bytes, skipped";
     }
+}
+
+// A path set with no path, or a path with no step. rippled's JSON reader
+// takes these and writes bytes its own STPathSet reader refuses ("empty
+// path"; checked against xrpl-codec at cd322b9811), so they have no
+// serialized form. x-data used to write and read them both ways.
+TEST(MalformedInput, EmptyPathsAreRefusedBothWays)
+{
+    auto const protocol = Protocol::load_embedded_xrpl_protocol();
+    char const* issuer = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+    boost::json::object const step{{"currency", "USD"}, {"issuer", issuer}};
+    using boost::json::array;
+    using boost::json::object;
+    for (auto const& paths : std::vector<boost::json::value>{
+             array{},                         // no path
+             array{array{}},                  // one path, no step
+             array{array{step}, array{}},     // a second path with no step
+             array{array{object{}}},          // a step naming nothing
+             array{array{object{{"type", 0}}}},
+         })
+    {
+        std::vector<std::uint8_t> out;
+        catl::xdata::VectorSink sink(out);
+        catl::xdata::Serializer<catl::xdata::VectorSink> s(sink);
+        EXPECT_THROW(
+            catl::xdata::codecs::PathSetCodec::encode(s, paths), EncodeError)
+            << boost::json::serialize(paths);
+    }
+
+    // The bytes rippled writes for those, read back.
+    std::vector<std::uint8_t> one_step = {0x30};  // currency and issuer
+    one_step.insert(one_step.end(), 40, 0x11);
+    auto after_one_step = one_step;
+    after_one_step.insert(after_one_step.end(), {0xFF, 0x00});
+    for (auto const& bytes : std::vector<std::vector<std::uint8_t>>{
+             {0x00},          // the end byte alone
+             {0xFF, 0x00},    // a separator with nothing before it
+             after_one_step,  // a separator with nothing after it
+         })
+        EXPECT_THROW(
+            catl::xdata::codecs::PathSetCodec::decode(
+                Slice(bytes.data(), bytes.size())),
+            ParserError)
+            << bytes.size() << " bytes";
+
+    // And a path set that is fine still reads.
+    one_step.push_back(0x00);
+    EXPECT_NO_THROW(catl::xdata::codecs::PathSetCodec::decode(
+        Slice(one_step.data(), one_step.size())));
+    (void)protocol;
 }
 
 TEST(MalformedInput, CursorNeverLeavesItsData)

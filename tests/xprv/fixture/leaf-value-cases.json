@@ -1003,6 +1003,83 @@
    ],
    "accept": false,
    "why": "a member rippled does not write"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [],
+   "accept": false,
+   "why": "no path: rippled writes one byte for it and cannot read that byte back"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    []
+   ],
+   "accept": false,
+   "why": "a path with no step"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 48
+     }
+    ],
+    []
+   ],
+   "accept": false,
+   "why": "a second path with no step"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "type": 0
+     }
+    ]
+   ],
+   "accept": false,
+   "why": "a step naming no account, currency or issuer"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {}
+    ]
+   ],
+   "accept": false,
+   "why": "an empty step"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 48
+     }
+    ],
+    [
+     {
+      "account": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 1
+     }
+    ]
+   ],
+   "accept": true,
+   "why": "two paths"
   }
  ]
 }
