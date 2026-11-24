@@ -1129,8 +1129,12 @@ def verify_anchor(
 
     # Step 4: verify validator manifests from blob → build signing→master key map
     try:
-        blob_json = loads_strict_json(blob_bytes)
-    except ValueError:
+        # The list is signed text with one reading (§1.3): a member written
+        # twice would leave the choice between them to the parser.
+        blob_json = loads_strict_json(blob_bytes, object_pairs_hook=unique_members)
+    except ValueError as exc:
+        if "duplicate JSON member" in str(exc):
+            return AnchorResult(ok=False, message="UNL blob has a duplicate member")
         return AnchorResult(ok=False, message="invalid blob JSON")
     if not isinstance(blob_json, dict):
         return AnchorResult(ok=False, message="UNL blob is not an object")
@@ -1161,10 +1165,13 @@ def verify_anchor(
         if not isinstance(m_b64, str) or not isinstance(advertised, str):
             return AnchorResult(ok=False, message="validator entry missing key or manifest")
         try:
-            m_raw = base64.b64decode(m_b64, validate=True)
+            m_raw = canonical_base64(m_b64)
+        except Exception:
+            return AnchorResult(ok=False, message="validator manifest is not canonical base64")
+        try:
             ok, err, m = verify_manifest(m_raw)
         except Exception as exc:
-            m_raw, ok, err, m = b"", False, str(exc), {}
+            ok, err, m = False, str(exc), {}
         revoked = ok and m.get("Sequence") == MANIFEST_REVOKED
         sk = _upper_hex(m.get("SigningPubKey"))
         if not ok or (not sk and not revoked):
@@ -1346,6 +1353,28 @@ def validate_json_trie(node: Any, depth: int = 0, path: str = "") -> int:
     raise ValueError(f"unexpected trie node: {type(node)}")
 
 
+def unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A JSON object with each member once. A repeat has no single reading."""
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate JSON member {key!r}")
+        obj[key] = value
+    return obj
+
+
+def canonical_base64(text: str) -> bytes:
+    """Decode canonical padded base64 (RFC 4648 §4), and nothing else.
+
+    One text per byte string: whatever decodes must encode back to the same
+    characters, which covers the alphabet, the padding and the pad bits.
+    """
+    raw = base64.b64decode(text, validate=True)
+    if base64.b64encode(raw).decode() != text:
+        raise ValueError("not canonical base64")
+    return raw
+
+
 def loads_strict_json(raw: str | bytes, **kwargs: Any) -> Any:
     """JSON text is UTF-8, with no byte-order mark and no NaN or Infinity.
 
@@ -1376,14 +1405,7 @@ def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:
     size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
     if size > MAX_JSON_PROOF_SIZE:
         raise ValueError(f"proof JSON: text exceeds {MAX_JSON_PROOF_SIZE} bytes")
-    def object_members(pairs):
-        obj = {}
-        for key, value in pairs:
-            if key in obj:
-                raise ValueError(f"duplicate JSON member {key!r}")
-            obj[key] = value
-        return obj
-    return loads_strict_json(raw, object_pairs_hook=object_members)
+    return loads_strict_json(raw, object_pairs_hook=unique_members)
 
 
 # Hex in the JSON form has one spelling: uppercase (§2).
@@ -2240,7 +2262,7 @@ def main() -> None:
         items = json.loads(Path(args.manifests).read_text())
         if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
             raise SystemExit("--manifests must be a JSON array of base64 strings")
-        extra = [base64.b64decode(x, validate=True) for x in items]
+        extra = [canonical_base64(x) for x in items]
     r = verify(proof, args.trusted_key, args.network, extra)
     sys.exit(0 if r.ok else 1)
 

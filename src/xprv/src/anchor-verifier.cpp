@@ -1,4 +1,5 @@
 #include "xprv/anchor-verifier.h"
+#include "json-proof-loader.h"
 #include "xprv/hex-utils.h"
 #include "xprv/manifest-utils.h"
 
@@ -395,15 +396,23 @@ AnchorVerifier::verify(
     std::string blob_str(
         reinterpret_cast<char const*>(blob_bytes.data()), blob_bytes.size());
 
+    // The list is signed text, and it has one reading: a member written
+    // twice would leave the choice between them to the parser (§1.3).
     boost::json::value blob_json;
     try
     {
-        blob_json = boost::json::parse(blob_str);
+        blob_json = detail::parse_unique_json(blob_str);
     }
-    catch (...)
+    catch (std::exception const& e)
     {
-        result.error = "invalid blob JSON";
-        narrative.push_back("   FAIL: blob is not valid JSON.");
+        bool const repeated =
+            std::string_view(e.what()).find("duplicate member") !=
+            std::string_view::npos;
+        result.error = repeated ? "UNL blob has a duplicate member"
+                                : "invalid blob JSON";
+        narrative.push_back(
+            repeated ? "   FAIL: the list has a duplicate JSON member."
+                     : "   FAIL: blob is not valid JSON.");
         return result;
     }
 
@@ -478,8 +487,18 @@ AnchorVerifier::verify(
             return result;
         }
 
-        auto m_b64 = std::string(vobj.at("manifest").as_string());
-        auto m_bytes = catl::base64_decode(m_b64);
+        // Canonical padded base64 and nothing else (§1.3): a manifest string
+        // with stray characters is not the string the publisher signed for.
+        auto const m_decoded = catl::base64_decode_strict(
+            std::string_view(vobj.at("manifest").as_string()));
+        if (!m_decoded)
+        {
+            result.error = "validator manifest is not canonical base64";
+            narrative.push_back(
+                "   FAIL: a validator manifest is not canonical base64.");
+            return result;
+        }
+        auto const& m_bytes = *m_decoded;
         auto verified_manifest = parse_and_verify_manifest(m_bytes, protocol);
         if (!verified_manifest ||
             (!verified_manifest->is_revocation() &&

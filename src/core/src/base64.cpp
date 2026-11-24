@@ -50,6 +50,20 @@ base64_decode(std::string_view input)
     return result;
 }
 
+std::optional<std::vector<uint8_t>>
+base64_decode_strict(std::string_view input)
+{
+    // One text per byte string: whatever decodes must encode back to the
+    // same characters. That covers the alphabet, the padding, the pad bits
+    // and anything stray in one comparison.
+    if (input.size() % 4 != 0)
+        return std::nullopt;
+    auto bytes = base64_decode(input);
+    if (base64_encode(bytes) != input)
+        return std::nullopt;
+    return bytes;
+}
+
 std::string
 base64_encode(std::span<const uint8_t> input)
 {

@@ -839,9 +839,17 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                                     "manifest");
                             }
 
-                            auto m_b64 =
-                                std::string(vobj.at("manifest").as_string());
-                            auto m_bytes = base64_decode(m_b64);
+                            // The verifier refuses a list whose manifest
+                            // strings are not canonical base64, so a fetched
+                            // list is held to the same rule.
+                            auto const m_decoded =
+                                catl::base64_decode_strict(std::string_view(
+                                    vobj.at("manifest").as_string()));
+                            if (!m_decoded)
+                                throw std::runtime_error(
+                                    "validator manifest is not canonical "
+                                    "base64");
+                            auto const& m_bytes = *m_decoded;
                             auto manifest = parse_manifest(m_bytes);
                             auto const advertised = lower_ascii(std::string(
                                 vobj.at("validation_public_key").as_string()));
