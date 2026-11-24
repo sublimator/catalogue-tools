@@ -110,7 +110,7 @@ verify_proof(std::span<const uint8_t> data, TrustForNetworkFn const& trust_for);
 /// `reason`. `verifier` names the program and build that produced an
 /// accepted report; it is kept apart from the definitions fingerprints.
 boost::json::object
-to_json(VerifyReport const& report, std::string_view verifier = {});
+to_json(VerifyReport const& report, std::string_view verifier = "");
 
 /// A fingerprint of a loaded set of definitions, so a report says which
 /// table produced it: every field with its code, type and flags, the type
