@@ -118,12 +118,15 @@ Step 7 · map_proof (tx tree of 103,053,705)
 Look closely at Step 7 — it illustrates the most important consumer lesson in
 spec §5.5: **a verified proof proves ledger inclusion, not application
 success.** Here the proof verifies cleanly, the consumer checks that the
-authenticated leaf key matches `DF2B3DE0…`, and inspecting the authenticated
-metadata shows `TransactionResult: "tecUNFUNDED_PAYMENT"`. The payment was
-included in ledger 103,053,705, charged a 12-drop fee, and **failed**. Likewise,
-an authenticated account-state leaf proves an account's balance *at that
-specific ledger*; a claim about what an account holds *today* requires checking
-the anchor's authenticated `close_time` against an application freshness policy.
+authenticated leaf key matches the full expected transaction ID (`DF2B3DE0…`),
+and inspecting the authenticated metadata shows
+`TransactionResult: "tecUNFUNDED_PAYMENT"`. The payment was included in ledger
+103,053,705, charged a 12-drop fee, and **failed**. Likewise, an authenticated
+account-state leaf proves an account's balance *at that specific ledger* — a
+fresh anchor can authenticate a historical observation without refreshing it.
+To decide whether a balance is recent enough, check the authenticated
+`close_time` of the supporting ledger containing that balance (not the anchor's
+`close_time`) against an application freshness policy.
 
 ### Shorter routes (spec §6)
 
@@ -362,9 +365,9 @@ Version 10 keeps two distinct identities separate (spec §1.2, §1.4):
   specific proof artifact.
 - **Claim identity:** What was actually proven is
   `(network_id, authenticated ledger_hash, tree, leaf_key)` (plus the leaf
-  bytes). Two valid proofs of the same transaction generated ten minutes apart
-  have different anchor ledgers and different CAS hashes, yet prove the same
-  claim.
+  bytes). Two valid proofs of the same transaction produced ten minutes apart
+  can use different anchor ledgers or validation sets and therefore carry
+  different CAS hashes, yet prove the exact same claim.
 
 **Caching pitfall:** never treat a CAS hash as a shortcut around validating the
 exact bytes you received. A malformed JSON proof (for example, carrying an
