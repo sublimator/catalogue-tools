@@ -2258,11 +2258,57 @@ def canonical_base64(text: str) -> bytes:
     return raw
 
 
-def loads_strict_json(raw: str | bytes, **kwargs: Any) -> Any:
-    """JSON text is UTF-8, with no byte-order mark and no NaN or Infinity.
+# The deepest nesting of arrays and objects read (§2.4). A valid proof stays
+# far below it. The C++ verifier stops at the same level.
+MAX_JSON_DEPTH = 128
 
-    ``json.loads`` on bytes sniffs UTF-16, UTF-32, and a BOM. The C++ parser
-    does not. A signed validator-list blob is the same text.
+
+def _refuse_what_json_loads_lets_through(value: Any) -> None:
+    """Two things ``json.loads`` reads and the C++ parser refuses.
+
+    Nesting deeper than MAX_JSON_DEPTH; and a string holding half of a
+    surrogate pair, which only an escape such as "\\ud800" can put there
+    and which is no Unicode character. A pair of escapes has already become
+    the one character it stands for.
+    """
+
+    def check_text(text: str) -> None:
+        if not text.isascii():
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("JSON string holds half of a surrogate pair") from exc
+
+    if isinstance(value, str):
+        check_text(value)
+        return
+    pending = [(value, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if isinstance(node, dict):
+            members: Any = node.values()
+            for name in node:
+                check_text(name)
+        elif isinstance(node, list):
+            members = node
+        else:
+            continue
+        if depth > MAX_JSON_DEPTH:
+            raise ValueError(f"JSON nested too deep (more than {MAX_JSON_DEPTH} levels)")
+        for member in members:
+            if isinstance(member, str):
+                check_text(member)
+            elif isinstance(member, (dict, list)):
+                pending.append((member, depth + 1))
+
+
+def loads_strict_json(raw: str | bytes, **kwargs: Any) -> Any:
+    """JSON text is UTF-8, with no byte-order mark and no NaN or Infinity,
+    nested no deeper than MAX_JSON_DEPTH, every string Unicode text.
+
+    ``json.loads`` on bytes sniffs UTF-16, UTF-32, and a BOM, reads any depth
+    its stack allows and reads an escaped lone surrogate. The C++ parser does
+    none of these. A signed validator-list blob is the same text.
     """
     if isinstance(raw, (bytes, bytearray)):
         try:
@@ -2277,7 +2323,12 @@ def loads_strict_json(raw: str | bytes, **kwargs: Any) -> Any:
     def reject_constant(name: str) -> Any:
         raise ValueError(f"{name} is not a JSON number")
 
-    return json.loads(text, parse_constant=reject_constant, **kwargs)
+    try:
+        value = json.loads(text, parse_constant=reject_constant, **kwargs)
+    except RecursionError as exc:
+        raise ValueError(f"JSON nested too deep (more than {MAX_JSON_DEPTH} levels)") from exc
+    _refuse_what_json_loads_lets_through(value)
+    return value
 
 
 def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:

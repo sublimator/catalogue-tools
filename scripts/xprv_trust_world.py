@@ -595,6 +595,26 @@ def cases() -> list[dict[str, Any]]:
     anchored("list-repeats-a-member", "spec §2.4: a signed list's JSON has no repeated member", f,
              reason="duplicate member")
 
+    def list_with_member(value_text: str) -> Fixture:
+        """A signed list with one more member, "x", written exactly as given."""
+        f = Fixture()
+        text = json.dumps({**f.blob_fields, "validators": f.entries})
+        f.blob_text = '{"x": ' + value_text + ", " + text[1:]
+        return f
+
+    # The list is level 1, so a member of n nested arrays reaches level n + 1.
+    anchored("list-nested-128-levels", "spec §2.4: JSON nested 128 levels deep is read",
+             list_with_member("[" * 127 + "]" * 127))
+    anchored("list-nested-129-levels", "spec §2.4: JSON nested deeper than 128 levels is refused, here in a signed list",
+             list_with_member("[" * 128 + "]" * 128), reason="invalid blob JSON")
+    half = "spec §2.4: an escape for half of a surrogate pair is not a character, here in a signed list"
+    anchored("list-with-a-lone-high-surrogate-escape", half, list_with_member('"\\ud800"'), reason="invalid blob JSON")
+    anchored("list-with-a-lone-low-surrogate-escape", half, list_with_member('"\\udc00"'), reason="invalid blob JSON")
+    anchored("list-with-a-lone-surrogate-in-a-member-name", half, list_with_member('{"\\ud800": 1}'),
+             reason="invalid blob JSON")
+    anchored("list-with-a-surrogate-pair-escape", "spec §2.4: a pair of surrogate escapes is one character",
+             list_with_member('"\\ud83d\\ude00"'))
+
     # ── manifest shape ───────────────────────────────────────────────
     template = "spec §1.3 rule 1: a manifest has exactly the fields of its template"
 

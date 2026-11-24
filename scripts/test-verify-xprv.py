@@ -599,6 +599,42 @@ print(json.dumps({"errors": errors, "results": sorted(set(results))}))
         self.assertTrue(result.ok, result.reason)
 
 
+class StrictJsonReaderTests(unittest.TestCase):
+    """What json.loads reads and the C++ parser refuses (§2.4)."""
+
+    def test_nesting_is_read_to_128_levels_and_no_deeper(self) -> None:
+        for opener, closer in (("[", "]"), ('{"a":', "}")):
+            with self.subTest(opener=opener):
+                v.loads_strict_json(opener * 128 + ("" if opener == "[" else "1") + closer * 128)
+                with self.assertRaisesRegex(ValueError, "too deep"):
+                    v.loads_strict_json(opener * 129 + ("" if opener == "[" else "1") + closer * 129)
+        # Mixed, and beside a shallow sibling that must not hide it.
+        with self.assertRaisesRegex(ValueError, "too deep"):
+            v.loads_strict_json('{"shallow": [1], "deep": ' + "[" * 128 + "]" * 128 + "}")
+
+    def test_nesting_too_deep_for_the_interpreter_is_a_refusal_not_a_crash(self) -> None:
+        with self.assertRaisesRegex(ValueError, "too deep"):
+            v.loads_strict_json("[" * 200000 + "]" * 200000)
+        with self.assertRaisesRegex(ValueError, "too deep"):
+            v.load_json_proof('{"a":' * 200000 + "1" + "}" * 200000)
+
+    def test_half_of_a_surrogate_pair_is_refused_anywhere(self) -> None:
+        for text in (
+            '"\\ud800"', '"\\udc00"', '"\\udc00\\ud800"', '"a\\ud800b"',
+            '["\\ud800"]', '{"k": "\\udfff"}', '{"\\ud800": 1}', '{"k": [[{"j": "\\ud800"}]]}',
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "surrogate"):
+                v.loads_strict_json(text)
+        # A pair is one character, and so is anything written directly.
+        self.assertEqual(v.loads_strict_json('"\\ud83d\\ude00"'), "\U0001F600")
+        self.assertEqual(v.loads_strict_json('{"é": "日本", "k": "\\u00e9"}'), {"é": "日本", "k": "é"})
+
+    def test_the_proof_reader_refuses_both(self) -> None:
+        for text in ('{"x": "\\ud800"}', '{"x": ' + "[" * 128 + "]" * 128 + "}"):
+            with self.subTest(text=text[:20]), self.assertRaises(ValueError):
+                v.load_json_proof(text)
+
+
 class RippledReferenceTests(unittest.TestCase):
     """The XRPL leaf codec held to rippled's own, over every section of
     tests/x-data/fixture/rippled-reference-fixtures.json, which records what
