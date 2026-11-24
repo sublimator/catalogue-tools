@@ -101,15 +101,20 @@ expect_encodes(boost::json::object const& entry, Encode const& encode)
     EXPECT_EQ(upper_hex(buf), expected) << what;
 }
 
-// rippled writes "type" into each path step. x-data, xrpl.js and xrpl-py do
-// not, and x-data's encoder takes the type from the members present. The
-// comparison is of everything else.
+// rippled writes "type" into each path step when it decodes, and so does
+// x-data. A client's JSON need not carry it: the encoder takes the type from
+// the members present. This is the decoding of a client's path set.
 boost::json::value
-without_step_type(boost::json::value paths)
+with_step_type(boost::json::value paths)
 {
     for (auto& path : paths.as_array())
         for (auto& step : path.as_array())
-            step.as_object().erase("type");
+        {
+            auto& members = step.as_object();
+            members["type"] = (members.contains("account") ? 0x01 : 0) |
+                (members.contains("currency") ? 0x10 : 0) |
+                (members.contains("issuer") ? 0x20 : 0);
+        }
     return paths;
 }
 
@@ -264,7 +269,7 @@ TEST(RippledReference, PathSetJson)
         auto const bytes = bytes_of(e.at("hex"));
         EXPECT_EQ(
             PathSetCodec::decode(Slice(bytes.data(), bytes.size())),
-            without_step_type(e.at("json")))
+            e.at("json"))
             << e.at("hex").as_string();
     }
 }
@@ -368,8 +373,8 @@ TEST(RippledReference, UInt64HexFromText)
         });
 }
 
-// Disabled: waits on the decision about how x-data writes a hex UInt64.
-TEST(RippledReference, DISABLED_UInt64HexText)
+// A UInt64 field that is not base ten is lowercase hex without padding.
+TEST(RippledReference, UInt64HexText)
 {
     auto const protocol = Protocol::load_embedded_xrpl_protocol();
     for (auto const& e : section("uint64_hex_decode"))
@@ -437,7 +442,10 @@ TEST(XrplIssuedXah, PathStepRoundTrips)
                  "17A73888B98222E485D927BCDFD63FC3895AD2AE00"),
         std::string::npos)
         << hex;
-    EXPECT_EQ(decode_object(bytes, protocol), boost::json::value(payment));
+    // Decoding adds each step's type, as rippled does.
+    auto decoded = payment;
+    decoded["Paths"] = with_step_type(payment.at("Paths"));
+    EXPECT_EQ(decode_object(bytes, protocol), boost::json::value(decoded));
 }
 
 // A native issue in a whole object reads as rippled writes it.
@@ -569,7 +577,9 @@ TEST(XahauNative, AmountsAndPathsInAnObject)
             "300000000000000000000000005852500000000000"),
         std::string::npos)
         << hex;
-    EXPECT_EQ(decode_object(bytes, protocol), boost::json::value(payment));
+    auto decoded = payment;
+    decoded["Paths"] = with_step_type(payment.at("Paths"));
+    EXPECT_EQ(decode_object(bytes, protocol), boost::json::value(decoded));
 
     // XAH is native here: an issued amount cannot name it.
     payment["Amount"] = boost::json::object{

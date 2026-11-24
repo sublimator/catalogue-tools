@@ -1122,9 +1122,16 @@ decode_fixture_binary(std::string const& hex_str, Protocol const& protocol)
 
 }  // namespace
 
+// What the decoder writes is what rippled writes for the same bytes
+// (fixture/codec-roundtrip-rippled-decode.json, printed by rippled's own
+// codec). The `json` beside each `binary` is xrpl.js's, which differs in an
+// ordinary UInt64's text and in a path step's `type`; it is what the encode
+// tests feed in, not what a decoder is held to.
 TEST_P(CodecRoundtripTxTest, DecodeMatchesJson)
 {
     static auto fixtures = load_json_fixture("codec-roundtrip-fixtures.json");
+    static auto rippled =
+        load_json_fixture("codec-roundtrip-rippled-decode.json");
     auto const& data = FixtureData::instance();
     auto const& entry = fixtures.as_object()
                             .at("transactions")
@@ -1133,7 +1140,9 @@ TEST_P(CodecRoundtripTxTest, DecodeMatchesJson)
 
     auto const decoded = decode_fixture_binary(
         std::string(entry.at("binary").as_string()), data.protocol);
-    EXPECT_EQ(decoded, entry.at("json"))
+    EXPECT_EQ(
+        decoded,
+        rippled.as_object().at("transactions").as_array()[GetParam()])
         << "TX[" << GetParam() << "] "
         << entry.at("json").as_object().at("TransactionType").as_string();
 }
@@ -1147,9 +1156,13 @@ TEST_P(CodecRoundtripSLETest, DecodeMatchesJson)
                             .as_array()[GetParam()]
                             .as_object();
 
+    static auto rippled =
+        load_json_fixture("codec-roundtrip-rippled-decode.json");
     auto const decoded = decode_fixture_binary(
         std::string(entry.at("binary").as_string()), data.protocol);
-    EXPECT_EQ(decoded, entry.at("json"))
+    EXPECT_EQ(
+        decoded,
+        rippled.as_object().at("accountState").as_array()[GetParam()])
         << "SLE[" << GetParam() << "] "
         << entry.at("json").as_object().at("LedgerEntryType").as_string();
 }

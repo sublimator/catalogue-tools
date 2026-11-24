@@ -142,7 +142,10 @@ struct PathSetCodec
                 continue;
             }
 
+            // rippled's STPathSet::getJson writes the step's type byte as
+            // `type`, before the members that byte says are present.
             boost::json::object hop;
+            hop["type"] = type_byte;
 
             if (type_byte & PathSet::TYPE_ACCOUNT)
             {
@@ -174,10 +177,7 @@ struct PathSetCodec
                 }
             }
 
-            if (!hop.empty())
-            {
-                current_path.push_back(std::move(hop));
-            }
+            current_path.push_back(std::move(hop));
         }
 
         if (!current_path.empty())

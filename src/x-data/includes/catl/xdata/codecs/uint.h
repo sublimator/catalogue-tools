@@ -234,7 +234,10 @@ struct UInt64Codec
         return boost::json::string(std::to_string(v));
     }
 
-    // Decode to hex string (matching xrpl-py/xrpl.js)
+    // Decode to hex text, as rippled's STUInt64::getJson writes a field that
+    // is not base ten: std::to_chars in base 16, so lowercase and without
+    // leading zeros ("ff"; zero is "0"). xrpl.js and xrpl-py write 16
+    // uppercase digits for the same bytes; both spellings are read back.
     static boost::json::value
     decode(Slice const& data)
     {
@@ -243,10 +246,9 @@ struct UInt64Codec
         {
             v = (v << 8) | data.data()[i];
         }
-        // Return uppercase hex, zero-padded to 16 chars
         char buf[17];
         std::snprintf(
-            buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(v));
+            buf, sizeof(buf), "%llx", static_cast<unsigned long long>(v));
         return boost::json::string(buf);
     }
 };
