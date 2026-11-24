@@ -458,11 +458,14 @@ def _require_value_grammar(type_name: str, value: Any, at: str) -> None:
             raise _not_a_value(at, "PathSet")
         for path in value:
             for hop in path:
+                # `type` is the step's type byte, as rippled writes it. Its
+                # value is checked by the round trip, like everything else.
                 if (
                     not isinstance(hop, dict)
                     or not hop
-                    or not set(hop) <= {"account", "currency", "issuer"}
-                    or not all(isinstance(x, str) for x in hop.values())
+                    or not set(hop) <= {"account", "currency", "issuer", "type"}
+                    or not all(isinstance(x, str) for k, x in hop.items() if k != "type")
+                    or ("type" in hop and (isinstance(hop["type"], bool) or not isinstance(hop["type"], int)))
                 ):
                     raise _not_a_value(at, "PathSet")
         return
@@ -513,29 +516,55 @@ def _require_stobject_members(obj: Any, path: str) -> None:
 
 
 # The reference JSON of a leaf is the JSON rippled writes for its bytes (§2.3).
-# xrpl-py 5.2.0 differs from it in three places, and the helpers below put its
-# input and its output into the reference form:
-# - it decodes the four base-ten UInt64 fields as 16 hex digits, and reads
-#   LockedAmount's text as hex;
-# - it writes an issued amount's value as plain digits (1000000000000) where
-#   rippled keeps the 16-digit mantissa (1000000000000000e-3);
-# - it writes "e0" after a Number whose exponent is zero.
+# xrpl-py 5.2.0 differs from it in five places, and the helpers below put its
+# input (_for_codec) and its output (_as_reference) into the reference form:
+# - an ordinary UInt64 field: rippled writes lowercase hex without padding
+#   ("ff"); xrpl-py writes and wants 16 uppercase digits;
+# - the four base-ten UInt64 fields: rippled writes decimal; xrpl-py decodes
+#   them as 16 hex digits, and reads LockedAmount's text as hex;
+# - a path step: rippled writes its type byte as `type`; xrpl-py does not;
+# - an issued amount's value: rippled keeps the 16-digit mantissa
+#   (1000000000000000e-3); xrpl-py writes plain digits (1000000000000);
+# - a Number whose exponent is zero: xrpl-py appends "e0".
 _BASE_TEN_UINT64 = frozenset({"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount"})
+_RIPPLED_HEX_UINT64 = re.compile(r"[0-9a-f]{1,16}")
+_STEP_TYPE = {"account": 0x01, "currency": 0x10, "issuer": 0x20}
 
 
 def _for_codec(value: Any) -> Any:
-    """A leaf as xrpl-py serializes it correctly: LockedAmount as hex."""
-    if isinstance(value, dict):
-        return {
-            k: f"{int(v):016X}"
-            if k == "LockedAmount" and isinstance(v, str) and len(v) <= 20
-            and v.isascii() and v.isdigit() and int(v) < 1 << 64
-            else _for_codec(v)
-            for k, v in value.items()
-        }
+    """A leaf in the reference form, as xrpl-py serializes it correctly.
+
+    Only text that is already in the reference form is rewritten. Anything
+    else goes to the codec as it is, and the comparison refuses it afterwards.
+    """
     if isinstance(value, list):
         return [_for_codec(v) for v in value]
-    return value
+    if not isinstance(value, dict):
+        return value
+    out: dict[str, Any] = {}
+    for name, member in value.items():
+        info = _serialized_field(name)
+        kind = info.type if info else ""
+        if kind == "UInt64" and isinstance(member, str):
+            if name == "LockedAmount":
+                decimal = len(member) <= 20 and member.isascii() and member.isdigit()
+                out[name] = f"{int(member):016X}" if decimal and int(member) < 1 << 64 else member
+            elif name not in _BASE_TEN_UINT64 and _RIPPLED_HEX_UINT64.fullmatch(member):
+                out[name] = f"{int(member, 16):016X}"
+            else:
+                out[name] = member
+        elif kind == "PathSet" and isinstance(member, list):
+            out[name] = [
+                [
+                    {k: v for k, v in step.items() if k != "type"} if isinstance(step, dict) else step
+                    for step in path
+                ]
+                if isinstance(path, list) else path
+                for path in member
+            ]
+        else:
+            out[name] = _for_codec(member)
+    return out
 
 
 def _plain_decimal(negative: bool, digits: str, exponent: int) -> str:
@@ -617,6 +646,13 @@ def _as_reference(value: Any) -> Any:
         kind = info.type if info else ""
         if name in _BASE_TEN_UINT64 and isinstance(member, str) and len(member) == 16:
             out[name] = str(int(member, 16))
+        elif kind == "UInt64" and isinstance(member, str) and len(member) == 16:
+            out[name] = format(int(member, 16), "x")
+        elif kind == "PathSet" and isinstance(member, list):
+            out[name] = [
+                [{**step, "type": sum(bit for key, bit in _STEP_TYPE.items() if key in step)} for step in path]
+                for path in member
+            ]
         elif kind == "Amount" and isinstance(member, dict) and "currency" in member:
             out[name] = {**member, "value": rippled_issued_value(member["value"])}
         elif kind == "Amount" and isinstance(member, dict) and member.get("value") == "-0":

@@ -290,7 +290,8 @@ class StructuredValueGrammarTests(unittest.TestCase):
             ("Amount", {**iou, "currency": "XAH"}),
             ("Asset", {"currency": "XAH", "issuer": self.ISSUER}),
             ("Asset", {"currency": "USD", "issuer": self.ISSUER}),
-            ("Paths", [[{"currency": "USD", "issuer": self.ISSUER}]]),
+            # A step carries its type byte, as rippled writes it.
+            ("Paths", [[{"currency": "USD", "issuer": self.ISSUER, "type": 48}]]),
             ("XChainBridge", bridge),
         ]
         refuse = [

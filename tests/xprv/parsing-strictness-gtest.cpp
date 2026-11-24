@@ -155,8 +155,9 @@ TEST(ParsingStrictness, StructuredValuesCarryExactlyTheirMembers)
     EXPECT_FALSE(leaf_accepted(tx_leaf_with(
         "Asset", {{"currency", "USD"}, {"issuer", issuer}, {"note", "x"}})));
 
-    boost::json::array paths{boost::json::array{
-        boost::json::object{{"currency", "USD"}, {"issuer", issuer}}}};
+    // A step carries its type byte, as rippled writes it.
+    boost::json::array paths{boost::json::array{boost::json::object{
+        {"currency", "USD"}, {"issuer", issuer}, {"type", 48}}}};
     EXPECT_TRUE(leaf_accepted(tx_leaf_with("Paths", paths)));
     paths[0].as_array()[0].as_object()["note"] = "x";
     EXPECT_FALSE(leaf_accepted(tx_leaf_with("Paths", paths)));

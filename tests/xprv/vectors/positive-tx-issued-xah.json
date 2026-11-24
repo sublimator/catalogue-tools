@@ -913,7 +913,7 @@
                           "LedgerEntryType": "DirectoryNode",
                           "LedgerIndex": "3D979FC6B9C0671BE19DC633803FEF5F3189668087082E105904BDF683289945",
                           "NewFields": {
-                            "ExchangeRate": "5904BDF683289945",
+                            "ExchangeRate": "5904bdf683289945",
                             "RootIndex": "3D979FC6B9C0671BE19DC633803FEF5F3189668087082E105904BDF683289945",
                             "TakerGetsCurrency": "0000000000000000000000005841480000000000",
                             "TakerGetsIssuer": "17A73888B98222E485D927BCDFD63FC3895AD2AE"
@@ -927,7 +927,7 @@
                           "FinalFields": {
                             "Flags": 0,
                             "PreviousTxnLgrSeq": 108510269,
-                            "ExchangeRate": "5904BE0928E503C5",
+                            "ExchangeRate": "5904be0928e503c5",
                             "PreviousTxnID": "A07478AC2EB19D9E94621E94AF018EEC76D0F153A56072043269937FBF1DBB87",
                             "RootIndex": "3D979FC6B9C0671BE19DC633803FEF5F3189668087082E105904BE0928E503C5",
                             "TakerPaysCurrency": "0000000000000000000000000000000000000000",
@@ -977,8 +977,8 @@
                             "Flags": 0,
                             "Sequence": 100077711,
                             "PreviousTxnLgrSeq": 108510269,
-                            "BookNode": "0000000000000000",
-                            "OwnerNode": "0000000000000000",
+                            "BookNode": "0",
+                            "OwnerNode": "0",
                             "PreviousTxnID": "A07478AC2EB19D9E94621E94AF018EEC76D0F153A56072043269937FBF1DBB87",
                             "BookDirectory": "3D979FC6B9C0671BE19DC633803FEF5F3189668087082E105904BE0928E503C5",
                             "TakerPays": "1735300394",

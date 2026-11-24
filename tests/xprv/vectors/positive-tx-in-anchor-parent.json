@@ -134,8 +134,8 @@
                             "LedgerIndex": "5831CFF053714F1BB59E6F4C15A1D1B95826539A3282BE39290DD67A607846B5",
                             "FinalFields": {
                               "Flags": 0,
-                              "IndexNext": "0000000000000B72",
-                              "IndexPrevious": "0000000000000B19",
+                              "IndexNext": "b72",
+                              "IndexPrevious": "b19",
                               "RootIndex": "B8CE21504D8DAFA3F5C6615F589E022E599C8B321AA40A90DF2A723A0E0712A9",
                               "Owner": "rGk99J8mmxA2bmgmLNg1vXrCF5VqbRzqd1"
                             }
@@ -149,7 +149,7 @@
                               "Flags": 0,
                               "PreviousTxnLgrSeq": 108533913,
                               "TicketSequence": 108405259,
-                              "OwnerNode": "0000000000000B71",
+                              "OwnerNode": "b71",
                               "PreviousTxnID": "C59A2F82F47279969D776610415EE6DEB494B9284605C62FFF4B2DA6E15CE426",
                               "Account": "rGk99J8mmxA2bmgmLNg1vXrCF5VqbRzqd1"
                             }
@@ -188,6 +188,7 @@
                             "Paths": [
                               [
                                 {
+                                  "type": 48,
                                   "currency": "5745544800000000000000000000000000000000",
                                   "issuer": "rfmS3zqrQrka8wVyhXifEeyTwe8AMz2Yhw"
                                 }
@@ -215,6 +216,7 @@
                             "Paths": [
                               [
                                 {
+                                  "type": 48,
                                   "currency": "46454C4958000000000000000000000000000000",
                                   "issuer": "rsCCLpiq87xAsXEAmmmpzBiDPGJHmTiHq7"
                                 }

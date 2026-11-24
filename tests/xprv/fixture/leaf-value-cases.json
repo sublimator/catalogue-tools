@@ -1,5 +1,5 @@
 {
- "about": "Values of one member of a Payment's tx object on XRPL, and whether the leaf rule accepts the leaf (spec section 2.3: a JSON leaf is the JSON its own bytes decode to). A value has one text, the one rippled writes: another notation for the same number is refused. The C++ and Python unit tests both read this file, so the two verifiers are asked the same questions.",
+ "about": "Values of one member of a Payment's tx object on XRPL, and whether the leaf rule accepts the leaf (spec section 2.3: a JSON leaf is the JSON its own bytes decode to, and that JSON is rippled's). A value has one text: another notation for the same number, the padded uppercase hex that xrpl.js and xrpl-py write for a 64-bit field, or a path step without its `type`, is refused. The C++ and Python unit tests both read this file, so the two verifiers are asked the same questions.",
  "cases": [
   {
    "group": "issued amount value",
@@ -660,6 +660,349 @@
    "value": 10,
    "accept": false,
    "why": "a JSON number where the text belongs"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "ff",
+   "accept": true,
+   "why": "the reference text: lowercase, no padding"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "0",
+   "accept": true,
+   "why": "zero"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "1",
+   "accept": true,
+   "why": "one"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "ffffffffffffffff",
+   "accept": true,
+   "why": "the largest value"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "FF",
+   "accept": false,
+   "why": "uppercase"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "00000000000000FF",
+   "accept": false,
+   "why": "16 uppercase digits, as xrpl.js and xrpl-py write it"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "00000000000000ff",
+   "accept": false,
+   "why": "padded"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "0ff",
+   "accept": false,
+   "why": "a leading zero"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "0xff",
+   "accept": false,
+   "why": "a prefix"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "",
+   "accept": false,
+   "why": "empty"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "g",
+   "accept": false,
+   "why": "not hex"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "10000000000000000",
+   "accept": false,
+   "why": "more than 64 bits"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": "ff ",
+   "accept": false,
+   "why": "trailing space"
+  },
+  {
+   "group": "64-bit field (hex)",
+   "field": "OwnerNode",
+   "value": 255,
+   "accept": false,
+   "why": "a JSON number where the text belongs"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "255",
+   "accept": true,
+   "why": "the reference text: decimal"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "0",
+   "accept": true,
+   "why": "zero"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "18446744073709551615",
+   "accept": true,
+   "why": "the largest value"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "ff",
+   "accept": false,
+   "why": "hex"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "00000000000000FF",
+   "accept": false,
+   "why": "16 hex digits, as xrpl-py writes it"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "0255",
+   "accept": false,
+   "why": "a leading zero"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "18446744073709551616",
+   "accept": false,
+   "why": "more than 64 bits"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "MaximumAmount",
+   "value": "255 ",
+   "accept": false,
+   "why": "trailing space"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "255",
+   "accept": true,
+   "why": "the reference text: decimal"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "0",
+   "accept": true,
+   "why": "zero"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "18446744073709551615",
+   "accept": true,
+   "why": "the largest value"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "ff",
+   "accept": false,
+   "why": "hex"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "00000000000000FF",
+   "accept": false,
+   "why": "16 hex digits, as xrpl-py writes it"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "0255",
+   "accept": false,
+   "why": "a leading zero"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "18446744073709551616",
+   "accept": false,
+   "why": "more than 64 bits"
+  },
+  {
+   "group": "64-bit field (base ten)",
+   "field": "LockedAmount",
+   "value": "255 ",
+   "accept": false,
+   "why": "trailing space"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 48
+     }
+    ]
+   ],
+   "accept": true,
+   "why": "currency and issuer, with their type byte"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "account": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 1
+     }
+    ]
+   ],
+   "accept": true,
+   "why": "an account step"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "XRP",
+      "type": 16
+     }
+    ]
+   ],
+   "accept": true,
+   "why": "a native currency step"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+     }
+    ]
+   ],
+   "accept": false,
+   "why": "no type, as xrpl.js and xrpl-py write it"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 49
+     }
+    ]
+   ],
+   "accept": false,
+   "why": "a type that names a member the step lacks"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 16
+     }
+    ]
+   ],
+   "accept": false,
+   "why": "a type that omits a member the step has"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": "48"
+     }
+    ]
+   ],
+   "accept": false,
+   "why": "the type as a string"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 48.5
+     }
+    ]
+   ],
+   "accept": false,
+   "why": "the type as a fraction"
+  },
+  {
+   "group": "path step",
+   "field": "Paths",
+   "value": [
+    [
+     {
+      "currency": "USD",
+      "issuer": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+      "type": 48,
+      "type_hex": "0000000000000030"
+     }
+    ]
+   ],
+   "accept": false,
+   "why": "a member rippled does not write"
   }
  ]
 }

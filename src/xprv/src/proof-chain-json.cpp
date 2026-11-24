@@ -405,11 +405,21 @@ require_value_grammar(
             {
                 if (!hop.is_object() || hop.as_object().empty())
                     not_a_value(at, "PathSet");
+                // `type` is the step's type byte, as rippled writes it. Its
+                // value is checked by the round trip, like everything else.
                 for (auto const& kv : hop.as_object())
-                    if ((kv.key() != "account" && kv.key() != "currency" &&
+                {
+                    if (kv.key() == "type")
+                    {
+                        if (!kv.value().is_int64() && !kv.value().is_uint64())
+                            not_a_value(at, "PathSet");
+                    }
+                    else if (
+                        (kv.key() != "account" && kv.key() != "currency" &&
                          kv.key() != "issuer") ||
                         !kv.value().is_string())
                         not_a_value(at, "PathSet");
+                }
             }
         }
         return;
