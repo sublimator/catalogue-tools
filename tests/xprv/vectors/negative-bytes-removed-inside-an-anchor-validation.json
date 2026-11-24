@@ -1,7 +1,7 @@
 {
   "name": "bytes-removed-inside-an-anchor-validation",
   "violates": "spec \u00a73.4 and \u00a77: a verifier refuses malformed bytes; it never aborts on them",
-  "notes": "Found by Neon's differential run at code 19a04df5 (reviews/xprv-v10-code-claude/neon-fuzz-19a04df5.md). Four bytes removed inside the anchor core's validations. The C++ process ended with SIGSEGV in the codec's array parser. The two verifiers meet different faults first (a validation that is not canonical; an unknown record type after it), so no reason is asserted.",
+  "notes": "Found by a differential run of the two verifiers at code 19a04df5. Four bytes removed inside the anchor core's validations. The C++ process ended with SIGSEGV in the codec's array parser. The two verifiers meet different faults first (a validation that is not canonical; an unknown record type after it), so no reason is asserted.",
   "layer": "parse",
   "base": "positive-tx-in-anchor-ledger",
   "mutations": [

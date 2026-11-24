@@ -1,7 +1,7 @@
 {
   "name": "issued-value-as-plain-digits",
   "violates": "spec \u00a72.3: a JSON leaf is the JSON its own bytes decode to; an issued amount's value has one text",
-  "notes": "Found by Neon's differential run at code 19a04df5 (reviews/xprv-v10-code-claude/neon-fuzz-19a04df5.md). 10^30 written as 31 plain digits, which is the text xrpl-py decodes these bytes to. The Python verifier accepted it and the C++ one could not read it.",
+  "notes": "Found by a differential run of the two verifiers at code 19a04df5. 10^30 written as 31 plain digits, which is the text xrpl-py decodes these bytes to. The Python verifier accepted it and the C++ one could not read it.",
   "layer": "parse",
   "base": "positive-tx-in-anchor-parent",
   "json_patch": [
