@@ -380,6 +380,41 @@ class XahauJsonLeafTests(unittest.TestCase):
         self.assertEqual(result.layer, "graph", result.reason)
 
 
+class StandaloneScriptTests(unittest.TestCase):
+    """The verifier is handed out as one file (xprv.it serves it as a
+    download). It has to run with nothing of this repository beside it."""
+
+    REPO = Path(__file__).resolve().parent.parent
+
+    def test_format_version_is_the_repositorys(self) -> None:
+        self.assertEqual(v.FORMAT_VERSION, int((self.REPO / "src" / "xprv" / "VERSION").read_text().strip()))
+
+    def test_runs_from_a_directory_of_its_own(self) -> None:
+        import shutil
+        import subprocess
+        import tempfile
+
+        vector = json.loads((self.REPO / "tests" / "xprv" / "vectors" / "positive-tx-skiplist.json").read_text())
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td) / "verify-xprv.py"
+            shutil.copyfile(self.REPO / "scripts" / "verify-xprv.py", script)
+            for name, data in (
+                ("proof.json", json.dumps(vector["form"]["json"]).encode()),
+                ("proof.bin", bytes.fromhex(vector["form"]["binary_hex"])),
+            ):
+                proof = Path(td) / name
+                proof.write_bytes(data)
+                # The same interpreter and packages as this test, and no
+                # repository on the path: only the copied file.
+                run = subprocess.run(
+                    [sys.executable, str(script), str(proof), "--json"],
+                    capture_output=True, text=True, cwd=td,
+                )
+                with self.subTest(form=name):
+                    self.assertEqual(run.returncode, 0, run.stderr[-600:])
+                    self.assertIs(json.loads(run.stdout)["verified"], True)
+
+
 class JsonTextCapTests(unittest.TestCase):
     """The text itself: its size and its encoding, before any JSON is read."""
 

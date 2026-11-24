@@ -2280,7 +2280,11 @@ def verify(
 # TLV types: 0x01=anchor, 0x02=header, 0x03=tx_map, 0x04=state_map, 0x05=unl
 
 MAGIC = b"XPRV"
-FORMAT_VERSION = int((Path(__file__).parent.parent / "src/xprv/VERSION").read_text().strip())
+# The format version this verifier reads (§9.1). It is written here, and not
+# read from src/xprv/VERSION, because this script is also handed out on its
+# own (xprv.it serves it as a download) and must run from wherever it is
+# saved. A unit test holds this number equal to that file.
+FORMAT_VERSION = 10
 FLAG_ZLIB = 0x01
 
 # TLV types
