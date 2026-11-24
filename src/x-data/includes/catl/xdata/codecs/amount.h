@@ -1,8 +1,10 @@
 #pragma once
 
+#include "catl/base58/base58.h"
 #include "catl/xdata/codec-error.h"
 #include "catl/xdata/codecs/account_id.h"
 #include "catl/xdata/codecs/currency.h"
+#include "catl/xdata/decimal.h"
 #include "catl/xdata/serializer.h"
 #include "catl/xdata/types/amount.h"
 #include "catl/xdata/types/iou-value.h"
@@ -10,6 +12,15 @@
 
 namespace catl::xdata::codecs {
 
+// Amount JSON follows rippled's STAmount::setJson and amountFromJson
+// (src/libxrpl/protocol/STAmount.cpp):
+//
+//   native   a string of drops
+//   issued   {"value", "currency", "issuer"}; the currency is never the
+//            native code, which depends on the network (see CurrencyCodec)
+//   MPT      {"value", "mpt_issuance_id"}
+//
+// Every value is a decimal in rippled's number grammar (decimal.h).
 struct AmountCodec
 {
     static constexpr size_t native_size = 8;
@@ -43,7 +54,19 @@ struct AmountCodec
         std::string_view drops_str,
         std::string const& path = {})
     {
-        s.add_native_amount(parse_int64(drops_str, "Amount", path));
+        auto const parts = parse_decimal(drops_str, "Amount", path);
+        auto const drops = decimal_to_integer(parts, drops_str, "Amount", path);
+        // rippled kMaxNativeN: no more than 10^17 drops exist.
+        static constexpr int64_t max_native = 100'000'000'000'000'000LL;
+        if (drops > max_native || drops < -max_native)
+        {
+            throw EncodeError(
+                CodecErrorCode::out_of_range,
+                "Amount",
+                "native amount out of range: " + std::string(drops_str),
+                path);
+        }
+        s.add_native_amount(drops);
     }
 
     // -- IOU amount from string parts --
@@ -54,12 +77,48 @@ struct AmountCodec
         std::string_view value,
         std::string_view currency,
         std::string_view issuer,
-        std::string const& path = {})
+        std::string const& path = {},
+        std::string_view native = CurrencyCodec::default_native)
     {
         uint64_t raw = encode_iou_value(value, path);
+
+        uint8_t currency_raw[20];
+        CurrencyCodec::to_bytes(currency, currency_raw, path, native);
+        // rippled: "XRP may not be specified as an object". The zero
+        // currency in an issued amount is also bytes rippled cannot read
+        // back ("invalid native currency"), however the JSON spells it.
+        if (CurrencyCodec::is_zero(currency_raw))
+        {
+            throw EncodeError(
+                CodecErrorCode::invalid_value,
+                "Amount",
+                "an issued amount cannot name the native currency",
+                path);
+        }
+
+        auto const decoded = base58::decode_account_id(issuer);
+        if (!decoded || decoded->size() != 20)
+        {
+            throw EncodeError(
+                CodecErrorCode::invalid_encoding,
+                "Amount",
+                "invalid issuer: " + std::string(issuer),
+                path);
+        }
+        // The zero account as issuer is likewise unreadable by rippled
+        // ("invalid native account").
+        if (AccountIDCodec::is_zero_account(decoded->data(), 20))
+        {
+            throw EncodeError(
+                CodecErrorCode::invalid_value,
+                "Amount",
+                "an issued amount needs an issuer other than the zero account",
+                path);
+        }
+
         s.add_u64(raw);
-        CurrencyCodec::encode(s, currency, path);
-        AccountIDCodec::encode(s, issuer, path);
+        s.add_raw(std::span<const uint8_t>{currency_raw, 20});
+        s.add_raw(std::span<const uint8_t>{decoded->data(), 20});
     }
 
     // -- MPT amount from string parts --
@@ -73,24 +132,11 @@ struct AmountCodec
     {
         require_hex_length(mpt_issuance_id, 48, "Amount", path);
 
-        int64_t int_val = 0;
-        bool is_negative = false;
-
-        if (value.size() > 2 && value[0] == '0' &&
-            (value[1] == 'x' || value[1] == 'X'))
-        {
-            int_val = static_cast<int64_t>(
-                parse_hex_uint64(value.substr(2), "Amount", path));
-        }
-        else
-        {
-            if (!value.empty() && value[0] == '-')
-            {
-                is_negative = true;
-                value.remove_prefix(1);
-            }
-            int_val = parse_int64(value, "Amount", path);
-        }
+        auto const parts = parse_decimal(value, "Amount", path);
+        auto const signed_val =
+            decimal_to_integer(parts, value, "Amount", path);
+        bool const is_negative = signed_val < 0;
+        int64_t const int_val = is_negative ? -signed_val : signed_val;
 
         // Zero is always positive
         uint8_t flags = 0x20;  // cMPToken
@@ -110,8 +156,24 @@ struct AmountCodec
     encode(
         Serializer<Sink>& s,
         boost::json::value const& v,
-        std::string const& path = {})
+        std::string const& path = {},
+        std::string_view native = CurrencyCodec::default_native)
     {
+        auto const text = [&](boost::json::object const& obj,
+                              char const* name) -> std::string_view {
+            auto const* member = obj.if_contains(name);
+            if (!member || !member->is_string())
+            {
+                throw EncodeError(
+                    member ? CodecErrorCode::invalid_value
+                           : CodecErrorCode::missing_field,
+                    "Amount",
+                    std::string("'") + name + "' must be a string",
+                    path);
+            }
+            return std::string_view(member->as_string());
+        };
+
         if (v.is_string())
         {
             encode_native(s, std::string_view(v.as_string()), path);
@@ -121,6 +183,15 @@ struct AmountCodec
             auto const& obj = v.as_object();
             if (obj.contains("mpt_issuance_id"))
             {
+                // rippled validJSONAsset: an MPT names no currency or issuer.
+                if (obj.contains("currency") || obj.contains("issuer"))
+                {
+                    throw EncodeError(
+                        CodecErrorCode::invalid_value,
+                        "Amount",
+                        "mpt_issuance_id excludes currency and issuer",
+                        path);
+                }
                 if (!obj.contains("value"))
                 {
                     throw EncodeError(
@@ -130,10 +201,7 @@ struct AmountCodec
                         path);
                 }
                 encode_mpt(
-                    s,
-                    std::string_view(obj.at("value").as_string()),
-                    std::string_view(obj.at("mpt_issuance_id").as_string()),
-                    path);
+                    s, text(obj, "value"), text(obj, "mpt_issuance_id"), path);
             }
             else
             {
@@ -148,10 +216,11 @@ struct AmountCodec
                 }
                 encode_iou(
                     s,
-                    std::string_view(obj.at("value").as_string()),
-                    std::string_view(obj.at("currency").as_string()),
-                    std::string_view(obj.at("issuer").as_string()),
-                    path);
+                    text(obj, "value"),
+                    text(obj, "currency"),
+                    text(obj, "issuer"),
+                    path,
+                    native);
             }
         }
         else
@@ -166,7 +235,9 @@ struct AmountCodec
 
     // Decode binary amount to JSON
     static boost::json::value
-    decode(Slice const& data)
+    decode(
+        Slice const& data,
+        std::string_view native = CurrencyCodec::default_native)
     {
         if (is_native_amount(data))
         {
@@ -181,7 +252,7 @@ struct AmountCodec
                 base58::encode_account_id(data.data() + 28, 20);
 
             boost::json::object obj;
-            obj["currency"] = CurrencyCodec::decode(currency_slice);
+            obj["currency"] = CurrencyCodec::decode(currency_slice, native);
             obj["value"] = boost::json::string(iou.to_string());
             obj["issuer"] = boost::json::string(issuer);
             return obj;
@@ -194,8 +265,14 @@ struct AmountCodec
             {
                 val = (val << 8) | data.data()[i];
             }
+            // rippled STAmount::getText: zero is "0" whatever the sign bit
+            // says; otherwise the sign is the cleared positive bit.
+            bool const negative = (data.data()[0] & 0x40) == 0;
+            std::string text = std::to_string(val);
+            if (negative && val != 0)
+                text.insert(text.begin(), '-');
             boost::json::object obj;
-            obj["value"] = boost::json::string(std::to_string(val));
+            obj["value"] = boost::json::string(text);
             obj["mpt_issuance_id"] =
                 boost::json::string(hex_encode(data.data() + 9, 24));
             return obj;
@@ -211,97 +288,32 @@ private:
     static constexpr uint64_t MIN_MANTISSA = 1000000000000000ULL;
     static constexpr uint64_t MAX_MANTISSA = 9999999999999999ULL;
 
+    /// The 8-byte issued value for a decimal in rippled's number grammar.
+    /// A mantissa of more than 16 digits is rounded to nearest, ties to
+    /// even, as rippled's Number does.
     static uint64_t
     encode_iou_value(std::string_view value_str, std::string const& path = {})
     {
-        if (value_str == "0" || value_str == "0.0" || value_str.empty())
-        {
-            return IOU_BIT;
-        }
+        auto const parts = parse_decimal(value_str, "Amount", path);
 
-        bool negative = false;
-        std::string_view sv = value_str;
-        if (sv.front() == '-')
-        {
-            negative = true;
-            sv.remove_prefix(1);
-        }
-
-        uint64_t mantissa = 0;
-        int exponent = 0;
-        bool seen_dot = false;
-        int decimals = 0;
-        bool in_trailing_digits = false;
-
-        // Split on 'e'/'E' for scientific notation (e.g. "9999999999999999e79")
-        auto e_pos = sv.find_first_of("eE");
-        std::string_view digits_part = (e_pos != std::string_view::npos)
-            ? sv.substr(0, e_pos)
-            : sv;
-        int e_exponent = 0;
-        if (e_pos != std::string_view::npos)
-        {
-            auto exp_str = sv.substr(e_pos + 1);
-            bool exp_neg = false;
-            if (!exp_str.empty() && exp_str.front() == '-')
-            {
-                exp_neg = true;
-                exp_str.remove_prefix(1);
-            }
-            else if (!exp_str.empty() && exp_str.front() == '+')
-            {
-                exp_str.remove_prefix(1);
-            }
-            for (char c : exp_str)
-            {
-                if (c < '0' || c > '9')
-                    break;
-                e_exponent = e_exponent * 10 + (c - '0');
-            }
-            if (exp_neg)
-                e_exponent = -e_exponent;
-        }
-
-        for (char c : digits_part)
-        {
-            if (c == '.')
-            {
-                seen_dot = true;
-                continue;
-            }
-            if (c < '0' || c > '9')
-                break;
-
-            if (in_trailing_digits)
-            {
-                if (!seen_dot)
-                    ++exponent;
-                continue;
-            }
-
-            uint64_t next = mantissa * 10 + static_cast<uint64_t>(c - '0');
-            if (next > MAX_MANTISSA)
-            {
-                if (c >= '5' && mantissa < MAX_MANTISSA)
-                {
-                    ++mantissa;
-                }
-                in_trailing_digits = true;
-                if (!seen_dot)
-                    ++exponent;
-                continue;
-            }
-
-            mantissa = next;
-            if (seen_dot)
-                ++decimals;
-        }
-        exponent -= decimals;
-        exponent += e_exponent;
+        uint64_t mantissa = parts.mantissa;
+        int64_t exponent = parts.exponent;
 
         if (mantissa == 0)
         {
             return IOU_BIT;
+        }
+
+        // rippled reads the digits as an unsigned 64-bit integer and then
+        // treats them as signed, so digits above 2^63 - 1 come out as a
+        // negative amount there. That is not a value to reproduce.
+        if (mantissa > static_cast<uint64_t>(INT64_MAX))
+        {
+            throw EncodeError(
+                CodecErrorCode::out_of_range,
+                "Amount",
+                "'" + std::string(value_str) + "' has too many digits",
+                path);
         }
 
         // Normalize to [1e15, 1e16)
@@ -310,10 +322,24 @@ private:
             mantissa *= 10;
             --exponent;
         }
+        unsigned first_dropped = 0;
+        bool later_dropped = false;
         while (mantissa > MAX_MANTISSA)
         {
+            later_dropped = later_dropped || first_dropped != 0;
+            first_dropped = static_cast<unsigned>(mantissa % 10);
             mantissa /= 10;
             ++exponent;
+        }
+        if (first_dropped > 5 ||
+            (first_dropped == 5 && (later_dropped || (mantissa & 1) == 1)))
+        {
+            ++mantissa;
+            if (mantissa > MAX_MANTISSA)
+            {
+                mantissa /= 10;
+                ++exponent;
+            }
         }
 
         // Validate exponent range (-96 to 80)
@@ -327,7 +353,7 @@ private:
         }
 
         uint64_t raw = IOU_BIT;
-        if (!negative)
+        if (!parts.negative)
         {
             raw |= POS_BIT;
         }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/base58/base58.h"
 #include "catl/xdata/codecs/account_id.h"
 #include "catl/xdata/codecs/currency.h"
 #include "catl/xdata/serializer.h"
@@ -36,10 +37,33 @@ struct PathSetCodec
         return size;
     }
 
-    // From JSON: array of arrays of hop objects
+    /// A step's account or issuer is always 20 bytes on the wire. The zero
+    /// account is 20 zero bytes here, not the empty value AccountIDCodec
+    /// writes for a top-level account field.
     template <ByteSink Sink>
     static void
-    encode(Serializer<Sink>& s, boost::json::value const& v)
+    encode_step_account(Serializer<Sink>& s, std::string_view base58_addr)
+    {
+        auto const decoded = base58::decode_account_id(base58_addr);
+        if (!decoded || decoded->size() != 20)
+        {
+            throw EncodeError(
+                CodecErrorCode::invalid_encoding,
+                "PathSet",
+                "invalid base58 address: " + std::string(base58_addr));
+        }
+        s.add_raw(std::span<const uint8_t>{decoded->data(), 20});
+    }
+
+    // From JSON: array of arrays of hop objects. A step's currency reads as
+    // rippled's toCurrency does: the network's native code is the zero
+    // currency and any other three-character code is itself.
+    template <ByteSink Sink>
+    static void
+    encode(
+        Serializer<Sink>& s,
+        boost::json::value const& v,
+        std::string_view native = CurrencyCodec::default_native)
     {
         auto const& paths = v.as_array();
         for (size_t p = 0; p < paths.size(); ++p)
@@ -63,17 +87,22 @@ struct PathSetCodec
 
                 if (obj.contains("account"))
                 {
-                    AccountIDCodec::encode(
+                    encode_step_account(
                         s, std::string_view(obj.at("account").as_string()));
                 }
                 if (obj.contains("currency"))
                 {
-                    CurrencyCodec::encode(
-                        s, std::string_view(obj.at("currency").as_string()));
+                    uint8_t currency_raw[20];
+                    CurrencyCodec::to_bytes(
+                        std::string_view(obj.at("currency").as_string()),
+                        currency_raw,
+                        {},
+                        native);
+                    s.add_raw(std::span<const uint8_t>{currency_raw, 20});
                 }
                 if (obj.contains("issuer"))
                 {
-                    AccountIDCodec::encode(
+                    encode_step_account(
                         s, std::string_view(obj.at("issuer").as_string()));
                 }
             }
@@ -82,7 +111,9 @@ struct PathSetCodec
     }
 
     static boost::json::value
-    decode(Slice const& data)
+    decode(
+        Slice const& data,
+        std::string_view native = CurrencyCodec::default_native)
     {
         boost::json::array paths;
         boost::json::array current_path;
@@ -128,7 +159,7 @@ struct PathSetCodec
                 if (pos + 20 <= data.size())
                 {
                     Slice s(data.data() + pos, 20);
-                    hop["currency"] = CurrencyCodec::decode(s);
+                    hop["currency"] = CurrencyCodec::decode(s, native);
                     pos += 20;
                 }
             }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/xdata/codec-error.h"
+#include "catl/xdata/decimal.h"
 #include "catl/xdata/serializer.h"
 #include "catl/xdata/types/number.h"
 #include <boost/json.hpp>
@@ -17,6 +18,9 @@ struct NumberCodec
         1'000'000'000'000'000'000ULL;  // 1e18
     static constexpr uint64_t MAX_MANTISSA =
         9'999'999'999'999'999'999ULL;  // 1e19-1
+    // rippled Number::kMinExponent and kMaxExponent
+    static constexpr int64_t MIN_EXPONENT = -32768;
+    static constexpr int64_t MAX_EXPONENT = 32768;
 
     static size_t
     encoded_size(boost::json::value const&)
@@ -102,89 +106,106 @@ struct NumberCodec
         encode_normalized(s, negative, abs_mantissa, exponent);
     }
 
-    // From JSON string (decimal or scientific notation)
+    /// Write mantissa * 10^exponent only when the wire form holds it
+    /// exactly. rippled's numberFromJson refuses a value its Number would
+    /// have to round ("number cannot be represented"), and so does this:
+    /// a decimal that is quietly rounded is not the number the JSON showed.
     template <ByteSink Sink>
     static void
-    encode(Serializer<Sink>& s, boost::json::value const& v)
+    encode_exact(
+        Serializer<Sink>& s,
+        bool negative,
+        uint64_t mantissa,
+        int64_t exponent,
+        std::string const& path = {})
     {
-        if (v.is_int64() || v.is_uint64())
+        auto const refuse = [&]() -> EncodeError {
+            return EncodeError(
+                CodecErrorCode::out_of_range,
+                "Number",
+                "number cannot be represented",
+                path);
+        };
+
+        if (mantissa == 0)
         {
-            int64_t val = v.is_int64() ? v.as_int64()
-                                       : static_cast<int64_t>(v.as_uint64());
-            encode(s, val, 0);
+            // Zero: mantissa=0, exponent=INT32_MIN (0x80000000)
+            s.add_u64(0);
+            s.add_u32(static_cast<uint32_t>(INT32_MIN));
             return;
         }
 
-        auto sv = std::string_view(v.as_string());
-
-        bool negative = false;
-        if (!sv.empty() && sv.front() == '-')
+        // Number::normalize: into [1e18, 1e19 - 1], exponent in range.
+        while (mantissa < MIN_MANTISSA && exponent > MIN_EXPONENT)
         {
-            negative = true;
-            sv.remove_prefix(1);
+            mantissa *= 10;
+            --exponent;
         }
-        else if (!sv.empty() && sv.front() == '+')
+        // Too small: rippled's Number becomes zero.
+        if (mantissa < MIN_MANTISSA || exponent < MIN_EXPONENT)
+            throw refuse();
+        while (mantissa > MAX_MANTISSA)
         {
-            sv.remove_prefix(1);
+            if (mantissa % 10 != 0)
+                throw refuse();
+            mantissa /= 10;
+            ++exponent;
         }
+        if (exponent > MAX_EXPONENT)
+            throw refuse();
 
-        // Parse mantissa digits and decimal point
-        uint64_t mantissa = 0;
-        int32_t exponent = 0;
-        bool seen_dot = false;
-        int decimals = 0;
-        bool overflow = false;
-
-        size_t i = 0;
-        for (; i < sv.size(); ++i)
+        // The wire mantissa is signed. One above 2^63 - 1 is written a
+        // digit shorter, which is exact only when that digit is zero.
+        if (mantissa > static_cast<uint64_t>(INT64_MAX))
         {
-            char c = sv[i];
-            if (c == '.')
-            {
-                seen_dot = true;
-                continue;
-            }
-            if (c == 'e' || c == 'E')
-                break;
-            if (c < '0' || c > '9')
-                break;
-
-            if (!overflow)
-            {
-                uint64_t next = mantissa * 10 + static_cast<uint64_t>(c - '0');
-                if (next / 10 != mantissa || next < mantissa)
-                {
-                    // Overflow — round and track remaining digits
-                    overflow = true;
-                    if (c >= '5')
-                        ++mantissa;
-                    if (!seen_dot)
-                        ++exponent;
-                    continue;
-                }
-                mantissa = next;
-                if (seen_dot)
-                    ++decimals;
-            }
-            else
-            {
-                if (!seen_dot)
-                    ++exponent;
-            }
-        }
-        exponent -= decimals;
-
-        // Parse optional exponent part
-        if (i < sv.size() && (sv[i] == 'e' || sv[i] == 'E'))
-        {
-            ++i;
-            auto exp_sv = sv.substr(i);
-            int32_t exp_val =
-                static_cast<int32_t>(parse_int64(exp_sv, "Number"));
-            exponent += exp_val;
+            if (mantissa % 10 != 0)
+                throw refuse();
+            mantissa /= 10;
+            ++exponent;
         }
 
-        encode_normalized(s, negative, mantissa, exponent);
+        int64_t signed_mantissa = negative ? -static_cast<int64_t>(mantissa)
+                                           : static_cast<int64_t>(mantissa);
+        s.add_u64(static_cast<uint64_t>(signed_mantissa));
+        s.add_u32(static_cast<uint32_t>(static_cast<int32_t>(exponent)));
+    }
+
+    // From JSON: an integer, or a decimal string in rippled's number
+    // grammar (decimal.h), as rippled's numberFromJson.
+    template <ByteSink Sink>
+    static void
+    encode(
+        Serializer<Sink>& s,
+        boost::json::value const& v,
+        std::string const& path = {})
+    {
+        if (v.is_int64())
+        {
+            int64_t const val = v.as_int64();
+            bool const negative = val < 0;
+            // Negate as unsigned: -INT64_MIN does not fit int64.
+            uint64_t const magnitude = negative ? 0 - static_cast<uint64_t>(val)
+                                                : static_cast<uint64_t>(val);
+            encode_exact(s, negative, magnitude, 0, path);
+            return;
+        }
+        if (v.is_uint64())
+        {
+            encode_exact(s, false, v.as_uint64(), 0, path);
+            return;
+        }
+        if (!v.is_string())
+        {
+            throw EncodeError(
+                CodecErrorCode::invalid_value,
+                "Number",
+                "expected a decimal string or an integer",
+                path);
+        }
+
+        auto const parts =
+            parse_decimal(std::string_view(v.as_string()), "Number", path);
+        encode_exact(s, parts.negative, parts.mantissa, parts.exponent, path);
     }
 
     static boost::json::value

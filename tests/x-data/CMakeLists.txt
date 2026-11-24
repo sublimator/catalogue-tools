@@ -1,7 +1,8 @@
 include(GoogleTest)
 
 add_executable(xdata_gtest xdata-gtest.cpp codecs-gtest.cpp
-                           known-fields-gtest.cpp optional-visitor-gtest.cpp)
+                           known-fields-gtest.cpp optional-visitor-gtest.cpp
+                           rippled-reference-gtest.cpp)
 
 target_link_libraries(
   xdata_gtest

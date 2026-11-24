@@ -24,6 +24,7 @@ Protocol::operator=(Protocol const& other)
         return *this;
 
     expand_xaddresses_ = other.expand_xaddresses_;
+    native_currency_ = other.native_currency_;
     network_id_ = other.network_id_;
     fields_ = other.fields_;
     inferred_vl_types_ = other.inferred_vl_types_;
@@ -51,6 +52,7 @@ Protocol::operator=(Protocol&& other)
         return *this;
 
     expand_xaddresses_ = other.expand_xaddresses_;
+    native_currency_ = other.native_currency_;
     network_id_ = std::move(other.network_id_);
     fields_ = std::move(other.fields_);
     inferred_vl_types_ = std::move(other.inferred_vl_types_);
@@ -119,6 +121,8 @@ Protocol::load_from_json_value(
         ? std::optional<uint32_t>(
               Networks::find_base_network_id(opts.network_id.value()))
         : std::nullopt;
+    if (protocol.network_id_ == Networks::XAHAU)
+        protocol.native_currency_ = "XAH";
     protocol.expand_xaddresses_ = opts.expand_xaddresses;
     const auto& obj = json_value.as_object();
 

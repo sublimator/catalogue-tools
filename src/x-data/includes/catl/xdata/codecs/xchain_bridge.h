@@ -29,9 +29,14 @@ struct XChainBridgeCodec
                IssueCodec::encoded_size(obj.at("IssuingChainIssue"));
     }
 
+    // Both issues are of the network this object lives on, so they share its
+    // native code (see IssueCodec).
     template <ByteSink Sink>
     static void
-    encode(Serializer<Sink>& s, boost::json::value const& v)
+    encode(
+        Serializer<Sink>& s,
+        boost::json::value const& v,
+        std::string_view native = CurrencyCodec::default_native)
     {
         auto const& obj = v.as_object();
         // Doors are STAccount → VL-encoded (like in STObject)
@@ -41,18 +46,20 @@ struct XChainBridgeCodec
         AccountIDCodec::encode(s, lcd_sv);
 
         // Issues are STIssue → raw (no VL)
-        IssueCodec::encode(s, obj.at("LockingChainIssue"));
+        IssueCodec::encode(s, obj.at("LockingChainIssue"), {}, native);
 
         auto icd_sv = std::string_view(obj.at("IssuingChainDoor").as_string());
         size_t icd_size = (icd_sv == AccountIDCodec::ZERO_ACCOUNT_B58) ? 0 : 20;
         s.add_vl_prefix(icd_size);
         AccountIDCodec::encode(s, icd_sv);
 
-        IssueCodec::encode(s, obj.at("IssuingChainIssue"));
+        IssueCodec::encode(s, obj.at("IssuingChainIssue"), {}, native);
     }
 
     static boost::json::value
-    decode(Slice const& data)
+    decode(
+        Slice const& data,
+        std::string_view native = CurrencyCodec::default_native)
     {
         boost::json::object obj;
         size_t pos = 0;
@@ -68,7 +75,7 @@ struct XChainBridgeCodec
         SliceCursor lci_cursor(Slice(data.data() + pos, data.size() - pos));
         size_t lci_size = get_issue_size(lci_cursor);
         obj["LockingChainIssue"] = IssueCodec::decode(
-            Slice(data.data() + pos, lci_size));
+            Slice(data.data() + pos, lci_size), native);
         pos += lci_size;
 
         // IssuingChainDoor: STAccount = VL prefix + AccountID
@@ -80,7 +87,7 @@ struct XChainBridgeCodec
 
         // IssuingChainIssue: STIssue = rest
         obj["IssuingChainIssue"] = IssueCodec::decode(
-            Slice(data.data() + pos, data.size() - pos));
+            Slice(data.data() + pos, data.size() - pos), native);
         return obj;
     }
 
