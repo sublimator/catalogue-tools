@@ -449,3 +449,114 @@ TEST(AnchorVerifier, HighestSequenceWinsNotLastSeen)
     EXPECT_TRUE(r.verified) << r.error;
     EXPECT_EQ(r.validations_matched_unl, 4);
 }
+
+TEST(AnchorVerifier, ParseExternalValidatorListsV1V2AndErrors)
+{
+    auto const m1_b64 = catl::base64_encode(std::vector<uint8_t>{0x01, 0x02});
+    auto const m2_b64 = catl::base64_encode(std::vector<uint8_t>{0x03, 0x04});
+    auto const b1_b64 = catl::base64_encode(std::vector<uint8_t>{'{', '}'});
+    auto const b2_b64 =
+        catl::base64_encode(std::vector<uint8_t>{'{', '"', 'a', '"', ':', '1', '}'});
+
+    // Single v1 VL document object
+    boost::json::object v1_doc{
+        {"version", 1},
+        {"public_key", "ED" + std::string(64, 'A')},
+        {"manifest", m1_b64},
+        {"blob", b1_b64},
+        {"signature", "AABBCC"},
+    };
+    auto parsed_v1 = xprv::parse_external_validator_lists(v1_doc);
+    ASSERT_EQ(parsed_v1.size(), 1u);
+    EXPECT_EQ(parsed_v1[0].manifest, (std::vector<uint8_t>{0x01, 0x02}));
+    EXPECT_EQ(parsed_v1[0].blob, (std::vector<uint8_t>{'{', '}'}));
+    EXPECT_EQ(parsed_v1[0].signature, (std::vector<uint8_t>{0xAA, 0xBB, 0xCC}));
+
+    // Single v2 VL document with doc-level manifest, entry override, and one bad entry skipped
+    boost::json::object v2_doc{
+        {"version", 2},
+        {"manifest", m1_b64},
+        {"blobs_v2",
+         boost::json::array{
+             boost::json::object{{"blob", b1_b64}, {"signature", "1122"}},
+             boost::json::object{
+                 {"manifest", m2_b64}, {"blob", b2_b64}, {"signature", "3344"}},
+             boost::json::object{
+                 {"blob", "not valid base64!!!"}, {"signature", "5566"}},
+             boost::json::object{{"blob", b1_b64}, {"signature", "ZZZZ"}},
+         }},
+    };
+    auto parsed_v2 = xprv::parse_external_validator_lists(v2_doc);
+    ASSERT_EQ(parsed_v2.size(), 2u);
+    EXPECT_EQ(parsed_v2[0].manifest, (std::vector<uint8_t>{0x01, 0x02}));
+    EXPECT_EQ(parsed_v2[1].manifest, (std::vector<uint8_t>{0x03, 0x04}));
+
+    // v2 document with empty blobs_v2 retains top-level manifest (e.g. publisher revocation)
+    boost::json::object v2_empty{
+        {"version", 2},
+        {"manifest", m2_b64},
+        {"blobs_v2", boost::json::array{}},
+    };
+    auto parsed_empty = xprv::parse_external_validator_lists(v2_empty);
+    ASSERT_EQ(parsed_empty.size(), 1u);
+    EXPECT_EQ(parsed_empty[0].manifest, (std::vector<uint8_t>{0x03, 0x04}));
+    EXPECT_TRUE(parsed_empty[0].blob.empty());
+
+    // Array of documents
+    boost::json::array arr{v1_doc, v2_doc};
+    EXPECT_EQ(xprv::parse_external_validator_lists(arr).size(), 3u);
+
+    // Invalid outer shapes throw
+    EXPECT_THROW(
+        xprv::parse_external_validator_lists(boost::json::value("bad")),
+        std::runtime_error);
+    EXPECT_THROW(
+        xprv::parse_external_validator_lists(boost::json::array{123}),
+        std::runtime_error);
+}
+
+TEST(AnchorVerifier, ListlessAnchorUsesExternalListAndCloseTime)
+{
+    auto const [key, cases] = load_overlay_fixture();
+    auto const& base_anchor = cases.at("superseded-key-signs").anchor;
+    auto const& base_unl = base_anchor.at("unl").as_object();
+
+    // Build an external v1 VL document from the fixture's bundled UNL.
+    auto const m_bytes =
+        xprv::from_hex(std::string(base_unl.at("manifest").as_string()));
+    auto const b_bytes =
+        xprv::from_hex(std::string(base_unl.at("blob").as_string()));
+    boost::json::object v1_doc{
+        {"version", 1},
+        {"public_key", base_unl.at("public_key")},
+        {"manifest", catl::base64_encode(m_bytes)},
+        {"blob", catl::base64_encode(b_bytes)},
+        {"signature", base_unl.at("signature")},
+    };
+    auto const ext_lists = xprv::parse_external_validator_lists(v1_doc);
+
+    // Strip manifest/blob/signature to form a list-less anchor.
+    boost::json::object listless = base_anchor;
+    listless["unl"] =
+        boost::json::object{{"public_key", base_unl.at("public_key")}};
+
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    std::vector<std::string> narrative;
+
+    auto const no_ext = xprv::AnchorVerifier::verify(
+        listless, key, protocol, narrative, {}, {}, 800000000u);
+    EXPECT_FALSE(no_ext.verified);
+    EXPECT_NE(no_ext.error.find("no external list"), std::string::npos);
+
+    auto const with_ext = xprv::AnchorVerifier::verify(
+        listless, key, protocol, narrative, {}, ext_lists, 800000000u);
+    EXPECT_TRUE(with_ext.verified) << with_ext.error;
+    EXPECT_EQ(with_ext.validations_matched_unl, 4);
+
+    auto const expired = xprv::AnchorVerifier::verify(
+        listless, key, protocol, narrative, {}, ext_lists, 950000000u);
+    EXPECT_FALSE(expired.verified);
+    EXPECT_NE(
+        expired.error.find("anchor close time is outside the"),
+        std::string::npos);
+}

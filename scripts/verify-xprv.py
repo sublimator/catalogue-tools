@@ -1958,10 +1958,133 @@ def _blob_uint32(value: Any) -> int | None:
     return value if 0 <= value <= 0xFFFFFFFF else None
 
 
+def _is_66_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 66
+        and all(c in "0123456789abcdefABCDEF" for c in value)
+    )
+
+
+def _strict_hex_bytes(value: Any) -> bytes | None:
+    if not isinstance(value, str) or not value or len(value) % 2 != 0:
+        return None
+    if not all(c in "0123456789abcdefABCDEF" for c in value):
+        return None
+    return unhexlify(value)
+
+
+@dataclass(frozen=True)
+class ExternalValidatorList:
+    """One signed validator-list candidate held from outside the proof (§1.3, §3.3)."""
+
+    public_key: str  # optional outer document public_key (may be empty)
+    manifest: bytes  # raw publisher manifest bytes
+    blob: bytes  # raw signed list blob bytes (may be empty for manifest-only v2 doc)
+    signature: bytes  # raw publisher signature over blob
+
+
+def _extract_vl_candidate(
+    doc_pub: str,
+    manifest_val: Any,
+    blob_val: Any,
+    sig_val: Any,
+) -> ExternalValidatorList | None:
+    if (
+        not isinstance(manifest_val, str)
+        or not isinstance(blob_val, str)
+        or not isinstance(sig_val, str)
+    ):
+        return None
+    try:
+        manifest_bytes = canonical_base64(manifest_val)
+        blob_bytes = canonical_base64(blob_val)
+    except Exception:
+        return None
+    if not manifest_bytes or not blob_bytes:
+        return None
+    sig_bytes = _strict_hex_bytes(sig_val)
+    if not sig_bytes:
+        return None
+    return ExternalValidatorList(
+        public_key=doc_pub,
+        manifest=manifest_bytes,
+        blob=blob_bytes,
+        signature=sig_bytes,
+    )
+
+
+def _expand_vl_document(
+    doc: dict[str, Any], out: list[ExternalValidatorList]
+) -> None:
+    version = _blob_uint32(doc.get("version"))
+    if version not in (1, 2):
+        return
+    doc_pub = ""
+    if "public_key" in doc:
+        if not isinstance(doc["public_key"], str):
+            return
+        doc_pub = doc["public_key"]
+    doc_manifest = doc.get("manifest")
+
+    if version == 1:
+        cand = _extract_vl_candidate(
+            doc_pub, doc_manifest, doc.get("blob"), doc.get("signature")
+        )
+        if cand is not None:
+            out.append(cand)
+        return
+
+    blobs = doc.get("blobs_v2")
+    if not isinstance(blobs, list):
+        return
+    added_entry = False
+    for item in blobs:
+        if not isinstance(item, dict):
+            continue
+        entry_manifest = item.get("manifest") if "manifest" in item else doc_manifest
+        cand = _extract_vl_candidate(
+            doc_pub, entry_manifest, item.get("blob"), item.get("signature")
+        )
+        if cand is not None:
+            out.append(cand)
+            added_entry = True
+    # A v2 document with no active blobs_v2 entries can still carry a
+    # top-level publisher manifest (e.g., publisher revocation or rotation).
+    if not added_entry and isinstance(doc_manifest, str):
+        try:
+            m_bytes = canonical_base64(doc_manifest)
+        except Exception:
+            m_bytes = b""
+        if m_bytes:
+            out.append(
+                ExternalValidatorList(
+                    public_key=doc_pub, manifest=m_bytes, blob=b"", signature=b""
+                )
+            )
+
+
+def parse_external_validator_lists(obj: Any) -> list[ExternalValidatorList]:
+    """Parse one XRPL VL site document (v1/v2) or an array of such documents."""
+    out: list[ExternalValidatorList] = []
+    if isinstance(obj, dict):
+        _expand_vl_document(obj, out)
+        return out
+    if isinstance(obj, list):
+        for item in obj:
+            if not isinstance(item, dict):
+                raise ValueError("validator list array elements must be JSON objects")
+            _expand_vl_document(item, out)
+        return out
+    raise ValueError("expected a JSON VL document object or array of VL documents")
+
+
 def verify_anchor(
     anchor: dict[str, Any],
     trusted_key: str,
     extra_manifests: list[bytes] | None = None,
+    extra_lists: list[ExternalValidatorList] | None = None,
+    anchor_close_time: int | None = None,
 ) -> AnchorResult:
     """Verify anchor: manifest chain + VL blob + validations + quorum.
 
@@ -1971,6 +2094,10 @@ def verify_anchor(
     `extra_manifests` are raw manifests held from outside the proof (§1.3
     trust view: peers, the manifest RPC, secondary lists). They only re-point
     masters the primary list already names; they never add members or change N.
+
+    `extra_lists` are signed validator-list candidates held from outside the
+    proof (§1.3 P1-P4, §3.3). When `anchor_close_time` is provided, P3 selects
+    the highest-sequence eligible list active at that close time.
     """
     # Candidate manifests from outside the proof, verified once. One that
     # doesn't verify grants nothing (§1.3 rule 1).
@@ -2011,108 +2138,280 @@ def verify_anchor(
         )
     print(f"    A1: Publisher key {proof_key[:16]}... matches trusted key")
 
-    # A list-less anchor (§2.1, §3.3) needs the verifier's own copy of the
-    # list; this verifier has no external list source yet (§1.3, D4).
-    if set(unl) == {"public_key"}:
+    # Assemble candidate lists: bundled list (if present) + externally held lists (§1.3 P2, §3.3).
+    # Each entry: (doc_pub, manifest_bytes, blob_bytes, sig_bytes, is_bundled)
+    candidates: list[tuple[str, bytes, bytes, bytes, bool]] = []
+    bundled_manifest_err = ""
+    bundled_blob_err = ""
+
+    if len(unl) > 1:
+        manifest_hex = unl.get("manifest")
+        blob_hex = unl.get("blob")
+        sig_hex = unl.get("signature")
+        if not isinstance(manifest_hex, str) or not manifest_hex:
+            if not extra_lists:
+                return AnchorResult(ok=False, message="no manifest")
+        elif (
+            not isinstance(blob_hex, str)
+            or not isinstance(sig_hex, str)
+            or not blob_hex
+            or not sig_hex
+        ):
+            if not extra_lists:
+                return AnchorResult(ok=False, message="no blob or signature")
+        else:
+            m_b = _strict_hex_bytes(manifest_hex)
+            b_b = _strict_hex_bytes(blob_hex)
+            s_b = _strict_hex_bytes(sig_hex)
+            if m_b is None or b_b is None or s_b is None:
+                bundled_manifest_err = "publisher manifest: invalid hex"
+            else:
+                candidates.append(("", m_b, b_b, s_b, True))
+
+    for ext in extra_lists or []:
+        candidates.append((ext.public_key, ext.manifest, ext.blob, ext.signature, False))
+
+    if not candidates:
         return AnchorResult(
             ok=False, message="validator list not bundled and no external list"
         )
 
-    # Step 2: verify publisher manifest, bound to the trusted key → signing key
-    manifest_hex = unl.get("manifest")
-    if not isinstance(manifest_hex, str) or not manifest_hex:
-        return AnchorResult(ok=False, message="no manifest")
-    try:
-        ok, err, manifest = verify_manifest(unhexlify(manifest_hex))
-    except Exception as exc:
-        ok, err, manifest = False, str(exc), {}
-    if not ok:
-        return AnchorResult(ok=False, message=f"publisher manifest: {err}")
-    if _upper_hex(manifest.get("PublicKey")) != trusted:
-        return AnchorResult(
-            ok=False, message="publisher manifest master key does not match trusted key"
-        )
-    signing_key = _upper_hex(manifest.get("SigningPubKey"))
-    if not signing_key:
-        return AnchorResult(ok=False, message="manifest has no SigningPubKey")
-    # §1.3: the publisher's signing key comes from the highest-sequence
-    # publisher manifest held; the list must verify under that key. A newer
-    # manifest naming the same key leaves the list valid.
-    bundled_signing_key = signing_key
-    publisher_seq = int(manifest.get("Sequence", -1))
-    publisher_seen: dict[int, bytes] = {publisher_seq: unhexlify(manifest_hex)}
-    for master_x, seq_x, raw_x, sk_x in held:
+    # Step 2: Publisher manifest resolution (§1.3 P1, rules 2 & 9)
+    publisher_seen: dict[int, bytes] = {}
+    all_publisher_signing_keys: list[str] = []
+    publisher_seq = -1
+    signing_key = ""
+    publisher_revoked = False
+    bundled_signing_key: str | None = None
+
+    def consider_publisher_manifest(
+        master_x: str, seq_x: int, raw_x: bytes, sk_x: str
+    ) -> bool:
+        nonlocal publisher_seq, signing_key, publisher_revoked
         if master_x != trusted:
-            continue
+            return True
         if publisher_seen.setdefault(seq_x, raw_x) != raw_x:
+            return False  # rule 2: publisher equivocation
+        if seq_x != MANIFEST_REVOKED and sk_x:
+            if sk_x not in all_publisher_signing_keys:
+                all_publisher_signing_keys.append(sk_x)
+        if seq_x > publisher_seq:
+            publisher_seq = seq_x
+            if seq_x == MANIFEST_REVOKED:
+                publisher_revoked = True
+                signing_key = ""
+            else:
+                publisher_revoked = False
+                signing_key = sk_x
+        return True
+
+    for master_x, seq_x, raw_x, sk_x in held:
+        if not consider_publisher_manifest(master_x, seq_x, raw_x, sk_x):
             return AnchorResult(
                 ok=False, message="conflicting publisher manifests at the same sequence"
             )
-        if seq_x > publisher_seq:
-            if seq_x == MANIFEST_REVOKED:
-                return AnchorResult(ok=False, message="the validator list publisher is revoked")
-            publisher_seq, signing_key = seq_x, sk_x
+
+    for doc_pub, m_bytes, _, _, is_bundled in candidates:
+        if doc_pub and doc_pub.upper() != trusted:
+            continue
+        try:
+            ok, err, manifest = verify_manifest(m_bytes)
+        except Exception as exc:
+            ok, err, manifest = False, str(exc), {}
+        if not ok:
+            if is_bundled:
+                bundled_manifest_err = f"publisher manifest: {err}"
+            continue
+        if _upper_hex(manifest.get("PublicKey")) != trusted:
+            if is_bundled:
+                bundled_manifest_err = (
+                    "publisher manifest master key does not match trusted key"
+                )
+            continue
+        seq_m = int(manifest.get("Sequence", -1))
+        sk_m = "" if seq_m == MANIFEST_REVOKED else _upper_hex(manifest.get("SigningPubKey"))
+        if seq_m != MANIFEST_REVOKED and not sk_m:
+            if is_bundled:
+                bundled_manifest_err = "manifest has no SigningPubKey"
+            continue
+        if is_bundled and seq_m != MANIFEST_REVOKED:
+            bundled_signing_key = sk_m
+        if not consider_publisher_manifest(trusted, seq_m, m_bytes, sk_m):
+            return AnchorResult(
+                ok=False, message="conflicting publisher manifests at the same sequence"
+            )
+
+    if publisher_seq < 0:
+        return AnchorResult(
+            ok=False,
+            message=bundled_manifest_err or "no verified publisher manifest available",
+        )
+    if publisher_revoked:
+        return AnchorResult(ok=False, message="the validator list publisher is revoked")
+
     print(f"    A2: Publisher manifest VERIFIED, signing key {signing_key[:16]}...")
 
-    # Step 3: verify blob signature (raw bytes, signed by publisher signing key)
-    blob_hex = unl.get("blob")
-    sig_hex = unl.get("signature")
-    if not isinstance(blob_hex, str) or not isinstance(sig_hex, str) or not blob_hex or not sig_hex:
-        return AnchorResult(ok=False, message="no blob or signature")
-    try:
-        blob_bytes = unhexlify(blob_hex)
-        blob_ok = verify_signature(blob_bytes, unhexlify(sig_hex), signing_key)
-    except Exception:
-        blob_ok = False
-    if not blob_ok:
-        if signing_key != bundled_signing_key:
-            return AnchorResult(
-                ok=False, message="validator list is signed by a superseded publisher key"
-            )
-        return AnchorResult(ok=False, message="blob signature FAILED")
-    print(f"    A3: Blob signature VERIFIED ({len(blob_bytes)} bytes)")
+    # Step 3: Candidate blob signature + P3 well-formedness
+    # Each parsed candidate: (seq, eff, exp, raw_blob, entries, is_bundled)
+    # Each entry: (advertised_upper, manifest_raw_bytes)
+    def parse_p3_blob(
+        blob_bytes: bytes,
+    ) -> tuple[tuple[int, int, int, bytes, list[tuple[str, bytes]]] | None, str]:
+        try:
+            # The list is signed text with one reading (§1.3): a member written
+            # twice would leave the choice between them to the parser.
+            blob_json = loads_strict_json(blob_bytes, object_pairs_hook=unique_members)
+        except ValueError as exc:
+            if "duplicate JSON member" in str(exc):
+                return None, "UNL blob has a duplicate member"
+            return None, "invalid blob JSON"
+        if not isinstance(blob_json, dict):
+            return None, "UNL blob is not an object"
+        validators = blob_json.get("validators")
+        if (
+            "sequence" not in blob_json
+            or "expiration" not in blob_json
+            or not isinstance(validators, list)
+        ):
+            return None, "UNL blob is missing required fields"
+        vl_seq = _blob_uint32(blob_json["sequence"])
+        vl_exp = _blob_uint32(blob_json["expiration"])
+        vl_eff = _blob_uint32(blob_json.get("effective", 0))
+        if vl_seq is None or vl_exp is None or vl_eff is None:
+            return None, "UNL blob validity fields are malformed"
+        if vl_exp <= vl_eff:
+            return None, "UNL blob validity interval is invalid"
+        entries: list[tuple[str, bytes]] = []
+        for entry in validators:
+            if not isinstance(entry, dict):
+                return None, "malformed validator entry in UNL blob"
+            m_b64 = entry.get("manifest")
+            advertised = entry.get("validation_public_key")
+            if not isinstance(m_b64, str) or not isinstance(advertised, str):
+                return None, "validator entry missing key or manifest"
+            if not _is_66_hex(advertised):
+                return None, "validator entry has malformed validation_public_key"
+            try:
+                m_raw = canonical_base64(m_b64)
+            except Exception:
+                return None, "validator manifest is not canonical base64"
+            entries.append((advertised.upper(), m_raw))
+        return (vl_seq, vl_eff, vl_exp, blob_bytes, entries), ""
 
-    # Step 4: verify validator manifests from blob → build signing→master key map
-    try:
-        # The list is signed text with one reading (§1.3): a member written
-        # twice would leave the choice between them to the parser.
-        blob_json = loads_strict_json(blob_bytes, object_pairs_hook=unique_members)
-    except ValueError as exc:
-        if "duplicate JSON member" in str(exc):
-            return AnchorResult(ok=False, message="UNL blob has a duplicate member")
-        return AnchorResult(ok=False, message="invalid blob JSON")
-    if not isinstance(blob_json, dict):
-        return AnchorResult(ok=False, message="UNL blob is not an object")
-    validators = blob_json.get("validators")
-    if (
-        "sequence" not in blob_json
-        or "expiration" not in blob_json
-        or not isinstance(validators, list)
-    ):
-        return AnchorResult(ok=False, message="UNL blob is missing required fields")
-    vl_sequence = _blob_uint32(blob_json["sequence"])
-    vl_expiration = _blob_uint32(blob_json["expiration"])
-    vl_effective = _blob_uint32(blob_json.get("effective", 0))
-    if vl_sequence is None or vl_expiration is None or vl_effective is None:
-        return AnchorResult(ok=False, message="UNL blob validity fields are malformed")
-    if vl_expiration <= vl_effective:
-        return AnchorResult(ok=False, message="UNL blob validity interval is invalid")
+    def harvest_entries(entries: list[tuple[str, bytes]]) -> None:
+        for _, m_raw in entries:
+            try:
+                ok_x, _, mx = verify_manifest(m_raw)
+            except Exception:
+                continue
+            if ok_x:
+                held.append(
+                    (
+                        _upper_hex(mx.get("PublicKey")),
+                        int(mx.get("Sequence", -1)),
+                        m_raw,
+                        _upper_hex(mx.get("SigningPubKey")),
+                    )
+                )
 
+    verified_candidates: list[
+        tuple[int, int, int, bytes, list[tuple[str, bytes]], bool]
+    ] = []
+    seen_active_blobs: set[bytes] = set()
+
+    for doc_pub, _, blob_bytes, sig_bytes, is_bundled in candidates:
+        if doc_pub and doc_pub.upper() != trusted:
+            continue
+        if not blob_bytes or not sig_bytes:
+            continue
+        signed_current = verify_signature(blob_bytes, sig_bytes, signing_key)
+        signed_superseded = False
+        if not signed_current:
+            for old_key in all_publisher_signing_keys:
+                if old_key == signing_key:
+                    continue
+                if verify_signature(blob_bytes, sig_bytes, old_key):
+                    signed_superseded = True
+                    break
+        if not signed_current and not signed_superseded:
+            if is_bundled:
+                bundled_blob_err = (
+                    "validator list is signed by a superseded publisher key"
+                    if bundled_signing_key is not None
+                    and signing_key != bundled_signing_key
+                    else "blob signature FAILED"
+                )
+            continue
+
+        parsed_blob, p3_err = parse_p3_blob(blob_bytes)
+        if parsed_blob is None:
+            if is_bundled:
+                bundled_blob_err = (
+                    "validator list is signed by a superseded publisher key"
+                    if signed_superseded
+                    else p3_err
+                )
+            continue
+        if signed_superseded:
+            if is_bundled:
+                bundled_blob_err = "validator list is signed by a superseded publisher key"
+            # §1.3 P2: superseded-key list is not a primary candidate, but
+            # its verified validator manifests still enter delegation resolution.
+            harvest_entries(parsed_blob[4])
+            continue
+        if blob_bytes not in seen_active_blobs:
+            seen_active_blobs.add(blob_bytes)
+            verified_candidates.append((*parsed_blob, is_bundled))
+
+    if not verified_candidates:
+        return AnchorResult(
+            ok=False,
+            message=(
+                bundled_blob_err
+                or bundled_manifest_err
+                or "no valid validator list candidate available"
+            ),
+        )
+
+    # Step 3b: Select primary list (§1.3 P3, P4, rule 7)
+    eligible_indices = [
+        idx
+        for idx, cand in enumerate(verified_candidates)
+        if anchor_close_time is None
+        or validator_list_active_at(cand[1], cand[2], anchor_close_time)
+    ]
+    if not eligible_indices:
+        return AnchorResult(
+            ok=False, message="anchor close time is outside the signed list interval"
+        )
+    max_seq = max(verified_candidates[idx][0] for idx in eligible_indices)
+    winners = [idx for idx in eligible_indices if verified_candidates[idx][0] == max_seq]
+    if len(winners) > 1:
+        # §1.3 rule 7: two distinct eligible lists share the highest eligible sequence.
+        return AnchorResult(
+            ok=False,
+            message="conflicting eligible validator lists at the same sequence",
+        )
+
+    primary_idx = winners[0]
+    vl_sequence, vl_effective, vl_expiration, primary_blob, primary_entries, _ = (
+        verified_candidates[primary_idx]
+    )
+
+    # §1.3 P4: every other verified, P3-well-formed list from this publisher
+    # contributes its verified validator manifests to delegation resolution.
+    for idx, cand in enumerate(verified_candidates):
+        if idx != primary_idx:
+            harvest_entries(cand[4])
+
+    print(f"    A3: Blob signature VERIFIED ({len(primary_blob)} bytes)")
+
+    # Step 4: Rules 10 & 11 soundness on the selected primary list (no fallback)
     signing_to_master: dict[str, str] = {}
     masters: set[str] = set()
     # Per master, the winning manifest so far: (sequence, raw bytes, signing key).
     best: dict[str, tuple[int, bytes, str]] = {}
-    for entry in validators:
-        if not isinstance(entry, dict):
-            return AnchorResult(ok=False, message="malformed validator entry in UNL blob")
-        m_b64 = entry.get("manifest")
-        advertised = entry.get("validation_public_key")
-        if not isinstance(m_b64, str) or not isinstance(advertised, str):
-            return AnchorResult(ok=False, message="validator entry missing key or manifest")
-        try:
-            m_raw = canonical_base64(m_b64)
-        except Exception:
-            return AnchorResult(ok=False, message="validator manifest is not canonical base64")
+    for advertised, m_raw in primary_entries:
         try:
             ok, err, m = verify_manifest(m_raw)
         except Exception as exc:
@@ -2124,7 +2423,7 @@ def verify_anchor(
                 ok=False, message=f"invalid validator manifest: {err if not ok else 'no signing key'}"
             )
         mk = _upper_hex(m.get("PublicKey"))
-        if advertised.upper() != mk:
+        if advertised != mk:
             return AnchorResult(ok=False, message="validator manifest master key mismatch")
         if mk in masters:
             return AnchorResult(ok=False, message="duplicate validator master key")
@@ -2525,6 +2824,7 @@ def verify(
     trusted_key: str | None = None,
     network_id: int | None = None,
     extra_manifests: list[bytes] | None = None,
+    extra_lists: list[ExternalValidatorList] | None = None,
 ) -> VerifyResult:
     """Verify a proof DAG serialized as a parent-first step list.
 
@@ -2641,7 +2941,25 @@ def verify(
                 f"({n_val} validations)"
             )
 
-            ar = verify_anchor(step, trusted_key, extra_manifests)
+            # §1.3: when the proof carries the anchor ledger's header, its
+            # close_time guides primary list selection (P3) before quorum is
+            # counted; the header grants no capability until verified below.
+            anchor_hash_upper = step["ledger_hash"].upper()
+            anchor_close_time: int | None = None
+            for other in steps:
+                if other.get("type") == "ledger_header":
+                    hdr_cand = other.get("header", {})
+                    if hash_header(hdr_cand).hex().upper() == anchor_hash_upper:
+                        anchor_close_time = int(hdr_cand["close_time"])
+                        break
+
+            ar = verify_anchor(
+                step,
+                trusted_key,
+                extra_manifests,
+                extra_lists=extra_lists,
+                anchor_close_time=anchor_close_time,
+            )
             result.warnings.extend(f"step {i}: {w}" for w in ar.warnings)
             if ar.ok:
                 ledger_hash = step["ledger_hash"].upper()
@@ -3280,6 +3598,12 @@ def main() -> None:
         "proof (spec §1.3); they only update keys of masters the list already names",
     )
     ap.add_argument(
+        "--lists",
+        default=None,
+        help="JSON file: XRPL validator-list site document (v1 or v2) or array of "
+        "such documents held from outside the proof (spec §1.3, §3.3)",
+    )
+    ap.add_argument(
         "--network",
         type=int,
         default=None,
@@ -3324,6 +3648,15 @@ def main() -> None:
         if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
             raise SystemExit("--manifests must be a JSON array of base64 strings")
         extra = [canonical_base64(x) for x in items]
+    extra_lists: list[ExternalValidatorList] = []
+    if args.lists:
+        try:
+            list_obj = json.loads(Path(args.lists).read_text())
+            extra_lists = parse_external_validator_lists(list_obj)
+        except Exception as exc:
+            raise SystemExit(
+                f"--lists must be a JSON VL document or array of VL documents: {exc}"
+            )
 
     # Bad input is a refusal with a layer and a reason, never a traceback.
     try:
@@ -3338,7 +3671,7 @@ def main() -> None:
         r.refuse("parse", str(exc) or type(exc).__name__)
         print(f"\n  FAIL: {r.reason}")
     else:
-        r = verify(proof, args.trusted_key, args.network, extra)
+        r = verify(proof, args.trusted_key, args.network, extra, extra_lists=extra_lists)
     if args.json:
         print(json.dumps(r.report()), file=report_out)
     sys.exit(0 if r.ok else 1)

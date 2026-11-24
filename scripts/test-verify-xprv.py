@@ -905,5 +905,116 @@ class StructuralParityTests(unittest.TestCase):
             self.assertIn("Domain", message)
 
 
+class ExternalValidatorListTests(unittest.TestCase):
+    def test_parse_external_validator_lists_v1_v2_and_malformed(self) -> None:
+        import base64
+
+        m1 = base64.b64encode(b"\x01\x02").decode()
+        m2 = base64.b64encode(b"\x03\x04").decode()
+        b1 = base64.b64encode(b"{}").decode()
+        b2 = base64.b64encode(b'{"a":1}').decode()
+
+        v1 = {"version": 1, "public_key": "ED" + "AA" * 32, "manifest": m1, "blob": b1, "signature": "aabbcc"}
+        parsed_v1 = v.parse_external_validator_lists(v1)
+        self.assertEqual(len(parsed_v1), 1)
+        self.assertEqual(parsed_v1[0].manifest, b"\x01\x02")
+        self.assertEqual(parsed_v1[0].blob, b"{}")
+        self.assertEqual(parsed_v1[0].signature, b"\xaa\xbb\xcc")
+
+        v2 = {
+            "version": 2,
+            "manifest": m1,
+            "blobs_v2": [
+                {"blob": b1, "signature": "1122"},
+                {"manifest": m2, "blob": b2, "signature": "3344"},
+                {"blob": "not base64!", "signature": "5566"},
+                {"blob": b1, "signature": "11 22"},  # whitespace in hex rejected
+            ],
+        }
+        parsed_v2 = v.parse_external_validator_lists(v2)
+        self.assertEqual(len(parsed_v2), 2)
+        self.assertEqual(parsed_v2[0].manifest, b"\x01\x02")
+        self.assertEqual(parsed_v2[1].manifest, b"\x03\x04")
+
+        v2_empty = {"version": 2, "manifest": m2, "blobs_v2": []}
+        parsed_empty = v.parse_external_validator_lists(v2_empty)
+        self.assertEqual(len(parsed_empty), 1)
+        self.assertEqual(parsed_empty[0].manifest, b"\x03\x04")
+        self.assertEqual(parsed_empty[0].blob, b"")
+
+        self.assertEqual(len(v.parse_external_validator_lists([v1, v2])), 3)
+        with self.assertRaises(ValueError):
+            v.parse_external_validator_lists("not-an-object-or-array")
+        with self.assertRaises(ValueError):
+            v.parse_external_validator_lists([123])
+
+    def test_cli_lists_accepts_single_v1_v2_and_array_and_rejects_bad_file(self) -> None:
+        import base64
+        import shutil
+        import subprocess
+        import tempfile
+
+        f = Fixture()
+        proof_json = f.proof(listless=True)
+        proof_bin = world.binary_proof(proof_json)
+        v1_doc = f.vl_doc_v1()
+        v2_blob = json.dumps({**f.blob_fields, "validators": f.entries}).encode()
+        v2_doc = f.vl_doc_v2(
+            [{"blob": base64.b64encode(v2_blob).decode(), "signature": sign(v2_blob, f.publisher_signing[1])}]
+        )
+
+        with tempfile.TemporaryDirectory(prefix="xprv-lists-cli-") as td:
+            tmp = Path(td)
+            proof_path = tmp / "listless.bin"
+            proof_path.write_bytes(proof_bin)
+            # Standalone copy of verify-xprv.py in an isolated empty directory.
+            standalone = tmp / "verify-xprv.py"
+            shutil.copy2(Path(__file__).resolve().parent / "verify-xprv.py", standalone)
+
+            for label, payload in (("v1_obj", v1_doc), ("v2_obj", v2_doc), ("array", [v1_doc])):
+                lists_file = tmp / f"{label}.json"
+                lists_file.write_text(json.dumps(payload))
+                run = subprocess.run(
+                    [
+                        sys.executable,
+                        str(standalone),
+                        str(proof_path),
+                        "--trusted-key",
+                        f.trusted_key,
+                        "--network",
+                        "0",
+                        "--lists",
+                        str(lists_file),
+                        "--json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    cwd=tmp,
+                )
+                self.assertEqual(run.returncode, 0, f"{label}: {run.stderr}")
+                report = json.loads(run.stdout)
+                self.assertTrue(report["verified"], label)
+                self.assertEqual(report["anchor"]["votes"], 5)
+
+            bad_lists = tmp / "bad.json"
+            bad_lists.write_text('"not-a-vl-doc"')
+            bad_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(standalone),
+                    str(proof_path),
+                    "--trusted-key",
+                    f.trusted_key,
+                    "--lists",
+                    str(bad_lists),
+                ],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+            )
+            self.assertEqual(bad_run.returncode, 1)
+            self.assertIn("--lists", bad_run.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

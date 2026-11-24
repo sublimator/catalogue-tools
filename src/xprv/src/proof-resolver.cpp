@@ -291,7 +291,8 @@ resolve_proof_chain_impl(
     bool pretrusted_anchor_for_testing,
     std::vector<std::vector<uint8_t>> const& extra_manifests,
     std::string* failure,
-    VerifyReport* report)
+    VerifyReport* report,
+    std::vector<ExternalValidatorList> const& extra_lists = {})
 {
     // The first refusal, for callers that report why (tests, the corpus),
     // with the layer it belongs to: "parse" for the proof's structure,
@@ -454,12 +455,31 @@ resolve_proof_chain_impl(
                             auto const& steps =
                                 anchor_json.at("steps").as_array();
                             std::vector<std::string> av_narrative;
+                            // §1.3: when the proof carries the anchor ledger's
+                            // header, its close_time guides primary list
+                            // selection (P3) before quorum is counted; the
+                            // header grants no capability until verified below.
+                            std::optional<uint32_t> anchor_close_time;
+                            for (auto const& s : chain.steps)
+                            {
+                                if (auto const* hdr =
+                                        std::get_if<HeaderData>(&s))
+                                {
+                                    if (hash_header(*hdr) == data.ledger_hash)
+                                    {
+                                        anchor_close_time = hdr->close_time;
+                                        break;
+                                    }
+                                }
+                            }
                             auto av_result = AnchorVerifier::verify(
                                 steps[0].as_object(),
                                 trusted_publisher_key,
                                 protocol,
                                 av_narrative,
-                                extra_manifests);
+                                extra_manifests,
+                                extra_lists,
+                                anchor_close_time);
 
                             anchor_step.sub_steps = std::move(av_narrative);
                             anchor_step.publisher_key =
@@ -1293,7 +1313,8 @@ resolve_proof_chain(
     std::string const& trusted_publisher_key,
     std::vector<std::vector<uint8_t>> const& extra_manifests,
     std::string* failure,
-    VerifyReport* report)
+    VerifyReport* report,
+    std::vector<ExternalValidatorList> const& extra_lists)
 {
     return resolve_proof_chain_impl(
         chain,
@@ -1302,7 +1323,8 @@ resolve_proof_chain(
         false,
         extra_manifests,
         failure,
-        report);
+        report,
+        extra_lists);
 }
 
 std::string
@@ -1384,13 +1406,15 @@ verify_proof(std::span<const uint8_t> data, TrustForNetworkFn const& trust_for)
     try
     {
         static std::vector<std::vector<uint8_t>> const none;
+        static std::vector<ExternalValidatorList> const no_lists;
         resolve_proof_chain(
             chain,
             *trust->protocol,
             trust->publisher_key,
             trust->held_manifests ? *trust->held_manifests : none,
             nullptr,
-            &report);
+            &report,
+            trust->held_lists ? *trust->held_lists : no_lists);
     }
     catch (std::exception const& e)
     {

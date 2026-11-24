@@ -11,6 +11,7 @@
 //   - Map proofs: trie root hash reconstruction
 //   - Skip lists: hash lookup between steps
 
+#include "anchor-verifier.h"
 #include "proof-chain.h"
 
 #include <boost/json.hpp>
@@ -83,16 +84,20 @@ resolve_proof_chain(
     std::vector<std::vector<uint8_t>> const& extra_manifests =
         std::vector<std::vector<uint8_t>>(),
     std::string* failure = nullptr,
-    VerifyReport* report = nullptr);
+    VerifyReport* report = nullptr,
+    std::vector<ExternalValidatorList> const& extra_lists =
+        std::vector<ExternalValidatorList>());
 
 /// What a verifier is configured to trust for one network (§1.3, §8): its
 /// primary publisher key, the definitions it decodes that network with, and
-/// the newer validator manifests it holds.
+/// any manifests and signed validator lists it holds outside the proof.
 struct VerifyTrust
 {
     std::string publisher_key;
     catl::xdata::Protocol const* protocol = nullptr;
-    std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests;
+    std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests =
+        {};
+    std::shared_ptr<std::vector<ExternalValidatorList> const> held_lists = {};
 };
 
 /// The trust configured for a network. It returns nullopt, or throws with

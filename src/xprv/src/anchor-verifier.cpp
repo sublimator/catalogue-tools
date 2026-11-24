@@ -75,6 +75,117 @@ strict_uint32(boost::json::value const& value)
     return std::nullopt;
 }
 
+bool
+is_66_hex(std::string_view s)
+{
+    if (s.size() != 66)
+        return false;
+    for (unsigned char c : s)
+    {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F')))
+            return false;
+    }
+    return true;
+}
+
+std::optional<ExternalValidatorList>
+extract_vl_candidate(
+    std::string const& doc_pub,
+    boost::json::value const* manifest_val,
+    boost::json::value const* blob_val,
+    boost::json::value const* sig_val)
+{
+    if (!manifest_val || !manifest_val->is_string() || !blob_val ||
+        !blob_val->is_string() || !sig_val || !sig_val->is_string())
+        return std::nullopt;
+
+    auto const manifest = catl::base64_decode_strict(
+        std::string_view(manifest_val->as_string()));
+    auto const blob =
+        catl::base64_decode_strict(std::string_view(blob_val->as_string()));
+    if (!manifest || manifest->empty() || !blob || blob->empty())
+        return std::nullopt;
+
+    std::vector<uint8_t> sig;
+    try
+    {
+        sig = xprv::from_hex(std::string_view(sig_val->as_string()));
+    }
+    catch (std::exception const&)
+    {
+        return std::nullopt;
+    }
+    if (sig.empty())
+        return std::nullopt;
+
+    return ExternalValidatorList{
+        doc_pub, std::move(*manifest), std::move(*blob), std::move(sig)};
+}
+
+void
+expand_vl_document(
+    boost::json::object const& doc,
+    std::vector<ExternalValidatorList>& out)
+{
+    auto const* ver_val = doc.if_contains("version");
+    auto const version = ver_val ? strict_uint32(*ver_val) : std::nullopt;
+    if (!version || (*version != 1u && *version != 2u))
+        return;
+
+    std::string doc_pub;
+    if (auto const* pub_val = doc.if_contains("public_key"))
+    {
+        if (!pub_val->is_string())
+            return;
+        doc_pub = std::string(pub_val->as_string());
+    }
+    auto const* doc_manifest = doc.if_contains("manifest");
+
+    if (*version == 1u)
+    {
+        if (auto c = extract_vl_candidate(
+                doc_pub,
+                doc_manifest,
+                doc.if_contains("blob"),
+                doc.if_contains("signature")))
+            out.push_back(std::move(*c));
+        return;
+    }
+
+    auto const* blobs = doc.if_contains("blobs_v2");
+    if (!blobs || !blobs->is_array())
+        return;
+    bool added_entry = false;
+    for (auto const& item : blobs->as_array())
+    {
+        if (!item.is_object())
+            continue;
+        auto const& entry = item.as_object();
+        auto const* entry_manifest = entry.if_contains("manifest");
+        if (auto c = extract_vl_candidate(
+                doc_pub,
+                entry_manifest ? entry_manifest : doc_manifest,
+                entry.if_contains("blob"),
+                entry.if_contains("signature")))
+        {
+            out.push_back(std::move(*c));
+            added_entry = true;
+        }
+    }
+    // A v2 document with no active blobs_v2 entries can still carry a
+    // top-level publisher manifest (e.g., publisher revocation or rotation).
+    if (!added_entry && doc_manifest && doc_manifest->is_string())
+    {
+        if (auto m = catl::base64_decode_strict(
+                std::string_view(doc_manifest->as_string()));
+            m && !m->empty())
+        {
+            out.push_back(ExternalValidatorList{doc_pub, std::move(*m), {}, {}});
+        }
+    }
+}
+
 catl::xdata::Protocol const&
 xrpl_protocol()
 {
@@ -84,6 +195,30 @@ xrpl_protocol()
 }
 
 }  // namespace
+
+std::vector<ExternalValidatorList>
+parse_external_validator_lists(boost::json::value const& json)
+{
+    std::vector<ExternalValidatorList> out;
+    if (json.is_object())
+    {
+        expand_vl_document(json.as_object(), out);
+        return out;
+    }
+    if (json.is_array())
+    {
+        for (auto const& item : json.as_array())
+        {
+            if (!item.is_object())
+                throw std::runtime_error(
+                    "validator list array elements must be JSON objects");
+            expand_vl_document(item.as_object(), out);
+        }
+        return out;
+    }
+    throw std::runtime_error(
+        "expected a JSON VL document object or array of VL documents");
+}
 
 AnchorVerifier::ParsedValidation
 AnchorVerifier::parse_validation(std::vector<uint8_t> const& raw)
@@ -200,7 +335,9 @@ AnchorVerifier::verify(
     std::string const& trusted_key,
     catl::xdata::Protocol const& protocol,
     std::vector<std::string>& narrative,
-    std::vector<std::vector<uint8_t>> const& extra_manifests)
+    std::vector<std::vector<uint8_t>> const& extra_manifests,
+    std::vector<ExternalValidatorList> const& extra_lists,
+    std::optional<uint32_t> anchor_close_time)
 {
     AnchorVerifyResult result;
 
@@ -247,7 +384,8 @@ AnchorVerifier::verify(
         return s;
     };
 
-    if (lower(proof_key) != lower(trusted_key))
+    std::string const trusted_lower = lower(trusted_key);
+    if (lower(proof_key) != trusted_lower)
     {
         result.error = "publisher key mismatch";
         PLOGE(
@@ -267,202 +405,431 @@ AnchorVerifier::verify(
         "   Step A1: Publisher key " + proof_key.substr(0, 16) +
         "... matches the trusted key we were given.");
 
-    // ── Step 2: Publisher manifest signature ─────────────────────
-    // A list-less anchor (§2.1, §3.3) needs the verifier's own copy of the
-    // list for this publisher key. This verifier has no external list source
-    // yet (§1.3 discrete trust, D4), so it refuses rather than guessing.
-    if (unl.size() == 1)
+    // Assemble candidate lists: bundled list (if present) + externally held
+    // lists (§1.3 P2, §3.3).
+    struct CandidateInput
     {
-        result.error = "validator list not bundled and no external list";
-        narrative.push_back(
-            "   FAIL: the proof does not bundle its validator list, and this "
-            "verifier has no external copy of it.");
-        return result;
-    }
-    if (!unl.contains("manifest"))
-    {
-        result.error = "no manifest in UNL";
-        narrative.push_back("   FAIL: no manifest in UNL.");
-        return result;
-    }
+        std::string doc_pub;
+        std::vector<uint8_t> manifest;
+        std::vector<uint8_t> blob;
+        std::vector<uint8_t> signature;
+        bool is_bundled = false;
+    };
+    std::vector<CandidateInput> candidates;
+    std::string bundled_manifest_err;
+    std::string bundled_blob_err;
 
-    auto manifest_hex = std::string(unl.at("manifest").as_string());
-    auto manifest_bytes = from_hex(manifest_hex);
-    auto publisher_manifest = catl::vl::parse_manifest(manifest_bytes);
-
-    if (publisher_manifest.master_public_key.empty() ||
-        publisher_manifest.signing_public_key.empty())
+    if (unl.size() > 1)
     {
-        result.error = "invalid publisher manifest";
-        narrative.push_back("   FAIL: publisher manifest could not be parsed.");
-        return result;
-    }
-
-    if (lower(publisher_manifest.master_key_hex()) != lower(trusted_key))
-    {
-        result.error = "publisher manifest master key mismatch";
-        PLOGE(log_, "Publisher manifest is not bound to the trusted key");
-        narrative.push_back(
-            "   FAIL: publisher manifest master key does not match the "
-            "trusted publisher key.");
-        return result;
-    }
-
-    if (!verify_manifest(publisher_manifest, protocol))
-    {
-        result.error = "publisher manifest signature verification failed";
-        PLOGE(log_, "Step 2: Publisher manifest signature verification failed");
-        narrative.push_back("   FAIL: publisher manifest is invalid.");
-        return result;
-    }
-
-    // §1.3: the publisher's signing key comes from the highest-sequence
-    // publisher manifest held; the list must verify under that key. A newer
-    // manifest naming the same key leaves the list valid.
-    auto publisher_signing_key = publisher_manifest.signing_public_key;
-    auto publisher_sequence = publisher_manifest.sequence;
-    {
-        std::map<std::uint32_t, std::vector<uint8_t>> publisher_seen{
-            {publisher_manifest.sequence, publisher_manifest.raw}};
-        for (auto const& m : held)
+        if (!unl.contains("manifest"))
         {
-            if (lower(m.master_key_hex()) != lower(trusted_key))
-                continue;
-            auto const [it, inserted] =
-                publisher_seen.emplace(m.sequence, m.raw);
-            if (!inserted && it->second != m.raw)
+            if (extra_lists.empty())
             {
-                result.error =
-                    "conflicting publisher manifests at the same sequence";
-                narrative.push_back(
-                    "   FAIL: two different publisher manifests share a "
-                    "sequence.");
+                result.error = "no manifest in UNL";
+                narrative.push_back("   FAIL: no manifest in UNL.");
                 return result;
             }
-            if (m.sequence > publisher_sequence)
+        }
+        else if (!unl.contains("blob") || !unl.contains("signature"))
+        {
+            if (extra_lists.empty())
             {
-                if (m.is_revocation())
-                {
-                    result.error = "the validator list publisher is revoked";
-                    narrative.push_back(
-                        "   FAIL: a held manifest revokes the list publisher.");
-                    return result;
-                }
-                publisher_sequence = m.sequence;
-                publisher_signing_key = m.signing_public_key;
+                result.error = "no blob or signature in UNL";
+                narrative.push_back("   FAIL: no blob or signature in UNL.");
+                return result;
+            }
+        }
+        else
+        {
+            CandidateInput bundled;
+            bundled.is_bundled = true;
+            try
+            {
+                bundled.manifest = from_hex(unl.at("manifest").as_string());
+                bundled.blob = from_hex(unl.at("blob").as_string());
+                bundled.signature = from_hex(unl.at("signature").as_string());
+                candidates.push_back(std::move(bundled));
+            }
+            catch (std::exception const&)
+            {
+                bundled_manifest_err = "invalid publisher manifest";
             }
         }
     }
+    for (auto const& ext : extra_lists)
+    {
+        candidates.push_back(CandidateInput{
+            ext.public_key, ext.manifest, ext.blob, ext.signature, false});
+    }
+
+    if (candidates.empty())
+    {
+        result.error = "validator list not bundled and no external list";
+        narrative.push_back(
+            "   FAIL: the proof does not bundle its validator list, and no "
+            "external validator list is held.");
+        return result;
+    }
+
+    // ── Step 2: Publisher manifest resolution (§1.3 P1, rules 2 & 9) ──
+    std::map<std::uint32_t, std::vector<uint8_t>> publisher_seen;
+    std::vector<std::vector<uint8_t>> all_publisher_signing_keys;
+    std::optional<catl::vl::Manifest> publisher_winner;
+    std::optional<std::vector<uint8_t>> bundled_signing_key;
+
+    auto consider_publisher_manifest = [&](catl::vl::Manifest const& m) {
+        if (lower(m.master_key_hex()) != trusted_lower)
+            return true;
+        auto const [it, inserted] = publisher_seen.emplace(m.sequence, m.raw);
+        if (!inserted && it->second != m.raw)
+            return false;  // rule 2: publisher equivocation
+        if (!m.is_revocation() && !m.signing_public_key.empty())
+            all_publisher_signing_keys.push_back(m.signing_public_key);
+        if (!publisher_winner || m.sequence > publisher_winner->sequence)
+            publisher_winner = m;
+        return true;
+    };
+
+    for (auto const& m : held)
+    {
+        if (!consider_publisher_manifest(m))
+        {
+            result.error =
+                "conflicting publisher manifests at the same sequence";
+            narrative.push_back(
+                "   FAIL: two different publisher manifests share a sequence.");
+            return result;
+        }
+    }
+
+    for (auto const& c : candidates)
+    {
+        if (!c.doc_pub.empty() && lower(c.doc_pub) != trusted_lower)
+            continue;
+        auto parsed = catl::vl::parse_manifest(c.manifest);
+        if (parsed.master_public_key.empty() ||
+            (!parsed.is_revocation() && parsed.signing_public_key.empty()))
+        {
+            if (c.is_bundled)
+                bundled_manifest_err = "invalid publisher manifest";
+            continue;
+        }
+        if (lower(parsed.master_key_hex()) != trusted_lower)
+        {
+            if (c.is_bundled)
+                bundled_manifest_err = "publisher manifest master key mismatch";
+            continue;
+        }
+        if (!verify_manifest(parsed, protocol))
+        {
+            if (c.is_bundled)
+                bundled_manifest_err =
+                    "publisher manifest signature verification failed";
+            continue;
+        }
+        if (c.is_bundled && !parsed.is_revocation())
+            bundled_signing_key = parsed.signing_public_key;
+        if (!consider_publisher_manifest(parsed))
+        {
+            result.error =
+                "conflicting publisher manifests at the same sequence";
+            narrative.push_back(
+                "   FAIL: two different publisher manifests share a sequence.");
+            return result;
+        }
+    }
+
+    if (!publisher_winner)
+    {
+        result.error = !bundled_manifest_err.empty()
+            ? bundled_manifest_err
+            : "no verified publisher manifest available";
+        PLOGE(log_, "Step 2: ", result.error);
+        narrative.push_back("   FAIL: " + result.error + ".");
+        return result;
+    }
+
+    if (publisher_winner->is_revocation())
+    {
+        result.error = "the validator list publisher is revoked";
+        narrative.push_back(
+            "   FAIL: a held manifest revokes the list publisher.");
+        return result;
+    }
+
+    auto const publisher_signing_key = publisher_winner->signing_public_key;
 
     PLOGI(
         log_,
         "Step 2: Publisher manifest VERIFIED, signing_key=",
-        publisher_manifest.signing_key_hex().substr(0, 16),
+        publisher_winner->signing_key_hex().substr(0, 16),
         "...");
     narrative.push_back(
         "   Step A2: Publisher manifest verified (master + signing "
         "signatures). "
         "Signing key " +
-        publisher_manifest.signing_key_hex().substr(0, 16) + "...");
+        publisher_winner->signing_key_hex().substr(0, 16) + "...");
 
-    // ── Step 3: Blob signature ──────────────────────────────────
-    if (!unl.contains("blob") || !unl.contains("signature"))
+    // ── Step 3: Candidate blob signature + P3 well-formedness ────
+    struct ParsedBlobEntry
     {
-        result.error = "no blob or signature in UNL";
-        narrative.push_back("   FAIL: no blob or signature in UNL.");
+        std::string advertised_master;
+        std::vector<uint8_t> manifest_bytes;
+    };
+    struct ParsedCandidate
+    {
+        uint32_t sequence = 0;
+        uint32_t effective = 0;
+        uint32_t expiration = 0;
+        std::vector<uint8_t> raw_blob;
+        std::vector<ParsedBlobEntry> entries;
+        bool is_bundled = false;
+    };
+
+    auto parse_p3_blob =
+        [&](std::vector<uint8_t> const& blob_bytes,
+            std::string& err) -> std::optional<ParsedCandidate> {
+        std::string blob_str(
+            reinterpret_cast<char const*>(blob_bytes.data()),
+            blob_bytes.size());
+        boost::json::value blob_json;
+        try
+        {
+            blob_json = detail::parse_unique_json(blob_str);
+        }
+        catch (std::exception const& e)
+        {
+            bool const repeated =
+                std::string_view(e.what()).find("duplicate member") !=
+                std::string_view::npos;
+            err = repeated ? "UNL blob has a duplicate member"
+                           : "invalid blob JSON";
+            return std::nullopt;
+        }
+        if (!blob_json.is_object())
+        {
+            err = "UNL blob is not an object";
+            return std::nullopt;
+        }
+        auto const& blob_obj = blob_json.as_object();
+        if (!blob_obj.contains("sequence") ||
+            !blob_obj.contains("expiration") ||
+            !blob_obj.contains("validators") ||
+            !blob_obj.at("validators").is_array())
+        {
+            err = "UNL blob is missing required fields";
+            return std::nullopt;
+        }
+        auto const seq = strict_uint32(blob_obj.at("sequence"));
+        auto const exp = strict_uint32(blob_obj.at("expiration"));
+        std::optional<uint32_t> eff = 0;
+        if (blob_obj.contains("effective"))
+            eff = strict_uint32(blob_obj.at("effective"));
+        if (!seq || !exp || !eff)
+        {
+            err = "UNL blob validity fields are malformed";
+            return std::nullopt;
+        }
+        if (*exp <= *eff)
+        {
+            err = "UNL blob validity interval is invalid";
+            return std::nullopt;
+        }
+        ParsedCandidate out;
+        out.sequence = *seq;
+        out.effective = *eff;
+        out.expiration = *exp;
+        out.raw_blob = blob_bytes;
+        for (auto const& v : blob_obj.at("validators").as_array())
+        {
+            if (!v.is_object())
+            {
+                err = "malformed validator entry in UNL blob";
+                return std::nullopt;
+            }
+            auto const& vobj = v.as_object();
+            if (!vobj.contains("manifest") || !vobj.at("manifest").is_string() ||
+                !vobj.contains("validation_public_key") ||
+                !vobj.at("validation_public_key").is_string())
+            {
+                err = "validator entry missing key or manifest";
+                return std::nullopt;
+            }
+            auto const pub_sv =
+                std::string_view(vobj.at("validation_public_key").as_string());
+            if (!is_66_hex(pub_sv))
+            {
+                err = "validator entry has malformed validation_public_key";
+                return std::nullopt;
+            }
+            auto const m_decoded = catl::base64_decode_strict(
+                std::string_view(vobj.at("manifest").as_string()));
+            if (!m_decoded)
+            {
+                err = "validator manifest is not canonical base64";
+                return std::nullopt;
+            }
+            out.entries.push_back(ParsedBlobEntry{
+                lower(std::string(pub_sv)), std::move(*m_decoded)});
+        }
+        return out;
+    };
+
+    auto harvest_entries = [&](std::vector<ParsedBlobEntry> const& entries) {
+        for (auto const& e : entries)
+        {
+            try
+            {
+                if (auto m =
+                        parse_and_verify_manifest(e.manifest_bytes, protocol))
+                    held.push_back(std::move(*m));
+            }
+            catch (std::exception const&)
+            {
+            }
+        }
+    };
+
+    std::vector<ParsedCandidate> verified_candidates;
+    std::set<std::vector<uint8_t>> seen_active_blobs;
+    for (auto const& c : candidates)
+    {
+        if (!c.doc_pub.empty() && lower(c.doc_pub) != trusted_lower)
+            continue;
+        if (c.blob.empty() || c.signature.empty())
+            continue;
+
+        bool const signed_current = catl::crypto::verify_message(
+            publisher_signing_key, c.signature, c.blob);
+        bool signed_superseded = false;
+        if (!signed_current)
+        {
+            for (auto const& old_key : all_publisher_signing_keys)
+            {
+                if (old_key == publisher_signing_key)
+                    continue;
+                if (catl::crypto::verify_message(
+                        old_key, c.signature, c.blob))
+                {
+                    signed_superseded = true;
+                    break;
+                }
+            }
+        }
+        if (!signed_current && !signed_superseded)
+        {
+            if (c.is_bundled)
+            {
+                bundled_blob_err = (bundled_signing_key &&
+                                    publisher_signing_key !=
+                                        *bundled_signing_key)
+                    ? "validator list is signed by a superseded publisher key"
+                    : "blob signature verification failed";
+            }
+            continue;
+        }
+
+        std::string p3_err;
+        auto parsed = parse_p3_blob(c.blob, p3_err);
+        if (!parsed)
+        {
+            if (c.is_bundled)
+                bundled_blob_err = signed_superseded
+                    ? "validator list is signed by a superseded publisher key"
+                    : p3_err;
+            continue;
+        }
+        if (signed_superseded)
+        {
+            if (c.is_bundled)
+                bundled_blob_err =
+                    "validator list is signed by a superseded publisher key";
+            // §1.3 P2: superseded-key list is not a primary candidate, but
+            // its verified validator manifests still enter delegation resolution.
+            harvest_entries(parsed->entries);
+            continue;
+        }
+
+        // Byte-identical signed blobs are one candidate (§1.3 rule 7).
+        if (seen_active_blobs.insert(c.blob).second)
+        {
+            parsed->is_bundled = c.is_bundled;
+            verified_candidates.push_back(std::move(*parsed));
+        }
+    }
+
+    if (verified_candidates.empty())
+    {
+        result.error = !bundled_blob_err.empty()
+            ? bundled_blob_err
+            : (!bundled_manifest_err.empty()
+                   ? bundled_manifest_err
+                   : "no valid validator list candidate available");
+        PLOGE(log_, "Step 3: ", result.error);
+        narrative.push_back("   FAIL: " + result.error + ".");
         return result;
     }
 
-    auto blob_hex = std::string(unl.at("blob").as_string());
-    auto blob_bytes = from_hex(blob_hex);
-    auto blob_sig_hex = std::string(unl.at("signature").as_string());
-    auto blob_sig = from_hex(blob_sig_hex);
-
-    // The blob is signed directly by the publisher's signing key
-    // (no hash prefix — raw bytes)
-    bool blob_sig_ok = catl::crypto::verify_message(
-        publisher_signing_key, blob_sig, blob_bytes);
-
-    if (!blob_sig_ok)
+    // ── Step 3b: Select primary list (§1.3 P3, P4, rule 7) ──────
+    std::vector<size_t> eligible_indices;
+    for (size_t i = 0; i < verified_candidates.size(); ++i)
     {
-        result.error =
-            publisher_signing_key != publisher_manifest.signing_public_key
-            ? "validator list is signed by a superseded publisher key"
-            : "blob signature verification failed";
-        PLOGE(log_, "Step 3: Blob signature FAILED");
-        narrative.push_back("   FAIL: blob signature verification failed.");
+        auto const& c = verified_candidates[i];
+        if (!anchor_close_time ||
+            validator_list_active_at(
+                c.effective, c.expiration, *anchor_close_time))
+            eligible_indices.push_back(i);
+    }
+
+    if (eligible_indices.empty())
+    {
+        result.error = "anchor close time is outside the signed list interval";
+        PLOGE(log_, "Step 3: ", result.error);
+        narrative.push_back("   FAIL: " + result.error + ".");
         return result;
     }
+
+    uint32_t max_seq = 0;
+    for (size_t idx : eligible_indices)
+        max_seq = std::max(max_seq, verified_candidates[idx].sequence);
+
+    std::vector<size_t> winners;
+    for (size_t idx : eligible_indices)
+    {
+        if (verified_candidates[idx].sequence == max_seq)
+            winners.push_back(idx);
+    }
+    if (winners.size() > 1)
+    {
+        // §1.3 rule 7: two distinct eligible lists share the highest eligible
+        // sequence — publisher equivocation.
+        result.error = "conflicting eligible validator lists at the same sequence";
+        PLOGE(log_, "Step 3: ", result.error);
+        narrative.push_back("   FAIL: " + result.error + ".");
+        return result;
+    }
+
+    size_t const primary_idx = winners[0];
+    auto const& primary = verified_candidates[primary_idx];
+
+    // §1.3 P4: every other verified, P3-well-formed list from this publisher
+    // contributes its verified validator manifests to delegation resolution.
+    for (size_t i = 0; i < verified_candidates.size(); ++i)
+    {
+        if (i != primary_idx)
+            harvest_entries(verified_candidates[i].entries);
+    }
+
+    result.vl_sequence = primary.sequence;
+    result.vl_effective = primary.effective;
+    result.vl_expiration = primary.expiration;
 
     PLOGI(log_, "Step 3: Blob signature VERIFIED");
     narrative.push_back(
-        "   Step A3: UNL blob (" + std::to_string(blob_bytes.size()) +
+        "   Step A3: UNL blob (" + std::to_string(primary.raw_blob.size()) +
         " bytes) signature verified against publisher's signing key.");
 
-    // ── Step 4: Parse validator manifests from blob ──────────────
-    // The blob is JSON containing a validators array
-    std::string blob_str(
-        reinterpret_cast<char const*>(blob_bytes.data()), blob_bytes.size());
-
-    // The list is signed text, and it has one reading: a member written
-    // twice would leave the choice between them to the parser (§1.3).
-    boost::json::value blob_json;
-    try
-    {
-        blob_json = detail::parse_unique_json(blob_str);
-    }
-    catch (std::exception const& e)
-    {
-        bool const repeated =
-            std::string_view(e.what()).find("duplicate member") !=
-            std::string_view::npos;
-        result.error = repeated ? "UNL blob has a duplicate member"
-                                : "invalid blob JSON";
-        narrative.push_back(
-            repeated ? "   FAIL: the list has a duplicate JSON member."
-                     : "   FAIL: blob is not valid JSON.");
-        return result;
-    }
-
-    if (!blob_json.is_object())
-    {
-        result.error = "UNL blob is not an object";
-        narrative.push_back("   FAIL: UNL blob is not a JSON object.");
-        return result;
-    }
-
-    auto const& blob_obj = blob_json.as_object();
-    if (!blob_obj.contains("sequence") || !blob_obj.contains("expiration") ||
-        !blob_obj.contains("validators") ||
-        !blob_obj.at("validators").is_array())
-    {
-        result.error = "UNL blob is missing required fields";
-        narrative.push_back("   FAIL: UNL blob is missing required fields.");
-        return result;
-    }
-
-    auto const sequence = strict_uint32(blob_obj.at("sequence"));
-    auto const expiration = strict_uint32(blob_obj.at("expiration"));
-    std::optional<uint32_t> effective = 0;
-    if (blob_obj.contains("effective"))
-        effective = strict_uint32(blob_obj.at("effective"));
-    if (!sequence || !expiration || !effective)
-    {
-        result.error = "UNL blob validity fields are malformed";
-        narrative.push_back("   FAIL: UNL blob validity fields are malformed.");
-        return result;
-    }
-    result.vl_sequence = *sequence;
-    result.vl_expiration = *expiration;
-    result.vl_effective = *effective;
-    if (result.vl_expiration <= result.vl_effective)
-    {
-        result.error = "UNL blob validity interval is invalid";
-        narrative.push_back("   FAIL: UNL blob validity interval is invalid.");
-        return result;
-    }
-
-    // Build signing key → master key lookup
+    // ── Step 4: Rules 10 & 11 soundness on the selected primary list ──
     std::map<std::string, std::string> signing_to_master;
     std::set<std::string> unl_masters;
     std::set<std::string> unl_signing_keys;
@@ -474,40 +841,11 @@ AnchorVerifier::verify(
         std::string signing_key;  // empty when revoked
     };
     std::map<std::string, Delegation> best;
-    auto const& vals_array = blob_obj.at("validators").as_array();
 
-    for (auto const& v : vals_array)
+    for (auto const& entry : primary.entries)
     {
-        if (!v.is_object())
-        {
-            result.error = "malformed validator entry in UNL blob";
-            narrative.push_back("   FAIL: malformed validator entry in UNL.");
-            return result;
-        }
-        auto const& vobj = v.as_object();
-        if (!vobj.contains("manifest") || !vobj.at("manifest").is_string() ||
-            !vobj.contains("validation_public_key") ||
-            !vobj.at("validation_public_key").is_string())
-        {
-            result.error = "validator entry missing key or manifest";
-            narrative.push_back(
-                "   FAIL: validator entry is missing its key or manifest.");
-            return result;
-        }
-
-        // Canonical padded base64 and nothing else (§1.3): a manifest string
-        // with stray characters is not the string the publisher signed for.
-        auto const m_decoded = catl::base64_decode_strict(
-            std::string_view(vobj.at("manifest").as_string()));
-        if (!m_decoded)
-        {
-            result.error = "validator manifest is not canonical base64";
-            narrative.push_back(
-                "   FAIL: a validator manifest is not canonical base64.");
-            return result;
-        }
-        auto const& m_bytes = *m_decoded;
-        auto verified_manifest = parse_and_verify_manifest(m_bytes, protocol);
+        auto verified_manifest =
+            parse_and_verify_manifest(entry.manifest_bytes, protocol);
         if (!verified_manifest ||
             (!verified_manifest->is_revocation() &&
              verified_manifest->signing_public_key.empty()))
@@ -517,10 +855,8 @@ AnchorVerifier::verify(
             return result;
         }
 
-        auto const advertised_master =
-            lower(std::string(vobj.at("validation_public_key").as_string()));
         auto const manifest_master = lower(verified_manifest->master_key_hex());
-        if (advertised_master != manifest_master)
+        if (entry.advertised_master != manifest_master)
         {
             result.error = "validator manifest master key mismatch";
             narrative.push_back(

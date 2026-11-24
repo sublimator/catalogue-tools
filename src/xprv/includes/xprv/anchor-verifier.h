@@ -53,6 +53,24 @@ struct AnchorVerifyResult
     std::vector<std::string> warnings;  // reported, never a rejection
 };
 
+/// A signed validator-list candidate held from outside the proof (§1.3).
+/// Extracted from an XRPL VL site document (version 1 or version 2 `blobs_v2`).
+struct ExternalValidatorList
+{
+    std::string public_key;  // optional hex master key from the site document
+    std::vector<uint8_t> manifest;   // raw publisher manifest bytes
+    std::vector<uint8_t> blob;       // raw signed list JSON bytes
+    std::vector<uint8_t> signature;  // raw signature over blob
+};
+
+/// Expand an XRPL VL site document (version 1 or version 2), or a JSON array
+/// of such documents, into candidate lists (§1.3 "Sources and packaging").
+/// Throws std::runtime_error if the outer JSON is not a document object or
+/// array of document objects; malformed individual candidates inside a
+/// document are skipped so one broken entry cannot poison others.
+std::vector<ExternalValidatorList>
+parse_external_validator_lists(boost::json::value const& json);
+
 class AnchorVerifier
 {
 public:
@@ -60,9 +78,14 @@ public:
     /// @param anchor    The anchor JSON object from the proof chain
     /// @param trusted_key  Hex string of the trusted VL publisher master key
     /// @param narrative Output: explanation lines appended here
-    /// @return Verification result
     /// @param extra_manifests  Raw manifests held from outside the proof
     ///        (§1.3). They only update keys of masters the list names.
+    /// @param extra_lists  Signed validator-list candidates held from outside
+    ///        the proof (§1.3, §3.3).
+    /// @param anchor_close_time  The matching anchor ledger header's close_time
+    ///        when the proof carries descendants (§1.3 P3), or nullopt for an
+    ///        anchor-only proof.
+    /// @return Verification result
     static AnchorVerifyResult
     verify(
         boost::json::object const& anchor,
@@ -70,7 +93,10 @@ public:
         catl::xdata::Protocol const& protocol,
         std::vector<std::string>& narrative,
         std::vector<std::vector<uint8_t>> const& extra_manifests =
-            std::vector<std::vector<uint8_t>>());
+            std::vector<std::vector<uint8_t>>(),
+        std::vector<ExternalValidatorList> const& extra_lists =
+            std::vector<ExternalValidatorList>(),
+        std::optional<uint32_t> anchor_close_time = std::nullopt);
 
     /// True when `raw` is a complete canonical XRPL `STValidation`: it
     /// round-trips under the XRPL codec and carries `LedgerHash`, a `Signature`

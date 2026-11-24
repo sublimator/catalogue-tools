@@ -456,6 +456,7 @@ main(int argc, char* argv[])
         std::string proof_path;
         std::string explicit_key;
         std::string manifests_path;
+        std::string lists_path;
         std::optional<uint32_t> network_arg;
         bool json_report = false;
 
@@ -472,6 +473,11 @@ main(int argc, char* argv[])
             else if (arg == "--manifests" && pos + 1 < command_args.size())
             {
                 manifests_path = command_args[pos + 1];
+                pos += 2;
+            }
+            else if (arg == "--lists" && pos + 1 < command_args.size())
+            {
+                lists_path = command_args[pos + 1];
                 pos += 2;
             }
             else if (arg == "--json")
@@ -500,7 +506,7 @@ main(int argc, char* argv[])
         {
             std::cerr
                 << "Usage: xprv verify <proof_file> [publisher_key] "
-                   "[--network N] [--manifests FILE] [--json]\n";
+                   "[--network N] [--manifests FILE] [--lists FILE] [--json]\n";
             return 1;
         }
 
@@ -543,7 +549,8 @@ main(int argc, char* argv[])
             verify_network_id,
             protocol,
             manifests_path,
-            json_report);
+            json_report,
+            lists_path);
     }
 
     // Offline form conversion. Exists so the two representations can be

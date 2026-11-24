@@ -374,7 +374,8 @@ verify_configured(
     uint32_t network_id,
     std::string const& publisher_key,
     std::string& why,
-    std::vector<std::vector<uint8_t>> const& held = {})
+    std::vector<std::vector<uint8_t>> const& held = {},
+    std::vector<ExternalValidatorList> const& held_lists = {})
 {
     if (chain.network_id != network_id)
     {
@@ -383,7 +384,13 @@ verify_configured(
         return false;
     }
     return resolve_proof_chain(
-        chain, protocol_for(network_id), publisher_key, held, &why);
+        chain,
+        protocol_for(network_id),
+        publisher_key,
+        held,
+        &why,
+        nullptr,
+        held_lists);
 }
 
 
@@ -627,8 +634,9 @@ struct Negative
     std::string layer;           // parse, graph or trust; empty on an accept
     std::string trust_key;
     uint32_t network_id = 0;
-    // Manifests the verifier holds from outside the proof (trust.manifests).
+    // Manifests and signed lists the verifier holds from outside the proof.
     std::vector<std::vector<uint8_t>> held;
+    std::vector<ExternalValidatorList> held_lists;
 };
 
 // A vector tagged known_failing for "cpp" records a defect this verifier
@@ -731,6 +739,8 @@ derived_vectors(std::string const& prefix)
             for (auto const& m : manifests->as_array())
                 n.held.push_back(
                     catl::base64_decode(std::string(m.as_string())));
+        if (auto const* lists = trust.if_contains("lists"))
+            n.held_lists = parse_external_validator_lists(*lists);
         for (auto& [binary, bytes] : forms)
         {
             auto each = n;
@@ -757,7 +767,8 @@ refusal(Negative const& n, bool production)
         auto const protocol = protocol_for(n.network_id);
         std::string why;
         bool const ok = production
-            ? verify_configured(chain, n.network_id, n.trust_key, why, n.held)
+            ? verify_configured(
+                  chain, n.network_id, n.trust_key, why, n.held, n.held_lists)
             : resolve_proof_chain_with_pretrusted_anchor_for_testing(
                   chain, protocol, &why);
         if (ok)

@@ -27,7 +27,8 @@ cmd_verify(
     uint32_t trusted_network_id,
     catl::xdata::Protocol const& protocol,
     std::string const& manifests_path,
-    bool json_report)
+    bool json_report,
+    std::string const& lists_path)
 {
     // --manifests: a JSON array of base64 raw manifests held from outside the
     // proof (spec §1.3, the D4 discrete form).
@@ -62,6 +63,33 @@ cmd_verify(
         }
     }
 
+    // --lists: a JSON XRPL VL site document (v1 or v2) or array of such
+    // documents held from outside the proof (spec §1.3, §3.3).
+    std::vector<xprv::ExternalValidatorList> extra_lists;
+    if (!lists_path.empty())
+    {
+        std::ifstream lin(lists_path);
+        if (!lin.is_open())
+        {
+            std::cerr << "Cannot open: " << lists_path << "\n";
+            return 1;
+        }
+        std::stringstream text;
+        text << lin.rdbuf();
+        try
+        {
+            auto const parsed = boost::json::parse(text.str());
+            extra_lists = xprv::parse_external_validator_lists(parsed);
+        }
+        catch (std::exception const& e)
+        {
+            std::cerr
+                << "--lists must be a JSON VL document or array of VL documents: "
+                << e.what() << "\n";
+            return 1;
+        }
+    }
+
     std::string read_error;
     auto const raw = xprv::read_proof_file(proof_path, read_error);
     if (!raw)
@@ -86,6 +114,9 @@ cmd_verify(
     // or 1.
     auto const held = std::make_shared<std::vector<std::vector<uint8_t>> const>(
         std::move(extra_manifests));
+    auto const held_lists =
+        std::make_shared<std::vector<xprv::ExternalValidatorList> const>(
+            std::move(extra_lists));
     auto const report = xprv::verify_proof(
         *raw, [&](uint32_t network_id) -> std::optional<xprv::VerifyTrust> {
             if (trusted_key.empty())
@@ -97,7 +128,7 @@ cmd_verify(
                     "proof network_id " + std::to_string(network_id) +
                     " does not match configured network " +
                     std::to_string(trusted_network_id));
-            return xprv::VerifyTrust{trusted_key, &protocol, held};
+            return xprv::VerifyTrust{trusted_key, &protocol, held, held_lists};
         });
 
     if (json_report)
