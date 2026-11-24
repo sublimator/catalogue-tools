@@ -17,7 +17,10 @@ unchanged.
 
 The two reference verifiers are built in as `cpp` and `python`. Name others
 with --verifier NAME=TEMPLATE; the template is split like a shell command and
-may use {proof}, {network_id} and {publisher_key}.
+may use {proof}, {network_id}, {publisher_key} and {manifests}. {manifests} is
+a file holding a JSON array of base64 raw manifests the verifier is to hold
+from outside the proof (spec §1.3); it is an empty array for most vectors. A
+verifier that ignores it fails the vectors that need it.
 
 For the built-in verifiers a refusal must also print the vector's
 `reason_contains`, so refusing for the wrong reason fails too. Another
@@ -78,6 +81,8 @@ class Case:
     expect: str  # accept or reject
     network_id: int
     publisher_key: str
+    # Base64 raw manifests the verifier holds from outside the proof (§1.3).
+    manifests: list[str] = field(default_factory=list)
     reason_contains: str | None = None
     known_failing: dict[str, dict[str, str]] = field(default_factory=dict)
 
@@ -113,6 +118,7 @@ def expand(path: Path, tool: Any) -> list[Case]:
             expect=verdict,
             network_id=int(trust["network_id"]),
             publisher_key=str(trust["publisher_key"]),
+            manifests=list(trust.get("manifests", [])),
             reason_contains=expect.get("reason_contains"),
             known_failing=dict(known),
         )
@@ -121,8 +127,8 @@ def expand(path: Path, tool: Any) -> list[Case]:
         base = json.loads((path.parent / f"{vec['base']}.json").read_text())
         trust = vec.get("trust") or base["trust"]
         if "json_patch" in vec:
-            doc = tool.apply_json_patch(base["form"]["json"], vec["json_patch"])
-            return [case("json", json.dumps(doc).encode(), trust)]
+            text = tool.patched_text(base["form"]["json"], vec["json_patch"])
+            return [case("json", text.encode(), trust)]
         raw = tool.apply_mutations(bytes.fromhex(base["form"]["binary_hex"]), vec["mutations"])
         return [case("binary", raw, trust)]
 
@@ -143,9 +149,10 @@ class Outcome:
     output: str = ""
 
 
-def run_verifier(template: list[str], case: Case, proof: Path, timeout: float) -> Outcome:
+def run_verifier(template: list[str], case: Case, proof: Path, manifests: Path, timeout: float) -> Outcome:
     cmd = [
-        part.format(proof=str(proof), network_id=case.network_id, publisher_key=case.publisher_key)
+        part.format(proof=str(proof), network_id=case.network_id, publisher_key=case.publisher_key,
+                    manifests=str(manifests))
         for part in template
     ]
     try:
@@ -200,10 +207,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     verifiers: dict[str, list[str]] = {}
     xprv_bin = Path(args.xprv_bin)
     builtin = {
-        "cpp": [str(xprv_bin), "verify", "{proof}", "{publisher_key}", "--network", "{network_id}"],
+        "cpp": [str(xprv_bin), "verify", "{proof}", "{publisher_key}", "--network", "{network_id}",
+                "--manifests", "{manifests}"],
         "python": [
             "uv", "run", "--script", str(REPO / "scripts" / "verify-xprv.py"),
             "{proof}", "--trusted-key", "{publisher_key}", "--network", "{network_id}",
+            "--manifests", "{manifests}",
         ],
     }
     for name in args.use or ["cpp", "python"]:
@@ -234,15 +243,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     rows: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="xprv-conformance-") as td:
         tmp = Path(td)
-        files = []
+        files, held = [], []
         for i, c in enumerate(cases):
             f = tmp / f"{i:04d}.{'json' if c.form == 'json' else 'bin'}"
             f.write_bytes(c.data)
             files.append(f)
+            # Always a file, so a template can name it unconditionally: a
+            # vector with no held manifests gets an empty array.
+            m = tmp / f"{i:04d}.manifests.json"
+            m.write_text(json.dumps(c.manifests))
+            held.append(m)
 
         def one(job: tuple[int, str]) -> tuple[int, str, Outcome]:
             i, name = job
-            return i, name, run_verifier(verifiers[name], cases[i], files[i], args.timeout)
+            return i, name, run_verifier(verifiers[name], cases[i], files[i], held[i], args.timeout)
 
         jobs = [(i, name) for i in range(len(cases)) for name in verifiers]
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:

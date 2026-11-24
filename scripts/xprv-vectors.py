@@ -59,6 +59,7 @@ check     verify every vector; assert verdicts AND recorded intermediates
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import importlib.util
 import io
@@ -186,10 +187,13 @@ def python_verdict(
     """
     buf = io.StringIO()
     trust = trust or {}
+    # Validator and publisher manifests the verifier holds from outside the
+    # proof (§1.3), as base64 raw manifests.
+    held = [base64.b64decode(m) for m in trust.get("manifests", [])]
     try:
         with redirect_stdout(buf):
             proof = V.binary_to_proof(raw) if binary or V.is_binary_proof(raw) else V.load_json_proof(raw)
-            res = V.verify(proof, trust.get("publisher_key"), trust.get("network_id"))
+            res = V.verify(proof, trust.get("publisher_key"), trust.get("network_id"), held)
         return bool(res.ok), "; ".join(res.errors) or "ok"
     except Exception as exc:  # a parse refusal is a legitimate reject
         return False, f"{type(exc).__name__}: {exc}"
@@ -404,7 +408,55 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
         "spec §3.5: the manifest, the signature and the list are each non-empty",
         _replace_payload(raw, unl_at, unl[:pos] + b"\x00"),
         "non-empty manifest, list and signature")
+
+    # Record order and count (§3.3, §3.8).
+    offsets = _record_offsets(raw)
+    assert records[core_at][0] == V.TLV_ANCHOR and core_at == 0 and records[1][0] == V.TLV_HEADER
+    anchor_record = raw[offsets[0][1] : offsets[1][1]]
+    header_record_len = offsets[2][1] - offsets[1][1]
+    mut("anchor-core-not-first", "spec §3.8: the first record is the anchor core",
+        [{"delete_at": offsets[0][1], "delete_len": len(anchor_record)},
+         {"insert_at": offsets[0][1] + header_record_len, "insert_hex": anchor_record.hex().upper()}],
+        "first record must be the anchor core")
+    mut("no-records", "spec §3.8: a body carries exactly one anchor core",
+        [{"truncate_to": 10}], "missing anchor core record")
+    mut("duplicate-anchor-core", "spec §3.8: a body carries exactly one anchor core",
+        [{"insert_at": offsets[1][1], "insert_hex": anchor_record.hex().upper()}], "duplicate anchor core")
+    core_payload_at = offsets[0][1] + 1 + len(_leb128(len(records[0][1])))
+    mut("publisher-key-unknown-prefix-binary", "spec §5.1: a public key is 33 bytes beginning ED, 02 or 03",
+        [{"at": core_payload_at + 32, "set_hex": "04"}], "must begin with ED, 02 or 03")
+
+    # Every payload is consumed exactly (§3.8). The anchor records are above.
+    mut("header-trailing-byte", "spec §3.6: a ledger header payload is exactly 118 bytes",
+        _replace_payload(raw, 1, records[1][1] + b"\x00"), "118 bytes")
+    mut("trie-trailing-byte", "spec §3.8: a TLV payload is consumed exactly",
+        _replace_payload(raw, map_at, records[map_at][1] + b"\x00"), "trailing bytes")
+
+    # The compressed body is one complete zlib stream, bounded while it
+    # inflates (§3.1, §8).
+    one_stream = "spec §3.1: a compressed body is one complete RFC 1950 zlib stream"
+    mut("zlib-truncated", one_stream, [{"compress_body": 9}, {"drop_last": 1}], "truncated zlib body")
+    mut("zlib-second-stream", one_stream, [{"compress_body": 9}, {"append_zlib_zeros": 16}],
+        "bytes after the zlib stream")
+    mut("zlib-bad-checksum", one_stream, [{"compress_body": 9}, {"xor_last": "01"}], "invalid zlib body")
+    mut("zlib-over-the-cap", "spec §8: a compressed body is bounded while it inflates",
+        [{"truncate_to": 10}, {"at": 5, "set_hex": "01"},
+         {"append_zlib_zeros": V.MAX_DECOMPRESSED_PROOF_SIZE + 1}],
+        "exceeds cap")
     return fam
+
+
+def mutation_accept_family(raw: bytes) -> list[dict[str, Any]]:
+    """Byte edits of a valid binary proof that a verifier MUST still accept."""
+    return [
+        {
+            "name": f"compressed-level-{level}",
+            "states": "spec §3.1: compression is a container option; the same proof verifies at any level",
+            "mutations": [{"compress_body": level}],
+            "expect": {"verdict": "accept"},
+        }
+        for level in (1, 9)
+    ]
 
 
 def _leb128(value: int) -> bytes:
@@ -560,9 +612,11 @@ def apply_json_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
 
     `set` writes a value at a JSON pointer (RFC 6901), creating an object member
     if needed; `remove` deletes the member or element at a pointer, which must
-    exist; `select` replaces the whole document with the value at a pointer.
+    exist; `select` replaces the whole document with the value at a pointer;
+    `duplicate` repeats a member name (see patched_text).
     """
     doc = copy.deepcopy(doc)
+    duplicates = 0
     for op in ops:
         tokens = _pointer_tokens(op["path"])
         if op["op"] == "select":
@@ -581,9 +635,39 @@ def apply_json_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
             for token in tokens[:-1]:
                 parent = _step(parent, token)
             del parent[int(tokens[-1]) if isinstance(parent, list) else tokens[-1]]
+        elif op["op"] == "duplicate":
+            # A parsed document cannot hold one member twice, so the second
+            # copy goes in under a placeholder name that patched_text renames.
+            parent = doc
+            for token in tokens:
+                parent = _step(parent, token)
+            if op["key"] not in parent:
+                raise SystemExit(f"json_patch duplicate: {op['path']} has no member {op['key']!r}")
+            parent[_duplicate_placeholder(duplicates)] = op["value"]
+            duplicates += 1
         else:
             raise SystemExit(f"unknown json_patch op {op['op']!r}")
     return doc
+
+
+def _duplicate_placeholder(n: int) -> str:
+    return f"__xprv_duplicate_member_{n}__"
+
+
+def patched_text(doc: Any, ops: list[dict[str, Any]]) -> str:
+    """The JSON text a patched vector hands a verifier.
+
+    Everything but `duplicate` is an edit of the parsed document. `duplicate`
+    writes a member name a second time, which only text can carry: the object
+    at `path` gets a second member named `key`, with `value`.
+    """
+    text = json.dumps(apply_json_patch(doc, ops))
+    for n, op in enumerate(o for o in ops if o["op"] == "duplicate"):
+        placeholder = json.dumps(_duplicate_placeholder(n))
+        if text.count(placeholder) != 1:
+            raise SystemExit("json_patch duplicate: placeholder not found exactly once")
+        text = text.replace(placeholder, json.dumps(op["key"]))
+    return text
 
 
 def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str, Any]]:
@@ -744,6 +828,118 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     # A verifier that describes a leaf it has just refused can trip over it.
     neg("tx-type-not-a-string", "spec §2.3: a leaf is refused, never fatal, when a member has the wrong JSON type",
         "graph", "", [at(f"{tx_leaf}/1/tx/TransactionType", [])])
+
+    def value_at(pointer: str) -> Any:
+        node: Any = proof
+        for token in _pointer_tokens(pointer):
+            node = _step(node, token)
+        return node
+
+    def remove(path: str) -> dict[str, Any]:
+        return {"op": "remove", "path": path}
+
+    # ── the closed form, at every level (§2, D12) ────────────────────
+    closed = "spec §2: the JSON form is closed; an object carries its listed members and no other"
+    for what, pointer in (("anchor", "/steps/0"), ("ledger_header step", f"/steps/{header_at}"),
+                          ("header", f"/steps/{header_at}/header"), ("map_proof step", f"/steps/{first_map}")):
+        neg("unknown-member-in-" + what.replace(" ", "-").replace("_", "-"), closed, "parse",
+            f"unknown member note in {what}", [at(f"{pointer}/note", "x")])
+    # The Python verifier names this member as its own (it carries a binary
+    # payload under it internally); to the C++ one it is any unknown member.
+    neg("reserved-binary-member", closed, "parse", "map_proof",
+        [at(f"/steps/{first_map}/__binary_root__", "00" * 32)])
+
+    # ── the envelope and the steps (§2) ──────────────────────────────
+    envelope = "spec §2: a proof is an object with format_version, network_id and steps"
+    neg("missing-network-id", envelope, "parse", "network_id", [remove("/network_id")])
+    neg("boolean-network-id", "spec §2: integer fields are integer tokens", "parse", "network_id",
+        [at("/network_id", False)])
+    neg("missing-format-version", envelope, "parse", "format_version", [remove("/format_version")])
+    neg("unknown-format-version", "spec §9.1: an unrecognized version is refused", "parse", "format_version",
+        [at("/format_version", 999)])
+    neg("unknown-step-type", "spec §2.4: an unknown step type", "parse", "unknown step type",
+        [at(f"/steps/{header_at}/type", "banana")])
+    neg("step-not-an-object", "spec §2: a step is an object", "parse", "step must be an object",
+        [at(f"/steps/{header_at}", 5)])
+    neg("unknown-tree", "spec §2.3: tree is tx or state", "parse", "unknown map tree type",
+        [at(f"/steps/{first_map}/tree", "banana")])
+    one_anchor = "spec §1: a proof contains exactly one anchor, and it is the first step"
+    anchor_step, header_step = value_at("/steps/0"), value_at(f"/steps/{header_at}")
+    neg("no-anchor", one_anchor, "graph", "exactly one anchor", [remove("/steps/0")])
+    neg("two-anchors", one_anchor, "graph", "exactly one anchor", [at(f"/steps/{header_at}", anchor_step)])
+    neg("anchor-not-first", one_anchor, "graph", "anchor must be the first",
+        [at("/steps/0", header_step), at(f"/steps/{header_at}", anchor_step)])
+
+    # ── header fields (§2.2) ─────────────────────────────────────────
+    header_ptr = f"/steps/{header_at}/header"
+    header = value_at(header_ptr)
+    numbers = "spec §2: integer fields are integer tokens in range"
+    neg("total-coins-a-number", "spec §2.2: total_coins is decimal text", "parse", "total_coins must be",
+        [at(f"{header_ptr}/total_coins", int(header["total_coins"]))])
+    neg("total-coins-with-junk", "spec §2.2: total_coins is decimal text", "parse", "total_coins must be",
+        [at(f"{header_ptr}/total_coins", "100junk")])
+    neg("close-flags-out-of-range", numbers, "parse", "close_flags", [at(f"{header_ptr}/close_flags", 256)])
+    neg("close-time-resolution-out-of-range", numbers, "parse", "close_time_resolution",
+        [at(f"{header_ptr}/close_time_resolution", 256)])
+    neg("ledger-index-a-float", numbers, "parse", "ledger_index",
+        [at(f"{header_ptr}/ledger_index", float(header["ledger_index"]))])
+    neg("header-hash-with-a-space", "spec §2: a hash is 64 uppercase hex digits", "parse", "parent_hash",
+        [at(f"{header_ptr}/parent_hash", "AB CD")])
+
+    # ── the anchor's members (§2.1) ──────────────────────────────────
+    publisher_key = value_at("/steps/0/unl/public_key")
+    neg("publisher-key-unknown-prefix", "spec §5.1: a public key is 33 bytes beginning ED, 02 or 03",
+        "parse", "must begin with ED, 02 or 03", [at("/steps/0/unl/public_key", "04" + publisher_key[2:])])
+    # "malformed validation key or value" in one verifier and "validation
+    # value must be a hex string" in the other: they share only the noun.
+    neg("null-validation-value", "spec §2.1: a validation value is hex text", "parse", "validation",
+        [at("/steps/0/validations/ED" + "00" * 32, None)])
+    moved_key = next(iter(validations))
+    neg("validation-under-a-foreign-key", "spec §2.1: a validation sits under its own SigningPubKey",
+        "parse", "does not match SigningPubKey",
+        [remove(f"/steps/0/validations/{moved_key}"),
+         at("/steps/0/validations/ED" + "AB" * 32, validations[moved_key])])
+    # The verifiers word this one differently; they share only the noun.
+    neg("lowercase-validation-keys", "spec §2.1: a validations key is uppercase hex", "parse", "validation",
+        [at("/steps/0/validations", {key.lower(): value for key, value in validations.items()})])
+
+    # ── trie node grammar (§2.3) ─────────────────────────────────────
+    node_rule = "spec §2.3: a trie node is a hash string, a [key, data] leaf or an inner-node object"
+    trie_at = f"/steps/{first_map}/trie"
+    neg("null-trie-branch", node_rule, "parse", "trie", [at(f"{inner_at}/{free}", None)])
+    neg("numeric-trie-branch", node_rule, "parse", "trie", [at(f"{inner_at}/{free}", 17)])
+    neg("malformed-trie-placeholder", node_rule, "parse", "placeholder", [at(f"{inner_at}/{free}", "BAD")])
+    neg("leaf-with-three-elements", node_rule, "parse", "[key, data]",
+        [at(state_leaf, value_at(state_leaf) + ["ignored"])])
+    neg("non-nibble-trie-member", "spec §2.3: an inner node's members are its branch keys", "parse", "branch",
+        [at(f"{trie_at}/10", "AB" * 32)])
+    neg("trie-root-hash", "spec §2.3: a JSON map_proof root is an inner node", "parse", "inner node",
+        [at(trie_at, "AB" * 32)])
+    neg("hex-leaf-data", "spec §2.3: JSON leaf data is the decoded object, never hex", "parse", "not hex",
+        [at(f"{tx_leaf}/1", "ABCDEF")])
+
+    # ── members a codec would display and not hash (§2.3) ────────────
+    unhashed = "spec §2.3: leaf data is the decoded content and nothing else"
+    tx_content = value_at(f"{tx_leaf}/1")
+    wrapper = next(iter(tx_content["meta"]["AffectedNodes"][0]))
+    neg("leaf-index-member", unhashed, "graph", "not a serialized field",
+        [at(f"{state_leaf}/1/index", value_at(f"{state_leaf}/0"))])
+    neg("tx-hash-member", unhashed, "graph", "not a serialized field",
+        [at(f"{tx_leaf}/1/tx/hash", value_at(f"{tx_leaf}/0"))])
+    neg("meta-unknown-member", unhashed, "graph", "not a serialized field",
+        [at(f"{tx_leaf}/1/meta/not_a_field", "1")])
+    neg("nested-unknown-member", unhashed, "graph", "not a serialized field",
+        [at(f"{tx_leaf}/1/meta/AffectedNodes/0/{wrapper}/DisplayedButNotHashed", 1)])
+    neg("tx-leaf-wrapper-member", "spec §2.3: a transaction leaf has exactly the members tx and meta",
+        "graph", "tx", [at(f"{tx_leaf}/1/hash", value_at(f"{tx_leaf}/0"))])
+
+    # ── a member name written twice (§2.4): only the text can say it ──
+    twice = "spec §2.4: no object in a proof repeats a member"
+    neg("duplicate-validation-member", twice, "parse", "duplicate",
+        [{"op": "duplicate", "path": "/steps/0/validations", "key": moved_key, "value": "00"}])
+    branch = next(key for key in value_at(trie_at) if key != "__depth__")
+    neg("duplicate-trie-branch", twice, "parse", "duplicate",
+        [{"op": "duplicate", "path": trie_at, "key": branch, "value": "AB" * 32}])
     return fam
 
 
@@ -785,6 +981,22 @@ def apply_mutations(raw: bytes, muts: list[dict[str, Any]]) -> bytes:
             continue
         if "append_hex" in m:
             buf += bytes.fromhex(m["append_hex"])
+            continue
+        if "append_zlib_zeros" in m:
+            # A whole RFC 1950 stream that inflates to this many zero bytes:
+            # too large an input to store, and any valid stream will do.
+            buf += zlib.compress(bytes(int(m["append_zlib_zeros"])), 9)
+            continue
+        if "drop_last" in m:
+            count = int(m["drop_last"])
+            if count < 0 or count > len(buf):
+                raise SystemExit(f"drop_last {count} exceeds file length {len(buf)}")
+            del buf[len(buf) - count :]
+            continue
+        if "xor_last" in m:
+            if not buf:
+                raise SystemExit("xor_last on an empty file")
+            buf[-1] ^= int(m["xor_last"], 16)
             continue
         if "truncate_to" in m:
             buf = buf[: int(m["truncate_to"])]
@@ -915,11 +1127,11 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     written = 0
     for derived in patch_accept_family(base, args.base) + patch_negative_family(base, args.base):
         # Compared as text: 10 and 10.0 are equal numbers and different tokens.
-        if json.dumps(apply_json_patch(base["form"]["json"], derived["json_patch"])) == json.dumps(base["form"]["json"]):
+        if patched_text(base["form"]["json"], derived["json_patch"]) == json.dumps(base["form"]["json"]):
             LOG.error("vector %r patches its base into itself; it would assert nothing", derived["name"])
             return 1
     for acc in patch_accept_family(base, args.base):
-        data = json.dumps(apply_json_patch(base["form"]["json"], acc["json_patch"])).encode()
+        data = patched_text(base["form"]["json"], acc["json_patch"]).encode()
         ok, reason = python_verdict(data, trust=base["trust"])
         if not ok:
             LOG.error("accept vector %r was REFUSED by the reference verifier (%s); "
@@ -930,7 +1142,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         LOG.info("wrote %s (accepted)", out.name)
         written += 1
     for neg in patch_negative_family(base, args.base):
-        data = json.dumps(apply_json_patch(base["form"]["json"], neg["json_patch"])).encode()
+        data = patched_text(base["form"]["json"], neg["json_patch"]).encode()
         ok, reason = python_verdict(data, trust=base["trust"])
         tagged = "python" in neg.get("known_failing", {})
         want = neg["expect"]["reason_contains"].lower()
@@ -948,6 +1160,18 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         out.write_text(json.dumps(neg, indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
         written += 1
+    for acc in mutation_accept_family(raw):
+        mutated = apply_mutations(raw, acc["mutations"])
+        ok, reason = python_verdict(mutated, binary=True, trust=base["trust"])
+        if mutated == raw or not ok:
+            LOG.error("accept vector %r %s; not writing a vector that asserts a false claim",
+                      acc["name"], "changes nothing" if mutated == raw else f"was REFUSED ({reason})")
+            return 1
+        acc["base"] = args.base
+        out = VECTOR_DIR / f"accept-{acc['name']}.json"
+        out.write_text(json.dumps(acc, indent=2) + "\n")
+        LOG.info("wrote %s (accepted)", out.name)
+        written += 1
     for neg in negative_family(raw):
         mutated = apply_mutations(raw, neg["mutations"])
         ok, reason = python_verdict(mutated, binary=True, trust=base["trust"])
@@ -963,7 +1187,103 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         out.write_text(json.dumps(neg, indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
         written += 1
+    # A vector this base no longer generates would keep asserting a rule
+    # nobody maintains.
+    expected = {
+        f"accept-{v['name']}.json"
+        for v in patch_accept_family(base, args.base) + mutation_accept_family(raw)
+    } | {
+        f"negative-{v['name']}.json"
+        for v in patch_negative_family(base, args.base) + negative_family(raw)
+    }
+    for stale in sorted(VECTOR_DIR.glob("*.json")):
+        if stale.name not in expected and json.loads(stale.read_text()).get("base") == args.base:
+            stale.unlink()
+            LOG.info("removed %s (no longer generated)", stale.name)
     LOG.info("%d derived vectors written", written)
+    return 0
+
+
+def load_trust_world() -> Any:
+    """scripts/xprv_trust_world.py, bound to the verifier already loaded."""
+    path = REPO / "scripts" / "xprv_trust_world.py"
+    spec = importlib.util.spec_from_file_location("xprv_trust_world", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot import {path}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["xprv_trust_world"] = mod
+    spec.loader.exec_module(mod)
+    mod.use(V)
+    return mod
+
+
+def cmd_trust(args: argparse.Namespace) -> int:
+    """Write the synthetic trust world as inline vectors.
+
+    Each carries its whole proof and its own trust: the test publisher key,
+    and any manifests the verifier is to hold from outside the proof. A proof
+    that parses is written in both forms; the binary one comes from the
+    world's own writer, checked here against `xprv convert` wherever the C++
+    encoder can be asked for the same proof.
+    """
+    world = load_trust_world()
+    wanted: dict[str, dict[str, Any]] = {}
+    compared = 0
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        for vec in world.cases():
+            name = vec["name"]
+            accept = vec["expect"]["verdict"] == "accept"
+            form = vec["form"]
+            # A JSON trie has decoded leaves; only the C++ encoder turns those
+            # into a binary trie, so such a proof stays JSON here.
+            plain = "json" in form and all(s["type"] != "map_proof" for s in form["json"]["steps"])
+            if plain and (accept or vec["layer"] != "parse"):
+                form["binary_hex"] = world.binary_proof(form["json"]).hex().upper()
+                if accept and XPRV_BIN.exists():
+                    src, dst = tmp / "proof.json", tmp / "proof.bin"
+                    src.write_text(json.dumps(form["json"]))
+                    xprv_convert(src, dst)
+                    if dst.read_bytes().hex().upper() != form["binary_hex"]:
+                        LOG.error("%s: the world's binary writer and xprv convert disagree", name)
+                        return 1
+                    dst.unlink()
+                    compared += 1
+
+            reasons = []
+            met = True
+            for which in ("json", "binary_hex"):
+                if which not in form:
+                    continue
+                raw = bytes.fromhex(form[which]) if which == "binary_hex" else json.dumps(form[which]).encode()
+                ok, reason = python_verdict(raw, binary=which == "binary_hex", trust=vec["trust"])
+                reasons.append("accepted" if ok else reason)
+                if accept:
+                    met = met and ok
+                else:
+                    met = met and not ok and vec["expect"]["reason_contains"].lower() in reason.lower()
+            tagged = "python" in vec.get("known_failing", {})
+            if tagged and met:
+                LOG.error("%s is tagged known_failing for python, but the reference verifier "
+                          "now meets it; remove the tag", name)
+                return 1
+            if not tagged and not met:
+                LOG.error("%s: the reference verifier does not meet this vector (%s); "
+                          "not writing a vector that asserts a false claim",
+                          name, " | ".join(r[:120] for r in reasons))
+                return 1
+            if not accept:
+                vec["observed"] = {"python_reason": reasons[0]}
+            wanted[f"{'accept' if accept else 'negative'}-{name}.json"] = vec
+
+    for stale in sorted(VECTOR_DIR.glob("*-trust-*.json")):
+        if stale.name not in wanted:
+            stale.unlink()
+            LOG.info("removed %s (no longer generated)", stale.name)
+    for filename, vec in wanted.items():
+        (VECTOR_DIR / filename).write_text(json.dumps(vec, indent=2) + "\n")
+    LOG.info("%d trust-world vectors written; %d binary forms compared with xprv convert",
+             len(wanted), compared)
     return 0
 
 
@@ -987,41 +1307,52 @@ def cmd_check(args: argparse.Namespace) -> int:
             LOG.info("known failing, not checked here: %s (%s)", name, vec["known_failing"]["python"]["because"])
             continue
 
-        if "form" in vec and expect.get("verdict") == "reject":
-            # JSON-form negative: the whole malformed proof is carried inline,
-            # because the attack lives in JSON trie structure rather than in
-            # binary framing and cannot be expressed as a byte patch.
-            negatives += 1
+        if "form" in vec and "intermediates" not in vec:
+            # An inline vector: the whole proof and its own trust, with no
+            # recorded intermediates. It is verified, in each form it carries,
+            # and nothing more. The trust-world vectors are all of this kind,
+            # and so is the one whole-proof JSON forgery.
             form = vec["form"]
-            raw = (
-                bytes.fromhex(form["binary_hex"])
-                if "binary_hex" in form
-                else json.dumps(form["json"]).encode()
-            )
-            ok, reason = python_verdict(raw, trust=vec.get("trust"))
-            if ok:
-                failures.append(
-                    f"{name}: expected reject, got ACCEPT — this is a hole, "
-                    f"not a test failure"
-                )
-            elif (want := expect.get("reason_contains")) and \
-                    want.lower() not in reason.lower():
-                failures.append(
-                    f"{name}: rejected for the wrong reason "
-                    f"(want ~{want!r}, got {reason[:70]!r})"
-                )
+            forms = []
+            if "json" in form:
+                forms.append(("json", json.dumps(form["json"]).encode()))
+            if "binary_hex" in form:
+                forms.append(("binary", bytes.fromhex(form["binary_hex"])))
+            if expect.get("verdict") == "accept":
+                accepts += 1
+            else:
+                negatives += 1
+            for which, raw in forms:
+                ok, reason = python_verdict(raw, binary=which == "binary", trust=vec.get("trust"))
+                if expect.get("verdict") == "accept":
+                    if not ok:
+                        failures.append(f"{name}: expected accept, {which} form rejected ({reason[:90]})")
+                elif ok:
+                    failures.append(
+                        f"{name}: expected reject, got ACCEPT — this is a hole, "
+                        f"not a test failure"
+                    )
+                elif (want := expect.get("reason_contains")) and \
+                        want.lower() not in reason.lower():
+                    failures.append(
+                        f"{name}: rejected for the wrong reason "
+                        f"(want ~{want!r}, got {reason[:70]!r})"
+                    )
             continue
 
         if "base" in vec:
             base = json.loads((VECTOR_DIR / f"{vec['base']}.json").read_text())
+            # A derived vector is checked under its base's trust unless it
+            # names its own.
+            trust = vec.get("trust") or base.get("trust")
             if "json_patch" in vec:
-                raw = json.dumps(apply_json_patch(base["form"]["json"], vec["json_patch"])).encode()
-                ok, reason = python_verdict(raw, trust=base.get("trust"))
+                raw = patched_text(base["form"]["json"], vec["json_patch"]).encode()
+                ok, reason = python_verdict(raw, trust=trust)
             else:
                 raw = apply_mutations(
                     bytes.fromhex(base["form"]["binary_hex"]), vec["mutations"]
                 )
-                ok, reason = python_verdict(raw, binary=True, trust=base.get("trust"))
+                ok, reason = python_verdict(raw, binary=True, trust=trust)
             if expect.get("verdict") == "accept":
                 accepts += 1
                 if not ok:
@@ -1107,6 +1438,9 @@ def main() -> int:
     m = sub.add_parser("mutate", help="write the accept and negative families")
     m.add_argument("--base", required=True)
     m.set_defaults(fn=cmd_mutate)
+
+    t = sub.add_parser("trust", help="write the synthetic trust-world vectors")
+    t.set_defaults(fn=cmd_trust)
 
     c = sub.add_parser("check", help="check every vector in the corpus")
     c.set_defaults(fn=cmd_check)
