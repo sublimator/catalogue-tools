@@ -676,6 +676,11 @@ object under strict comparison:
     XRPL's `ConfidentialOutstandingAmount`) use base-ten decimal strings;
   - `PathSet` hops carry `rippled`'s `type` bitmask integer alongside their
     present hop fields;
+  - an `AccountID` field that was never set (the 0-byte empty VL wire form,
+    such as `UNLModify`'s or Xahau `Entropy`'s `Account`) renders as `""` and
+    serializes back to the empty field, whereas a field explicitly set to the
+    zero account renders as `"rrrrrrrrrrrrrrrrrrrrrhoLvTp"` and serializes to
+    twenty zero bytes;
   - binary blobs, hashes, enum names, classic base58 addresses (never
     X-addresses), and currency codes match the reference rendering exactly.
 
@@ -782,7 +787,9 @@ A JSON verifier MUST reject at the parse layer:
   a binary trie identifies a branch by position in a 2-bit field (§3.7), so a
   branch there cannot be misspelled or repeated;
 - duplicate object members anywhere in the proof;
-- text that is not UTF-8, or that carries a UTF-8 byte-order mark;
+- text that is not UTF-8, or that carries a UTF-8 byte-order mark, or any
+  string (member name or value) containing an unpaired UTF-16 surrogate escape
+  (`\uD800`–`\uDFFF` without its matching pair);
 - a non-finite number (`NaN`, `Infinity`, `-Infinity`);
 - hex-string leaf data, or any leaf that fails the strict codec round-trip
   check of §2.3 (`null` or boolean values, non-serialized/unknown members,
@@ -790,15 +797,16 @@ A JSON verifier MUST reject at the parse layer:
   or an amount, `Number`, `UInt64`, or path step in any text or shape other
   than the reference rendering);
 - text longer than its configured maximum, checked before parsing (§8), or JSON
-  nested deeper than the verifier's nesting limit. Valid proofs stay well below
-  128 levels (a 64-level trie plus envelope and XRPL leaf structure), so
-  verifiers MUST support JSON nesting to at least 128 levels and MAY refuse
-  deeper JSON at the parse layer.
+  nested deeper than 128 levels of arrays and objects. Valid proofs stay well
+  below 128 levels (a 64-level trie plus envelope and XRPL leaf structure), so
+  verifiers MUST support JSON nesting to 128 levels and MUST refuse deeper JSON
+  at the parse layer.
 
 A signed validator-list `blob` is subject to the same UTF-8, no-BOM,
-finite-number, and unique-member rules plus P3's field and canonical padded
-RFC 4648 base64 checks; a blob that fails them is disqualified as a candidate
-under §1.3 (and rejects the anchor if no valid primary list remains).
+no-unpaired-surrogate, finite-number, 128-level nesting, and unique-member
+rules plus P3's field and canonical padded RFC 4648 base64 checks; a blob that
+fails them is disqualified as a candidate under §1.3 (and rejects the anchor if
+no valid primary list remains).
 
 The binary counterpart is §3.8.
 
@@ -1764,7 +1772,7 @@ registered.
 
 ## Appendix A. Reference Implementation Status
 
-What the reference verifiers implement of this draft (at code pin `da89329b`).
+What the reference verifiers implement of this draft (at code pin `98098b74`).
 How the reference server holds and passes trust material is described in
 `src/xprv/README.md` in the reference repository.
 
@@ -1774,13 +1782,16 @@ report the fingerprints of their loaded definitions in `definitions.{leaf,valida
 (§7.1): `xprv verify` loads the `xrpl_definitions.json` or
 `xahau_definitions.json` embedded in `catl::xdata` according to the configured
 network (so its leaf and validation snapshots can differ by network), while
-`verify-xprv.py` uses `xrpl-py` 5.2.0 (with adapters for `xrpl-py`'s five
-deviations from `rippled` JSON: ordinary `UInt64` text, base-ten `UInt64`
-fields, path-step `type`, issued-amount `value`, and `Number` text) and
-`PyNaCl` (`libsodium`) for Ed25519. Those two snapshots differ on some
-non-validation fields and on Xahau-only fields. §9.1 requires two verifiers of
-one version to agree on the bytes that their shared snapshot defines; it does
-not claim agreement on fields defined by only one snapshot.
+`verify-xprv.py` builds isolated per-network copies of `xrpl-py` 5.2.0 — using
+`xrpl-py`'s XRPL definitions for XRPL leaves and all validations, and an
+embedded copy of `xahau_definitions.json` (fingerprinted in `definitions.leaf`)
+for Xahau leaves — with adapters matching `rippled`/`xahaud` JSON (ordinary and
+base-ten `UInt64` text, path-step `type`, issued-amount `value`, `Number` text,
+network native currency/issue rules, and empty unset `AccountID` fields) plus
+`PyNaCl` (`libsodium`) for Ed25519. Those XRPL snapshots still differ on some
+non-validation fields; §9.1 requires two verifiers of one version to agree on
+the bytes that their shared snapshot defines, and does not claim agreement on
+fields defined by only one snapshot.
 
 | Capability | C++ `xprv verify` | Python `verify-xprv.py` |
 |---|---|---|
@@ -1790,8 +1801,8 @@ not claim agreement on fields defined by only one snapshot.
 | Primary lists from outside the proof; list-less anchor (§1.3 P1–P4, §3.3) | yes (`--lists FILE`) | yes (`--lists FILE`) |
 | Online list refresh before verifying | no; the reference server refreshes lists | no |
 | Binary encoder (`convert`, JSON ↔ binary) | yes | no (decodes binary only) |
-| Decoded Xahau JSON leaves (`network_id == 21337`) | yes | no: declines every decoded Xahau `map_proof` at `parse` with a stated reason directing callers to binary; verifies Xahau binary proofs and Xahau JSON proofs with no map step |
-| Exact `rippled` leaf JSON (§2.3: native `Issue`, amounts, `Number`, ordinary & base-ten `UInt64`, path-step `type`) | yes | yes (on XRPL; see limits below) |
+| Decoded Xahau JSON leaves (`network_id == 21337`) | yes | yes (embedded `xahau_definitions.json`, fingerprinted in `definitions.leaf`) |
+| Exact `rippled` / `xahaud` leaf JSON (§2.3: native `Issue`, amounts, `Number`, ordinary & base-ten `UInt64`, path-step `type`, empty unset `AccountID`) | yes | yes |
 | Full libsodium Ed25519 profile (§5.1) | yes | yes (`PyNaCl`) |
 | Sibling fan-out and multi-leaf proofs | accepted | accepted |
 
@@ -1799,21 +1810,19 @@ For `--manifests FILE`, `FILE` is a JSON array of canonical base64 raw
 manifests. For `--lists FILE`, `FILE` is either a single XRPL Validator List
 site document (version 1 `{version, public_key?, manifest, blob, signature}` or
 version 2 `{version, public_key?, manifest?, blobs_v2: [...]}`) or a JSON array
-of such documents. A list-less anchor is well-formed; `--lists FILE` on the
-`xprv verify` and `verify-xprv.py` CLIs supplies primary-list membership for
-the configured publisher (rejected at `trust` when no eligible list is held),
-while list soundness, delegation resolution, quorum, and graph checks still
-determine the final verdict. The reference HTTP server (`xprv serve`)
-verification endpoint currently supplies held manifests only and leaves its
-`held_lists` input empty.
+of such documents, read with the same strict JSON parser (§2.4: UTF-8 without
+BOM, unique members, finite numbers, no unpaired surrogates, max 128 nesting
+levels). Passing a non-JSON or wrong-shape `--manifests` or `--lists` file is a
+CLI invocation error that exits `1` with a diagnostic on stderr and no §7.1
+report. A list-less anchor is well-formed; `--lists FILE` on the `xprv verify`
+and `verify-xprv.py` CLIs supplies primary-list membership for the configured
+publisher (rejected at `trust` when no eligible list is held), while list
+soundness, delegation resolution, quorum, and graph checks still determine the
+final verdict. The reference HTTP server (`xprv serve`) verification endpoint
+currently supplies held manifests only and leaves its `held_lists` input empty.
 
-**Documented codec limits (both verify in binary):**
+**Documented codec limit (verifies in binary):**
 
-- **Reserved issued-currency code (Python):** an issued amount whose 20-byte
-  currency holds the native code's ASCII letters (`00..00 58 52 50 00..00`)
-  renders as 40 hex digits in `rippled`, whereas `xrpl-py` refuses to encode
-  or decode it. `verify-xprv.py` therefore refuses a JSON leaf holding that
-  code; the proof verifies in binary. None is known in a validated ledger.
 - **MPT path step (C++ `x-data`):** `rippled`'s newer `PathSet` step carrying
   an MPT issuance is not yet implemented in `catl::xdata`'s path codec, so the
   C++ side cannot write or round-trip such a leaf as JSON; the proof verifies
@@ -1853,9 +1862,8 @@ Each negative vector declares its expected refusal `layer` (`parse`, `trust`,
 or `graph`, matching §7.1) and a `reason_contains` substring. Any expected
 discrepancy is recorded as a typed `known_failing` entry (`{does, because}`)
 rather than an unconditional skip, so a crash, `timeout`, or any other failure
-category still fails the run. At `da89329b`, the corpus carries one typed
-`known_failing` entry (`accept-xahau-tx-json` for `python`), pinning Python's
-declared refusal of decoded Xahau leaves.
+category still fails the run. The corpus carries zero `known_failing` entries
+for `cpp` and `python`.
 
 **Black-box runner contract.** `scripts/xprv-conformance.py run` invokes any
 verifier via a command template (`{proof}`, `{publisher_key}`, `{network_id}`,
