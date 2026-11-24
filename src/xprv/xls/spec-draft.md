@@ -1799,9 +1799,13 @@ For `--manifests FILE`, `FILE` is a JSON array of canonical base64 raw
 manifests. For `--lists FILE`, `FILE` is either a single XRPL Validator List
 site document (version 1 `{version, public_key?, manifest, blob, signature}` or
 version 2 `{version, public_key?, manifest?, blobs_v2: [...]}`) or a JSON array
-of such documents. A list-less anchor is well-formed and verifies whenever
-`--lists FILE` supplies an eligible primary list for the configured publisher
-(and is rejected at `trust` when none is held).
+of such documents. A list-less anchor is well-formed; `--lists FILE` on the
+`xprv verify` and `verify-xprv.py` CLIs supplies primary-list membership for
+the configured publisher (rejected at `trust` when no eligible list is held),
+while list soundness, delegation resolution, quorum, and graph checks still
+determine the final verdict. The reference HTTP server (`xprv serve`)
+verification endpoint currently supplies held manifests only and leaves its
+`held_lists` input empty.
 
 **Documented codec limits (both verify in binary):**
 

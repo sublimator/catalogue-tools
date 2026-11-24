@@ -89,38 +89,33 @@ is_66_hex(std::string_view s)
     return true;
 }
 
-std::optional<ExternalValidatorList>
-extract_vl_candidate(
-    std::string const& doc_pub,
-    boost::json::value const* manifest_val,
-    boost::json::value const* blob_val,
-    boost::json::value const* sig_val)
+std::optional<std::vector<uint8_t>>
+decode_nonempty_b64(boost::json::value const* val)
 {
-    if (!manifest_val || !manifest_val->is_string() || !blob_val ||
-        !blob_val->is_string() || !sig_val || !sig_val->is_string())
+    if (!val || !val->is_string())
         return std::nullopt;
-
-    auto const manifest = catl::base64_decode_strict(
-        std::string_view(manifest_val->as_string()));
-    auto const blob =
-        catl::base64_decode_strict(std::string_view(blob_val->as_string()));
-    if (!manifest || manifest->empty() || !blob || blob->empty())
+    auto decoded = catl::base64_decode_strict(std::string_view(val->as_string()));
+    if (!decoded || decoded->empty())
         return std::nullopt;
+    return decoded;
+}
 
-    std::vector<uint8_t> sig;
+std::optional<std::vector<uint8_t>>
+decode_nonempty_hex(boost::json::value const* val)
+{
+    if (!val || !val->is_string())
+        return std::nullopt;
     try
     {
-        sig = xprv::from_hex(std::string_view(sig_val->as_string()));
+        auto decoded = xprv::from_hex(std::string_view(val->as_string()));
+        if (decoded.empty())
+            return std::nullopt;
+        return decoded;
     }
     catch (std::exception const&)
     {
         return std::nullopt;
     }
-    if (sig.empty())
-        return std::nullopt;
-
-    return ExternalValidatorList{
-        doc_pub, std::move(*manifest), std::move(*blob), std::move(sig)};
 }
 
 void
@@ -140,49 +135,76 @@ expand_vl_document(
             return;
         doc_pub = std::string(pub_val->as_string());
     }
-    auto const* doc_manifest = doc.if_contains("manifest");
+    auto doc_manifest = decode_nonempty_b64(doc.if_contains("manifest"));
 
     if (*version == 1u)
     {
-        if (auto c = extract_vl_candidate(
+        auto blob = decode_nonempty_b64(doc.if_contains("blob"));
+        auto sig = decode_nonempty_hex(doc.if_contains("signature"));
+        if (blob && sig)
+        {
+            out.push_back(ExternalValidatorList{
                 doc_pub,
-                doc_manifest,
-                doc.if_contains("blob"),
-                doc.if_contains("signature")))
-            out.push_back(std::move(*c));
+                doc_manifest ? std::move(*doc_manifest) : std::vector<uint8_t>{},
+                std::move(*blob),
+                std::move(*sig)});
+        }
+        else if (doc_manifest)
+        {
+            // Retain verified-candidate publisher manifest independently of
+            // companion blob/signature decoding so P1 never loses evidence.
+            out.push_back(
+                ExternalValidatorList{doc_pub, std::move(*doc_manifest), {}, {}});
+        }
         return;
     }
 
-    auto const* blobs = doc.if_contains("blobs_v2");
-    if (!blobs || !blobs->is_array())
-        return;
-    bool added_entry = false;
-    for (auto const& item : blobs->as_array())
+    bool doc_manifest_emitted = false;
+    if (auto const* blobs = doc.if_contains("blobs_v2");
+        blobs && blobs->is_array())
     {
-        if (!item.is_object())
-            continue;
-        auto const& entry = item.as_object();
-        auto const* entry_manifest = entry.if_contains("manifest");
-        if (auto c = extract_vl_candidate(
-                doc_pub,
-                entry_manifest ? entry_manifest : doc_manifest,
-                entry.if_contains("blob"),
-                entry.if_contains("signature")))
+        for (auto const& item : blobs->as_array())
         {
-            out.push_back(std::move(*c));
-            added_entry = true;
+            if (!item.is_object())
+                continue;
+            auto const& entry = item.as_object();
+            auto entry_manifest =
+                decode_nonempty_b64(entry.if_contains("manifest"));
+            auto blob = decode_nonempty_b64(entry.if_contains("blob"));
+            auto sig = decode_nonempty_hex(entry.if_contains("signature"));
+            if (blob && sig)
+            {
+                std::vector<uint8_t> chosen_manifest;
+                if (entry_manifest)
+                {
+                    chosen_manifest = std::move(*entry_manifest);
+                }
+                else if (doc_manifest)
+                {
+                    chosen_manifest = *doc_manifest;
+                    doc_manifest_emitted = true;
+                }
+                out.push_back(ExternalValidatorList{
+                    doc_pub,
+                    std::move(chosen_manifest),
+                    std::move(*blob),
+                    std::move(*sig)});
+            }
+            else if (entry_manifest)
+            {
+                // Preserve per-entry publisher manifest for P1 even if this
+                // entry's blob or signature failed to decode.
+                out.push_back(ExternalValidatorList{
+                    doc_pub, std::move(*entry_manifest), {}, {}});
+            }
         }
     }
-    // A v2 document with no active blobs_v2 entries can still carry a
-    // top-level publisher manifest (e.g., publisher revocation or rotation).
-    if (!added_entry && doc_manifest && doc_manifest->is_string())
+    // Always preserve top-level publisher manifest for P1 even when every
+    // blobs_v2 entry overrode it or failed to decode (or blobs_v2 is empty).
+    if (doc_manifest && !doc_manifest_emitted)
     {
-        if (auto m = catl::base64_decode_strict(
-                std::string_view(doc_manifest->as_string()));
-            m && !m->empty())
-        {
-            out.push_back(ExternalValidatorList{doc_pub, std::move(*m), {}, {}});
-        }
+        out.push_back(
+            ExternalValidatorList{doc_pub, std::move(*doc_manifest), {}, {}});
     }
 }
 
@@ -506,7 +528,19 @@ AnchorVerifier::verify(
     {
         if (!c.doc_pub.empty() && lower(c.doc_pub) != trusted_lower)
             continue;
-        auto parsed = catl::vl::parse_manifest(c.manifest);
+        if (c.manifest.empty())
+            continue;
+        catl::vl::Manifest parsed;
+        try
+        {
+            parsed = catl::vl::parse_manifest(c.manifest);
+        }
+        catch (std::exception const&)
+        {
+            if (c.is_bundled)
+                bundled_manifest_err = "invalid publisher manifest";
+            continue;
+        }
         if (parsed.master_public_key.empty() ||
             (!parsed.is_revocation() && parsed.signing_public_key.empty()))
         {
@@ -520,7 +554,16 @@ AnchorVerifier::verify(
                 bundled_manifest_err = "publisher manifest master key mismatch";
             continue;
         }
-        if (!verify_manifest(parsed, protocol))
+        bool manifest_ok = false;
+        try
+        {
+            manifest_ok = verify_manifest(parsed, protocol);
+        }
+        catch (std::exception const&)
+        {
+            manifest_ok = false;
+        }
+        if (!manifest_ok)
         {
             if (c.is_bundled)
                 bundled_manifest_err =
@@ -844,8 +887,16 @@ AnchorVerifier::verify(
 
     for (auto const& entry : primary.entries)
     {
-        auto verified_manifest =
-            parse_and_verify_manifest(entry.manifest_bytes, protocol);
+        std::optional<catl::vl::Manifest> verified_manifest;
+        try
+        {
+            verified_manifest =
+                parse_and_verify_manifest(entry.manifest_bytes, protocol);
+        }
+        catch (std::exception const&)
+        {
+            verified_manifest = std::nullopt;
+        }
         if (!verified_manifest ||
             (!verified_manifest->is_revocation() &&
              verified_manifest->signing_public_key.empty()))

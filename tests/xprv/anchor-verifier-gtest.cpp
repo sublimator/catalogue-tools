@@ -491,6 +491,34 @@ TEST(AnchorVerifier, ParseExternalValidatorListsV1V2AndErrors)
     EXPECT_EQ(parsed_v2[0].manifest, (std::vector<uint8_t>{0x01, 0x02}));
     EXPECT_EQ(parsed_v2[1].manifest, (std::vector<uint8_t>{0x03, 0x04}));
 
+    // v2 document with top-level manifest AND all entries carrying overrides retains BOTH manifests
+    boost::json::object v2_all_overridden{
+        {"version", 2},
+        {"manifest", m2_b64},
+        {"blobs_v2",
+         boost::json::array{
+             boost::json::object{
+                 {"manifest", m1_b64}, {"blob", b1_b64}, {"signature", "1122"}},
+         }},
+    };
+    auto parsed_both = xprv::parse_external_validator_lists(v2_all_overridden);
+    ASSERT_EQ(parsed_both.size(), 2u);
+    EXPECT_EQ(parsed_both[0].manifest, (std::vector<uint8_t>{0x01, 0x02}));
+    EXPECT_EQ(parsed_both[1].manifest, (std::vector<uint8_t>{0x03, 0x04}));
+    EXPECT_TRUE(parsed_both[1].blob.empty());
+
+    // v1 document with valid manifest and corrupt blob/sig still retains manifest for P1
+    boost::json::object v1_bad_blob{
+        {"version", 1},
+        {"manifest", m2_b64},
+        {"blob", "not base64!!!"},
+        {"signature", "ZZ"},
+    };
+    auto parsed_v1_man = xprv::parse_external_validator_lists(v1_bad_blob);
+    ASSERT_EQ(parsed_v1_man.size(), 1u);
+    EXPECT_EQ(parsed_v1_man[0].manifest, (std::vector<uint8_t>{0x03, 0x04}));
+    EXPECT_TRUE(parsed_v1_man[0].blob.empty());
+
     // v2 document with empty blobs_v2 retains top-level manifest (e.g. publisher revocation)
     boost::json::object v2_empty{
         {"version", 2},

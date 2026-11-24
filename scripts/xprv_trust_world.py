@@ -1020,6 +1020,50 @@ def cases() -> list[dict[str, Any]]:
         "spec §1.3 rule 9: an external v2 VL document with a publisher revocation manifest revokes the publisher even with empty blobs_v2",
         f.proof(), f, lists=[rev_v2], reason="publisher is revoked")
 
+    # §1.3 P1/P2: structurally unparseable bundled publisher manifest (triggers C++ parse_manifest throw)
+    # is isolated to that candidate and rescued by a valid held external list.
+    f = Fixture()
+    ext_good = f.vl_doc_v1()
+    proof = f.proof()
+    proof["steps"][0]["unl"]["manifest"] = "FF00"
+    add("external-list-rescues-unparseable-bundled-manifest",
+        "spec §1.3 P1/P2: a structurally unparseable bundled publisher manifest does not poison a held primary list",
+        proof, f, lists=[ext_good])
+
+    # §1.3 P1: in a v2 VL document, top-level doc.manifest is preserved for P1 even when
+    # every blobs_v2 entry carries its own manifest override (here doc seq 2 supersedes entry seq 1).
+    f = Fixture()
+    pub_v2_new = keypair(660)
+    v2_old_blob = json.dumps({**f.blob_fields, "validators": f.entries}).encode()
+    v2_override_doc = f.vl_doc_v2(
+        [
+            {
+                "manifest": b64(make_manifest(f.publisher, f.publisher_signing, seq=1)),
+                "blob": b64(v2_old_blob),
+                "signature": sign(v2_old_blob, f.publisher_signing[1]),
+            }
+        ],
+        manifest_bytes=make_manifest(f.publisher, pub_v2_new, seq=2),
+    )
+    add("v2-doc-manifest-supersedes-entry-manifest",
+        "spec §1.3 P1: a v2 document's top-level publisher manifest is retained even when all blobs_v2 entries carry overrides",
+        f.proof(listless=True), f, lists=[v2_override_doc],
+        reason="no valid validator list candidate")
+
+    # §1.3 P1/Rule 9: in a v1 VL document, a valid publisher revocation manifest is retained
+    # for P1 even when the companion blob and signature fail decoding.
+    f = Fixture()
+    v1_broken_blob_rev = {
+        "version": 1,
+        "public_key": f.trusted_key,
+        "manifest": b64(revocation(f.publisher)),
+        "blob": "not valid base64!!!",
+        "signature": "ZZ",
+    }
+    add("v1-broken-blob-still-enforces-publisher-revocation",
+        "spec §1.3 P1, rule 9: a v1 document's publisher manifest is retained independently of blob/signature decoding",
+        f.proof(), f, lists=[v1_broken_blob_rev], reason="publisher is revoked")
+
     # ── LedgerHashes links (§5.3), on headers the test keys anchor ───
     out.extend(_link_cases(add, proof_of))
     return out

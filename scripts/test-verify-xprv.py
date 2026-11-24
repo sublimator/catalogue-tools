@@ -936,6 +936,25 @@ class ExternalValidatorListTests(unittest.TestCase):
         self.assertEqual(parsed_v2[0].manifest, b"\x01\x02")
         self.assertEqual(parsed_v2[1].manifest, b"\x03\x04")
 
+        # v2 with top-level manifest AND all entries carrying overrides retains BOTH manifests
+        v2_all_overridden = {
+            "version": 2,
+            "manifest": m2,
+            "blobs_v2": [{"manifest": m1, "blob": b1, "signature": "1122"}],
+        }
+        parsed_both = v.parse_external_validator_lists(v2_all_overridden)
+        self.assertEqual(len(parsed_both), 2)
+        self.assertEqual(parsed_both[0].manifest, b"\x01\x02")
+        self.assertEqual(parsed_both[1].manifest, b"\x03\x04")
+        self.assertEqual(parsed_both[1].blob, b"")
+
+        # v1 with valid manifest and bad blob/sig still retains manifest for P1
+        v1_bad_blob = {"version": 1, "manifest": m2, "blob": "not base64!", "signature": "ZZ"}
+        parsed_v1_man = v.parse_external_validator_lists(v1_bad_blob)
+        self.assertEqual(len(parsed_v1_man), 1)
+        self.assertEqual(parsed_v1_man[0].manifest, b"\x03\x04")
+        self.assertEqual(parsed_v1_man[0].blob, b"")
+
         v2_empty = {"version": 2, "manifest": m2, "blobs_v2": []}
         parsed_empty = v.parse_external_validator_lists(v2_empty)
         self.assertEqual(len(parsed_empty), 1)

@@ -1984,34 +1984,14 @@ class ExternalValidatorList:
     signature: bytes  # raw publisher signature over blob
 
 
-def _extract_vl_candidate(
-    doc_pub: str,
-    manifest_val: Any,
-    blob_val: Any,
-    sig_val: Any,
-) -> ExternalValidatorList | None:
-    if (
-        not isinstance(manifest_val, str)
-        or not isinstance(blob_val, str)
-        or not isinstance(sig_val, str)
-    ):
+def _decode_nonempty_b64(value: Any) -> bytes | None:
+    if not isinstance(value, str):
         return None
     try:
-        manifest_bytes = canonical_base64(manifest_val)
-        blob_bytes = canonical_base64(blob_val)
+        decoded = canonical_base64(value)
     except Exception:
         return None
-    if not manifest_bytes or not blob_bytes:
-        return None
-    sig_bytes = _strict_hex_bytes(sig_val)
-    if not sig_bytes:
-        return None
-    return ExternalValidatorList(
-        public_key=doc_pub,
-        manifest=manifest_bytes,
-        blob=blob_bytes,
-        signature=sig_bytes,
-    )
+    return decoded if decoded else None
 
 
 def _expand_vl_document(
@@ -2025,43 +2005,72 @@ def _expand_vl_document(
         if not isinstance(doc["public_key"], str):
             return
         doc_pub = doc["public_key"]
-    doc_manifest = doc.get("manifest")
+    doc_manifest = _decode_nonempty_b64(doc.get("manifest"))
 
     if version == 1:
-        cand = _extract_vl_candidate(
-            doc_pub, doc_manifest, doc.get("blob"), doc.get("signature")
-        )
-        if cand is not None:
-            out.append(cand)
-        return
-
-    blobs = doc.get("blobs_v2")
-    if not isinstance(blobs, list):
-        return
-    added_entry = False
-    for item in blobs:
-        if not isinstance(item, dict):
-            continue
-        entry_manifest = item.get("manifest") if "manifest" in item else doc_manifest
-        cand = _extract_vl_candidate(
-            doc_pub, entry_manifest, item.get("blob"), item.get("signature")
-        )
-        if cand is not None:
-            out.append(cand)
-            added_entry = True
-    # A v2 document with no active blobs_v2 entries can still carry a
-    # top-level publisher manifest (e.g., publisher revocation or rotation).
-    if not added_entry and isinstance(doc_manifest, str):
-        try:
-            m_bytes = canonical_base64(doc_manifest)
-        except Exception:
-            m_bytes = b""
-        if m_bytes:
+        blob_bytes = _decode_nonempty_b64(doc.get("blob"))
+        sig_bytes = _strict_hex_bytes(doc.get("signature"))
+        if blob_bytes is not None and sig_bytes is not None:
             out.append(
                 ExternalValidatorList(
-                    public_key=doc_pub, manifest=m_bytes, blob=b"", signature=b""
+                    public_key=doc_pub,
+                    manifest=doc_manifest or b"",
+                    blob=blob_bytes,
+                    signature=sig_bytes,
                 )
             )
+        elif doc_manifest is not None:
+            # Retain publisher manifest independently of companion blob/sig decoding (P1).
+            out.append(
+                ExternalValidatorList(
+                    public_key=doc_pub, manifest=doc_manifest, blob=b"", signature=b""
+                )
+            )
+        return
+
+    doc_manifest_emitted = False
+    blobs = doc.get("blobs_v2")
+    if isinstance(blobs, list):
+        for item in blobs:
+            if not isinstance(item, dict):
+                continue
+            entry_manifest = _decode_nonempty_b64(item.get("manifest"))
+            blob_bytes = _decode_nonempty_b64(item.get("blob"))
+            sig_bytes = _strict_hex_bytes(item.get("signature"))
+            if blob_bytes is not None and sig_bytes is not None:
+                if entry_manifest is not None:
+                    chosen_manifest = entry_manifest
+                elif doc_manifest is not None:
+                    chosen_manifest = doc_manifest
+                    doc_manifest_emitted = True
+                else:
+                    chosen_manifest = b""
+                out.append(
+                    ExternalValidatorList(
+                        public_key=doc_pub,
+                        manifest=chosen_manifest,
+                        blob=blob_bytes,
+                        signature=sig_bytes,
+                    )
+                )
+            elif entry_manifest is not None:
+                # Preserve per-entry publisher manifest for P1 even if blob/sig fail.
+                out.append(
+                    ExternalValidatorList(
+                        public_key=doc_pub,
+                        manifest=entry_manifest,
+                        blob=b"",
+                        signature=b"",
+                    )
+                )
+    # Always preserve top-level publisher manifest for P1 even when every
+    # blobs_v2 entry overrode it or failed to decode (or blobs_v2 is empty).
+    if doc_manifest is not None and not doc_manifest_emitted:
+        out.append(
+            ExternalValidatorList(
+                public_key=doc_pub, manifest=doc_manifest, blob=b"", signature=b""
+            )
+        )
 
 
 def parse_external_validator_lists(obj: Any) -> list[ExternalValidatorList]:
@@ -2213,6 +2222,8 @@ def verify_anchor(
 
     for doc_pub, m_bytes, _, _, is_bundled in candidates:
         if doc_pub and doc_pub.upper() != trusted:
+            continue
+        if not m_bytes:
             continue
         try:
             ok, err, manifest = verify_manifest(m_bytes)
@@ -2941,17 +2952,16 @@ def verify(
                 f"({n_val} validations)"
             )
 
-            # §1.3: when the proof carries the anchor ledger's header, its
-            # close_time guides primary list selection (P3) before quorum is
-            # counted; the header grants no capability until verified below.
+            # §1.3: in a proof with any step after the anchor, the anchor
+            # ledger's header is the immediate next logical step; read its
+            # close_time before P3 primary list selection (granting no
+            # capability until verified below).
             anchor_hash_upper = step["ledger_hash"].upper()
             anchor_close_time: int | None = None
-            for other in steps:
-                if other.get("type") == "ledger_header":
-                    hdr_cand = other.get("header", {})
-                    if hash_header(hdr_cand).hex().upper() == anchor_hash_upper:
-                        anchor_close_time = int(hdr_cand["close_time"])
-                        break
+            if len(steps) > 1 and steps[1].get("type") == "ledger_header":
+                hdr_cand = steps[1].get("header", {})
+                if hash_header(hdr_cand).hex().upper() == anchor_hash_upper:
+                    anchor_close_time = int(hdr_cand["close_time"])
 
             ar = verify_anchor(
                 step,

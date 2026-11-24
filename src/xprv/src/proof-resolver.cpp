@@ -455,21 +455,19 @@ resolve_proof_chain_impl(
                             auto const& steps =
                                 anchor_json.at("steps").as_array();
                             std::vector<std::string> av_narrative;
-                            // §1.3: when the proof carries the anchor ledger's
-                            // header, its close_time guides primary list
-                            // selection (P3) before quorum is counted; the
-                            // header grants no capability until verified below.
+                            // §1.3: in a proof with any step after the anchor,
+                            // the anchor ledger's header is the immediate next
+                            // logical step; read its close_time before P3
+                            // primary list selection (granting no capability
+                            // until verified below).
                             std::optional<uint32_t> anchor_close_time;
-                            for (auto const& s : chain.steps)
+                            if (chain.steps.size() > 1)
                             {
-                                if (auto const* hdr =
-                                        std::get_if<HeaderData>(&s))
+                                if (auto const* hdr = std::get_if<HeaderData>(
+                                        &chain.steps[1]))
                                 {
                                     if (hash_header(*hdr) == data.ledger_hash)
-                                    {
                                         anchor_close_time = hdr->close_time;
-                                        break;
-                                    }
                                 }
                             }
                             auto av_result = AnchorVerifier::verify(
