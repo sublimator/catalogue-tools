@@ -315,6 +315,12 @@ main(int argc, char* argv[])
         return 1;
     }
 
+    // With --json, standard output carries the report and nothing else, so
+    // the log goes to standard error from the first line.
+    for (int i = 1; i < argc; ++i)
+        if (std::string_view(argv[i]) == "--json")
+            Logger::set_output_stream(&std::cerr);
+
     std::string command;
     std::vector<std::string> command_args;
     LoggingOptions logging;
@@ -451,6 +457,7 @@ main(int argc, char* argv[])
         std::string explicit_key;
         std::string manifests_path;
         std::optional<uint32_t> network_arg;
+        bool json_report = false;
 
         std::size_t pos = 0;
         while (pos < command_args.size())
@@ -466,6 +473,11 @@ main(int argc, char* argv[])
             {
                 manifests_path = command_args[pos + 1];
                 pos += 2;
+            }
+            else if (arg == "--json")
+            {
+                json_report = true;
+                pos++;
             }
             else if (arg[0] == '-')
             {
@@ -488,7 +500,7 @@ main(int argc, char* argv[])
         {
             std::cerr
                 << "Usage: xprv verify <proof_file> [publisher_key] "
-                   "[--network N] [--manifests FILE]\n";
+                   "[--network N] [--manifests FILE] [--json]\n";
             return 1;
         }
 
@@ -526,7 +538,12 @@ main(int argc, char* argv[])
             xprv::NetworkConfig::for_network(verify_network_id);
         auto protocol = net_config.load_protocol();
         return cmd_verify(
-            proof_path, trusted_key, verify_network_id, protocol, manifests_path);
+            proof_path,
+            trusted_key,
+            verify_network_id,
+            protocol,
+            manifests_path,
+            json_report);
     }
 
     // Offline form conversion. Exists so the two representations can be

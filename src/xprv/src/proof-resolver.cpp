@@ -2,6 +2,7 @@
 #include "xprv/anchor-verifier.h"
 #include "xprv/hex-utils.h"
 #include "xprv/ledger-hashes.h"
+#include "xprv/proof-chain-binary.h"
 #include "xprv/proof-chain-json.h"
 #include "xprv/proof-steps.h"
 
@@ -289,10 +290,24 @@ resolve_proof_chain_impl(
     std::string const& trusted_publisher_key,
     bool pretrusted_anchor_for_testing,
     std::vector<std::vector<uint8_t>> const& extra_manifests,
-    std::string* failure)
+    std::string* failure,
+    VerifyReport* report)
 {
-    // The first refusal, for callers that report why (tests, the corpus).
-    auto refuse = [failure](std::string reason) {
+    // The first refusal, for callers that report why (tests, the corpus),
+    // with the layer it belongs to: "parse" for the proof's structure,
+    // "trust" for the anchor, "graph" for everything the anchor supports.
+    if (report)
+    {
+        *report = VerifyReport{};
+        report->network_id = chain.network_id;
+    }
+    auto refuse = [failure, report](
+                      std::string reason, char const* layer = "graph") {
+        if (report && report->reason.empty())
+        {
+            report->layer = layer;
+            report->reason = reason;
+        }
         if (failure && failure->empty())
             *failure = std::move(reason);
         return false;
@@ -308,7 +323,7 @@ resolve_proof_chain_impl(
             verify_log,
             "  Anchor: no trusted publisher key configured; refusing "
             "implicit trust");
-        return refuse("no trusted publisher key configured");
+        return refuse("no trusted publisher key configured", "trust");
     }
     PLOGI(
         verify_log,
@@ -344,7 +359,8 @@ resolve_proof_chain_impl(
                 anchors);
             return refuse(
                 "proof must contain exactly one anchor, found " +
-                std::to_string(anchors));
+                    std::to_string(anchors),
+                "parse");
         }
         if (first_anchor_at != 0)
         {
@@ -352,16 +368,22 @@ resolve_proof_chain_impl(
                 verify_log,
                 "  Structure: anchor must be the first step, found at index ",
                 first_anchor_at);
-            return refuse("anchor must be the first step");
+            return refuse("anchor must be the first step", "parse");
         }
     }
 
     int step_num = 0;
     bool all_ok = true;
-    auto fail = [&](std::string reason) {
+    auto fail = [&](std::string reason, char const* layer = "graph") {
         all_ok = false;
-        refuse(std::move(reason));
+        refuse(std::move(reason), layer);
     };
+
+    // Every authenticated ledger a root belongs to, for the leaves' report.
+    std::map<std::string, std::vector<std::pair<Hash256, uint32_t>>>
+        ledgers_of_tx_root;
+    std::map<std::string, std::vector<std::pair<Hash256, uint32_t>>>
+        ledgers_of_state_root;
 
     std::map<std::string, std::vector<std::string>> trusted_ledger_hashes;
     std::map<std::string, std::vector<std::string>> trusted_tx_roots;
@@ -452,6 +474,13 @@ resolve_proof_chain_impl(
 
                             if (anchor_verified)
                             {
+                                if (report)
+                                {
+                                    report->anchor_hash = data.ledger_hash;
+                                    report->votes =
+                                        av_result.validations_matched_unl;
+                                    report->list_size = av_result.unl_size;
+                                }
                                 anchor_vl_window = std::pair{
                                     av_result.vl_effective,
                                     av_result.vl_expiration};
@@ -472,7 +501,7 @@ resolve_proof_chain_impl(
                                     "  Anchor: FAILED (",
                                     av_result.error,
                                     ")");
-                                fail("anchor: " + av_result.error);
+                                fail("anchor: " + av_result.error, "trust");
                             }
                         }
                         catch (std::exception const& e)
@@ -483,7 +512,9 @@ resolve_proof_chain_impl(
                                 e.what(),
                                 ")");
                             anchor_step.quorum_check = Check::fail;
-                            fail(std::string("anchor: malformed: ") + e.what());
+                            fail(
+                                std::string("anchor: malformed: ") + e.what(),
+                                "trust");
                         }
                     }
 
@@ -546,7 +577,8 @@ resolve_proof_chain_impl(
                                 "outside the signed list interval)");
                             fail(
                                 "anchor close time is outside the list's "
-                                "validity interval");
+                                "validity interval",
+                                "trust");
                         }
                         else
                         {
@@ -627,6 +659,18 @@ resolve_proof_chain_impl(
 
                     if (header_supported && anchor_vl_time_valid)
                     {
+                        ledgers_of_tx_root[upper_hex(data.tx_hash)]
+                            .emplace_back(computed, data.seq);
+                        ledgers_of_state_root[upper_hex(data.account_hash)]
+                            .emplace_back(computed, data.seq);
+                        if (report)
+                            report->headers.push_back(VerifiedHeader{
+                                computed,
+                                data,
+                                direct_source && *direct_source == "anchor"
+                                    ? "anchor"
+                                    : skip_support ? "ledger_hashes"
+                                                   : "parent_hash"});
                         add_capability(
                             trusted_ledger_hashes,
                             upper_hex(data.parent_hash),
@@ -997,6 +1041,44 @@ resolve_proof_chain_impl(
                                 map_step.expected_root =
                                     computed_root_hex.substr(0, 16);
 
+                                // The leaves this root authenticates, with
+                                // the bytes that were hashed (§7).
+                                if (report)
+                                {
+                                    auto const& ledgers = is_state
+                                        ? ledgers_of_state_root
+                                              [computed_root_hex]
+                                        : ledgers_of_tx_root[computed_root_hex];
+                                    reconstructed->walk_abbreviated(
+                                        [&](catl::shamap::SHAMapNodeID const&,
+                                            Hash256 const&,
+                                            catl::shamap::SHAMapTreeNodeT<
+                                                catl::shamap::
+                                                    AbbreviatedTreeTraits> const*
+                                                node) {
+                                            if (!node || !node->is_leaf())
+                                                return;
+                                            auto const item = static_cast<
+                                                catl::shamap::SHAMapLeafNodeT<
+                                                    catl::shamap::
+                                                        AbbreviatedTreeTraits> const*>(
+                                                node)
+                                                ->get_item();
+                                            if (!item)
+                                                return;
+                                            report->leaves.push_back(
+                                                VerifiedLeaf{
+                                                    !is_state,
+                                                    item->key().to_hash(),
+                                                    std::vector<uint8_t>(
+                                                        item->slice().data(),
+                                                        item->slice().data() +
+                                                            item->slice()
+                                                                .size()),
+                                                    ledgers});
+                                        });
+                                }
+
                                 auto root_key = std::make_pair(
                                     std::string(is_state ? "state" : "tx"),
                                     computed_root_hex);
@@ -1162,6 +1244,18 @@ resolve_proof_chain_impl(
     }
     PLOGI(verify_log, "");
 
+    // Nothing is reported as authenticated unless the whole proof verified.
+    if (report)
+    {
+        report->verified = all_ok;
+        if (!all_ok)
+        {
+            report->headers.clear();
+            report->leaves.clear();
+            report->anchor_hash = Hash256{};
+            report->votes = report->list_size = 0;
+        }
+    }
     return all_ok;
 }
 
@@ -1171,10 +1265,150 @@ resolve_proof_chain(
     catl::xdata::Protocol const& protocol,
     std::string const& trusted_publisher_key,
     std::vector<std::vector<uint8_t>> const& extra_manifests,
-    std::string* failure)
+    std::string* failure,
+    VerifyReport* report)
 {
     return resolve_proof_chain_impl(
-        chain, protocol, trusted_publisher_key, false, extra_manifests, failure);
+        chain,
+        protocol,
+        trusted_publisher_key,
+        false,
+        extra_manifests,
+        failure,
+        report);
+}
+
+std::string
+definitions_identity(catl::xdata::Protocol const& protocol)
+{
+    // The table as (code, name, type) lines in code order, hashed. It does
+    // not depend on how the definitions file was formatted.
+    std::vector<std::string> lines;
+    for (auto const& field : protocol.fields())
+        lines.push_back(
+            std::to_string(field.code) + " " + field.name + " " +
+            std::string(field.meta.type.name));
+    std::sort(lines.begin(), lines.end());
+    catl::crypto::Sha512HalfHasher hasher;
+    for (auto const& line : lines)
+    {
+        hasher.update(
+            reinterpret_cast<uint8_t const*>(line.data()), line.size());
+        hasher.update(reinterpret_cast<uint8_t const*>("\n"), 1);
+    }
+    return "catl-xdata " + protocol.native_currency() + " " +
+        std::to_string(lines.size()) + " fields " +
+        upper_hex(hasher.finalize()).substr(0, 16);
+}
+
+VerifyReport
+verify_proof(std::span<const uint8_t> data, TrustForNetworkFn const& trust_for)
+{
+    VerifyReport report;
+    auto const refused = [&](char const* layer, std::string reason) {
+        report = VerifyReport{};
+        report.layer = layer;
+        report.reason = std::move(reason);
+        return report;
+    };
+
+    ProofChain chain;
+    try
+    {
+        chain = data.size() >= 4 &&
+                std::equal(XPRV_MAGIC, XPRV_MAGIC + 4, data.begin())
+            ? from_binary(data)
+            : from_json_text(std::string_view(
+                  reinterpret_cast<char const*>(data.data()), data.size()));
+    }
+    catch (std::exception const& e)
+    {
+        return refused("parse", e.what());
+    }
+
+    // §8: network_id selects the configured primary key. It is the
+    // verifier's key for that network, never one the proof supplies.
+    std::optional<VerifyTrust> trust;
+    try
+    {
+        trust = trust_for ? trust_for(chain.network_id) : std::nullopt;
+    }
+    catch (std::exception const& e)
+    {
+        return refused("trust", e.what());
+    }
+    if (!trust || !trust->protocol || trust->publisher_key.empty())
+        return refused(
+            "trust",
+            "network " + std::to_string(chain.network_id) +
+                " is not configured on this verifier");
+
+    try
+    {
+        static std::vector<std::vector<uint8_t>> const none;
+        resolve_proof_chain(
+            chain,
+            *trust->protocol,
+            trust->publisher_key,
+            trust->held_manifests ? *trust->held_manifests : none,
+            nullptr,
+            &report);
+    }
+    catch (std::exception const& e)
+    {
+        return refused("graph", e.what());
+    }
+    report.network_id = chain.network_id;
+    report.definitions = definitions_identity(*trust->protocol);
+    return report;
+}
+
+boost::json::object
+to_json(VerifyReport const& report)
+{
+    boost::json::object out;
+    out["verified"] = report.verified;
+    if (!report.verified)
+    {
+        out["layer"] = report.layer;
+        out["reason"] = report.reason;
+        return out;
+    }
+    out["format_version"] = XPRV_FORMAT_VERSION;
+    out["network_id"] = report.network_id;
+    out["definitions"] = report.definitions;
+    out["anchor"] = boost::json::object{
+        {"ledger_hash", upper_hex(report.anchor_hash)},
+        {"votes", report.votes},
+        {"list_size", report.list_size}};
+    boost::json::array headers;
+    for (auto const& h : report.headers)
+        headers.push_back(boost::json::object{
+            {"ledger_hash", upper_hex(h.ledger_hash)},
+            {"ledger_index", h.header.seq},
+            {"close_time", h.header.close_time},
+            {"parent_hash", upper_hex(h.header.parent_hash)},
+            {"transaction_hash", upper_hex(h.header.tx_hash)},
+            {"account_hash", upper_hex(h.header.account_hash)},
+            {"supported_by", h.supported_by}});
+    out["headers"] = std::move(headers);
+    boost::json::array leaves;
+    for (auto const& leaf : report.leaves)
+    {
+        boost::json::array ledgers;
+        for (auto const& [hash, index] : leaf.ledgers)
+            ledgers.push_back(boost::json::object{
+                {"ledger_hash", upper_hex(hash)}, {"ledger_index", index}});
+        std::string bytes;
+        slice_hex(Slice(leaf.bytes.data(), leaf.bytes.size()), bytes);
+        leaves.push_back(boost::json::object{
+            {"tree", leaf.is_tx ? "tx" : "state"},
+            {"key", upper_hex(leaf.key)},
+            {"bytes", bytes},
+            {"ledgers", std::move(ledgers)}});
+    }
+    out["leaves"] = std::move(leaves);
+    return out;
 }
 
 #ifdef XPRV_TESTING
@@ -1184,7 +1418,8 @@ resolve_proof_chain_with_pretrusted_anchor_for_testing(
     catl::xdata::Protocol const& protocol,
     std::string* failure)
 {
-    return resolve_proof_chain_impl(chain, protocol, "", true, {}, failure);
+    return resolve_proof_chain_impl(
+        chain, protocol, "", true, {}, failure, nullptr);
 }
 #endif
 

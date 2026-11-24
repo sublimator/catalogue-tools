@@ -909,47 +909,9 @@ ProofEngine::verify(
     TrustForNetworkFn const& trust_for)
 {
     VerifyResult result;
-    try
-    {
-        // Auto-detect format
-        ProofChain chain;
-        if (data.size() >= 4 && std::memcmp(data.data(), XPRV_MAGIC, 4) == 0)
-        {
-            chain = from_binary(data);
-        }
-        else
-        {
-            chain = from_json_text(std::string_view(
-                reinterpret_cast<const char*>(data.data()), data.size()));
-        }
-
-        // §8: network_id selects the configured primary key. It is the
-        // deployment's key for that network, not a built-in default.
-        auto const trust =
-            trust_for ? trust_for(chain.network_id) : std::nullopt;
-        if (!trust || !trust->protocol || trust->publisher_key.empty())
-        {
-            result.error = "network " + std::to_string(chain.network_id) +
-                " is not configured on this verifier";
-            return result;
-        }
-
-        static std::vector<std::vector<uint8_t>> const none;
-        std::string why;
-        result.ok = resolve_proof_chain(
-            chain,
-            *trust->protocol,
-            trust->publisher_key,
-            trust->held_manifests ? *trust->held_manifests : none,
-            &why);
-        if (!result.ok)
-            result.error = why.empty() ? "verification failed" : why;
-    }
-    catch (std::exception const& e)
-    {
-        result.ok = false;
-        result.error = e.what();
-    }
+    result.report = verify_proof(data, trust_for);
+    result.ok = result.report.verified;
+    result.error = result.report.reason;
     return result;
 }
 

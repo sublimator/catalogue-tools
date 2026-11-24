@@ -2566,8 +2566,10 @@ HttpServer::handle_session(
                                 tracker ? tracker->held_manifests() : nullptr};
                         });
 
-                    boost::json::object result;
-                    result["verified"] = vr.ok;
+                    // The report (§7): the authenticated headers and leaves
+                    // when verified, the layer and reason when refused.
+                    // `error` repeats the reason for older clients.
+                    auto result = to_json(vr.report);
                     if (!vr.error.empty())
                     {
                         result["error"] = vr.error;

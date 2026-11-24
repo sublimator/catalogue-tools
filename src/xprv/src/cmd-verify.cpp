@@ -24,7 +24,8 @@ cmd_verify(
     std::string const& trusted_key,
     uint32_t trusted_network_id,
     catl::xdata::Protocol const& protocol,
-    std::string const& manifests_path)
+    std::string const& manifests_path,
+    bool json_report)
 {
     // --manifests: a JSON array of base64 raw manifests held from outside the
     // proof (spec §1.3, the D4 discrete form).
@@ -66,89 +67,31 @@ cmd_verify(
         std::cerr << read_error << "\n";
         return 1;
     }
-    std::string const file_data(raw->begin(), raw->end());
+    // One entry point with the service: read either form, take the trust
+    // configured for the proof's network, verify. Bad input is a refusal
+    // with a layer and a reason, never an abort, and the exit status is 0
+    // or 1.
+    auto const held = std::make_shared<std::vector<std::vector<uint8_t>> const>(
+        std::move(extra_manifests));
+    auto const report = xprv::verify_proof(
+        *raw, [&](uint32_t network_id) -> std::optional<xprv::VerifyTrust> {
+            if (trusted_key.empty())
+                throw std::runtime_error(
+                    "no trusted publisher key configured for network " +
+                    std::to_string(trusted_network_id));
+            if (network_id != trusted_network_id)
+                throw std::runtime_error(
+                    "proof network_id " + std::to_string(network_id) +
+                    " does not match configured network " +
+                    std::to_string(trusted_network_id));
+            return xprv::VerifyTrust{trusted_key, &protocol, held};
+        });
 
-    xprv::ProofChain proof;
-
-    bool is_binary = file_data.size() >= 4 &&
-        std::memcmp(file_data.data(), xprv::XPRV_MAGIC, 4) == 0;
-
-    if (!is_binary)
-    {
-        try
-        {
-            PLOGI(
-                log_,
-                "Loaded JSON proof from ",
-                proof_path,
-                " (",
-                file_data.size(),
-                " bytes)");
-            proof = xprv::from_json_text(file_data);
-        }
-        catch (std::exception const& e)
-        {
-            std::cerr << "JSON parse error: " << e.what() << "\n";
-            return 1;
-        }
-    }
-    else
-    {
-        try
-        {
-            auto data = reinterpret_cast<const uint8_t*>(file_data.data());
-            proof = xprv::from_binary({data, file_data.size()});
-            PLOGI(
-                log_,
-                "Loaded binary proof from ",
-                proof_path,
-                " (",
-                proof.steps.size(),
-                " steps, ",
-                file_data.size(),
-                " bytes)");
-        }
-        catch (std::exception const& e)
-        {
-            std::cerr << "Binary parse error: " << e.what() << "\n";
-            return 1;
-        }
-    }
-
-    if (trusted_key.empty())
-    {
-        std::cerr << "No trusted publisher key configured for network "
-                  << trusted_network_id << "\n";
-        return 1;
-    }
-
-    if (proof.network_id != trusted_network_id)
-    {
-        std::cerr << "Proof network_id " << proof.network_id
-                  << " does not match configured network "
-                  << trusted_network_id << "\n";
-        return 1;
-    }
-
-    PLOGI(
-        log_,
-        "Verifying (network_id=",
-        proof.network_id,
-        ", publisher=",
-        trusted_key.substr(0, 16),
-        "...)");
-
-    // Bad input is refused, never fatal: whatever verification throws is a
-    // refusal with a reason, and the exit status stays 0 or 1.
-    try
-    {
-        bool ok = xprv::resolve_proof_chain(
-            proof, protocol, trusted_key, extra_manifests);
-        return ok ? 0 : 1;
-    }
-    catch (std::exception const& e)
-    {
-        std::cerr << "Verification refused: " << e.what() << "\n";
-        return 1;
-    }
+    if (json_report)
+        std::cout << boost::json::serialize(xprv::to_json(report)) << "\n";
+    else if (!report.verified)
+        std::cerr << "Refused (" << report.layer << "): " << report.reason
+                  << "\n";
+    return report.verified ? 0 : 1;
 }
+

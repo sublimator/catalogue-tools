@@ -176,6 +176,35 @@ class VerifyResult:
     steps_checked: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # §7. On refusal: the layer of the first refusal (parse, graph or trust)
+    # and its reason. On acceptance: what the proof authenticated. The
+    # outputs are dropped when the proof does not verify as a whole.
+    layer: str = ""
+    reason: str = ""
+    network_id: int = 0
+    anchor: dict[str, Any] = field(default_factory=dict)
+    headers: list[dict[str, Any]] = field(default_factory=list)
+    leaves: list[dict[str, Any]] = field(default_factory=list)
+
+    def refuse(self, layer: str, message: str) -> None:
+        self.ok = False
+        self.errors.append(message)
+        if not self.reason:
+            self.layer, self.reason = layer, message
+
+    def report(self) -> dict[str, Any]:
+        """The result as JSON (§7), the same shape the C++ verifier writes."""
+        if not self.ok:
+            return {"verified": False, "layer": self.layer, "reason": self.reason}
+        return {
+            "verified": True,
+            "format_version": FORMAT_VERSION,
+            "network_id": self.network_id,
+            "definitions": definitions_identity(),
+            "anchor": self.anchor,
+            "headers": self.headers,
+            "leaves": self.leaves,
+        }
 
 
 @dataclass(frozen=True)
@@ -677,6 +706,40 @@ def collect_binary_leaves(
 
     walk(0)
     return leaves
+
+
+def binary_leaf_bytes(data: bytes) -> list[tuple[str, bytes]]:
+    """Every leaf of a binary trie as (key, the exact bytes that are hashed).
+
+    The payload has passed validate_binary_trie, so the walk cannot run off it.
+    """
+    out: list[tuple[str, bytes]] = []
+
+    def walk(pos: int) -> int:
+        header = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+        for branch in range(16):
+            branch_type = (header >> (branch * 2)) & 0x03
+            if branch_type == BR_LEAF:
+                key = data[pos : pos + 32]
+                size, pos = leb128_read(data, pos + 32)
+                out.append((key.hex().upper(), data[pos : pos + size]))
+                pos += size
+            elif branch_type == BR_INNER:
+                pos = walk(pos)
+            elif branch_type == BR_HASH:
+                pos += 32
+        return pos
+
+    walk(0)
+    return out
+
+
+def definitions_identity() -> str:
+    """Which field definitions this verifier decodes with (§7)."""
+    from importlib.metadata import version
+
+    return f"xrpl-py {version('xrpl-py')}"
 
 
 def is_hash_hex(value: Any) -> bool:
@@ -1569,14 +1632,17 @@ def verify(
         trusted_key = PUBLISHER_KEY_BY_NETWORK.get(network_id)
     key_network = NETWORK_BY_PUBLISHER_KEY.get(trusted_key.upper()) if trusted_key else None
 
+    # A malformed proof is a parse refusal; a proof this verifier is not
+    # configured to trust is a trust refusal.
+    layer = "parse"
     if error:
         pass
     elif not trusted_key:
-        error = f"no trusted publisher key configured for network {network_id}"
+        layer, error = "trust", f"no trusted publisher key configured for network {network_id}"
     elif key_network is not None and key_network != network_id:
-        error = f"trusted key belongs to network {key_network}, not configured network {network_id}"
+        layer, error = "trust", f"trusted key belongs to network {key_network}, not configured network {network_id}"
     elif proof_network != network_id:
-        error = f"proof network_id {proof_network} does not match configured network {network_id}"
+        layer, error = "trust", f"proof network_id {proof_network} does not match configured network {network_id}"
     if not error:
         try:
             validate_json_steps(steps)
@@ -1584,19 +1650,17 @@ def verify(
             error = str(exc)
     if error:
         print(f"\n  FAIL: {error}")
-        result.ok = False
-        result.errors.append(error)
+        result.refuse(layer, error)
         return result
+    result.network_id = network_id
 
     if not steps:
-        result.ok = False
-        result.errors.append("proof has no steps")
+        result.refuse("parse", "proof has no steps")
         return result
 
     anchor_count = sum(1 for step in steps if step.get("type") == "anchor")
     if anchor_count != 1:
-        result.ok = False
-        result.errors.append(f"proof must contain exactly one anchor, found {anchor_count}")
+        result.refuse("parse", f"proof must contain exactly one anchor, found {anchor_count}")
 
     trusted_ledger_hashes: dict[str, list[str]] = defaultdict(list)
     trusted_tx_roots: dict[str, list[str]] = defaultdict(list)
@@ -1608,6 +1672,9 @@ def verify(
     skip_source_last_seq: dict[str, int] = {}
     anchor_seen = False
     anchor_vl_window: tuple[int, int] | None = None
+    # Every authenticated ledger a root belongs to, for the leaves' report.
+    ledgers_of_tx_root: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    ledgers_of_state_root: dict[str, list[tuple[str, int]]] = defaultdict(list)
 
     print(f"\n{'=' * 60}")
     print(f"  PROOF VERIFICATION ({len(steps)} steps)")
@@ -1621,14 +1688,12 @@ def verify(
             if i != 1:
                 msg = "anchor must be the first serialized step"
                 print(f"\n  Step {i}: ANCHOR\n    [FAIL] {msg}")
-                result.ok = False
-                result.errors.append(f"step {i}: {msg}")
+                result.refuse("parse", f"step {i}: {msg}")
                 continue
             if anchor_seen:
                 msg = "duplicate anchor"
                 print(f"\n  Step {i}: ANCHOR\n    [FAIL] {msg}")
-                result.ok = False
-                result.errors.append(f"step {i}: {msg}")
+                result.refuse("parse", f"step {i}: {msg}")
                 continue
 
             anchor_seen = True
@@ -1644,11 +1709,15 @@ def verify(
                 ledger_hash = step["ledger_hash"].upper()
                 add_capability(trusted_ledger_hashes, ledger_hash, "anchor")
                 anchor_vl_window = (ar.vl_effective, ar.vl_expiration)
+                result.anchor = {
+                    "ledger_hash": ledger_hash,
+                    "votes": ar.matched_unl,
+                    "list_size": ar.unl_size,
+                }
                 print(f"    [PASS] anchor verified ({ar.message})")
             else:
                 print(f"    [FAIL] {ar.message}")
-                result.ok = False
-                result.errors.append(f"step {i}: anchor: {ar.message}")
+                result.refuse("trust", f"step {i}: anchor: {ar.message}")
 
         elif step_type == "ledger_header":
             hdr: dict[str, Any] = step.get("header", {})
@@ -1675,8 +1744,7 @@ def verify(
                     "ancestor or recognized LedgerHashes leaf"
                 )
                 print(f"    [FAIL] {msg}")
-                result.ok = False
-                result.errors.append(f"step {i}: {msg}")
+                result.refuse("graph", f"step {i}: {msg}")
                 continue
             if (
                 direct_source == "anchor"
@@ -1685,8 +1753,7 @@ def verify(
             ):
                 msg = "anchor close time is outside the signed list interval"
                 print(f"    [FAIL] {msg}")
-                result.ok = False
-                result.errors.append(f"step {i}: {msg}")
+                result.refuse("trust", f"step {i}: {msg}")
                 continue
 
             if direct_source == "anchor":
@@ -1723,6 +1790,18 @@ def verify(
                 parent_hash,
                 f"parent hash of header ledger_index={hdr['ledger_index']}",
             )
+            ledgers_of_tx_root[tx_root].append((computed_hex, int(hdr["ledger_index"])))
+            ledgers_of_state_root[state_root].append((computed_hex, int(hdr["ledger_index"])))
+            result.headers.append({
+                "ledger_hash": computed_hex,
+                "ledger_index": int(hdr["ledger_index"]),
+                "close_time": int(hdr["close_time"]),
+                "parent_hash": parent_hash,
+                "transaction_hash": tx_root,
+                "account_hash": state_root,
+                "supported_by": "anchor" if direct_source == "anchor"
+                else "ledger_hashes" if skip_support is not None else "parent_hash",
+            })
             add_capability(trusted_tx_roots, tx_root, f"header ledger_index={hdr['ledger_index']}")
             add_capability(
                 trusted_state_roots, state_root, f"header seq={hdr['ledger_index']}"
@@ -1746,6 +1825,7 @@ def verify(
                         raise ValueError("binary trie: trailing bytes")
                     root_hex = root.hex().upper()
                     leaves = collect_binary_leaves(binary_payload, is_tx=is_tx)
+                    leaf_bytes = binary_leaf_bytes(binary_payload)
                     print(f"    Binary trie, root={root_hex[:16]}...")
                 else:
                     if trie is None:
@@ -1757,6 +1837,9 @@ def verify(
                     )
                     root_hex = hash_trie(trie, is_tx=is_tx).hex().upper()
                     leaves = collect_json_leaves(trie)
+                    leaf_bytes = [
+                        (key_hex, serialize_leaf(leaf, is_tx=is_tx)) for key_hex, leaf in leaves
+                    ]
             except Exception as exc:
                 detail = str(exc)
                 if network_id == XAHAU_NETWORK_ID and isinstance(exc, (KeyError, UnknownLeafField)):
@@ -1767,8 +1850,7 @@ def verify(
                         "can't check Xahau JSON leaves, verify the binary proof instead"
                     )
                 print(f"    [ERROR] {detail}")
-                result.ok = False
-                result.errors.append(f"step {i}: {tree} tree error: {detail}")
+                result.refuse("graph", f"step {i}: {tree} tree error: {detail}")
                 continue
 
             capability_store = trusted_tx_roots if is_tx else trusted_state_roots
@@ -1776,19 +1858,25 @@ def verify(
             if root_source is None:
                 msg = f"{tree} root {root_hex[:16]}... is not supported by any earlier header"
                 print(f"    [FAIL] {msg}")
-                result.ok = False
-                result.errors.append(f"step {i}: {msg}")
+                result.refuse("graph", f"step {i}: {msg}")
                 continue
 
             if not leaves:
                 msg = f"{tree} map proof contains no leaves"
                 print(f"    [FAIL] {msg}")
-                result.ok = False
-                result.errors.append(f"step {i}: {msg}")
+                result.refuse("graph", f"step {i}: {msg}")
                 continue
 
             print(f"    [PASS] root {root_hex[:16]}... supported by {root_source}")
             print(f"    leaves: {len(leaves)}")
+            ledgers = (ledgers_of_tx_root if is_tx else ledgers_of_state_root)[root_hex]
+            for key_hex, data in leaf_bytes:
+                result.leaves.append({
+                    "tree": tree,
+                    "key": key_hex.upper(),
+                    "bytes": data.hex().upper(),
+                    "ledgers": [{"ledger_hash": h, "ledger_index": n} for h, n in ledgers],
+                })
             for key_hex, leaf_data in leaves:
                 if not isinstance(leaf_data, dict):
                     print(f"    leaf {key_hex[:16]}... authenticated, decode failed")
@@ -1820,8 +1908,7 @@ def verify(
                     if not containing_sequences:
                         msg = "state root has no authenticated containing ledger sequence"
                         print(f"    [FAIL] {msg}")
-                        result.ok = False
-                        result.errors.append(f"step {i}: {msg}")
+                        result.refuse("graph", f"step {i}: {msg}")
                         continue
 
                     for leaf in ledger_hashes_leaves:
@@ -1842,8 +1929,11 @@ def verify(
         else:
             msg = f"unknown step type: {step_type!r}"
             print(f"\n  Step {i}: UNKNOWN\n    [FAIL] {msg}")
-            result.ok = False
-            result.errors.append(f"step {i}: {msg}")
+            result.refuse("parse", f"step {i}: {msg}")
+
+    # Nothing is reported as authenticated unless the whole proof verified.
+    if not result.ok:
+        result.anchor, result.headers, result.leaves = {}, [], []
 
     print(f"\n{'=' * 60}")
     print(f"  {'PASS — all checks verified' if result.ok else 'FAIL'}")
@@ -2245,7 +2335,17 @@ def main() -> None:
         default=None,
         help="configured network id (0 = XRPL, 21337 = Xahau); the proof must match",
     )
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="print the result as JSON on standard output (§7): the authenticated "
+        "headers and leaves, or the refusal's layer and reason; the narrative goes "
+        "to standard error",
+    )
     args = ap.parse_args()
+    if args.json:
+        # Standard output carries the report and nothing else.
+        report_out, sys.stdout = sys.stdout, sys.stderr
 
     path = Path(args.proof)
     if not path.exists():
@@ -2261,20 +2361,29 @@ def main() -> None:
     if is_binary_proof(raw) and len(raw) > 10 + MAX_DECOMPRESSED_PROOF_SIZE:
         print("Binary proof body exceeds the size cap", file=sys.stderr)
         sys.exit(1)
-    if is_binary_proof(raw):
-        print("Format: binary (XPRV)")
-        proof = binary_to_proof(raw)
-    else:
-        print("Format: JSON")
-        proof = load_json_proof(raw)
-
     extra: list[bytes] = []
     if args.manifests:
         items = json.loads(Path(args.manifests).read_text())
         if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
             raise SystemExit("--manifests must be a JSON array of base64 strings")
         extra = [canonical_base64(x) for x in items]
-    r = verify(proof, args.trusted_key, args.network, extra)
+
+    # Bad input is a refusal with a layer and a reason, never a traceback.
+    try:
+        if is_binary_proof(raw):
+            print("Format: binary (XPRV)")
+            proof = binary_to_proof(raw)
+        else:
+            print("Format: JSON")
+            proof = load_json_proof(raw)
+    except (ValueError, RecursionError) as exc:
+        r = VerifyResult()
+        r.refuse("parse", str(exc) or type(exc).__name__)
+        print(f"\n  FAIL: {r.reason}")
+    else:
+        r = verify(proof, args.trusted_key, args.network, extra)
+    if args.json:
+        print(json.dumps(r.report()), file=report_out)
     sys.exit(0 if r.ok else 1)
 
 

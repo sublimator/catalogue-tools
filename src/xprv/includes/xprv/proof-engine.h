@@ -14,6 +14,7 @@
 
 #include "network-config.h"
 #include "proof-chain.h"
+#include "proof-resolver.h"
 #include "validation-quorum-tracker.h"
 #include "vl-cache.h"
 
@@ -147,7 +148,8 @@ private:
 struct VerifyResult
 {
     bool ok = false;
-    std::string error;
+    std::string error;    // the refusal's reason, empty when verified
+    VerifyReport report;  // outputs, or the refusal's layer and reason (§7)
 };
 
 class ProofEngine : public std::enable_shared_from_this<ProofEngine>
@@ -248,20 +250,10 @@ public:
         StepCallback on_step = nullptr,
         std::shared_ptr<catl::core::RequestScope> request_scope = nullptr);
 
-    /// What a deployment trusts for one network (§1.3, §8): its configured
-    /// primary publisher key, the definitions it decodes that network with,
-    /// and the newer validator manifests it holds.
-    struct VerifyTrust
-    {
-        std::string publisher_key;
-        catl::xdata::Protocol const* protocol = nullptr;
-        std::shared_ptr<std::vector<std::vector<uint8_t>> const> held_manifests;
-    };
-
-    /// The trust configured for a network, or nullopt when the deployment
-    /// does not serve it.
-    using TrustForNetworkFn =
-        std::function<std::optional<VerifyTrust>(uint32_t network_id)>;
+    /// What a deployment trusts for one network, and the lookup that
+    /// supplies it (proof-resolver.h).
+    using VerifyTrust = xprv::VerifyTrust;
+    using TrustForNetworkFn = xprv::TrustForNetworkFn;
 
     /// Verify a proof against the trust configured for the network it names.
     /// The key and definitions come from `trust_for`, never from built-in
