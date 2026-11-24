@@ -332,6 +332,7 @@ class NetworkLeafCodecTests(unittest.TestCase):
 
     REPO = Path(__file__).resolve().parent.parent
     ISSUER = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+    ISSUER_HEX = "B5F762798A53D543A014CAF8B297CFF8F2F937E8"
     ZERO_ACCOUNT = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
     XAHAU = v.XAHAU_NETWORK_ID
 
@@ -591,6 +592,60 @@ print(json.dumps({"errors": errors, "results": sorted(set(results))}))
         )
         # In a path step an account is always twenty bytes.
         self.assertEqual(v.encode({"Paths": [[{"account": self.ZERO_ACCOUNT}]]}), "0112" + "01" + "00" * 20 + "00")
+
+    def test_a_bridge_door_is_an_account_field(self) -> None:
+        # A door never set is a length of 0 and ""; one set to the zero
+        # account is twenty zero bytes. xrpl-py writes 20 for both lengths.
+        def bridge(locking: str, issuing: str) -> dict:
+            return {"XChainBridge": {
+                "LockingChainDoor": locking, "LockingChainIssue": {"currency": "XRP"},
+                "IssuingChainDoor": issuing, "IssuingChainIssue": {"currency": "XRP"},
+            }}
+
+        zero, native = "00" * 20, "00" * 20
+        header = bytes(v.XRPL_CODEC.get_field_instance("XChainBridge").header).hex().upper()
+        for locking, issuing, body in (
+            ("", self.ISSUER, "00" + native + "14" + self.ISSUER_HEX + native),
+            (self.ISSUER, "", "14" + self.ISSUER_HEX + native + "00" + native),
+            ("", "", "00" + native + "00" + native),
+            (self.ZERO_ACCOUNT, self.ISSUER, "14" + zero + native + "14" + self.ISSUER_HEX + native),
+        ):
+            with self.subTest(locking=locking, issuing=issuing):
+                value = bridge(locking, issuing)
+                self.assertEqual(v.encode(value), header + body)
+                self.assertEqual(v.decode(header + body), value)
+                self.assertTrue(self.accepted(0, **value))
+        self.assertFalse(self.accepted(0, **bridge(" ", self.ISSUER)))
+        # A door of any other length is no account.
+        with self.assertRaises(Exception):
+            v.decode(header + "13" + "00" * 19 + native + "00" + native)
+        # The same on Xahau, whose bridge issues name XAH.
+        with v.leaf_codec(self.XAHAU):
+            value = {"XChainBridge": {
+                "LockingChainDoor": "", "LockingChainIssue": {"currency": "XAH"},
+                "IssuingChainDoor": self.ISSUER, "IssuingChainIssue": {"currency": "XAH"},
+            }}
+            self.assertEqual(v.decode(v.encode(value)), value)
+
+    def test_xahau_reserves_every_case_of_its_own_code(self) -> None:
+        # xahaud's isBadCurrency catches xah, Xah and the rest where rippled
+        # compares its own code exactly. An issue and a currency field refuse
+        # them; an amount, as with the reserved code itself, does not.
+        for code in ("xah", "Xah", "xAH", "XAh"):
+            with self.subTest(code=code):
+                self.assertFalse(self.accepted(self.XAHAU, Asset={"currency": code, "issuer": self.ISSUER}))
+                self.assertFalse(self.accepted(self.XAHAU, BaseAsset=code))
+                self.assertTrue(self.accepted(
+                    self.XAHAU, Amount={"value": "1", "currency": code, "issuer": self.ISSUER}))
+                # On XRPL these are ordinary codes, and so is xrp in any case but XRP.
+                self.assertTrue(self.accepted(0, Asset={"currency": code, "issuer": self.ISSUER}))
+                self.assertTrue(self.accepted(0, BaseAsset=code))
+        for code in ("xrp", "Xrp"):
+            with self.subTest(code=code):
+                self.assertTrue(self.accepted(0, Asset={"currency": code, "issuer": self.ISSUER}))
+                self.assertTrue(self.accepted(self.XAHAU, Asset={"currency": code, "issuer": self.ISSUER}))
+        self.assertTrue(self.accepted(self.XAHAU, Asset={"currency": "XRP", "issuer": self.ISSUER}))
+        self.assertTrue(self.accepted(self.XAHAU, BaseAsset="USD"))
 
     def test_a_xahau_json_proof_without_a_map_step_verifies(self) -> None:
         f = world.Fixture()

@@ -1179,6 +1179,118 @@
    },
    "accept": false,
    "why": "the reserved code in an issue: rippled refuses it there"
+  },
+  {
+   "group": "bridge door",
+   "field": "XChainBridge",
+   "value": {
+    "LockingChainDoor": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+    "LockingChainIssue": {
+     "currency": "XRP"
+    },
+    "IssuingChainDoor": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+    "IssuingChainIssue": {
+     "currency": "XRP"
+    }
+   },
+   "accept": true,
+   "why": "two doors, each an account"
+  },
+  {
+   "group": "bridge door",
+   "field": "XChainBridge",
+   "value": {
+    "LockingChainDoor": "",
+    "LockingChainIssue": {
+     "currency": "XRP"
+    },
+    "IssuingChainDoor": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+    "IssuingChainIssue": {
+     "currency": "XRP"
+    }
+   },
+   "accept": true,
+   "why": "a locking door that was never set: an empty field, and \"\""
+  },
+  {
+   "group": "bridge door",
+   "field": "XChainBridge",
+   "value": {
+    "LockingChainDoor": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+    "LockingChainIssue": {
+     "currency": "XRP"
+    },
+    "IssuingChainDoor": "",
+    "IssuingChainIssue": {
+     "currency": "XRP"
+    }
+   },
+   "accept": true,
+   "why": "an issuing door that was never set"
+  },
+  {
+   "group": "bridge door",
+   "field": "XChainBridge",
+   "value": {
+    "LockingChainDoor": "",
+    "LockingChainIssue": {
+     "currency": "XRP"
+    },
+    "IssuingChainDoor": "",
+    "IssuingChainIssue": {
+     "currency": "XRP"
+    }
+   },
+   "accept": true,
+   "why": "neither door set"
+  },
+  {
+   "group": "bridge door",
+   "field": "XChainBridge",
+   "value": {
+    "LockingChainDoor": "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+    "LockingChainIssue": {
+     "currency": "XRP"
+    },
+    "IssuingChainDoor": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+    "IssuingChainIssue": {
+     "currency": "XRP"
+    }
+   },
+   "accept": true,
+   "why": "a door set to the zero account: twenty zero bytes, and its address"
+  },
+  {
+   "group": "bridge door",
+   "field": "XChainBridge",
+   "value": {
+    "LockingChainDoor": " ",
+    "LockingChainIssue": {
+     "currency": "XRP"
+    },
+    "IssuingChainDoor": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+    "IssuingChainIssue": {
+     "currency": "XRP"
+    }
+   },
+   "accept": false,
+   "why": "a space is neither an account nor an unset door"
+  },
+  {
+   "group": "bridge door",
+   "field": "XChainBridge",
+   "value": {
+    "LockingChainDoor": "0000000000000000000000000000000000000000",
+    "LockingChainIssue": {
+     "currency": "XRP"
+    },
+    "IssuingChainDoor": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+    "IssuingChainIssue": {
+     "currency": "XRP"
+    }
+   },
+   "accept": false,
+   "why": "a door as hex: its reference text is the address"
   }
  ]
 }

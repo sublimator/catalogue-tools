@@ -748,7 +748,17 @@ def _install_currency_rules(native: str, currency: Any, issue: Any, account_id: 
     currency._iso_to_bytes = iso_code_bytes
     currency.Currency.__init__ = currency_init
 
-    reserved = bytes(12) + native.encode("ascii") + bytes(5)
+    def is_reserved(code: bytes) -> bool:
+        """The native code's letters where an issued code goes (rippled's
+        badCurrency). rippled compares them exactly; xahaud's isBadCurrency
+        also catches every case of its own code."""
+        if code[:12] != bytes(12) or code[15:] != bytes(5):
+            return False
+        letters = code[12:15]
+        if native != "XRP":
+            letters = bytes(c & 0xDF for c in letters)
+        return letters == native.encode("ascii")
+
     mpt_from_value = issue.Issue.from_value.__func__
     mpt_to_json = issue.Issue.to_json
 
@@ -761,7 +771,7 @@ def _install_currency_rules(native: str, currency: Any, issue: Any, account_id: 
             code = bytes(currency.Currency.from_value(value["currency"]))
             if code == _ZERO_20:
                 raise XRPLBinaryCodecException("the native currency has no issuer")
-            if code in (reserved, _NO_CURRENCY):
+            if code == _NO_CURRENCY or is_reserved(code):
                 raise XRPLBinaryCodecException("an issue cannot name a reserved currency code")
             issuer = bytes(account_id.from_value(value["issuer"]))
             if issuer in (_ZERO_20, bytes(no_account)) or len(issuer) != 20:
@@ -798,11 +808,57 @@ def _install_currency_rules(native: str, currency: Any, issue: Any, account_id: 
         @classmethod
         def from_value(cls: Any, value: Any) -> Any:
             made = super().from_value(value)
-            if bytes(made) == reserved:
-                raise XRPLBinaryCodecException("a currency field cannot hold the reserved code")
+            if bytes(made) == _NO_CURRENCY or is_reserved(bytes(made)):
+                raise XRPLBinaryCodecException("a currency field cannot hold a reserved code")
             return made
 
     return FieldCurrency
+
+
+def _install_bridge_rule(bridge: Any, parser_class: Any, account_id: Any, issue: Any) -> None:
+    """A bridge's two doors are account fields: a length, then the account.
+
+    rippled writes a door that was never set as a length of 0 and prints it
+    as "", like any other account field. xrpl-py writes 20 for the length
+    whatever the door holds, and skips the length when it reads.
+    """
+    members = ("LockingChainDoor", "LockingChainIssue", "IssuingChainDoor", "IssuingChainIssue")
+
+    def read(parser: Any) -> list[Any]:
+        parts = []
+        for name in members:
+            if name.endswith("Door"):
+                length = parser.read_uint8()
+                if length not in (0, 20):
+                    raise XRPLBinaryCodecException("a bridge door is an account or an empty field")
+                parts.append(account_id.from_parser(parser, length))
+            else:
+                parts.append(issue.from_parser(parser))
+        return parts
+
+    def written(parts: list[Any]) -> bytes:
+        out = b""
+        for name, part in zip(members, parts):
+            raw = bytes(part)
+            out += (bytes([len(raw)]) if name.endswith("Door") else b"") + raw
+        return out
+
+    def bridge_from_value(cls: Any, value: Any) -> Any:
+        if not isinstance(value, dict) or set(value) != set(members):
+            raise XRPLBinaryCodecException("a bridge has two doors and two issues")
+        return cls(written([
+            (account_id if name.endswith("Door") else issue).from_value(value[name]) for name in members
+        ]))
+
+    def bridge_from_parser(cls: Any, parser: Any, length_hint: int | None = None) -> Any:
+        return cls(written(read(parser)))
+
+    def bridge_to_json(self: Any) -> Any:
+        return {name: part.to_json() for name, part in zip(members, read(parser_class(self.buffer.hex())))}
+
+    bridge.from_value = classmethod(bridge_from_value)
+    bridge.from_parser = classmethod(bridge_from_parser)
+    bridge.to_json = bridge_to_json
 
 
 def _install_amount_rules(amount: Any, currency: Any, account_id: Any) -> None:
@@ -867,6 +923,12 @@ class NetworkCodec:
             module("types.uint32").UInt32,
         )
         _install_amount_rules(module("types.amount"), module("types.currency"), module("types.account_id").AccountID)
+        _install_bridge_rule(
+            module("types.xchain_bridge").XChainBridge,
+            module("binary_wrappers.binary_parser").BinaryParser,
+            module("types.account_id").AccountID,
+            module("types.issue").Issue,
+        )
         # A field's type class, from this copy's own types.
         types = module("types")
         type_of = {name: getattr(types, name) for name in types.__all__}
