@@ -58,7 +58,8 @@ definitions referenced below.
 | [XRPL Binary Format](https://xrpl.org/docs/references/protocol/binary-format) | Canonical STObject serialization, field IDs, canonical field order, and XRPL variable-length `Blob` prefix encoding |
 | [XRPL LedgerHashes](https://xrpl.org/docs/references/protocol/ledger-data/ledger-entry-types/ledgerhashes) | Skip-list SLE fields, recent/previous-history semantics, and LedgerHashes keylet derivation |
 | [XRPL binary codec definitions](https://github.com/XRPLF/xrpl.js/blob/main/packages/ripple-binary-codec/src/enums/definitions.json) | Type codes, field codes, ledger-entry codes, transaction result codes, and field metadata |
-| [XRPL rippled protocol layer](https://github.com/XRPLF/rippled/tree/develop/src/xrpl/protocol) | Manifest and STValidation signing formats, `MAN\0` and `VAL\0` signing data, signatures, and public-key formats |
+| [XRPL rippled protocol layer](https://github.com/XRPLF/rippled/tree/develop/src/libxrpl/protocol) | XRPL reference JSON rendering (`STAmount`, `STInteger`, `STPathSet`, `Issue`, `Number`), manifest and `STValidation` signing formats, `MAN\0` and `VAL\0` signing data, signatures, and public-key formats |
+| [Xahau xahaud protocol layer](https://github.com/Xahau/xahaud/tree/dev/src/ripple/protocol) | Xahau reference JSON rendering and protocol definitions for `network_id == 21337` |
 | XLS-41d XPOP ([XRPL-Standards](https://github.com/XRPLF/XRPL-Standards)) | Prior proof-of-payment trust chain and proof vocabulary |
 | [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) | Normative language |
 | [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648) | Canonical padded base64 (§3.5) for validator manifests inside signed validator-list blobs |
@@ -670,9 +671,9 @@ object under strict comparison:
     `to_string(Number)` (one exact text per value; no alternate decimal or
     scientific notation);
   - ordinary `UInt64` fields use unpadded lowercase hex (e.g. `"1"`, `"ff"`),
-    while base-ten `UInt64` fields (`MaximumAmount`, `OutstandingAmount`,
-    `MPTAmount`, `LockedAmount`, and XRPL's `ConfidentialOutstandingAmount`)
-    use base-ten decimal strings;
+    while the `UInt64` fields the network marks base ten (at this writing:
+    `MaximumAmount`, `OutstandingAmount`, `MPTAmount`, `LockedAmount`, and
+    XRPL's `ConfidentialOutstandingAmount`) use base-ten decimal strings;
   - `PathSet` hops carry `rippled`'s `type` bitmask integer alongside their
     present hop fields;
   - binary blobs, hashes, enum names, classic base58 addresses (never
@@ -1763,20 +1764,23 @@ registered.
 
 ## Appendix A. Reference Implementation Status
 
-What the reference verifiers implement of this draft (at code pin `c348a9c4`).
+What the reference verifiers implement of this draft (at code pin `da89329b`).
 How the reference server holds and passes trust material is described in
 `src/xprv/README.md` in the reference repository.
 
 A canonical `STValidation` (§2.1) is a round-trip under the verifier's
 protocol-definitions snapshot, not a fixed list of field names. Both verifiers
 report the fingerprints of their loaded definitions in `definitions.{leaf,validation}`
-(§7.1): `xprv verify` uses the `xrpl_definitions.json` / `xahau_definitions.json`
-embedded in `catl::xdata`, while `verify-xprv.py` uses `xrpl-py` 5.2.0 (with
-adapters for `rippled`'s base-ten `UInt64`, issued-amount, and `Number` text).
-Those two snapshots differ on some non-validation fields and on Xahau-only
-fields. §9.1 requires two verifiers of one version to agree on the bytes that
-their shared snapshot defines; it does not claim agreement on fields defined by
-only one snapshot.
+(§7.1): `xprv verify` loads the `xrpl_definitions.json` or
+`xahau_definitions.json` embedded in `catl::xdata` according to the configured
+network (so its leaf and validation snapshots can differ by network), while
+`verify-xprv.py` uses `xrpl-py` 5.2.0 (with adapters for `xrpl-py`'s five
+deviations from `rippled` JSON: ordinary `UInt64` text, base-ten `UInt64`
+fields, path-step `type`, issued-amount `value`, and `Number` text) and
+`PyNaCl` (`libsodium`) for Ed25519. Those two snapshots differ on some
+non-validation fields and on Xahau-only fields. §9.1 requires two verifiers of
+one version to agree on the bytes that their shared snapshot defines; it does
+not claim agreement on fields defined by only one snapshot.
 
 | Capability | C++ `xprv verify` | Python `verify-xprv.py` |
 |---|---|---|
@@ -1786,14 +1790,26 @@ only one snapshot.
 | Primary lists from outside the proof; list-less anchor (§3.3) | no: rejected at `trust` | no: same |
 | Online list refresh before verifying | no; the reference server refreshes lists | no |
 | Binary encoder (`convert`, JSON ↔ binary) | yes | no (decodes binary only) |
-| Decoded Xahau JSON leaves | yes | no: verifies Xahau binary proofs; `xrpl-py` ships XRPL definitions only |
-| Exact `rippled` leaf JSON (§2.3: native `Issue`, amounts, `Number`, base-ten `UInt64`) | yes; ordinary `UInt64` lowercase unpadded hex & path-step `type` in progress | same |
-| Full libsodium Ed25519 profile (§5.1) | yes | in progress (`PyNaCl`; currently `cryptography` + `S < L`) |
+| Decoded Xahau JSON leaves (`network_id == 21337`) | yes | no: declines every decoded Xahau `map_proof` at `parse` with a stated reason directing callers to binary; verifies Xahau binary proofs and Xahau JSON proofs with no map step |
+| Exact `rippled` leaf JSON (§2.3: native `Issue`, amounts, `Number`, ordinary & base-ten `UInt64`, path-step `type`) | yes | yes (on XRPL; see limits below) |
+| Full libsodium Ed25519 profile (§5.1) | yes | yes (`PyNaCl`) |
 | Sibling fan-out and multi-leaf proofs | accepted | accepted |
 
 `FILE` is a JSON array of base64 raw manifests. A list-less anchor is
 well-formed and unverifiable by both reference verifiers until external
 primary-list storage is added.
+
+**Documented codec limits (both verify in binary):**
+
+- **Reserved issued-currency code (Python):** an issued amount whose 20-byte
+  currency holds the native code's ASCII letters (`00..00 58 52 50 00..00`)
+  renders as 40 hex digits in `rippled`, whereas `xrpl-py` refuses to encode
+  or decode it. `verify-xprv.py` therefore refuses a JSON leaf holding that
+  code; the proof verifies in binary. None is known in a validated ledger.
+- **MPT path step (C++ `x-data`):** `rippled`'s newer `PathSet` step carrying
+  an MPT issuance is not yet implemented in `catl::xdata`'s path codec, so the
+  C++ side cannot write or round-trip such a leaf as JSON; the proof verifies
+  in binary.
 
 ## Appendix B. Conformance Corpus and Runner
 
@@ -1821,23 +1837,28 @@ three forms:
   trust-world suite (`scripts/xprv_trust_world.py`), which supplies per-vector
   `trust.manifests` (base64 held manifests) covering manifest rotation,
   revocation, equivocation, list windows, and publisher conflicts, plus the
-  historical duplicate-nibble forgery regression.
+  historical duplicate-nibble forgery regression and captured Xahau mainnet
+  vectors.
 
 Each negative vector declares its expected refusal `layer` (`parse`, `trust`,
 or `graph`, matching §7.1) and a `reason_contains` substring. Any expected
 discrepancy is recorded as a typed `known_failing` entry (`{does, because}`)
-rather than an unconditional skip, so a crash, timeout, or different failure
-category still fails the run.
+rather than an unconditional skip, so a crash, `timeout`, or any other failure
+category still fails the run. At `da89329b`, the corpus carries one typed
+`known_failing` entry (`accept-xahau-tx-json` for `python`), pinning Python's
+declared refusal of decoded Xahau leaves.
 
 **Black-box runner contract.** `scripts/xprv-conformance.py run` invokes any
 verifier via a command template (`{proof}`, `{publisher_key}`, `{network_id}`,
-`{manifests}`): exit `0` means accept, exit `1` means refuse, and any other
-exit status, signal, or timeout is recorded as `abnormal` (fail). For the
-built-in `cpp` and `python` verifiers (and any external verifier marked with
-`--reports NAME`), the runner parses standard output as a §7.1 JSON report and
-requires `verified` to match the exit status, `reason_contains` to appear in
-`report.reason` (log lines on stderr do not count), and `report.layer` to equal
-the vector's `layer`.
+`{manifests}`): exit `0` means accept, exit `1` means refuse, a timeout is
+recorded as `timeout` (fail), and any other exit status, signal, or malformed
+report is recorded as `abnormal` (fail). For the built-in `cpp` and `python`
+verifiers, the runner parses standard output as a §7.1 JSON report and checks
+that `verified` matches the exit status, `report.layer` equals the vector's
+`layer`, and `reason_contains` appears in `report.reason` (log lines on stderr
+do not count). For a third-party verifier, passing `--reports NAME` enables
+the JSON `verified` and `layer` checks; matching `reason_contains` against
+`report.reason` additionally requires `--check-reasons`.
 
 **Coverage note:** a positive list-less (`0x05`-omitted) proof verified solely
 from externally held lists is not yet covered because neither reference

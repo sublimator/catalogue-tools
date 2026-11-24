@@ -474,7 +474,9 @@ the integrated v10 repository gives you a shared test corpus
    any held manifests file) to a command template and checks exit `0` (accept)
    vs. `1` (refuse), treating any crash, signal, or timeout as a failure. If
    your verifier also emits the spec §7.1 `--json` report, pass `--reports mine`
-   to check `verified`, refusal `layer`, and `reason` strictly from the report.
+   to check `verified` against the exit status and the refusal `layer` from the
+   report (add `--check-reasons` as well to match `reason_contains` against
+   `report.reason`).
    By default it also runs the built-in `cpp` and `python` reference verifiers
    alongside yours (which requires a built `xprv` binary, or `--use python` to
    skip the C++ build):
