@@ -439,10 +439,20 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
     mut("zlib-second-stream", one_stream, [{"compress_body": 9}, {"append_zlib_zeros": 16}],
         "bytes after the zlib stream")
     mut("zlib-bad-checksum", one_stream, [{"compress_body": 9}, {"xor_last": "01"}], "invalid zlib body")
+    cap = V.MAX_DECOMPRESSED_PROOF_SIZE
     mut("zlib-over-the-cap", "spec §8: a compressed body is bounded while it inflates",
-        [{"truncate_to": 10}, {"at": 5, "set_hex": "01"},
-         {"append_zlib_zeros": V.MAX_DECOMPRESSED_PROOF_SIZE + 1}],
-        "exceeds cap")
+        [{"truncate_to": 10}, {"at": 5, "set_hex": "01"}, {"append_zlib_zeros": cap + 1}],
+        "decompressed size exceeds cap")
+    mut("plain-body-over-the-cap", "spec §8: the cap holds before parsing, compressed or not",
+        [{"truncate_to": 10}, {"append_zeros": cap + 1}], "body exceeds")
+    # The cap is inclusive: a body of exactly the cap is read, and refused for
+    # what it holds. Zeros are no record, so the reason is the parser's.
+    inclusive = "spec §8: a body of exactly the cap is within it"
+    mut("zlib-body-at-the-cap", inclusive,
+        [{"truncate_to": 10}, {"at": 5, "set_hex": "01"}, {"append_zlib_zeros": cap}],
+        "unknown TLV type 0")
+    mut("plain-body-at-the-cap", inclusive, [{"truncate_to": 10}, {"append_zeros": cap}],
+        "unknown TLV type 0")
     return fam
 
 
@@ -986,6 +996,10 @@ def apply_mutations(raw: bytes, muts: list[dict[str, Any]]) -> bytes:
             continue
         if "append_hex" in m:
             buf += bytes.fromhex(m["append_hex"])
+            continue
+        if "append_zeros" in m:
+            # This many zero bytes: a body too large to store in a vector.
+            buf += bytes(int(m["append_zeros"]))
             continue
         if "append_zlib_zeros" in m:
             # A whole RFC 1950 stream that inflates to this many zero bytes:

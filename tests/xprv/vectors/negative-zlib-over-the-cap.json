@@ -16,7 +16,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "exceeds cap"
+    "reason_contains": "decompressed size exceeds cap"
   },
   "base": "positive-tx-skiplist",
   "observed": {

@@ -92,13 +92,14 @@ class LedgerHashesRecognitionTests(unittest.TestCase):
 
 
 class AnchorVerificationTests(unittest.TestCase):
-    """The anchor verifier's own checks, called directly.
+    """The anchor verifier called directly: its counts and its own checks.
 
-    verify() refuses these anchors earlier, while it reads the proof, and that
-    is what the shared vectors show (trust-validations-under-each-others-keys,
-    trust-unknown-unl-member, trust-list-bundled-in-part, incomplete-validation,
-    trust-absent-signature-*). verify_anchor refuses them again on its own; no
-    proof reaches that second check, so no vector does.
+    verify() refuses the anchors below earlier, while it reads the proof, and
+    that is what the shared vectors show (trust-validations-under-each-others-
+    keys, trust-unknown-unl-member, trust-list-bundled-in-part,
+    incomplete-validation, trust-absent-signature-*). verify_anchor refuses
+    them again on its own; no proof reaches that second check, so no vector
+    does.
     """
 
     def verify(self, anchor: dict, trusted_key: str):
@@ -107,6 +108,13 @@ class AnchorVerificationTests(unittest.TestCase):
     def assertRejected(self, result, reason: str) -> None:
         self.assertFalse(result.ok)
         self.assertIn(reason, result.message)
+
+    def test_accepts_bound_anchor(self) -> None:
+        # The counts; that it is accepted is the vector trust-bound-anchor.
+        f = Fixture()
+        result = self.verify(f.anchor(), f.trusted_key)
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual((result.matched_unl, result.unl_size), (5, 5))
 
     def test_rejects_validation_map_key_mismatch(self) -> None:
         f = Fixture()

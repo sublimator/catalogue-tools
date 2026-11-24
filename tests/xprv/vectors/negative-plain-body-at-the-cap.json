@@ -1,0 +1,21 @@
+{
+  "name": "plain-body-at-the-cap",
+  "violates": "spec \u00a78: a body of exactly the cap is within it",
+  "layer": "parse",
+  "mutations": [
+    {
+      "truncate_to": 10
+    },
+    {
+      "append_zeros": 16777216
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "unknown TLV type 0"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: unknown TLV type 0"
+  }
+}

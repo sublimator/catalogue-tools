@@ -734,6 +734,11 @@ def _link_cases(add: Any, proof_of: Any) -> list[dict[str, Any]]:
     linked("recent-link-at-the-window-edge", recent, containing=1000, child=744, key_hex=short, last=999)
     linked("recent-link-past-the-window", recent, containing=1000, child=743, key_hex=short, last=999,
            reason=NO_SUPPORT)
+    below = "spec §5.3: a skip list supports only ledgers below the one holding it"
+    linked("recent-link-to-its-own-ledger", below, containing=1000, child=1000, key_hex=short, last=999,
+           reason=NO_SUPPORT)
+    linked("recent-link-to-a-later-ledger", below, containing=1000, child=1001, key_hex=short, last=999,
+           reason=NO_SUPPORT)
     linked("recent-link-with-wrong-last-sequence",
            "spec §5.3: a recent list's LastLedgerSequence is the ledger before the one holding it",
            containing=1000, child=900, key_hex=short, last=998, reason=NO_SUPPORT)
@@ -751,9 +756,14 @@ def _link_cases(add: Any, proof_of: Any) -> list[dict[str, Any]]:
            key_hex=v.long_skip_key_hex(131072), last=196352, reason=NO_SUPPORT)
     linked("flag-link-from-another-group", flag, containing=200000, child=131072,
            key_hex=v.long_skip_key_hex(65536), last=196352, reason=NO_SUPPORT)
-    linked("flag-link-with-wrong-last-sequence",
-           "spec §5.3: a flag list's LastLedgerSequence is a flag ledger of the child's group, at or above the child",
-           containing=200000, child=131072, key_hex=v.long_skip_key_hex(131072), last=196353, reason=NO_SUPPORT)
+    linked("flag-link-to-its-own-ledger", below, containing=196608, child=196608,
+           key_hex=v.long_skip_key_hex(196608), last=196352, reason=NO_SUPPORT)
+    last_rule = "spec §5.3: a flag list's LastLedgerSequence is a flag ledger of the child's group, at or above the child"
+    for name, last in (("wrong-last-sequence", 196353),  # not a flag ledger
+                       ("last-sequence-from-another-group", 65536),
+                       ("last-sequence-below-the-child", 131071)):
+        linked(f"flag-link-with-{name}", last_rule, containing=200000, child=131072,
+               key_hex=v.long_skip_key_hex(131072), last=last, reason=NO_SUPPORT)
 
     # A binary leaf is authenticated as bytes; a verifier need not decode it.
     opaque = "spec §2.3, §3.7: a binary leaf the codec cannot decode is still authenticated"

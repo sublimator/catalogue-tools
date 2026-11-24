@@ -130,6 +130,14 @@ apply_mutations(
             raw.insert(raw.end(), bytes.begin(), bytes.end());
             continue;
         }
+        if (auto const* zeros = o.if_contains("append_zeros"))
+        {
+            // This many zero bytes: a body too large to store in a vector.
+            raw.resize(
+                raw.size() + static_cast<size_t>(zeros->to_number<uint64_t>()),
+                0);
+            continue;
+        }
         if (auto const* zeros = o.if_contains("append_zlib_zeros"))
         {
             // A whole RFC 1950 stream that inflates to this many zero bytes:
