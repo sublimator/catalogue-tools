@@ -1,0 +1,15 @@
+{
+  "name": "depth-diagnostic",
+  "states": "spec \u00a72.3: __depth__ is optional and, where present, equals the node's nesting depth",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie/__depth__",
+      "value": 0
+    }
+  ],
+  "expect": {
+    "verdict": "accept"
+  }
+}

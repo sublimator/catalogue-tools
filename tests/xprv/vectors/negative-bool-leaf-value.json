@@ -1,0 +1,24 @@
+{
+  "name": "bool-leaf-value",
+  "violates": "spec \u00a72.3: a leaf field that is not structured has a string or a number as its value",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/4/trie/B/4/9/7/9/A/1/Flags",
+      "value": false
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "must be a string or a number"
+  },
+  "known_failing": {
+    "python": "accepts: false and true serialize as 0 and 1",
+    "cpp": "refuses through a codec type error, not through the \u00a72.3 value rule"
+  },
+  "observed": {
+    "python_reason": "accepted"
+  }
+}

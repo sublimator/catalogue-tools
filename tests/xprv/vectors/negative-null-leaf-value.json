@@ -1,0 +1,24 @@
+{
+  "name": "null-leaf-value",
+  "violates": "spec \u00a72.3: a leaf field that is not structured has a string or a number as its value",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1/tx/InvoiceID",
+      "value": null
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "must be a string or a number"
+  },
+  "known_failing": {
+    "python": "accepts: xrpl-py drops a null member, so the leaf hashes as if it were absent",
+    "cpp": "refuses through a codec type error, not through the \u00a72.3 value rule"
+  },
+  "observed": {
+    "python_reason": "accepted"
+  }
+}

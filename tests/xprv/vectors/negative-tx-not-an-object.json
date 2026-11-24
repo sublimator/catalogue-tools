@@ -1,0 +1,23 @@
+{
+  "name": "tx-not-an-object",
+  "violates": "spec \u00a72.3: a transaction leaf's tx and meta are the decoded objects",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1/tx",
+      "value": 123
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "tx must be an object"
+  },
+  "known_failing": {
+    "cpp": "xprv verify refuses the leaf, then aborts on an uncaught exception while describing it"
+  },
+  "observed": {
+    "python_reason": "step 7: tx tree error: leaf member tx must be an object"
+  }
+}

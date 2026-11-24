@@ -66,8 +66,11 @@ read_json(fs::path const& p)
     return boost::json::parse(ss.str());
 }
 
+// Vector files by kind. "positive-" carries a whole proof and its
+// intermediates; "accept-" and "negative-" are edits of a positive that a
+// verifier must accept or refuse.
 std::vector<fs::path>
-vectors_matching(bool negative)
+vectors_named(std::string const& prefix)
 {
     std::vector<fs::path> out;
     if (!fs::exists(vector_dir()))
@@ -76,13 +79,17 @@ vectors_matching(bool negative)
     {
         if (e.path().extension() != ".json")
             continue;
-        bool const is_neg =
-            e.path().filename().string().rfind("negative-", 0) == 0;
-        if (is_neg == negative)
+        if (e.path().filename().string().rfind(prefix, 0) == 0)
             out.push_back(e.path());
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+std::vector<fs::path>
+vectors_matching(bool negative)
+{
+    return vectors_named(negative ? "negative-" : "positive-");
 }
 
 /// Apply the vector's declared byte mutations. Mirrors apply_mutations() in
@@ -137,6 +144,18 @@ apply_mutations(
                 from_hex(std::string(o.at("insert_hex").as_string()));
             raw.insert(raw.begin() + static_cast<std::ptrdiff_t>(n),
                 bytes.begin(), bytes.end());
+            continue;
+        }
+        if (auto const* del = o.if_contains("delete_at"))
+        {
+            auto const n = static_cast<size_t>(del->to_number<uint64_t>());
+            auto const count =
+                static_cast<size_t>(o.at("delete_len").to_number<uint64_t>());
+            if (n > raw.size() || count > raw.size() - n)
+                throw std::runtime_error("deletion exceeds file length");
+            raw.erase(
+                raw.begin() + static_cast<std::ptrdiff_t>(n),
+                raw.begin() + static_cast<std::ptrdiff_t>(n + count));
             continue;
         }
         auto at = static_cast<size_t>(o.at("at").to_number<uint64_t>());
@@ -497,24 +516,57 @@ struct Negative
     boost::json::object vector;
     std::vector<uint8_t> bytes;  // the proof as a verifier would receive it
     bool binary = false;  // parsed as binary even when the magic is mutated
-    std::string layer;           // parse, graph or trust
+    std::string layer;           // parse, graph or trust; empty on an accept
     std::string trust_key;
     uint32_t network_id = 0;
 };
 
-// Each negative as bytes: a byte mutation of its base, or the proof carried
-// inline (JSON structure, a container option or anchor contents that no byte
-// patch expresses). Trust comes from the vector's metadata or its base's.
+// A vector tagged known_failing for "cpp" records a defect this verifier
+// still has. It is not asserted here; scripts/xprv-conformance.py runs it
+// against the built verifier and fails once the tag is stale.
+std::vector<Negative>
+derived_vectors(std::string const& prefix);
+
+std::vector<Negative>
+without_known_failing(std::vector<Negative> all)
+{
+    std::vector<Negative> out;
+    for (auto& n : all)
+    {
+        auto const* known = n.vector.if_contains("known_failing");
+        if (known && known->is_object() && known->as_object().contains("cpp"))
+        {
+            std::cout << "[ KNOWN    ] " << n.path.filename().string() << ": "
+                      << std::string(known->as_object().at("cpp").as_string())
+                      << "\n";
+            continue;
+        }
+        out.push_back(std::move(n));
+    }
+    return out;
+}
+
 std::vector<Negative>
 negatives()
 {
+    return without_known_failing(derived_vectors("negative-"));
+}
+
+// Each derived vector as bytes: a byte mutation of its base, a patch of its
+// base's JSON form, or the proof carried inline (JSON structure, a container
+// option or anchor contents that no edit expresses). Trust comes from the
+// vector's metadata or its base's.
+std::vector<Negative>
+derived_vectors(std::string const& prefix)
+{
     std::vector<Negative> out;
-    for (auto const& path : vectors_matching(true))
+    for (auto const& path : vectors_named(prefix))
     {
         Negative n;
         n.path = path;
         n.vector = read_json(path).as_object();
-        n.layer = std::string(n.vector.at("layer").as_string());
+        if (auto const* layer = n.vector.if_contains("layer"))
+            n.layer = std::string(layer->as_string());
         boost::json::object trust;
         if (n.vector.contains("base"))
         {
@@ -655,6 +707,26 @@ TEST(XprvVectors, GraphNegativeVectorsAreRejectedWithAPretrustedAnchor)
     EXPECT_GT(inline_json, 0u)
         << "no JSON-form negative vectors found; the corpus is blind to "
            "JSON-trie soundness, which is where the known forgery lived";
+}
+
+// An accept vector is an edit of a positive that must still verify, in the
+// same production path and under the same configured trust.
+TEST(XprvVectors, AcceptVectorsAreAcceptedOnTheProductionPath)
+{
+    auto const all = without_known_failing(derived_vectors("accept-"));
+    ASSERT_FALSE(all.empty())
+        << "no accept vectors; regenerate with scripts/xprv-vectors.py mutate";
+    for (auto const& n : all)
+    {
+        EXPECT_EQ(
+            std::string(n.vector.at("expect").at("verdict").as_string()),
+            "accept")
+            << n.path.filename();
+        auto const why = refusal(n, true);
+        EXPECT_FALSE(why) << n.path.filename() << " ("
+                          << std::string(n.vector.at("states").as_string())
+                          << "): refused: " << why.value_or("");
+    }
 }
 
 // A mutation that changes nothing would assert a rejection never exercised.

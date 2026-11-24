@@ -37,10 +37,21 @@ REJECTION is the assertion — a verifier that accepts it has a hole, and one th
 rejects it for the wrong reason is also a finding, which is why `reason_contains`
 is recorded.
 
+Accept vectors are the same shape with the opposite assertion: an edit of a
+positive vector that a verifier MUST still accept.
+
+A vector may carry `known_failing`, an object naming the verifiers ("cpp",
+"python") that do not yet meet its expectation, each with the reason. It
+records a known defect as a test instead of leaving it out of the corpus.
+`mutate` writes such a vector only while the Python verifier really does miss
+it, `check` and the C++ gtest skip a vector tagged for their own verifier, and
+scripts/xprv-conformance.py holds the tag to account: a tagged verifier that
+starts meeting the expectation fails the run until the tag is removed.
+
 Commands
 --------
 annotate  derive intermediates from a proof and write a positive vector
-mutate    generate the negative-vector family from a positive vector
+mutate    generate the accept and negative families from a positive vector
 check     verify every vector; assert verdicts AND recorded intermediates
 """
 from __future__ import annotations
@@ -356,15 +367,19 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     proof = base["form"]["json"]
     fam: list[dict[str, Any]] = []
 
-    def neg(name: str, rule: str, layer: str, reason: str, ops: list[dict[str, Any]]) -> None:
-        fam.append({
+    def neg(name: str, rule: str, layer: str, reason: str, ops: list[dict[str, Any]],
+            known_failing: dict[str, str] | None = None) -> None:
+        entry = {
             "name": name,
             "violates": rule,
             "layer": layer,
             "base": base_name,
             "json_patch": ops,
             "expect": {"verdict": "reject", "reason_contains": reason},
-        })
+        }
+        if known_failing:
+            entry["known_failing"] = known_failing
+        fam.append(entry)
 
     def at(path: str, value: Any) -> dict[str, Any]:
         return {"op": "set", "path": path, "value": value}
@@ -429,7 +444,42 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("validation-unsigned-field",
         "spec §5.1: validation signing data keeps every field except Signature",
         "trust", "quorum not met", injected)
+
+    # §2.3 gives a plain field's value two JSON types. A codec that skips a
+    # null member hashes the leaf as if it were absent, so the reader sees a
+    # member nothing authenticated.
+    value_rule = "spec §2.3: a leaf field that is not structured has a string or a number as its value"
+    neg("null-leaf-value", value_rule, "graph", "must be a string or a number",
+        [at(f"{tx_leaf}/1/tx/InvoiceID", None)],
+        known_failing={
+            "python": "accepts: xrpl-py drops a null member, so the leaf hashes as if it were absent",
+            "cpp": "refuses through a codec type error, not through the §2.3 value rule",
+        })
+    neg("bool-leaf-value", value_rule, "graph", "must be a string or a number",
+        [at(f"{state_leaf}/1/Flags", False)],
+        known_failing={
+            "python": "accepts: false and true serialize as 0 and 1",
+            "cpp": "refuses through a codec type error, not through the §2.3 value rule",
+        })
+    neg("tx-not-an-object", "spec §2.3: a transaction leaf's tx and meta are the decoded objects",
+        "graph", "tx must be an object", [at(f"{tx_leaf}/1/tx", 123)],
+        known_failing={
+            "cpp": "xprv verify refuses the leaf, then aborts on an uncaught exception while describing it",
+        })
     return fam
+
+
+def patch_accept_family(base: dict[str, Any], base_name: str) -> list[dict[str, Any]]:
+    """Edits of a positive vector's JSON form that a verifier MUST still accept."""
+    proof = base["form"]["json"]
+    first_map = next(i for i, s in enumerate(proof["steps"]) if s["type"] == "map_proof")
+    return [{
+        "name": "depth-diagnostic",
+        "states": "spec §2.3: __depth__ is optional and, where present, equals the node's nesting depth",
+        "base": base_name,
+        "json_patch": [{"op": "set", "path": f"/steps/{first_map}/trie/__depth__", "value": 0}],
+        "expect": {"verdict": "accept"},
+    }]
 
 
 def apply_mutations(raw: bytes, muts: list[dict[str, Any]]) -> bytes:
@@ -450,6 +500,12 @@ def apply_mutations(raw: bytes, muts: list[dict[str, Any]]) -> bytes:
             if at > len(buf):
                 raise SystemExit(f"insertion at {at} exceeds file length {len(buf)}")
             buf[at:at] = bytes.fromhex(m["insert_hex"])
+            continue
+        if "delete_at" in m:
+            at, count = int(m["delete_at"]), int(m["delete_len"])
+            if at + count > len(buf):
+                raise SystemExit(f"deletion at {at} exceeds file length {len(buf)}")
+            del buf[at : at + count]
             continue
         at = int(m["at"])
         patch = bytes.fromhex(m["set_hex"])
@@ -563,14 +619,32 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     raw = bytes.fromhex(bin_hex)
 
     written = 0
+    for acc in patch_accept_family(base, args.base):
+        data = json.dumps(apply_json_patch(base["form"]["json"], acc["json_patch"])).encode()
+        ok, reason = python_verdict(data, trust=base["trust"])
+        if not ok:
+            LOG.error("accept vector %r was REFUSED by the reference verifier (%s); "
+                      "not writing a vector that asserts a false claim", acc["name"], reason)
+            return 1
+        out = VECTOR_DIR / f"accept-{acc['name']}.json"
+        out.write_text(json.dumps(acc, indent=2) + "\n")
+        LOG.info("wrote %s (accepted)", out.name)
+        written += 1
     for neg in patch_negative_family(base, args.base):
         data = json.dumps(apply_json_patch(base["form"]["json"], neg["json_patch"])).encode()
         ok, reason = python_verdict(data, trust=base["trust"])
-        if ok:
+        tagged = "python" in neg.get("known_failing", {})
+        want = neg["expect"]["reason_contains"].lower()
+        met = not ok and want in reason.lower()
+        if tagged and met:
+            LOG.error("negative %r is tagged known_failing for python, but the reference "
+                      "verifier now refuses it for its reason; remove the tag", neg["name"])
+            return 1
+        if ok and not tagged:
             LOG.error("inline negative %r was ACCEPTED by the reference verifier; "
                       "not writing a vector that asserts a false claim", neg["name"])
             return 1
-        neg["observed"] = {"python_reason": reason}
+        neg["observed"] = {"python_reason": "accepted" if ok else reason}
         out = VECTOR_DIR / f"negative-{neg['name']}.json"
         out.write_text(json.dumps(neg, indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
@@ -590,7 +664,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         out.write_text(json.dumps(neg, indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
         written += 1
-    LOG.info("%d negative vectors written", written)
+    LOG.info("%d derived vectors written", written)
     return 0
 
 
@@ -601,12 +675,18 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 2
 
     failures: list[str] = []
-    positives = negatives = 0
+    positives = negatives = accepts = known = 0
 
     for path in vectors:
         vec = json.loads(path.read_text())
         name = vec.get("name", path.stem)
         expect = vec.get("expect", {})
+
+        if "python" in vec.get("known_failing", {}):
+            # scripts/xprv-conformance.py holds the tag to account.
+            known += 1
+            LOG.info("known failing, not checked here: %s (%s)", name, vec["known_failing"]["python"])
+            continue
 
         if "form" in vec and expect.get("verdict") == "reject":
             # JSON-form negative: the whole malformed proof is carried inline,
@@ -634,7 +714,6 @@ def cmd_check(args: argparse.Namespace) -> int:
             continue
 
         if "base" in vec:
-            negatives += 1
             base = json.loads((VECTOR_DIR / f"{vec['base']}.json").read_text())
             if "json_patch" in vec:
                 raw = json.dumps(apply_json_patch(base["form"]["json"], vec["json_patch"])).encode()
@@ -644,6 +723,12 @@ def cmd_check(args: argparse.Namespace) -> int:
                     bytes.fromhex(base["form"]["binary_hex"]), vec["mutations"]
                 )
                 ok, reason = python_verdict(raw, binary=True, trust=base.get("trust"))
+            if expect.get("verdict") == "accept":
+                accepts += 1
+                if not ok:
+                    failures.append(f"{name}: expected accept, got reject ({reason[:70]})")
+                continue
+            negatives += 1
             if ok:
                 failures.append(f"{name}: expected reject, got accept")
             elif (want := expect.get("reason_contains")) and \
@@ -701,8 +786,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     for f in failures:
         LOG.error("FAIL %s", f)
-    LOG.info("checked %d positive, %d negative vector(s): %d failure(s)",
-             positives, negatives, len(failures))
+    LOG.info("checked %d positive, %d accept and %d negative vector(s), %d known failing "
+             "left to xprv-conformance.py: %d failure(s)",
+             positives, accepts, negatives, known, len(failures))
     return 1 if failures else 0
 
 
@@ -719,7 +805,7 @@ def main() -> int:
     a.add_argument("--allow-failing", action="store_true")
     a.set_defaults(fn=cmd_annotate)
 
-    m = sub.add_parser("mutate", help="write the negative-vector family")
+    m = sub.add_parser("mutate", help="write the accept and negative families")
     m.add_argument("--base", required=True)
     m.set_defaults(fn=cmd_mutate)
 
