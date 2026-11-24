@@ -40,9 +40,11 @@ from typing import Any, Literal, TypedDict
 
 import zlib
 
+import builtins
 import contextlib
 import contextvars
 import importlib
+import importlib.util
 
 import nacl.signing
 import xrpl.core.binarycodec  # noqa: F401  (copied privately below; never changed)
@@ -396,12 +398,14 @@ class UnknownLeafField(LeafFormError):
 # which is built for XRPL alone and keeps its definitions in module globals.
 #
 # So the verifier does not use the xrpl-py codec that everything else in the
-# process shares. It imports the codec package a second and a third time into
-# private module objects, one copy per network, sets each copy up once, and
-# never changes it again. The public xrpl-py is left exactly as installed: a
-# program that imports this file and calls xrpl-py itself sees no difference.
-# Which copy handles a value is held in a context variable, so two threads,
-# one on an XRPL proof and one on a Xahau proof, cannot see each other's.
+# process shares. It runs the codec package's source a second and a third
+# time into private module objects, one copy per network, sets each copy up
+# once when this file loads, and never changes it again. The copies are in no
+# shared table: sys.modules is not touched, so the public xrpl-py is exactly
+# as installed at every moment, and a program that imports this file and
+# calls xrpl-py itself sees no difference. Which copy handles a value is held
+# in a context variable, so two threads, one on an XRPL proof and one on a
+# Xahau proof, cannot see each other's.
 #
 # What a copy is given that xrpl-py does not have:
 #
@@ -555,40 +559,91 @@ def xahau_definitions_text() -> str:
     return zlib.decompress(base64.b64decode(_XAHAU_DEFINITIONS_ZB64)).decode()
 
 
-def _private_copy_of_xrpl_codec() -> dict[str, Any]:
-    """Import xrpl-py's codec package again, into module objects of our own.
+def _in_codec_package(name: str) -> bool:
+    return name == _CODEC_PACKAGE or name.startswith(_CODEC_PACKAGE + ".")
 
-    The public modules are taken out of sys.modules for the length of the
-    import and put back, with the parent package's attribute, before this
-    returns. The copy's modules refer to each other, to the shared exceptions
-    module and to the packages the codec builds on.
 
-    xrpl-py 5.2.0 also imports from its own package inside two functions,
-    which would find the public modules when they run. NetworkCodec deals
-    with both: the lookup of a field's type class is replaced with the
-    copy's own, and the serializer class that STObject fetches is the public
-    one, which holds no definitions and is used as it is. A unit test fails
-    if the installed xrpl-py has any other such import.
+class _TowardsPrivate:
+    """A public package on the way down to a private copy.
+
+    `import xrpl.core.binarycodec.types as types`, written inside the copy,
+    asks Python for `xrpl` and then walks `.core.binarycodec.types`. This
+    stands in for `xrpl` and for `xrpl.core` on that walk, and hands over the
+    copy's module where the walk reaches the codec package.
     """
 
-    def codec_module(name: str) -> bool:
-        return (name == _CODEC_PACKAGE or name.startswith(_CODEC_PACKAGE + ".")) and name not in _CODEC_SHARED
+    def __init__(self, real: Any, name: str, modules: dict[str, Any]) -> None:
+        self._real, self._name, self._modules = real, name, modules
 
-    public = {name: module for name, module in sys.modules.items() if codec_module(name)}
-    parent = sys.modules["xrpl.core"]
-    for name in public:
-        del sys.modules[name]
-    try:
-        importlib.import_module(_CODEC_PACKAGE)
-        for name in sorted(public):
-            importlib.import_module(name)
-        private = {name: module for name, module in sys.modules.items() if codec_module(name)}
-    finally:
-        for name in [name for name in sys.modules if codec_module(name)]:
-            del sys.modules[name]
-        sys.modules.update(public)
-        parent.binarycodec = public[_CODEC_PACKAGE]
-    return private
+    def __getattr__(self, attribute: str) -> Any:
+        full = f"{self._name}.{attribute}"
+        if full in self._modules:
+            return self._modules[full]
+        real = getattr(self._real, attribute)
+        if _CODEC_PACKAGE.startswith(full + "."):
+            return _TowardsPrivate(real, full, self._modules)
+        return real
+
+
+class _PrivateCodecModules:
+    """xrpl-py's codec package, run again into module objects of our own.
+
+    Each private module is given its own `__import__`. An import of the codec
+    package from inside the copy, at the top of a module or inside a function
+    when it runs, gets the copy's module; every other import goes to
+    Python's. sys.modules is never written, so no other thread, and no other
+    user of xrpl-py, can meet a copy, whole or half made, under a public name.
+    One module is deliberately not copied: the exceptions, so that every copy
+    raises the class that callers catch.
+    """
+
+    def __init__(self) -> None:
+        self.modules: dict[str, Any] = {}
+        self._builtins = dict(vars(builtins))
+        self._builtins["__import__"] = self._import
+        self.load(_CODEC_PACKAGE)
+
+    def load(self, name: str) -> Any:
+        if name in _CODEC_SHARED:
+            return importlib.import_module(name)
+        module = self.modules.get(name)
+        if module is not None:
+            return module
+        parent, _, child = name.rpartition(".")
+        if _in_codec_package(parent):
+            self.load(parent)
+        spec = importlib.util.find_spec(name)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no module named {name}")
+        module = importlib.util.module_from_spec(spec)
+        module.__dict__["__builtins__"] = self._builtins
+        # Registered before it runs, as Python does, so that modules that
+        # import each other find one another.
+        self.modules[name] = module
+        if parent in self.modules:
+            setattr(self.modules[parent], child, module)
+        spec.loader.exec_module(module)
+        return module
+
+    def _import(self, name: str, globals: Any = None, locals: Any = None, fromlist: Any = (), level: int = 0) -> Any:
+        if level:
+            package = (globals or {}).get("__package__") or ""
+            name = importlib.util.resolve_name("." * level + name, package)
+            level = 0
+        if not _in_codec_package(name):
+            return builtins.__import__(name, globals, locals, fromlist, level)
+        module = self.load(name)
+        if not fromlist:
+            # `import a.b.c`: Python wants the top package and walks down.
+            top = name.partition(".")[0]
+            return _TowardsPrivate(importlib.import_module(top), top, self.modules)
+        for item in fromlist:
+            # `from package import submodule`
+            if item != "*" and not hasattr(module, item):
+                submodule = f"{name}.{item}"
+                if submodule in _CODEC_SHARED or importlib.util.find_spec(submodule) is not None:
+                    setattr(module, item, self.load(submodule))
+        return module
 
 
 def _install_definitions(definitions: Any, field_info: Any, field_header: Any, table: dict[str, Any]) -> None:
@@ -786,10 +841,11 @@ class NetworkCodec:
     """xrpl-py's codec, privately copied and set up for one network."""
 
     def __init__(self, native: str, definitions: dict[str, Any] | None = None) -> None:
-        modules = _private_copy_of_xrpl_codec()
+        private = _PrivateCodecModules()
+        self.modules = private.modules
 
         def module(name: str) -> Any:
-            return modules[f"{_CODEC_PACKAGE}.{name}"]
+            return private.load(f"{_CODEC_PACKAGE}.{name}")
 
         if definitions is not None:
             _install_definitions(
@@ -816,7 +872,7 @@ class NetworkCodec:
         type_of = {name: getattr(types, name) for name in types.__all__}
         type_of["Currency"] = field_currency
         module("definitions.field_instance")._get_type_by_name = type_of.__getitem__
-        package = modules[_CODEC_PACKAGE]
+        package = private.load(_CODEC_PACKAGE)
         self.native = native
         self.encode = package.encode
         self.decode = package.decode
@@ -824,21 +880,18 @@ class NetworkCodec:
         self.get_field_instance = module("definitions.definitions").get_field_instance
 
 
+# Both are made here, once, while this file loads, and are read-only after:
+# there is nothing left to set up when a proof arrives, on any thread.
 XRPL_CODEC = NetworkCodec("XRP")
-_xahau_codec: NetworkCodec | None = None
+_xahau_table = json.loads(xahau_definitions_text())
+XAHAU_CODEC = NetworkCodec(_xahau_table["native_currency_code"], _xahau_table)
 # The codec of the value in hand. XRPL's unless a Xahau leaf is being handled:
 # a validation and a manifest are read with XRPL's on every network (§2.1).
 _codec: contextvars.ContextVar[NetworkCodec] = contextvars.ContextVar("xprv_codec", default=XRPL_CODEC)
 
 
 def network_codec(network_id: int) -> NetworkCodec:
-    global _xahau_codec
-    if network_id != XAHAU_NETWORK_ID:
-        return XRPL_CODEC
-    if _xahau_codec is None:
-        table = json.loads(xahau_definitions_text())
-        _xahau_codec = NetworkCodec(table["native_currency_code"], table)
-    return _xahau_codec
+    return XAHAU_CODEC if network_id == XAHAU_NETWORK_ID else XRPL_CODEC
 
 
 @contextlib.contextmanager

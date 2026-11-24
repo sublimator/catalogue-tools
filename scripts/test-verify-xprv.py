@@ -463,32 +463,66 @@ print(json.dumps({"same": before == snapshot(), "verified": result.ok, "before":
         self.assertEqual(outcome["before"][0], "8314" + "00" * 20)
         self.assertEqual(outcome["before"][2], {"Account": "rrrrrrrrrrrrrrrrrrrrrhoLvTp"})
 
-    def test_xrpl_py_imports_its_own_package_lazily_in_two_known_places(self) -> None:
-        # A private copy of the codec is complete only if no function inside
-        # it imports the package again when it runs: that import would find
-        # the public modules. xrpl-py 5.2.0 has two such places and
-        # NetworkCodec handles both. Any other fails here.
-        import inspect
-        import pkgutil
-        import re
+    def test_a_private_copy_shares_no_codec_module_with_xrpl_py(self) -> None:
+        shared = "xrpl.core.binarycodec.exceptions"
+        for codec in (v.XRPL_CODEC, v.XAHAU_CODEC):
+            self.assertGreater(len(codec.modules), 30)
+            for name, module in codec.modules.items():
+                with self.subTest(module=name):
+                    self.assertIsNot(sys.modules.get(name), module)
+            self.assertNotIn(shared, codec.modules)
+        self.assertFalse(set(map(id, v.XRPL_CODEC.modules.values())) & set(map(id, v.XAHAU_CODEC.modules.values())))
+        # An import written inside a function of the copy, which runs long
+        # after the copy was made, still gets the copy's module. xrpl-py has
+        # two: `from ... import BinarySerializer` and `import ... as types`.
+        modules = v.XAHAU_CODEC.modules
+        st_object = modules["xrpl.core.binarycodec.types.st_object"]
+        private_import = st_object.__dict__["__builtins__"]["__import__"]
+        serializer = "xrpl.core.binarycodec.binary_wrappers.binary_serializer"
+        self.assertIs(private_import(serializer, st_object.__dict__, None, ("BinarySerializer",), 0), modules[serializer])
+        walked = private_import("xrpl.core.binarycodec.types", st_object.__dict__, None, (), 0)
+        self.assertIs(walked.core.binarycodec.types, modules["xrpl.core.binarycodec.types"])
+        # And anything else is Python's own.
+        self.assertIs(private_import("json", st_object.__dict__, None, (), 0), json)
 
-        import xrpl.core.binarycodec as package
+    def test_threads_that_start_cold_together_do_not_collide(self) -> None:
+        # A fresh interpreter. Eight threads meet at a barrier and each takes
+        # the Xahau codec for the first time at once, while eight more use
+        # xrpl-py itself. Nothing is set up when a proof arrives, so there is
+        # nothing to collide on.
+        import subprocess
 
-        lazy = set()
-        for info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
-            source = inspect.getsource(importlib.import_module(info.name))
-            guarded = False
-            for line in source.splitlines():
-                if re.match(r"if TYPE_CHECKING", line):
-                    guarded = True
-                elif line and not line[0].isspace():
-                    guarded = False
-                if not guarded and re.match(r"\s+(from|import) xrpl\.core\.binarycodec", line):
-                    lazy.add((info.name.rsplit(".", 1)[-1], line.split()[1]))
-        self.assertEqual(lazy, {
-            ("field_instance", "xrpl.core.binarycodec.types"),
-            ("st_object", "xrpl.core.binarycodec.binary_wrappers.binary_serializer"),
-        })
+        program = """
+import importlib.util, json, sys, threading
+import xrpl.core.binarycodec as public
+spec = importlib.util.spec_from_file_location("verify_xprv", sys.argv[1])
+v = importlib.util.module_from_spec(spec); sys.modules["verify_xprv"] = v; spec.loader.exec_module(v)
+barrier, results, errors = threading.Barrier(16), [], []
+def xahau():
+    try:
+        barrier.wait(10)
+        with v.leaf_codec(v.XAHAU_NETWORK_ID):
+            results.append(("xahau", v.encode({"Data": "AB"})))
+    except Exception as exc:
+        errors.append(repr(exc))
+def xrpl_py():
+    try:
+        barrier.wait(10)
+        results.append(("public", public.encode({"Data": "AB"})))
+    except Exception as exc:
+        errors.append(repr(exc))
+threads = [threading.Thread(target=f) for f in [xahau] * 8 + [xrpl_py] * 8]
+[t.start() for t in threads]; [t.join(20) for t in threads]
+print(json.dumps({"errors": errors, "results": sorted(set(results))}))
+"""
+        run = subprocess.run(
+            [sys.executable, "-c", program, str(self.REPO / "scripts" / "verify-xprv.py")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr[-800:])
+        outcome = json.loads(run.stdout)
+        self.assertEqual(outcome["errors"], [])
+        self.assertEqual(outcome["results"], [["public", "701B01AB"], ["xahau", "701C01AB"]])
 
     def test_only_the_networks_own_code_is_native(self) -> None:
         issued = lambda code: {"value": "1", "currency": code, "issuer": self.ISSUER}  # noqa: E731
