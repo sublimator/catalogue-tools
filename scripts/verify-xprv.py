@@ -1974,6 +1974,9 @@ def parse_tlv_records(body: bytes) -> list[tuple[int, bytes]]:
                 "binary proof: TLV length exceeds remaining body bytes")
         if tlv_type not in KNOWN_TLV_TYPES:
             raise ValueError(f"binary proof: unknown TLV type {tlv_type}")
+        # §3.8: the anchor core comes first.
+        if not seen_anchor and tlv_type in (TLV_HEADER, TLV_MAP_TX, TLV_MAP_STATE):
+            raise ValueError("binary proof: first record must be the anchor core")
         if tlv_type == TLV_ANCHOR:
             if seen_anchor:
                 raise ValueError("binary proof: duplicate anchor core")

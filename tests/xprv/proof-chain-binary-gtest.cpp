@@ -41,6 +41,20 @@ make_bytes(size_t len, uint8_t fill)
     return std::vector<uint8_t>(len, fill);
 }
 
+/// The smallest anchor: a hash and a publisher key, no validations and no
+/// list. Every binary proof begins with an anchor core (§3.8), so the
+/// round-trip tests below put one in front of the step they exercise. Its
+/// record is 68 bytes: type, length and a 66-byte payload.
+AnchorData
+make_anchor()
+{
+    AnchorData a;
+    a.ledger_hash = make_hash(0x11);
+    a.publisher_key_hex = "ED" + std::string(64, 'A');
+    return a;
+}
+constexpr size_t kAnchorRecordSize = 68;
+
 /// A minimal well-formed binary trie (§3.7): a root with one leaf of `size`
 /// bytes, on the branch its key begins with. from_binary refuses a payload
 /// that is not a trie.
@@ -251,6 +265,7 @@ TEST(ProofChainBinary, RejectsZlibSuffixTruncationAndBadChecksum)
 TEST(ProofChainBinary, CompressedRoundTripAtLevelsOneAndNine)
 {
     ProofChain chain;
+    chain.steps.push_back(make_anchor());
     HeaderData h;
     h.seq = 12345678;
     h.drops = 99999999999000000ULL;
@@ -317,6 +332,7 @@ TEST(ProofChainBinary, RejectsDuplicateAnchorCore)
 TEST(ProofChainBinary, HeaderRoundTrip)
 {
     ProofChain chain;
+    chain.steps.push_back(make_anchor());
     HeaderData h;
     h.seq = 12345678;
     h.drops = 99999999999000000ULL;
@@ -331,8 +347,9 @@ TEST(ProofChainBinary, HeaderRoundTrip)
 
     auto binary = to_binary(chain);
 
-    // Header(10) + TLV: 1 type + varint(118) + 118 payload = 130 bytes
-    EXPECT_EQ(binary.size(), 130u);
+    // File header (10) + the anchor record + the header record: 1 type +
+    // varint(118) + 118 payload = 120 bytes.
+    EXPECT_EQ(binary.size(), 10u + kAnchorRecordSize + 120u);
     // Check magic
     EXPECT_EQ(binary[0], 'X');
     EXPECT_EQ(binary[1], 'P');
@@ -348,8 +365,8 @@ TEST(ProofChainBinary, HeaderRoundTrip)
 
     auto decoded = from_binary(binary);
     EXPECT_EQ(decoded.network_id, 0u);
-    ASSERT_EQ(decoded.steps.size(), 1u);
-    auto& dh = std::get<HeaderData>(decoded.steps[0]);
+    ASSERT_EQ(decoded.steps.size(), 2u);
+    auto& dh = std::get<HeaderData>(decoded.steps[1]);
 
     EXPECT_EQ(dh.seq, h.seq);
     EXPECT_EQ(dh.drops, h.drops);
@@ -368,6 +385,7 @@ TEST(ProofChainBinary, NetworkIdRoundTrip)
 {
     ProofChain chain;
     chain.network_id = 21337;  // Xahau
+    chain.steps.push_back(make_anchor());
     HeaderData h;
     h.seq = 1;
     chain.steps.push_back(h);
@@ -389,7 +407,7 @@ TEST(ProofChainBinary, NetworkIdRoundTrip)
 
     auto decoded_json = from_json(json_obj);
     EXPECT_EQ(decoded_json.network_id, 21337u);
-    ASSERT_EQ(decoded_json.steps.size(), 1u);
+    ASSERT_EQ(decoded_json.steps.size(), 2u);
 }
 
 // ─── Anchor round-trip ──────────────────────────────────────────
@@ -540,6 +558,7 @@ TEST(ProofChainBinary, RejectsListMaterialWithoutBlob)
 TEST(ProofChainBinary, TrieRoundTrip)
 {
     ProofChain chain;
+    chain.steps.push_back(make_anchor());
 
     TrieData trie;
     trie.tree = TrieData::TreeType::state;
@@ -554,13 +573,13 @@ TEST(ProofChainBinary, TrieRoundTrip)
 
     auto binary = to_binary(chain);
     auto decoded = from_binary(binary);
-    ASSERT_EQ(decoded.steps.size(), 2u);
+    ASSERT_EQ(decoded.steps.size(), 3u);
 
-    auto& dt1 = std::get<TrieData>(decoded.steps[0]);
+    auto& dt1 = std::get<TrieData>(decoded.steps[1]);
     EXPECT_EQ(dt1.tree, TrieData::TreeType::state);
     EXPECT_EQ(dt1.trie_binary, trie.trie_binary);
 
-    auto& dt2 = std::get<TrieData>(decoded.steps[1]);
+    auto& dt2 = std::get<TrieData>(decoded.steps[2]);
     EXPECT_EQ(dt2.tree, TrieData::TreeType::tx);
     EXPECT_EQ(dt2.trie_binary, trie2.trie_binary);
 }

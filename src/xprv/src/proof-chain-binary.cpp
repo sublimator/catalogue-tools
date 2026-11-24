@@ -600,6 +600,13 @@ decode_tlv_body(std::span<const uint8_t> data)
 
         if (length > data.size() - pos)
             throw std::runtime_error("binary proof: TLV length exceeds data");
+        // §3.8: the anchor core comes first. An unknown type is reported as
+        // such, below, rather than as a misplaced record.
+        if (!seen_anchor && type != TLV_ANCHOR &&
+            (type == TLV_LEDGER_HEADER || type == TLV_MAP_PROOF_TX ||
+             type == TLV_MAP_PROOF_STATE))
+            throw std::runtime_error(
+                "binary proof: first record must be the anchor core");
 
         std::span<const uint8_t> payload(data.data() + pos, length);
         pos += length;
@@ -654,14 +661,11 @@ decode_tlv_body(std::span<const uint8_t> data)
         }
     }
 
-    // NB: the "exactly one anchor" rule (spec §1, §3.8) is enforced by the
-    // verifier, not here. This function is a codec: it decodes whatever TLV
-    // records are present, and unit tests legitimately round-trip partial
-    // chains (a lone header, a lone trie) through it. Asserting proof structure
-    // at this layer conflated framing with validity and broke exactly those
-    // round-trips. The 0x05 anchor UNL is separately OPTIONAL by design — see
-    // §3.3: omitting it is how a verifier with cached or on-chain-pinned trust
-    // avoids shipping the ~15KB VL blob.
+    // §3.8: a body has exactly one anchor core, and it is the first record.
+    // The 0x05 anchor UNL is OPTIONAL by design (§3.3): omitting it is how a
+    // verifier holding the list avoids carrying it again.
+    if (!seen_anchor)
+        throw std::runtime_error("binary proof: missing anchor core record");
     return chain;
 }
 

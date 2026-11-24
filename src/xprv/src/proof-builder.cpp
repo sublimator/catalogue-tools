@@ -514,7 +514,31 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     // recent short list.
     bool const target_is_flag = (tx_ledger_seq % 256 == 0);
 
-    if (!ctx->need_flag_hop || target_is_flag)
+    if (ctx->distance == 0)
+    {
+        // The target is the anchor ledger (§6). Its header is already in the
+        // proof, and a ledger's skip list never holds its own hash, so there
+        // is nothing to walk: anchor, header, transaction tree.
+        PLOGI(log_, "[", net_label, "] Target is the anchor ledger");
+        catl::core::emit_status("target is the anchor ledger");
+        ctx->target_hdr_result = ctx->anchor_hdr;
+        ctx->target_ledger_hash = ctx->anchor_hash;
+    }
+    else if (ctx->distance == 1)
+    {
+        // The anchor header's parent_hash is the target's hash (§6). The
+        // header supports it directly, which is shorter than any skip-list
+        // proof, a flag-ledger target included.
+        PLOGI(log_, "[", net_label, "] Target is the anchor's parent");
+        catl::core::emit_status("target is the anchor's parent");
+        ctx->target_hdr_result = co_await ctx->node_cache->get_header(
+            tx_ledger_seq, ctx->peers, PeerSessionPtr{}, ctx->request_scope);
+        ctx->target_ledger_hash = ctx->target_hdr_result->ledger_hash256();
+        if (ctx->target_ledger_hash != ctx->anchor_hdr.header().parent_hash())
+            throw std::runtime_error(
+                "the anchor header's parent_hash is not the target ledger");
+    }
+    else if (!ctx->need_flag_hop || target_is_flag)
     {
         bool const long_direct = target_is_flag;
         if (long_direct)
@@ -719,7 +743,9 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         std::to_string(placed) + " placeholders)");
 
     // ── Emit target header + TX tree ──
-    co_await emit_step(make_header(target_hdr));
+    // At distance 0 the target header is the anchor header, emitted above.
+    if (ctx->distance != 0)
+        co_await emit_step(make_header(target_hdr));
     co_await emit_step(make_trie_data(abbrev, true, TrieData::TreeType::tx));
 
     co_return BuildResult{
