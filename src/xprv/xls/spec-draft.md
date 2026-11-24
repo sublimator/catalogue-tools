@@ -59,7 +59,7 @@ definitions referenced below.
 | [XRPL LedgerHashes](https://xrpl.org/docs/references/protocol/ledger-data/ledger-entry-types/ledgerhashes) | Skip-list SLE fields, recent/previous-history semantics, and LedgerHashes keylet derivation |
 | [XRPL binary codec definitions](https://github.com/XRPLF/xrpl.js/blob/main/packages/ripple-binary-codec/src/enums/definitions.json) | Type codes, field codes, ledger-entry codes, transaction result codes, and field metadata |
 | [XRPL rippled protocol layer](https://github.com/XRPLF/rippled/tree/develop/src/libxrpl/protocol) | XRPL reference JSON rendering (`STAmount`, `STInteger`, `STPathSet`, `Issue`, `Number`), manifest and `STValidation` signing formats, `MAN\0` and `VAL\0` signing data, signatures, and public-key formats |
-| [Xahau xahaud protocol layer](https://github.com/Xahau/xahaud/tree/dev/src/ripple/protocol) | Xahau reference JSON rendering and protocol definitions for `network_id == 21337` |
+| [Xahau xahaud protocol layer](https://github.com/Xahau/xahaud/tree/dev/src/libxrpl/protocol) | Xahau reference JSON rendering and protocol definitions for `network_id == 21337` |
 | XLS-41d XPOP ([XRPL-Standards](https://github.com/XRPLF/XRPL-Standards)) | Prior proof-of-payment trust chain and proof vocabulary |
 | [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) | Normative language |
 | [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648) | Canonical padded base64 (§3.5) for validator manifests inside signed validator-list blobs |
