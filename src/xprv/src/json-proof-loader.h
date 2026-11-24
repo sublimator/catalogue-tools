@@ -124,15 +124,23 @@ struct UniqueJsonMembers
     }
 };
 
+// A trie may nest 64 inner nodes (§2.3), inside the proof, its steps and a
+// step, and above a leaf whose decoded object nests in turn. Boost.JSON stops
+// at 32 levels unless told otherwise, which refused valid deep tries that the
+// binary form and the Python verifier accept.
+inline constexpr std::size_t kMaxJsonDepth = 128;
+
 inline boost::json::value
 parse_unique_json(std::string_view text)
 {
-    boost::json::basic_parser<UniqueJsonMembers> parser{boost::json::parse_options{}};
+    boost::json::parse_options options;
+    options.max_depth = kMaxJsonDepth;
+    boost::json::basic_parser<UniqueJsonMembers> parser{options};
     boost::system::error_code error;
     parser.write_some(false, text.data(), text.size(), error);
     if (error)
         throw std::runtime_error("proof JSON: " + error.message());
-    return boost::json::parse(text);
+    return boost::json::parse(text, {}, options);
 }
 
 }  // namespace xprv::detail

@@ -93,6 +93,36 @@ TEST(ParsingStrictness, RejectsTrieRootThatIsNotAnInnerNode)
         std::runtime_error);
 }
 
+// A trie may be 64 inner nodes deep (§2.3). The JSON parser must read one
+// that deep; the node after that is refused by the trie rule, not by the
+// parser's nesting limit.
+TEST(ParsingStrictness, ReadsATrieOfFullDepth)
+{
+    auto const deep_trie_text = [](int inner_nodes) {
+        // Every inner node sits on branch 0, so the leaf key is all zeros.
+        std::string text =
+            R"({"format_version":)" + std::to_string(XPRV_FORMAT_VERSION) +
+            R"(,"network_id":0,"steps":[{"type":"map_proof","tree":"state","trie":)";
+        for (int i = 0; i < inner_nodes; ++i)
+            text += R"({"0":)";
+        text += "[\"" + std::string(64, '0') +
+            R"(",{"LedgerEntryType":"AccountRoot","Flags":0}])";
+        text += std::string(static_cast<size_t>(inner_nodes), '}');
+        return text + "}]}";
+    };
+    EXPECT_NO_THROW(xprv::from_json_text(deep_trie_text(64)));
+    try
+    {
+        xprv::from_json_text(deep_trie_text(65));
+        FAIL() << "a trie 65 inner nodes deep was read";
+    }
+    catch (std::runtime_error const& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("depth exceeds"), std::string::npos)
+            << e.what();
+    }
+}
+
 TEST(ParsingStrictness, RejectsWrongDiagnosticDepth)
 {
     EXPECT_THROW(
