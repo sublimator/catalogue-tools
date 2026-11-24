@@ -295,9 +295,10 @@ Each rule in spec §1.3 closes a concrete failure mode:
 - **Why bundling the list (`0x05` / `unl.manifest`+`blob`+`signature`) is
   optional on the wire.** A stateful verifier checking many proofs anchored to
   the same ledger can supply a verified primary list it already holds instead
-  of repeating a ~14.6 KB list in every proof. Neither reference verifier holds
-  external primary lists yet (spec Appendix A), so today both reject list-less
-  proofs cleanly at the trust layer.
+  of repeating a ~14.6 KB list in every proof. Both reference verifiers accept
+  externally held XRPL v1/v2 VL documents via `--lists FILE` (spec Appendix A)
+  and reject list-less proofs cleanly at the `trust` layer when no eligible
+  external list is supplied.
 
 ---
 
@@ -471,18 +472,18 @@ the integrated v10 repository gives you a shared test corpus
    tokens, single-pass trie parsing, and the §2.3 exact codec round-trip check.
 6. **Run the full black-box conformance suite** once both forms are working.
    `scripts/xprv-conformance.py` feeds each vector's JSON and binary proofs (and
-   any held manifests file) to a command template and checks exit `0` (accept)
-   vs. `1` (refuse), treating any crash, signal, or timeout as a failure. If
-   your verifier also emits the spec §7.1 `--json` report, pass `--reports mine`
-   to check `verified` against the exit status and the refusal `layer` from the
-   report (add `--check-reasons` as well to match `reason_contains` against
-   `report.reason`).
+   any held manifests and external validator-list files) to a command template
+   and checks exit `0` (accept) vs. `1` (refuse), treating any crash, signal, or
+   timeout as a failure. If your verifier also emits the spec §7.1 `--json`
+   report, pass `--reports mine` to check `verified` against the exit status and
+   the refusal `layer` from the report (add `--check-reasons` as well to match
+   `reason_contains` against `report.reason`).
    By default it also runs the built-in `cpp` and `python` reference verifiers
    alongside yours (which requires a built `xprv` binary, or `--use python` to
    skip the C++ build):
    ```sh
    scripts/xprv-conformance.py run \
-     --verifier mine='my-verifier {proof} --network {network_id} --key {publisher_key} --manifests {manifests}'
+     --verifier mine='my-verifier {proof} --network {network_id} --key {publisher_key} --manifests {manifests} --lists {lists}'
    ```
 
 ---

@@ -1787,7 +1787,7 @@ not claim agreement on fields defined by only one snapshot.
 | Both forms; capability-based DAG verification (§1, §5) | yes | yes |
 | Structured `--json` report (§7.1) | yes | yes |
 | Trust view from bundled list plus held manifests (§1.3) | yes (`--manifests FILE`) | yes (`--manifests FILE`) |
-| Primary lists from outside the proof; list-less anchor (§3.3) | no: rejected at `trust` | no: same |
+| Primary lists from outside the proof; list-less anchor (§1.3 P1–P4, §3.3) | yes (`--lists FILE`) | yes (`--lists FILE`) |
 | Online list refresh before verifying | no; the reference server refreshes lists | no |
 | Binary encoder (`convert`, JSON ↔ binary) | yes | no (decodes binary only) |
 | Decoded Xahau JSON leaves (`network_id == 21337`) | yes | no: declines every decoded Xahau `map_proof` at `parse` with a stated reason directing callers to binary; verifies Xahau binary proofs and Xahau JSON proofs with no map step |
@@ -1795,9 +1795,13 @@ not claim agreement on fields defined by only one snapshot.
 | Full libsodium Ed25519 profile (§5.1) | yes | yes (`PyNaCl`) |
 | Sibling fan-out and multi-leaf proofs | accepted | accepted |
 
-`FILE` is a JSON array of base64 raw manifests. A list-less anchor is
-well-formed and unverifiable by both reference verifiers until external
-primary-list storage is added.
+For `--manifests FILE`, `FILE` is a JSON array of canonical base64 raw
+manifests. For `--lists FILE`, `FILE` is either a single XRPL Validator List
+site document (version 1 `{version, public_key?, manifest, blob, signature}` or
+version 2 `{version, public_key?, manifest?, blobs_v2: [...]}`) or a JSON array
+of such documents. A list-less anchor is well-formed and verifies whenever
+`--lists FILE` supplies an eligible primary list for the configured publisher
+(and is rejected at `trust` when none is held).
 
 **Documented codec limits (both verify in binary):**
 
@@ -1835,10 +1839,11 @@ three forms:
   generation.
 - **Inline vectors** carry a full proof directly — notably the synthetic
   trust-world suite (`scripts/xprv_trust_world.py`), which supplies per-vector
-  `trust.manifests` (base64 held manifests) covering manifest rotation,
-  revocation, equivocation, list windows, and publisher conflicts, plus the
-  historical duplicate-nibble forgery regression and captured Xahau mainnet
-  vectors.
+  `trust.manifests` (base64 held manifests) and `trust.lists` (XRPL v1/v2 VL
+  site documents) covering manifest rotation, revocation, equivocation, list
+  windows, external primary list selection (P1–P4, Rule 7), list-less anchors,
+  and publisher conflicts, plus the historical duplicate-nibble forgery
+  regression and captured Xahau mainnet vectors.
 
 Each negative vector declares its expected refusal `layer` (`parse`, `trust`,
 or `graph`, matching §7.1) and a `reason_contains` substring. Any expected
@@ -1850,17 +1855,19 @@ declared refusal of decoded Xahau leaves.
 
 **Black-box runner contract.** `scripts/xprv-conformance.py run` invokes any
 verifier via a command template (`{proof}`, `{publisher_key}`, `{network_id}`,
-`{manifests}`): exit `0` means accept, exit `1` means refuse, a timeout is
-recorded as `timeout` (fail), and any other exit status, signal, or malformed
-report is recorded as `abnormal` (fail). For the built-in `cpp` and `python`
-verifiers, the runner parses standard output as a §7.1 JSON report and checks
-that `verified` matches the exit status, `report.layer` equals the vector's
-`layer`, and `reason_contains` appears in `report.reason` (log lines on stderr
-do not count). For a third-party verifier, passing `--reports NAME` enables
-the JSON `verified` and `layer` checks; matching `reason_contains` against
-`report.reason` additionally requires `--check-reasons`.
+`{manifests}`, `{lists}`): exit `0` means accept, exit `1` means refuse, a
+timeout is recorded as `timeout` (fail), and any other exit status, signal, or
+malformed report is recorded as `abnormal` (fail). For the built-in `cpp` and
+`python` verifiers, the runner parses standard output as a §7.1 JSON report and
+checks that `verified` matches the exit status, `report.layer` equals the
+vector's `layer`, and `reason_contains` appears in `report.reason` (log lines
+on stderr do not count). For a third-party verifier, passing `--reports NAME`
+enables the JSON `verified` and `layer` checks; matching `reason_contains`
+against `report.reason` additionally requires `--check-reasons`.
 
-**Coverage note:** a positive list-less (`0x05`-omitted) proof verified solely
-from externally held lists is not yet covered because neither reference
-verifier holds external primary lists; the negative list-less refusal at
-`trust` is covered.
+**List-less and external-list coverage:** the corpus covers both negative
+list-less refusals at `trust` (when no external list is supplied) and positive
+list-less proofs — including captured mainnet JSON and `0x05`-omitted binary
+proofs (`accept-listless-json`, `accept-listless-binary`) plus synthetic v1/v2
+external primary list selection, P2/P3 non-poisoning, P4 manifest harvesting,
+Rule 7 equivocation, and Rule 10/11 no-fallback vectors.
