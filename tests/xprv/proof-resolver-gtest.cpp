@@ -178,11 +178,12 @@ resolve(xprv::ProofChain const& proof, catl::xdata::Protocol const& protocol)
 
 }  // namespace
 
-TEST(ProofResolver, RejectsMissingAnchor)
-{
-    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-    EXPECT_FALSE(resolve(xprv::ProofChain{}, protocol));
-}
+// The resolver's rules for a proof (the one anchor, which LedgerHashes entry
+// links which ledger) are shared vectors, run against both verifiers through
+// the production path: tests/xprv/vectors/*-trust-*-link-*.json and
+// negative-no-anchor.json beside them. The tests here hand the resolver a
+// chain built in memory, which no proof file can: a chain the loader would
+// have refused, and an empty trust configuration.
 
 TEST(ProofResolver, RejectsEmptyProductionTrustConfiguration)
 {
@@ -192,6 +193,8 @@ TEST(ProofResolver, RejectsEmptyProductionTrustConfiguration)
     EXPECT_FALSE(xprv::resolve_proof_chain(proof, protocol, ""));
 }
 
+// The two accepts are the controls for the refusals below: the same chain,
+// unspoiled, resolves.
 TEST(ProofResolver, AcceptsRecognizedRecentJsonLink)
 {
     auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
@@ -215,23 +218,6 @@ TEST(ProofResolver, RejectsTrailingBinaryTrieBytes)
         protocol, "LedgerHashes", xprv::skip_list_key(), 1000, 900, 999, true);
     std::get<xprv::TrieData>(proof.steps[2]).trie_binary.push_back(0);
     EXPECT_FALSE(resolve(proof, protocol));
-}
-
-TEST(ProofResolver, RejectsGenericHashesJsonAndBinary)
-{
-    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-    for (bool const binary : {false, true})
-    {
-        auto const proof = make_state_link_proof(
-            protocol,
-            "AccountRoot",
-            xprv::skip_list_key(),
-            1000,
-            900,
-            999,
-            binary);
-        EXPECT_FALSE(resolve(proof, protocol));
-    }
 }
 
 TEST(ProofResolver, RejectsLedgerHashesUnderIgnoredJsonMember)
@@ -268,27 +254,5 @@ TEST(ProofResolver, RejectsLedgerHashesUnderDuplicateNibbleMember)
         false,
         false,
         true);
-    EXPECT_FALSE(resolve(proof, protocol));
-}
-
-TEST(ProofResolver, RejectsWrongKeyAndRecentRange)
-{
-    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-    auto wrong_key = xprv::skip_list_key();
-    wrong_key.data()[0] ^= 0xFF;
-    auto const wrong_key_proof = make_state_link_proof(
-        protocol, "LedgerHashes", wrong_key, 1000, 900, 999, false);
-    EXPECT_FALSE(resolve(wrong_key_proof, protocol));
-
-    auto const out_of_range = make_state_link_proof(
-        protocol, "LedgerHashes", xprv::skip_list_key(), 1000, 743, 999, false);
-    EXPECT_FALSE(resolve(out_of_range, protocol));
-}
-
-TEST(ProofResolver, RejectsInconsistentLastLedgerSequence)
-{
-    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-    auto const proof = make_state_link_proof(
-        protocol, "LedgerHashes", xprv::skip_list_key(), 1000, 900, 998, false);
     EXPECT_FALSE(resolve(proof, protocol));
 }

@@ -9,10 +9,6 @@
 #include <catl/xdata/protocol.h>
 #include <catl/xdata/serialize.h>
 
-#include <boost/iostreams/copy.hpp>
-#include <boost/iostreams/device/back_inserter.hpp>
-#include <boost/iostreams/filter/zlib.hpp>
-#include <boost/iostreams/filtering_stream.hpp>
 #include <boost/json.hpp>
 #include <cstring>
 #include <fstream>
@@ -93,173 +89,13 @@ make_blob(int num_validators = 2)
     return {json.begin(), json.end()};
 }
 
-// Build a FLAG_ZLIB binary-proof blob wrapping `compressed` as its body.
-std::vector<uint8_t>
-make_zlib_proof(std::vector<char> const& compressed)
-{
-    std::vector<uint8_t> blob = {'X', 'P', 'R', 'V'};
-    blob.push_back(static_cast<uint8_t>(XPRV_FORMAT_VERSION));
-    blob.push_back(0x01);                   // FLAG_ZLIB
-    blob.insert(blob.end(), {0, 0, 0, 0});  // network_id (BE)
-    blob.insert(blob.end(), compressed.begin(), compressed.end());
-    return blob;
-}
-
-// zlib-compress `n` zero bytes — a classic decompression bomb (huge output,
-// tiny compressed form).
-std::vector<char>
-zlib_compress_zeros(size_t n)
-{
-    namespace io = boost::iostreams;
-    std::vector<char> zeros(n, 0);
-    std::vector<char> compressed;
-    io::filtering_ostream os;
-    os.push(io::zlib_compressor());
-    os.push(io::back_inserter(compressed));
-    io::write(os, zeros.data(), static_cast<std::streamsize>(zeros.size()));
-    os.reset();
-    return compressed;
-}
-
 }  // namespace
 
-// ─── Decompression-bomb guard (#0050) ───────────────────────────
-
-// Regression: a /verify body with FLAG_ZLIB whose payload inflates past the
-// 16 MiB cap must not be fully expanded (decompression bomb). The inflate loop
-// bounds output during inflation; from_binary must reject the blob rather
-// than allocate the full decompressed size.
-TEST(ProofChainBinary, RejectsZlibDecompressionBomb)
-{
-    // 32 MiB of zeros — well past the 16 MiB cap — compresses to a few KB.
-    auto compressed = zlib_compress_zeros(32u * 1024 * 1024);
-    ASSERT_LT(compressed.size(), 1u * 1024 * 1024)
-        << "bomb should compress small";
-
-    auto blob = make_zlib_proof(compressed);
-
-    // Must surface the cap error specifically (not OOM, not an incidental
-    // decode error) — proves the inflate loop, not something downstream,
-    // stopped it.
-    try
-    {
-        from_binary(std::span<const uint8_t>(blob));
-        FAIL() << "expected decompression-bomb rejection";
-    }
-    catch (std::exception const& e)
-    {
-        EXPECT_NE(
-            std::string(e.what()).find("decompressed size exceeds cap"),
-            std::string::npos)
-            << "expected the cap to trip, got: " << e.what();
-    }
-}
-
-// Control: a small FLAG_ZLIB body under the cap inflates fine (the cap
-// doesn't reject legitimate compressed proofs — it gets past decompression
-// and fails later in TLV decode, NOT in the decompressor).
-TEST(ProofChainBinary, AcceptsSmallZlibBodyPastDecompression)
-{
-    auto compressed = zlib_compress_zeros(1024);  // 1 KiB, well under cap
-    auto blob = make_zlib_proof(compressed);
-
-    // 1 KiB of zeros isn't a valid TLV body, so decode still throws — but the
-    // point is it does NOT throw the decompressor's "exceeds cap" error.
-    try
-    {
-        from_binary(std::span<const uint8_t>(blob));
-    }
-    catch (std::exception const& e)
-    {
-        EXPECT_EQ(
-            std::string(e.what()).find("decompressed size exceeds cap"),
-            std::string::npos)
-            << "small body must not trip the decompression cap";
-    }
-}
-
-namespace {
-
-std::string
-from_binary_error(std::vector<uint8_t> const& blob)
-{
-    try
-    {
-        from_binary(std::span<const uint8_t>(blob));
-    }
-    catch (std::exception const& e)
-    {
-        return e.what();
-    }
-    return {};
-}
-
-std::vector<uint8_t>
-make_plain_proof(std::size_t body_size)
-{
-    auto blob = make_zlib_proof({});
-    blob[5] = 0x00;
-    blob.resize(blob.size() + body_size, 0);
-    return blob;
-}
-
-bool
-mentions(std::string const& error, char const* text)
-{
-    return error.find(text) != std::string::npos;
-}
-
-}  // namespace
-
-// §8: exactly the cap inflates; one byte more trips it. Zeros are not a
-// valid TLV body, so the exact-cap case still fails, but later.
-TEST(ProofChainBinary, ZlibCapIsInclusive)
-{
-    auto const at_cap = from_binary_error(
-        make_zlib_proof(zlib_compress_zeros(XPRV_MAX_BODY_SIZE)));
-    EXPECT_FALSE(mentions(at_cap, "exceeds cap")) << at_cap;
-    auto const over = from_binary_error(
-        make_zlib_proof(zlib_compress_zeros(XPRV_MAX_BODY_SIZE + 1)));
-    EXPECT_TRUE(mentions(over, "decompressed size exceeds cap")) << over;
-}
-
-// §8: the cap applies before parsing to a plain body too.
-TEST(ProofChainBinary, PlainBodyCapIsInclusive)
-{
-    auto const at_cap = from_binary_error(make_plain_proof(XPRV_MAX_BODY_SIZE));
-    EXPECT_FALSE(mentions(at_cap, "exceeds size cap")) << at_cap;
-    auto const over =
-        from_binary_error(make_plain_proof(XPRV_MAX_BODY_SIZE + 1));
-    EXPECT_TRUE(mentions(over, "body exceeds size cap")) << over;
-}
-
-// §3.1: the body is one zlib stream, whole, and nothing after it.
-TEST(ProofChainBinary, RejectsZlibSuffixTruncationAndBadChecksum)
-{
-    auto const stream = zlib_compress_zeros(1024);
-
-    auto suffix = stream;
-    suffix.push_back(0);
-    EXPECT_TRUE(mentions(
-        from_binary_error(make_zlib_proof(suffix)),
-        "bytes after the zlib stream"));
-
-    auto twice = stream;
-    twice.insert(twice.end(), stream.begin(), stream.end());
-    EXPECT_TRUE(mentions(
-        from_binary_error(make_zlib_proof(twice)),
-        "bytes after the zlib stream"));
-
-    auto truncated = stream;
-    truncated.pop_back();
-    EXPECT_TRUE(mentions(
-        from_binary_error(make_zlib_proof(truncated)), "truncated zlib body"));
-
-    auto bad_checksum = stream;
-    bad_checksum.back() ^= 0x01;  // the last four bytes are the Adler-32
-    EXPECT_TRUE(mentions(
-        from_binary_error(make_zlib_proof(bad_checksum)), "invalid zlib body"));
-}
+// What a reader refuses (the size cap and its edge, a zlib stream cut short,
+// followed or corrupted, reserved flags, unknown record types, a payload
+// trailer, a second anchor core) is in the shared vectors, run against both
+// verifiers: tests/xprv/vectors/negative-*.json. The tests here are the
+// encoder's: what to_binary writes and what it reads back.
 
 // A compressed proof is the same proof (§1.2) at any zlib level.
 TEST(ProofChainBinary, CompressedRoundTripAtLevelsOneAndNine)
@@ -286,45 +122,6 @@ TEST(ProofChainBinary, CompressedRoundTripAtLevelsOneAndNine)
         auto const decoded = from_binary(compressed);
         EXPECT_EQ(to_binary(decoded), canonical) << "level " << level;
     }
-}
-
-TEST(ProofChainBinary, RejectsReservedFlagsAndUnknownTypes)
-{
-    ProofChain chain;
-    chain.steps.emplace_back(HeaderData{});
-    auto binary = to_binary(chain);
-
-    auto reserved_flags = binary;
-    reserved_flags[5] |= 0x02;
-    EXPECT_THROW(from_binary(reserved_flags), std::runtime_error);
-
-    auto unknown_type = binary;
-    unknown_type[10] = 0x7F;
-    EXPECT_THROW(from_binary(unknown_type), std::runtime_error);
-}
-
-TEST(ProofChainBinary, RejectsNonExactHeaderPayload)
-{
-    ProofChain chain;
-    chain.steps.emplace_back(HeaderData{});
-    auto binary = to_binary(chain);
-    ASSERT_EQ(binary[11], 118);
-    binary[11] = 119;
-    binary.push_back(0);
-    EXPECT_THROW(from_binary(binary), std::runtime_error);
-}
-
-TEST(ProofChainBinary, RejectsDuplicateAnchorCore)
-{
-    ProofChain chain;
-    AnchorData anchor;
-    anchor.publisher_key_hex = "ED" + std::string(64, 'A');
-    anchor.publisher_manifest = make_bytes(8, 1);
-    anchor.blob = make_blob(1);
-    anchor.blob_signature = make_bytes(64, 2);
-    chain.steps.emplace_back(anchor);
-    chain.steps.emplace_back(anchor);
-    EXPECT_THROW(from_binary(to_binary(chain)), std::runtime_error);
 }
 
 // ─── Header round-trip ──────────────────────────────────────────

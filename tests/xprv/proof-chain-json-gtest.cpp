@@ -13,73 +13,12 @@
 #include <sstream>
 #include <utility>
 
-namespace {
-
-boost::json::object
-header_proof_json()
-{
-    xprv::ProofChain chain;
-    xprv::HeaderData header;
-    header.seq = 1;
-    header.drops = 100;
-    chain.steps.emplace_back(header);
-    return xprv::to_json(chain);
-}
-
-boost::json::object&
-header_fields(boost::json::object& proof)
-{
-    return proof.at("steps")
-        .as_array()
-        .front()
-        .as_object()
-        .at("header")
-        .as_object();
-}
-
-}  // namespace
-
-TEST(ProofChainJson, RejectsUnknownOrMalformedSteps)
-{
-    auto proof = header_proof_json();
-    proof.at("steps").as_array().emplace_back(
-        boost::json::object{{"type", "unknown"}});
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-
-    proof = header_proof_json();
-    proof.at("steps").as_array().emplace_back("not-an-object");
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-}
-
-TEST(ProofChainJson, RejectsMalformedHeaderNumbers)
-{
-    auto proof = header_proof_json();
-    header_fields(proof)["total_coins"] = "100junk";
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-
-    proof = header_proof_json();
-    header_fields(proof)["close_time_resolution"] = 256;
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-
-    proof = header_proof_json();
-    header_fields(proof)["close_flags"] = 256;
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-}
-
-TEST(ProofChainJson, RejectsUnknownTreeAndMissingVersion)
-{
-    xprv::ProofChain chain;
-    xprv::TrieData trie;
-    trie.trie_json = boost::json::object{};
-    chain.steps.emplace_back(std::move(trie));
-    auto proof = xprv::to_json(chain);
-    proof.at("steps").as_array().front().as_object()["tree"] = "other";
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-
-    proof = header_proof_json();
-    proof.erase("format_version");
-    EXPECT_THROW(xprv::from_json(proof), std::exception);
-}
+// What the JSON loader refuses (an unknown or malformed step, header numbers
+// out of range, an unknown tree, a missing version, a unl object that is
+// partly bundled or carries an unknown member, hex leaf data, a validation
+// under a foreign key) is in the shared vectors, run against both verifiers:
+// tests/xprv/vectors/negative-*.json. The tests here are the converter's and
+// the builder's.
 
 // 2055 interim rule: JSON leaves are decoded only. A trie whose leaf this
 // server can't decode and re-encode exactly has no JSON form; the builder
@@ -396,36 +335,8 @@ TEST(ProofChainJson, ListLessAnchorRoundTripsThroughJsonAndBinary)
         json.at("steps").as_array().front().at("unl"));
 }
 
-TEST(ProofChainJson, PartlyBundledListIsRejected)
-{
-    auto proof = list_less_fixture();
-    proof.at("steps").as_array().front().at("unl").as_object()["blob"] = "AB";
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-}
-
-TEST(ProofChainJson, UnknownUnlMemberIsRejected)
-{
-    auto proof = list_less_fixture();
-    proof.at("steps").as_array().front().at("unl").as_object()["extra"] = "00";
-    EXPECT_THROW(xprv::from_json(proof), std::runtime_error);
-}
-
-TEST(ProofChainJson, ListLessAnchorNeedsAnExternalList)
-{
-    auto const proof = list_less_fixture();
-    auto const& anchor = proof.at("steps").as_array().front().as_object();
-    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-    std::vector<std::string> narrative;
-    auto const result = xprv::AnchorVerifier::verify(
-        anchor,
-        std::string(anchor.at("unl").at("public_key").as_string()),
-        protocol,
-        narrative);
-    EXPECT_FALSE(result.verified);
-    EXPECT_EQ(result.error, "validator list not bundled and no external list");
-}
-
-// v7 §2.3: a hex string is not JSON leaf data, at load and at conversion.
+// §2.3: a hex string is not JSON leaf data. The loader's refusal is the
+// vector hex-leaf-data; the encoder's own is below.
 namespace {
 
 boost::json::array&
@@ -461,21 +372,6 @@ hex_leaf_proof()
 }
 
 }  // namespace
-
-TEST(ProofChainJson, HexLeafIsRejectedAtLoad)
-{
-    auto const text = boost::json::serialize(hex_leaf_proof());
-    try
-    {
-        xprv::from_json_text(text);
-        FAIL() << "expected a hex leaf to be rejected";
-    }
-    catch (std::runtime_error const& e)
-    {
-        EXPECT_NE(std::string(e.what()).find("not hex"), std::string::npos)
-            << e.what();
-    }
-}
 
 TEST(ProofChainJson, HexLeafIsRejectedByBinaryConversion)
 {
@@ -563,32 +459,6 @@ load_proof_fixture()
 }
 
 }  // namespace
-
-TEST(ProofChainJson, RejectsValidationKeyThatIsNotTheSigningPubKey)
-{
-    auto proof = load_proof_fixture();
-    auto& validations = proof.at("steps")
-                            .as_array()
-                            .front()
-                            .as_object()
-                            .at("validations")
-                            .as_object();
-    auto const value = validations.begin()->value();
-    validations.erase(validations.begin());
-    validations[std::string("02") + std::string(64, 'A')] = value;
-    try
-    {
-        xprv::from_json(proof);
-        FAIL()
-            << "a validation map key other than SigningPubKey must be rejected";
-    }
-    catch (std::runtime_error const& e)
-    {
-        EXPECT_NE(
-            std::string(e.what()).find("SigningPubKey"), std::string::npos)
-            << e.what();
-    }
-}
 
 TEST(ProofChainJson, ConvertRejectsValidationKeyThatIsNotTheSigningPubKey)
 {

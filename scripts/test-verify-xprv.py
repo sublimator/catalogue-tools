@@ -10,8 +10,9 @@ verifier is asked the same question: `scripts/xprv-vectors.py check` runs this
 verifier over every vector, and `scripts/xprv-conformance.py run` runs both.
 
 What stays here is what a verdict cannot show: a helper's output, the type of
-an exception, a reason only this verifier words, an input too large to store
-in a vector file, and trust configuration that a vector always states.
+an exception, a reason only this verifier words, a check no proof reaches,
+JSON text no vector edit writes, and trust configuration that a vector always
+states.
 """
 
 from __future__ import annotations
@@ -257,25 +258,6 @@ class ProofBindingTests(unittest.TestCase):
         proof = f.proof()
         proof["steps"].append({"type": "map_proof", "tree": "tx", "__binary_root__": "00" * 32})
         self.assertFailsWith(self.verify(proof, f.trusted_key, 0), "reserved for binary decoding")
-
-
-class DecompressionBoundTests(unittest.TestCase):
-    """The cap's edge. A body of exactly the cap is 16 MiB: no vector stores it."""
-
-    def packed(self, body: bytes, flags: int) -> bytes:
-        return b"XPRV" + bytes([v.FORMAT_VERSION, flags]) + (0).to_bytes(4, "big") + body
-
-    def test_cap_is_inclusive_plain_and_inflated(self) -> None:
-        import zlib
-        cap = v.MAX_DECOMPRESSED_PROOF_SIZE
-        for flags, make in ((0, lambda n: b"\x00" * n), (1, lambda n: zlib.compress(b"\x00" * n, 9))):
-            with self.subTest(flags=flags):
-                # Zeros are no TLV body, so exactly the cap still fails, but later.
-                with self.assertRaises(ValueError) as at_cap:
-                    v.binary_to_proof(self.packed(make(cap), flags))
-                self.assertNotIn("exceeds", str(at_cap.exception))
-                with self.assertRaisesRegex(ValueError, "exceeds"):
-                    v.binary_to_proof(self.packed(make(cap + 1), flags))
 
 
 class StructuredValueGrammarTests(unittest.TestCase):

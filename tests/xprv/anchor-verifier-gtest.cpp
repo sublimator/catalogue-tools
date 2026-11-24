@@ -37,8 +37,6 @@ load_anchor_fixture()
 
 constexpr auto xrpl_publisher =
     "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734";
-constexpr auto other_publisher =
-    "EDA46E9C39B1389894E690E58914DC1029602870370A0993E5B87C4A24EAF4A8E8";
 
 xprv::AnchorVerifyResult
 verify(boost::json::object const& anchor, std::string const& trusted_key)
@@ -51,53 +49,11 @@ verify(boost::json::object const& anchor, std::string const& trusted_key)
 
 }  // namespace
 
-TEST(AnchorVerifier, AcceptsRealFixture)
-{
-    EXPECT_TRUE(verify(load_anchor_fixture(), xrpl_publisher).verified);
-}
-
-TEST(AnchorVerifier, RejectsPublisherClaimNotBoundToManifest)
-{
-    auto anchor = load_anchor_fixture();
-    anchor.at("unl").as_object()["public_key"] = other_publisher;
-    auto const result = verify(anchor, other_publisher);
-    EXPECT_FALSE(result.verified);
-    EXPECT_EQ(result.error, "publisher manifest master key mismatch");
-}
-
-TEST(AnchorVerifier, RejectsIntegralFloatInSignedBlob)
-{
-    std::ifstream in(
-        std::string(PROJECT_ROOT) +
-        "tests/xprv/fixture/strict-blob-cases.json");
-    ASSERT_TRUE(in.is_open());
-    std::stringstream buffer;
-    buffer << in.rdbuf();
-    auto const fixture = boost::json::parse(buffer.str()).as_object();
-    auto const key = std::string(fixture.at("trusted_key").as_string());
-    auto const result =
-        verify(fixture.at("integral_float_sequence").as_object(), key);
-    EXPECT_FALSE(result.verified);
-    EXPECT_EQ(result.error, "UNL blob validity fields are malformed")
-        << result.error;
-}
-
-TEST(AnchorVerifier, RejectsAnchorOnlyExpirationNotAfterEffective)
-{
-    std::ifstream in(
-        std::string(PROJECT_ROOT) +
-        "tests/xprv/fixture/strict-blob-cases.json");
-    ASSERT_TRUE(in.is_open());
-    std::stringstream buffer;
-    buffer << in.rdbuf();
-    auto const fixture = boost::json::parse(buffer.str()).as_object();
-    auto const key = std::string(fixture.at("trusted_key").as_string());
-    auto const result =
-        verify(fixture.at("expiration_not_after_effective").as_object(), key);
-    EXPECT_FALSE(result.verified);
-    EXPECT_EQ(result.error, "UNL blob validity interval is invalid")
-        << result.error;
-}
+// What stays here is what a proof's verdict cannot show: the result's
+// counters, the anchor verifier's own checks behind the proof loader, and the
+// bytes a validation is signed over. Every rule a verdict does show is a
+// shared vector: tests/xprv/vectors/*-trust-*.json and the anchor negatives
+// beside them, run against both verifiers.
 
 namespace {
 
@@ -196,26 +152,10 @@ TEST(AnchorVerifier, ValidationPreimageDropsOnlySignature)
     check(with_amendments, false);
 }
 
-TEST(AnchorVerifier, TxnSignatureInjectionDropsTheQuorum)
-{
-    auto anchor = load_anchor_fixture();
-    ASSERT_TRUE(verify(anchor, xrpl_publisher).verified);
-    auto& validations = anchor.at("validations").as_object();
-    for (auto& validation : validations)
-    {
-        auto fields = decode_validation(
-            xprv::from_hex(std::string(validation.value().as_string())));
-        fields["TxnSignature"] = "DEADBEEF";
-        auto const bytes =
-            catl::xdata::codecs::serialize_object(fields, xrpl_protocol());
-        EXPECT_TRUE(xprv::AnchorVerifier::is_canonical_stvalidation(bytes));
-        validation.value() = upper_hex(bytes);
-    }
-    auto const result = verify(anchor, xrpl_publisher);
-    EXPECT_FALSE(result.verified);
-    EXPECT_EQ(result.error, "quorum not met") << result.error;
-}
-
+// The empty and one-byte halves are also the vectors trust-empty-signature-*
+// and trust-one-byte-signature-*. A proof with an absent Signature is refused
+// by the loader (trust-absent-signature-*); this is the anchor verifier's own
+// refusal, and the canonical-form predicate.
 TEST(AnchorVerifier, PresentEmptySignatureIsAnUncountedVote)
 {
     auto anchor = load_anchor_fixture();
@@ -265,6 +205,9 @@ TEST(AnchorVerifier, PresentEmptySignatureIsAnUncountedVote)
     }
 }
 
+// This and the next test call the anchor verifier directly. A proof with
+// either anchor is refused earlier, by the loader, which is what the vectors
+// incomplete-validation and validation-under-a-foreign-key show.
 TEST(AnchorVerifier, RejectsIncompleteValidationBesideAQuorum)
 {
     auto anchor = load_anchor_fixture();
@@ -373,19 +316,10 @@ TEST(AnchorVerifier, RevokedMasterStaysInNAndNeverVotes)
     EXPECT_EQ(three.validations_matched_unl, 3);
 }
 
-TEST(AnchorVerifier, RejectsListExpiredAtAnchorCloseTime)
-{
-    EXPECT_TRUE(xprv::validator_list_active_at(50, 100, 99));
-    EXPECT_FALSE(xprv::validator_list_active_at(50, 100, 100));
-}
-
-TEST(AnchorVerifier, RejectsListNotYetEffectiveAtAnchorCloseTime)
-{
-    EXPECT_FALSE(xprv::validator_list_active_at(101, 200, 100));
-    EXPECT_TRUE(xprv::validator_list_active_at(100, 200, 100));
-}
-
 // §1.3 trust view: manifests held outside the proof re-point listed masters.
+// The verdicts are vectors (trust-rotated-key-*, trust-listed-key-*,
+// trust-equivocating-*, trust-conflict-*, trust-held-*, trust-highest-*); the
+// tests below assert the counters behind them.
 namespace {
 
 struct OverlayCase
@@ -464,38 +398,6 @@ TEST(AnchorVerifier, EquivocatingValidatorIsDroppedNotTheAnchor)
     EXPECT_EQ(r.unl_equivocated, 1);
     EXPECT_EQ(r.unl_size, 5);
     EXPECT_EQ(r.validations_matched_unl, 4);
-}
-
-TEST(AnchorVerifier, HeldManifestCollisionsAndSupersededPublisherReject)
-{
-    auto const [key, cases] = load_overlay_fixture();
-    EXPECT_EQ(
-        verify_with(cases.at("key-collision"), key, true).error,
-        "resolved signing key collides with another validator key");
-    EXPECT_EQ(
-        verify_with(cases.at("publisher-superseded"), key, true).error,
-        "validator list is signed by a superseded publisher key");
-}
-
-TEST(AnchorVerifier, HeldPublisherRevocationRejectsTheList)
-{
-    // A revoked publisher key signs nothing, as a revoked validator key
-    // votes for nothing (Nicholas: same laws for the publisher).
-    auto const [key, cases] = load_overlay_fixture();
-    auto const& c = cases.at("publisher-revoked");
-    EXPECT_TRUE(verify_with(c, key, false).verified);
-    EXPECT_EQ(
-        verify_with(c, key, true).error,
-        "the validator list publisher is revoked");
-}
-
-TEST(AnchorVerifier, NewerPublisherManifestWithTheSameKeyKeepsTheList)
-{
-    // A re-issued publisher manifest naming the same signing key doesn't
-    // invalidate a list that key signed.
-    auto const [key, cases] = load_overlay_fixture();
-    auto const r = verify_with(cases.at("publisher-same-key"), key, true);
-    EXPECT_TRUE(r.verified) << r.error;
 }
 
 TEST(AnchorVerifier, ConflictVerdictIsIndependentOfManifestOrder)
