@@ -169,7 +169,8 @@ apply_mutations(
 
 /// Apply a negative's edits to its base's JSON form. Mirrors
 /// apply_json_patch() in scripts/xprv-vectors.py: `set` writes a value at a
-/// JSON pointer, `select` makes the value at a pointer the whole document.
+/// JSON pointer, `remove` deletes the member or element there, and `select`
+/// makes the value at a pointer the whole document.
 boost::json::value
 apply_json_patch(boost::json::value doc, boost::json::array const& ops)
 {
@@ -221,6 +222,21 @@ apply_json_patch(boost::json::value doc, boost::json::array const& ops)
                 parent->as_array().at(std::stoul(path.back())) = op.at("value");
             else
                 parent->as_object()[path.back()] = op.at("value");
+        }
+        else if (kind == "remove")
+        {
+            boost::json::value* parent = &doc;
+            for (std::size_t i = 0; i + 1 < path.size(); ++i)
+                parent = &step(*parent, path[i]);
+            if (parent->is_array())
+            {
+                auto& arr = parent->as_array();
+                arr.erase(arr.begin() +
+                    static_cast<std::ptrdiff_t>(std::stoul(path.back())));
+            }
+            else if (parent->as_object().erase(path.back()) != 1)
+                throw std::runtime_error(
+                    "json_patch remove: no member " + path.back());
         }
         else
             throw std::runtime_error("unknown json_patch op " + kind);
@@ -537,7 +553,10 @@ without_known_failing(std::vector<Negative> all)
         if (known && known->is_object() && known->as_object().contains("cpp"))
         {
             std::cout << "[ KNOWN    ] " << n.path.filename().string() << ": "
-                      << std::string(known->as_object().at("cpp").as_string())
+                      << std::string(known->as_object()
+                                         .at("cpp")
+                                         .at("because")
+                                         .as_string())
                       << "\n";
             continue;
         }
@@ -727,6 +746,30 @@ TEST(XprvVectors, AcceptVectorsAreAcceptedOnTheProductionPath)
                           << std::string(n.vector.at("states").as_string())
                           << "): refused: " << why.value_or("");
     }
+}
+
+// A patch that changes nothing would assert a verdict never exercised.
+// Compared as text: 10 and 10.0 are equal numbers and different tokens.
+TEST(XprvVectors, PatchesChangeTheirBase)
+{
+    for (auto const& prefix : {"accept-", "negative-"})
+        for (auto const& path : vectors_named(prefix))
+        {
+            auto const vec = read_json(path);  // owns what obj refers to
+            auto const& obj = vec.as_object();
+            if (!obj.contains("base") || !obj.contains("json_patch"))
+                continue;
+            auto const base =
+                read_json(vector_dir() /
+                    (std::string(obj.at("base").as_string()) + ".json"))
+                    .as_object();
+            auto const& original = base.at("form").at("json");
+            EXPECT_NE(
+                boost::json::serialize(apply_json_patch(
+                    original, obj.at("json_patch").as_array())),
+                boost::json::serialize(original))
+                << path.filename();
+        }
 }
 
 // A mutation that changes nothing would assert a rejection never exercised.

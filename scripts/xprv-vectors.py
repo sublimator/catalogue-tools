@@ -41,8 +41,10 @@ Accept vectors are the same shape with the opposite assertion: an edit of a
 positive vector that a verifier MUST still accept.
 
 A vector may carry `known_failing`, an object naming the verifiers ("cpp",
-"python") that do not yet meet its expectation, each with the reason. It
-records a known defect as a test instead of leaving it out of the corpus.
+"python") that do not yet meet its expectation. Each entry says what the
+verifier `does` instead (accept, reject, wrong-reason, abnormal or timeout)
+and `because` of what. It records a known defect as a test instead of leaving
+it out of the corpus.
 `mutate` writes such a vector only while the Python verifier really does miss
 it, `check` and the C++ gtest skip a vector tagged for their own verifier, and
 scripts/xprv-conformance.py holds the tag to account: a tagged verifier that
@@ -322,6 +324,72 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
         "spec §1.3 rule 6, §3.4: an anchor with no validations parses and fails quorum",
         core([]), "quorum not met", layer="trust")
 
+    # The same tree-shape rules in the binary trie (§3.7), on the first map
+    # proof: the payload is rebuilt with one node changed and its length fixed.
+    map_at = next(i for i, (t, _) in enumerate(records) if t in (V.TLV_MAP_TX, V.TLV_MAP_STATE))
+    tree = _trie_parse(records[map_at][1])
+
+    def trie(edit: Any) -> list[dict[str, Any]]:
+        changed = copy.deepcopy(tree)
+        edit(changed)
+        return _replace_payload(raw, map_at, _trie_bytes(changed))
+
+    def first_inner_with_gap(node: list[Any]) -> tuple[list[Any], int]:
+        for branch, child in enumerate(node):
+            if child is None:
+                return node, branch
+        for child in node:
+            if isinstance(child, list):
+                try:
+                    return first_inner_with_gap(child)
+                except LookupError:
+                    pass
+        raise LookupError("no inner node has an empty branch")
+
+    def set_gap(value: Any) -> Any:
+        def edit(root: list[Any]) -> None:
+            node, branch = first_inner_with_gap(root)
+            node[branch] = value
+        return edit
+
+    def first_of(kind: str, node: list[Any]) -> tuple[list[Any], int]:
+        for branch, child in enumerate(node):
+            if isinstance(child, tuple) and child[0] == kind:
+                return node, branch
+        for child in node:
+            if isinstance(child, list):
+                try:
+                    return first_of(kind, child)
+                except LookupError:
+                    pass
+        raise LookupError(kind)
+
+    def hash_to_inner(root: list[Any]) -> None:
+        node, branch = first_of("hash", root)
+        node[branch] = [("hash", b"\xab" * 32)] + [None] * 15
+
+    def move_leaf_key(root: list[Any]) -> None:
+        node, branch = first_of("leaf", root)
+        _, key, data = node[branch]
+        node[branch] = ("leaf", bytes([key[0] ^ 0x10]) + key[1:], data)
+
+    def drop_leaves(node: list[Any]) -> None:
+        for branch, child in enumerate(node):
+            if isinstance(child, list):
+                drop_leaves(child)
+            elif isinstance(child, tuple) and child[0] == "leaf":
+                node[branch] = ("hash", b"\xab" * 32)
+
+    shape_rule = "spec §2.3, §3.7: an inner node is present only because a leaf lies beneath it"
+    mut("empty-inner-node-binary", shape_rule, trie(set_gap([None] * 16)), "contains no leaves")
+    mut("leafless-inner-node-binary", shape_rule, trie(hash_to_inner), "contains no leaves")
+    mut("leafless-map-binary", "spec §3.8: a map proof MUST contain at least one authenticated leaf",
+        trie(drop_leaves), "contains no leaves")
+    mut("zero-hash-placeholder-binary", "spec §2.3, §3.7: an empty branch is absent, never a zero hash",
+        trie(set_gap(("hash", bytes(32)))), "zero hash")
+    mut("leaf-key-off-its-path-binary", "spec §2.3, §3.7: a leaf sits where its key puts it",
+        trie(move_leaf_key), "does not match its trie path")
+
     # The anchor list (§3.5): manifest, signature and the exact signed list,
     # each length-prefixed and none empty.
     unl_at = next(i for i, (t, _) in enumerate(records) if t == V.TLV_UNL)
@@ -358,6 +426,52 @@ def _core_parts(payload: bytes) -> tuple[bytes, list[bytes]]:
         pos = start + size
     assert pos == len(payload)
     return payload[:65], records
+
+
+def _trie_parse(data: bytes, pos: int = 0) -> Any:
+    """A binary trie as nested lists of 16 branches.
+
+    A branch is None, ("leaf", key, bytes), ("hash", hash) or another list.
+    Used only to build malformed tries for negative vectors; the verifiers
+    never see this model.
+    """
+    def node(pos: int) -> tuple[list[Any], int]:
+        header = int.from_bytes(data[pos : pos + 4], "little")
+        pos += 4
+        branches: list[Any] = [None] * 16
+        for branch in range(16):
+            code = (header >> (2 * branch)) & 3
+            if code == V.BR_LEAF:
+                size, start = V.leb128_read(data, pos + 32)
+                branches[branch] = ("leaf", data[pos : pos + 32], data[start : start + size])
+                pos = start + size
+            elif code == V.BR_INNER:
+                branches[branch], pos = node(pos)
+            elif code == V.BR_HASH:
+                branches[branch] = ("hash", data[pos : pos + 32])
+                pos += 32
+        return branches, pos
+
+    root, end = node(pos)
+    assert end == len(data)
+    return root
+
+
+def _trie_bytes(node: list[Any]) -> bytes:
+    header, body = 0, bytearray()
+    for branch, child in enumerate(node):
+        if child is None:
+            continue
+        if isinstance(child, list):
+            header |= V.BR_INNER << (2 * branch)
+            body += _trie_bytes(child)
+        elif child[0] == "leaf":
+            header |= V.BR_LEAF << (2 * branch)
+            body += child[1] + _leb128(len(child[2])) + child[2]
+        else:
+            header |= V.BR_HASH << (2 * branch)
+            body += child[1]
+    return header.to_bytes(4, "little") + bytes(body)
 
 
 def _splice(old: bytes, new: bytes, at: int) -> list[dict[str, Any]]:
@@ -406,6 +520,33 @@ def _leaf_pointer(proof: dict[str, Any], tree: str) -> str:
     return path
 
 
+def _first_where(node: Any, pointer: str, wanted: Any) -> str:
+    """JSON pointer to the first trie node, in branch order, that `wanted` accepts."""
+    if wanted(node):
+        return pointer
+    if isinstance(node, dict):
+        for key in sorted(k for k in node if k != "__depth__"):
+            try:
+                return _first_where(node[key], f"{pointer}/{key}", wanted)
+            except LookupError:
+                pass
+    raise LookupError("no such trie node")
+
+
+def _first_empty_branch(node: dict[str, Any], pointer: str) -> tuple[str, str]:
+    """(pointer to an inner node, a branch key it does not have)."""
+    for key in "0123456789ABCDEF":
+        if key not in node:
+            return pointer, key
+    for key in "0123456789ABCDEF":
+        if isinstance(node[key], dict):
+            try:
+                return _first_empty_branch(node[key], f"{pointer}/{key}")
+            except LookupError:
+                pass
+    raise LookupError("no inner node has an empty branch")
+
+
 def _pointer_tokens(pointer: str) -> list[str]:
     return [t.replace("~1", "/").replace("~0", "~") for t in pointer.split("/")[1:]] if pointer else []
 
@@ -418,7 +559,8 @@ def apply_json_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
     """Apply a negative's edits to its base's JSON form.
 
     `set` writes a value at a JSON pointer (RFC 6901), creating an object member
-    if needed; `select` replaces the whole document with the value at a pointer.
+    if needed; `remove` deletes the member or element at a pointer, which must
+    exist; `select` replaces the whole document with the value at a pointer.
     """
     doc = copy.deepcopy(doc)
     for op in ops:
@@ -434,6 +576,11 @@ def apply_json_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
                 parent[int(tokens[-1])] = op["value"]
             else:
                 parent[tokens[-1]] = op["value"]
+        elif op["op"] == "remove":
+            parent = doc
+            for token in tokens[:-1]:
+                parent = _step(parent, token)
+            del parent[int(tokens[-1]) if isinstance(parent, list) else tokens[-1]]
         else:
             raise SystemExit(f"unknown json_patch op {op['op']!r}")
     return doc
@@ -450,7 +597,7 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     fam: list[dict[str, Any]] = []
 
     def neg(name: str, rule: str, layer: str, reason: str, ops: list[dict[str, Any]],
-            known_failing: dict[str, str] | None = None) -> None:
+            known_failing: dict[str, dict[str, str]] | None = None) -> None:
         entry = {
             "name": name,
             "violates": rule,
@@ -477,7 +624,7 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("integral-float-version", "D12: integer fields are integer tokens",
         "parse", "format_version", [at("/format_version", float(proof["format_version"]))])
     neg("malformed-validation-value", "spec §2.1: validations map signing keys to hex STValidation bytes",
-        "parse", "validation value must be a hex string", [at("/steps/0/validations/ED" + "00" * 32, "ZZ")])
+        "parse", "validation value must be uppercase hex", [at("/steps/0/validations/ED" + "00" * 32, "ZZ")])
     neg("wrong-depth", "spec §2.3: __depth__ MUST equal the node's nesting depth",
         "parse", "__depth__", [at(f"/steps/{first_map}/trie/__depth__", 17)])
     neg("unknown-leaf-member", "spec §2.3: leaf data is the decoded content and nothing else",
@@ -486,7 +633,7 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     recorded = base["intermediates"]["map_proofs"][-1]
     assert recorded["tree"] == "tx" and len(recorded["leaves"]) == 1
     neg("leafless-map", "spec §3.8: a map proof MUST contain at least one authenticated leaf",
-        "graph", "contains no leaves", [at(tx_leaf, recorded["leaves"][0]["leaf_hash"])])
+        "parse", "contains no leaves", [at(tx_leaf, recorded["leaves"][0]["leaf_hash"])])
 
     neg("failed-quorum", "spec §1.3 rule 6: quorum is ceil(0.8 x N) masters",
         "trust", "quorum not met", [at("/steps/0/validations", dict(list(validations.items())[:5]))])
@@ -532,6 +679,50 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("no-validations", "spec §1.3 rule 6: an anchor with no validations fails quorum",
         "trust", "quorum not met", [at("/steps/0/validations", {})])
 
+    # §2: hex has one spelling, uppercase, in every member of the proof's own.
+    def lowered(pointer: str) -> dict[str, Any]:
+        node: Any = proof
+        for token in _pointer_tokens(pointer):
+            node = _step(node, token)
+        assert node != node.lower(), f"{pointer} has no letter to lowercase"
+        return at(pointer, node.lower())
+
+    header_at = next(i for i, s in enumerate(proof["steps"]) if s["type"] == "ledger_header")
+    some_validation = next(k for k, val in validations.items() if val != val.lower())
+    hash_at = _first_where(proof["steps"][first_map]["trie"], f"/steps/{first_map}/trie",
+                           lambda n: isinstance(n, str))
+    hex_rule = "spec §2: hex in the JSON form is uppercase"
+    neg("lowercase-anchor-hash", hex_rule, "parse", "uppercase hex", [lowered("/steps/0/ledger_hash")])
+    neg("lowercase-publisher-key", hex_rule, "parse", "uppercase hex", [lowered("/steps/0/unl/public_key")])
+    neg("lowercase-list-signature", hex_rule, "parse", "uppercase hex", [lowered("/steps/0/unl/signature")])
+    neg("lowercase-validation", hex_rule, "parse", "uppercase hex",
+        [lowered(f"/steps/0/validations/{some_validation}")])
+    neg("lowercase-header-hash", hex_rule, "parse", "uppercase hex",
+        [lowered(f"/steps/{header_at}/header/account_hash")])
+    neg("lowercase-trie-hash", hex_rule, "parse", "uppercase hex", [lowered(hash_at)])
+    neg("lowercase-leaf-key", hex_rule, "parse", "uppercase hex", [lowered(f"{state_leaf}/0")])
+
+    neg("total-coins-leading-zero",
+        "spec §2.2: total_coins is the decimal text of a uint64 with no leading zeros",
+        "parse", "total_coins must be",
+        [at(f"/steps/{header_at}/header/total_coins", "0" + proof["steps"][header_at]["header"]["total_coins"])])
+
+    # §2.3: a tree has one shape. Each of these keeps the root and changes
+    # only how the same tree is written.
+    inner_at, free = _first_empty_branch(proof["steps"][first_map]["trie"], f"/steps/{first_map}/trie")
+    shape_rule = "spec §2.3: an inner node is present only because a leaf lies beneath it"
+    neg("empty-inner-node", shape_rule, "parse", "contains no leaves", [at(f"{inner_at}/{free}", {})])
+    neg("leafless-inner-node", shape_rule, "parse", "contains no leaves",
+        [at(hash_at, {"0": "AB" * 32})])
+    neg("zero-hash-placeholder", "spec §2.3: an empty branch is absent, never a zero hash",
+        "parse", "zero hash", [at(f"{inner_at}/{free}", "0" * 64)])
+    state_key = proof
+    for token in _pointer_tokens(f"{state_leaf}/0"):
+        state_key = _step(state_key, token)
+    moved = ("1" if state_key[0] == "0" else "0") + state_key[1:]
+    neg("leaf-key-off-its-path", "spec §2.3: a leaf sits where its key puts it",
+        "parse", "does not match its trie path", [at(f"{state_leaf}/0", moved)])
+
     # §2.3 gives a plain field's value two JSON types. A codec that skips a
     # null member hashes the leaf as if it were absent, so the reader sees a
     # member nothing authenticated.
@@ -539,19 +730,19 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("null-leaf-value", value_rule, "graph", "must be a string or a number",
         [at(f"{tx_leaf}/1/tx/InvoiceID", None)],
         known_failing={
-            "python": "accepts: xrpl-py drops a null member, so the leaf hashes as if it were absent",
-            "cpp": "refuses through a codec type error, not through the §2.3 value rule",
+            "python": {"does": "accept", "because": "xrpl-py drops a null member, so the leaf hashes as if it were absent"},
+            "cpp": {"does": "wrong-reason", "because": "refuses through a codec type error, not through the §2.3 value rule"},
         })
     neg("bool-leaf-value", value_rule, "graph", "must be a string or a number",
         [at(f"{state_leaf}/1/Flags", False)],
         known_failing={
-            "python": "accepts: false and true serialize as 0 and 1",
-            "cpp": "refuses through a codec type error, not through the §2.3 value rule",
+            "python": {"does": "accept", "because": "false and true serialize as 0 and 1"},
+            "cpp": {"does": "wrong-reason", "because": "refuses through a codec type error, not through the §2.3 value rule"},
         })
     neg("tx-not-an-object", "spec §2.3: a transaction leaf's tx and meta are the decoded objects",
         "graph", "tx must be an object", [at(f"{tx_leaf}/1/tx", 123)],
         known_failing={
-            "cpp": "xprv verify refuses the leaf, then aborts on an uncaught exception while describing it",
+            "cpp": {"does": "abnormal", "because": "xprv verify refuses the leaf, then aborts on an uncaught exception while describing it"},
         })
     return fam
 
@@ -559,12 +750,25 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
 def patch_accept_family(base: dict[str, Any], base_name: str) -> list[dict[str, Any]]:
     """Edits of a positive vector's JSON form that a verifier MUST still accept."""
     proof = base["form"]["json"]
-    first_map = next(i for i, s in enumerate(proof["steps"]) if s["type"] == "map_proof")
+
+    def depth_pointers(node: Any, pointer: str) -> list[str]:
+        found = [f"{pointer}/__depth__"] if "__depth__" in node else []
+        for key, child in node.items():
+            if isinstance(child, dict):
+                found += depth_pointers(child, f"{pointer}/{key}")
+        return found
+
+    diagnostics = [
+        pointer
+        for i, step in enumerate(proof["steps"]) if step["type"] == "map_proof"
+        for pointer in depth_pointers(step["trie"], f"/steps/{i}/trie")
+    ]
+    assert diagnostics, "the base carries no __depth__ to remove"
     return [{
-        "name": "depth-diagnostic",
-        "states": "spec §2.3: __depth__ is optional and, where present, equals the node's nesting depth",
+        "name": "no-depth-diagnostics",
+        "states": "spec §2.3: __depth__ is an optional diagnostic; a trie without any verifies",
         "base": base_name,
-        "json_patch": [{"op": "set", "path": f"/steps/{first_map}/trie/__depth__", "value": 0}],
+        "json_patch": [{"op": "remove", "path": pointer} for pointer in diagnostics],
         "expect": {"verdict": "accept"},
     }]
 
@@ -572,6 +776,9 @@ def patch_accept_family(base: dict[str, Any], base_name: str) -> list[dict[str, 
 def apply_mutations(raw: bytes, muts: list[dict[str, Any]]) -> bytes:
     buf = bytearray(raw)
     for m in muts:
+        for name in ("at", "insert_at", "delete_at", "delete_len", "truncate_to"):
+            if name in m and int(m[name]) < 0:
+                raise SystemExit(f"mutation {name} is negative")
         if "compress_body" in m:
             # Any valid stream will do: what is tested is what follows it.
             buf = buf[:5] + bytes([buf[5] | 1]) + buf[6:10] + zlib.compress(bytes(buf[10:]), int(m["compress_body"]))
@@ -706,6 +913,11 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     raw = bytes.fromhex(bin_hex)
 
     written = 0
+    for derived in patch_accept_family(base, args.base) + patch_negative_family(base, args.base):
+        # Compared as text: 10 and 10.0 are equal numbers and different tokens.
+        if json.dumps(apply_json_patch(base["form"]["json"], derived["json_patch"])) == json.dumps(base["form"]["json"]):
+            LOG.error("vector %r patches its base into itself; it would assert nothing", derived["name"])
+            return 1
     for acc in patch_accept_family(base, args.base):
         data = json.dumps(apply_json_patch(base["form"]["json"], acc["json_patch"])).encode()
         ok, reason = python_verdict(data, trust=base["trust"])
@@ -772,7 +984,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if "python" in vec.get("known_failing", {}):
             # scripts/xprv-conformance.py holds the tag to account.
             known += 1
-            LOG.info("known failing, not checked here: %s (%s)", name, vec["known_failing"]["python"])
+            LOG.info("known failing, not checked here: %s (%s)", name, vec["known_failing"]["python"]["because"])
             continue
 
         if "form" in vec and expect.get("verdict") == "reject":

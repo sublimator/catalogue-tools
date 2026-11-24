@@ -1,0 +1,31 @@
+{
+  "name": "zero-hash-placeholder-binary",
+  "violates": "spec \u00a72.3, \u00a73.7: an empty branch is absent, never a zero hash",
+  "layer": "parse",
+  "mutations": [
+    {
+      "delete_at": 8749,
+      "delete_len": 4
+    },
+    {
+      "insert_at": 8749,
+      "insert_hex": "7330F3CF0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "delete_at": 7703,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 7703,
+      "insert_hex": "CC"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "zero hash"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary trie: placeholder is a zero hash; an empty branch is absent"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "lowercase-validation",
+  "violates": "spec \u00a72: hex in the JSON form is uppercase",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/validations/020EA2AB574A644ED75DF19E0A8F54ED8E2163FA5CF0444DBDA293BE0EDA7BFB3B",
+      "value": "22800000012606249b36293153d2003a350125fe10eeaecc51cc0a27b7bbd6c0606300f920d18b0f94bce60c82795dea4af4c534d23d1136305017aa8beb65c8d2d8b82b85139422efaaba7eb50a923d3ce128faa120dd25e32baf50193bd31a56d7cffaf28bf6ed2c7146696cfabb5dc40fe2b44d4deee823182aee1e7321020ea2ab574a644ed75df19e0a8f54ed8e2163fa5cf0444dbda293be0eda7bfb3b7647304502210097bf35af028472ca70e38faf448eee31716af871e41301db95fe43a407ea3b6e022029c774f5d39d73a88437f166d1116c6a2bb0de2f64be233713e946ab76db5666"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "uppercase hex"
+  },
+  "observed": {
+    "python_reason": "validation value must be uppercase hex"
+  }
+}

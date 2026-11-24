@@ -321,55 +321,8 @@ TEST(ParsingStrictness, RejectsLeafMembersTheCodecWouldSkip)
     }));
 }
 
-// §3.8: a map proof authenticates at least one leaf. Replacing the tx leaf
-// with its own recorded leaf hash keeps the root, and so the anchor, intact.
-TEST(ParsingStrictness, RejectsMapProofWithoutLeaves)
-{
-    auto proof = proof_json();
-    auto const& recorded =
-        vector_data().at("intermediates").at("map_proofs").as_array().back();
-    ASSERT_EQ(recorded.at("tree"), "tx");
-    ASSERT_EQ(recorded.at("leaves").as_array().size(), 1u);
-    auto const leaf_hash = recorded.at("leaves").at(0).at("leaf_hash");
-
-    boost::json::value* node = nullptr;
-    for (auto& step : proof.at("steps").as_array())
-        if (step.at("type") == "map_proof" && step.at("tree") == "tx")
-            node = &step.as_object()["trie"];
-    ASSERT_NE(node, nullptr);
-    while (node->is_object())
-    {
-        boost::json::value* next = nullptr;
-        for (auto& kv : node->as_object())
-            if (kv.key() != "__depth__" && !kv.value().is_string())
-                next = &kv.value();
-        ASSERT_NE(next, nullptr);
-        node = next;
-    }
-    *node = leaf_hash;
-    auto const text = boost::json::serialize(proof);
-    EXPECT_FALSE(verify_text(text));
-
-    auto chain = xprv::from_json_text(text);
-    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-    xprv::BinaryOptions opts;
-    opts.protocol = &protocol;
-    auto const binary = xprv::to_binary(chain, opts);
-    auto path = std::filesystem::temp_directory_path() /
-        ("xprv-leafless-" + std::to_string(getpid()) + ".xprv.bin");
-    {
-        std::ofstream file(path, std::ios::binary);
-        file.write(
-            reinterpret_cast<char const*>(binary.data()),
-            static_cast<std::streamsize>(binary.size()));
-    }
-    auto const status =
-        std::system((std::string("'") + XPRV_TEST_EXECUTABLE + "' verify '" +
-                     path.string() + "' >/dev/null 2>&1")
-                        .c_str());
-    std::filesystem::remove(path);
-    EXPECT_NE(status, 0);
-}
+// A map proof without a leaf, in either form, is a shared vector:
+// tests/xprv/vectors/negative-leafless-map*.json.
 
 namespace {
 

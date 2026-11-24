@@ -1,7 +1,7 @@
 {
   "name": "leafless-map",
   "violates": "spec \u00a73.8: a map proof MUST contain at least one authenticated leaf",
-  "layer": "graph",
+  "layer": "parse",
   "base": "positive-tx-skiplist",
   "json_patch": [
     {
@@ -15,6 +15,6 @@
     "reason_contains": "contains no leaves"
   },
   "observed": {
-    "python_reason": "step 7: tx map proof contains no leaves"
+    "python_reason": "trie inner node contains no leaves"
   }
 }

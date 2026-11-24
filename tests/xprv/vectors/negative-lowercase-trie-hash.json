@@ -1,0 +1,20 @@
+{
+  "name": "lowercase-trie-hash",
+  "violates": "spec \u00a72: hex in the JSON form is uppercase",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie/0",
+      "value": "29014d6f89e4a4a6202a22b98542a427a3867a5c700c187d1adbd90fb63b2e40"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "uppercase hex"
+  },
+  "observed": {
+    "python_reason": "trie placeholder must be a 32-byte uppercase hex hash"
+  }
+}

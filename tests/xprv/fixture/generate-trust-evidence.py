@@ -74,13 +74,13 @@ def generate():
         f = fixture(sequence)
         a = f.anchor(publisher_signing=signer)
         a["unl"]["manifest"] = t.make_manifest(
-            f.publisher, signer, manifest_sequence).hex()
+            f.publisher, signer, manifest_sequence).hex().upper()
         cases[name] = a
 
     bad_pub = copy.deepcopy(cases["publisher_conflict"])
     raw = bytearray.fromhex(bad_pub["unl"]["manifest"])
     raw[-1] ^= 1
-    bad_pub["unl"]["manifest"] = raw.hex()
+    bad_pub["unl"]["manifest"] = raw.hex().upper()
     cases["invalid_publisher"] = bad_pub
     bad_validator = validator_case(9)
     raw = bytearray(base64.b64decode(bad_validator.entries[0]["manifest"]))

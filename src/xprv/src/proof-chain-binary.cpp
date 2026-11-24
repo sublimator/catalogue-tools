@@ -275,9 +275,7 @@ encode_anchor_core(AnchorData const& a)
     write_bytes(payload, a.ledger_hash.data(), 32);
 
     auto const pubkey = hex_decode(a.publisher_key_hex);
-    if (pubkey.size() != 33)
-        throw std::runtime_error(
-            "binary proof: publisher key must be exactly 33 bytes");
+    require_public_key(pubkey, "binary proof: publisher key");
     write_bytes(payload, pubkey.data(), 33);
 
     // Ascending order of the embedded SigningPubKey. Direct AnchorData
@@ -503,6 +501,7 @@ decode_anchor_core(std::span<const uint8_t> payload)
 
     uint8_t pubkey[33];
     read_bytes(payload, pos, pubkey, 33);
+    require_public_key(pubkey, "binary proof: publisher key");
     a.publisher_key_hex = hex_encode(pubkey, 33);
 
     // Each record is a complete canonical STValidation (§2.1). Its own
@@ -636,6 +635,9 @@ decode_tlv_body(std::span<const uint8_t> data)
 
             case TLV_MAP_PROOF_TX:
             case TLV_MAP_PROOF_STATE: {
+                // One shape per tree (§2.3, §3.7), checked before anything
+                // hashes or converts it.
+                catl::shamap::validate_binary_trie(payload);
                 TrieData trie;
                 trie.tree = (type == TLV_MAP_PROOF_STATE)
                     ? TrieData::TreeType::state

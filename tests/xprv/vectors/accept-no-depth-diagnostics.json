@@ -1,0 +1,70 @@
+{
+  "name": "no-depth-diagnostics",
+  "states": "spec \u00a72.3: __depth__ is an optional diagnostic; a trie without any verifies",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "remove",
+      "path": "/steps/2/trie/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/2/trie/A/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/2/trie/A/3/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/2/trie/A/3/7/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/2/trie/A/3/7/6/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/2/trie/A/3/7/6/6/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/4/trie/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/4/trie/B/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/4/trie/B/4/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/4/trie/B/4/9/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/4/trie/B/4/9/7/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/4/trie/B/4/9/7/9/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/6/trie/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/6/trie/D/__depth__"
+    },
+    {
+      "op": "remove",
+      "path": "/steps/6/trie/D/F/__depth__"
+    }
+  ],
+  "expect": {
+    "verdict": "accept"
+  }
+}

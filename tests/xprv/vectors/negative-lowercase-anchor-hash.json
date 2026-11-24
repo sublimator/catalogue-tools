@@ -1,0 +1,20 @@
+{
+  "name": "lowercase-anchor-hash",
+  "violates": "spec \u00a72: hex in the JSON form is uppercase",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/ledger_hash",
+      "value": "cc0a27b7bbd6c0606300f920d18b0f94bce60c82795dea4af4c534d23d113630"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "uppercase hex"
+  },
+  "observed": {
+    "python_reason": "anchor ledger_hash must be uppercase hex"
+  }
+}

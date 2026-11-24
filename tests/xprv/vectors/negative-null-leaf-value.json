@@ -15,8 +15,14 @@
     "reason_contains": "must be a string or a number"
   },
   "known_failing": {
-    "python": "accepts: xrpl-py drops a null member, so the leaf hashes as if it were absent",
-    "cpp": "refuses through a codec type error, not through the \u00a72.3 value rule"
+    "python": {
+      "does": "accept",
+      "because": "xrpl-py drops a null member, so the leaf hashes as if it were absent"
+    },
+    "cpp": {
+      "does": "wrong-reason",
+      "because": "refuses through a codec type error, not through the \u00a72.3 value rule"
+    }
   },
   "observed": {
     "python_reason": "accepted"

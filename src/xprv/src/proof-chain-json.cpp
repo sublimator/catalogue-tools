@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstring>
 #include <initializer_list>
 #include <span>
@@ -578,6 +579,38 @@ integer_member(
 static constexpr uint64_t kUint32Max = 0xFFFFFFFFu;
 static constexpr uint64_t kUint8Max = 0xFFu;
 
+// Hex in the JSON form has one spelling: uppercase, an even number of
+// digits (§2). `size` is the exact byte length, or 0 for any length.
+static std::vector<uint8_t>
+proof_hex(
+    boost::json::value const& value,
+    std::string_view what,
+    std::size_t size = 0)
+{
+    if (!value.is_string())
+        throw std::runtime_error(
+            "proof JSON: " + std::string(what) + " must be a hex string");
+    auto const text = std::string_view(value.as_string());
+    if (text.size() % 2 != 0 ||
+        !std::all_of(text.begin(), text.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+        }))
+        throw std::runtime_error(
+            "proof JSON: " + std::string(what) + " must be uppercase hex");
+    if (size != 0 && text.size() != size * 2)
+        throw std::runtime_error(
+            "proof JSON: " + std::string(what) + " must be exactly " +
+            std::to_string(size) + " bytes");
+    return from_hex(text);
+}
+
+static Hash256
+proof_hash(boost::json::value const& value, std::string_view what)
+{
+    auto const bytes = proof_hex(value, what, 32);
+    return Hash256(bytes.data());
+}
+
 static AnchorData
 anchor_from_json(boost::json::object const& obj)
 {
@@ -586,14 +619,12 @@ anchor_from_json(boost::json::object const& obj)
         {"type", "ledger_hash", "unl", "validations"},
         "anchor");
     AnchorData a;
-    a.ledger_hash =
-        hash_from_hex(std::string(obj.at("ledger_hash").as_string()));
+    a.ledger_hash = proof_hash(obj.at("ledger_hash"), "anchor ledger_hash");
 
     auto const& unl = obj.at("unl").as_object();
+    require_public_key(
+        proof_hex(unl.at("public_key"), "publisher key", 33), "publisher key");
     a.publisher_key_hex = std::string(unl.at("public_key").as_string());
-    if (from_hex(a.publisher_key_hex).size() != 33)
-        throw std::runtime_error(
-            "proof JSON: publisher key must be exactly 33 bytes");
     // The list is bundled whole or not at all: manifest, blob and signature
     // together, or only the publisher key (§2.1).
     auto const bundled = unl.contains("manifest") + unl.contains("blob") +
@@ -606,11 +637,9 @@ anchor_from_json(boost::json::object const& obj)
         throw std::runtime_error("proof JSON: unknown member in unl");
     if (bundled == 3)
     {
-        a.publisher_manifest =
-            from_hex(std::string(unl.at("manifest").as_string()));
-        a.blob = from_hex(std::string(unl.at("blob").as_string()));
-        a.blob_signature =
-            from_hex(std::string(unl.at("signature").as_string()));
+        a.publisher_manifest = proof_hex(unl.at("manifest"), "unl manifest");
+        a.blob = proof_hex(unl.at("blob"), "unl blob");
+        a.blob_signature = proof_hex(unl.at("signature"), "unl signature");
         if (a.publisher_manifest.empty() || a.blob.empty() ||
             a.blob_signature.empty())
             throw std::runtime_error(
@@ -628,14 +657,7 @@ anchor_from_json(boost::json::object const& obj)
             }))
             throw std::runtime_error(
                 "proof JSON: malformed validation key or value");
-        auto const value = std::string(kv.value().as_string());
-        if (value.size() % 2 != 0 ||
-            !std::all_of(value.begin(), value.end(), [](unsigned char c) {
-                return std::isxdigit(c) != 0;
-            }))
-            throw std::runtime_error(
-                "proof JSON: validation value must be a hex string");
-        auto const bytes = from_hex(value);
+        auto const bytes = proof_hex(kv.value(), "validation value");
         if (!AnchorVerifier::is_canonical_stvalidation(bytes))
             throw std::runtime_error(
                 "proof JSON: validation is not a canonical STValidation");
@@ -668,21 +690,28 @@ header_from_json(boost::json::object const& obj)
         "header");
     h.seq = static_cast<uint32_t>(
         integer_member(hdr, "ledger_index", kUint32Max, "header"));
-    auto const total_coins = std::string(hdr.at("total_coins").as_string());
+    // The decimal text of a uint64 as rippled writes it: digits, no sign,
+    // no leading zero. One spelling per value.
+    auto const& coins = hdr.at("total_coins");
+    auto const total_coins =
+        coins.is_string() ? std::string_view(coins.as_string()) : "";
+    uint64_t drops = 0;
+    auto const parsed = std::from_chars(
+        total_coins.data(), total_coins.data() + total_coins.size(), drops);
     if (total_coins.empty() ||
-        !std::all_of(
-            total_coins.begin(), total_coins.end(), [](unsigned char c) {
-                return std::isdigit(c) != 0;
-            }))
+        (total_coins.size() > 1 && total_coins.front() == '0') ||
+        total_coins.front() < '0' || total_coins.front() > '9' ||
+        parsed.ec != std::errc{} ||
+        parsed.ptr != total_coins.data() + total_coins.size())
         throw std::runtime_error(
-            "proof JSON: total_coins must be unsigned decimal digits");
-    h.drops = std::stoull(total_coins);
-    h.parent_hash =
-        hash_from_hex(std::string(hdr.at("parent_hash").as_string()));
+            "proof JSON: header total_coins must be the decimal text of a "
+            "uint64 with no leading zeros");
+    h.drops = drops;
+    h.parent_hash = proof_hash(hdr.at("parent_hash"), "header parent_hash");
     h.tx_hash =
-        hash_from_hex(std::string(hdr.at("transaction_hash").as_string()));
+        proof_hash(hdr.at("transaction_hash"), "header transaction_hash");
     h.account_hash =
-        hash_from_hex(std::string(hdr.at("account_hash").as_string()));
+        proof_hash(hdr.at("account_hash"), "header account_hash");
     h.parent_close_time = static_cast<uint32_t>(
         integer_member(hdr, "parent_close_time", kUint32Max, "header"));
     h.close_time = static_cast<uint32_t>(

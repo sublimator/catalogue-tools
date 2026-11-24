@@ -1,0 +1,31 @@
+{
+  "name": "leafless-map-binary",
+  "violates": "spec \u00a73.8: a map proof MUST contain at least one authenticated leaf",
+  "layer": "parse",
+  "mutations": [
+    {
+      "delete_at": 8749,
+      "delete_len": 5080
+    },
+    {
+      "insert_at": 8749,
+      "insert_hex": "F030F3CF44318469AB30757F49B30D8E5569FC9BD01E6F0B30B327661DBCBA977C53DB8CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    },
+    {
+      "delete_at": 7703,
+      "delete_len": 2
+    },
+    {
+      "insert_at": 7703,
+      "insert_hex": "9815"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "contains no leaves"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary trie: inner node contains no leaves"
+  }
+}

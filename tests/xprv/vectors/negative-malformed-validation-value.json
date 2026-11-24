@@ -12,9 +12,9 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "validation value must be a hex string"
+    "reason_contains": "validation value must be uppercase hex"
   },
   "observed": {
-    "python_reason": "validation value must be a hex string"
+    "python_reason": "validation value must be uppercase hex"
   }
 }

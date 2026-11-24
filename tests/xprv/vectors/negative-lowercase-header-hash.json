@@ -1,0 +1,20 @@
+{
+  "name": "lowercase-header-hash",
+  "violates": "spec \u00a72: hex in the JSON form is uppercase",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/header/account_hash",
+      "value": "72db884ecb8f3c58cd28e4fa0b10abcf35ede93ae72760dbd210456603ec2d71"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "uppercase hex"
+  },
+  "observed": {
+    "python_reason": "header account_hash must be uppercase hex"
+  }
+}

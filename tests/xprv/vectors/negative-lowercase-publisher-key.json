@@ -1,0 +1,20 @@
+{
+  "name": "lowercase-publisher-key",
+  "violates": "spec \u00a72: hex in the JSON form is uppercase",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/unl/public_key",
+      "value": "ed2677abffd1b33ac6fbc3062b71f1e8397c1505e1c42c64d11ad1b28ff73f4734"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "uppercase hex"
+  },
+  "observed": {
+    "python_reason": "publisher key must be uppercase hex"
+  }
+}

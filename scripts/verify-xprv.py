@@ -1304,27 +1304,46 @@ def verify_anchor(
 # ─── Main verifier ──────────────────────────────────────────────────
 
 
-def validate_json_trie(node: Any, depth: int = 0) -> None:
-    """Enforce the same node grammar before hashing, enumeration or display."""
+UPPER_HEX = frozenset("0123456789ABCDEF")
+
+
+def validate_json_trie(node: Any, depth: int = 0, path: str = "") -> int:
+    """Enforce the node grammar before hashing, enumeration or display.
+
+    Returns the number of leaves at and beneath `node`. `path` is the branch
+    nibbles from the root. A trie has one shape (§2.3): an empty branch is
+    absent, never a zero hash or an inner node with nothing in it; an inner
+    node is present only because a leaf lies beneath it; and a leaf sits where
+    its key puts it. Otherwise one tree has many spellings with one root.
+    """
     if depth == 0 and not isinstance(node, dict):
         raise ValueError("trie root must be an inner node")
     if isinstance(node, str):
-        if len(node) != 64 or any(c not in "0123456789abcdefABCDEF" for c in node):
-            raise ValueError("trie placeholder must be a 32-byte hex hash")
-    elif isinstance(node, list):
+        if len(node) != 64 or any(c not in UPPER_HEX for c in node):
+            raise ValueError("trie placeholder must be a 32-byte uppercase hex hash")
+        if node == "0" * 64:
+            raise ValueError("trie placeholder is a zero hash; an empty branch is absent")
+        return 0
+    if isinstance(node, list):
         if len(node) != 2 or not isinstance(node[0], str):
             raise ValueError("trie leaf must be exactly [key, data]")
-        if len(node[0]) != 64 or any(c not in "0123456789abcdefABCDEF" for c in node[0]):
-            raise ValueError("trie leaf key must be a 32-byte hex hash")
+        if len(node[0]) != 64 or any(c not in UPPER_HEX for c in node[0]):
+            raise ValueError("trie leaf key must be a 32-byte uppercase hex hash")
+        if not node[0].startswith(path):
+            raise ValueError("trie leaf key does not match its trie path")
         if not isinstance(node[1], dict):
             raise ValueError("trie leaf data must be a decoded object, not hex (§2.3)")
-    elif isinstance(node, dict):
+        return 1
+    if isinstance(node, dict):
         if depth >= 64:
             raise ValueError("trie depth exceeds maximum (64)")
-        for child in trie_branches(node, depth).values():
-            validate_json_trie(child, depth + 1)
-    else:
-        raise ValueError(f"unexpected trie node: {type(node)}")
+        leaves = 0
+        for idx, child in sorted(trie_branches(node, depth).items()):
+            leaves += validate_json_trie(child, depth + 1, path + f"{idx:X}")
+        if leaves == 0:
+            raise ValueError("trie inner node contains no leaves")
+        return leaves
+    raise ValueError(f"unexpected trie node: {type(node)}")
 
 
 def loads_strict_json(raw: str | bytes, **kwargs: Any) -> Any:
@@ -1367,8 +1386,10 @@ def load_json_proof(raw: str | bytes) -> dict[str, Any] | list[Any]:
     return loads_strict_json(raw, object_pairs_hook=object_members)
 
 
-HEX_DIGITS_RE = re.compile(r"(?:[0-9A-Fa-f]{2})*")
-DECIMAL_RE = re.compile(r"[0-9]+")
+# Hex in the JSON form has one spelling: uppercase (§2).
+HEX_DIGITS_RE = re.compile(r"(?:[0-9A-F]{2})*")
+# The decimal text of an unsigned integer as rippled writes it.
+DECIMAL_RE = re.compile(r"0|[1-9][0-9]*")
 
 
 def _require_uint(value: Any, bits: int, what: str) -> None:
@@ -1377,10 +1398,19 @@ def _require_uint(value: Any, bits: int, what: str) -> None:
 
 
 def _require_hex(value: Any, what: str, size: int | None = None) -> None:
-    if not isinstance(value, str) or not HEX_DIGITS_RE.fullmatch(value):
+    if not isinstance(value, str):
         raise ValueError(f"{what} must be a hex string")
+    if not HEX_DIGITS_RE.fullmatch(value):
+        raise ValueError(f"{what} must be uppercase hex")
     if size is not None and len(value) != 2 * size:
-        raise ValueError(f"{what} must be {size} bytes")
+        raise ValueError(f"{what} must be exactly {size} bytes")
+
+
+def _require_key(value: Any, what: str) -> None:
+    """A public key is 33 bytes: 0xED for Ed25519, 0x02 or 0x03 for secp256k1."""
+    _require_hex(value, what, 33)
+    if value[:2] not in ("ED", "02", "03"):
+        raise ValueError(f"{what} must begin with ED, 02 or 03")
 
 
 HEADER_MEMBERS = frozenset({
@@ -1414,6 +1444,21 @@ def validate_json_steps(steps: Any) -> None:
         if kind == "anchor":
             _require_members(step, {"type", "ledger_hash", "unl", "validations"}, "anchor")
             _require_hex(step.get("ledger_hash"), "anchor ledger_hash", 32)
+            # §2.1: public_key always; manifest, blob and signature together
+            # or not at all, each non-empty.
+            unl = step.get("unl")
+            if not isinstance(unl, dict):
+                raise ValueError("anchor unl must be an object")
+            if set(unl) - {"public_key", "manifest", "blob", "signature"}:
+                raise ValueError("unknown member in unl")
+            bundled = {"manifest", "blob", "signature"} & set(unl)
+            if len(bundled) not in (0, 3):
+                raise ValueError("unl must carry manifest, blob and signature together, or none of them")
+            _require_key(unl.get("public_key"), "publisher key")
+            for name in sorted(bundled):
+                _require_hex(unl[name], f"unl {name}")
+                if not unl[name]:
+                    raise ValueError("a bundled list needs a non-empty manifest, blob and signature")
             validations = step.get("validations")
             if not isinstance(validations, dict):
                 raise ValueError("anchor validations must be an object")
@@ -1440,7 +1485,9 @@ def validate_json_steps(steps: Any) -> None:
                 _require_hex(header.get(name), f"header {name}", 32)
             coins = header.get("total_coins")
             if not isinstance(coins, str) or not DECIMAL_RE.fullmatch(coins) or int(coins) >= 1 << 64:
-                raise ValueError("header total_coins must be a decimal string of a uint64")
+                raise ValueError(
+                    "header total_coins must be the decimal text of a uint64 with no leading zeros"
+                )
         elif kind == "map_proof":
             if step.get("tree") not in ("state", "tx"):
                 raise ValueError("unknown map tree type")
@@ -1662,6 +1709,7 @@ def verify(
 
             try:
                 if isinstance(binary_payload, bytes):
+                    validate_binary_trie(binary_payload)
                     # The root comes from the payload, never from a member.
                     root, end = hash_binary_trie(binary_payload, 0, is_tx=is_tx)
                     if end != len(binary_payload):
@@ -1956,6 +2004,7 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
     head, pos = read_fixed(payload, 0, 65)
     ledger_hash = head[:32].hex().upper()
     publisher_key = head[32:].hex().upper()
+    _require_key(publisher_key, "publisher key")
     val_count, pos = leb128_read(payload, pos)
 
     # Each record is a complete canonical STValidation (§2.1). Its own
@@ -1996,6 +2045,50 @@ def decode_anchor_unl(payload: bytes, anchor: dict[str, Any]) -> None:
     anchor["unl"]["manifest"] = manifest_bytes.hex().upper()
     anchor["unl"]["signature"] = sig_bytes.hex().upper()
     anchor["unl"]["blob"] = blob_bytes.hex().upper()
+
+
+def validate_binary_trie(data: bytes) -> None:
+    """The JSON trie's shape rules for a binary payload (§2.3, §3.7).
+
+    One root inner node, consumed exactly. Every inner node has a leaf beneath
+    it, no hash placeholder is all zero, a leaf's key begins with its path, and
+    no inner node lies deeper than 63.
+    """
+
+    def node(pos: int, path: list[int]) -> tuple[int, int]:
+        if len(path) >= 64:
+            raise ValueError("binary trie: depth exceeds maximum (64)")
+        if pos + 4 > len(data):
+            raise ValueError("binary trie: unexpected end reading header")
+        header = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+        leaves = 0
+        for branch in range(16):
+            btype = (header >> (branch * 2)) & 0x03
+            if btype == BR_EMPTY:
+                continue
+            if btype == BR_INNER:
+                count, pos = node(pos, path + [branch])
+                leaves += count
+                continue
+            key, pos = read_fixed(data, pos, 32)
+            if btype == BR_HASH:
+                if key == ZERO_HASH:
+                    raise ValueError("binary trie: placeholder is a zero hash; an empty branch is absent")
+                continue
+            nibbles = [n for byte in key for n in (byte >> 4, byte & 0x0F)]
+            if nibbles[: len(path) + 1] != path + [branch]:
+                raise ValueError("binary trie: leaf key does not match its trie path")
+            size, pos = leb128_read(data, pos)
+            _, pos = read_fixed(data, pos, size)
+            leaves += 1
+        if leaves == 0:
+            raise ValueError("binary trie: inner node contains no leaves")
+        return leaves, pos
+
+    _, end = node(0, [])
+    if end != len(data):
+        raise ValueError("binary trie: trailing bytes")
 
 
 def hash_binary_trie(data: bytes, pos: int, *, is_tx: bool, depth: int = 0) -> tuple[Hash256, int]:
@@ -2093,9 +2186,7 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
         elif tlv_type in (TLV_MAP_TX, TLV_MAP_STATE):
             tree = "tx" if tlv_type == TLV_MAP_TX else "state"
             is_tx = tree == "tx"
-            _, end = hash_binary_trie(payload, 0, is_tx=is_tx)
-            if end != len(payload):
-                raise ValueError("binary trie: trailing bytes")
+            validate_binary_trie(payload)
             # The verifier hashes the payload itself; bytes can't come from JSON.
             steps.append({"type": "map_proof", "tree": tree, "__binary_payload__": payload})
 

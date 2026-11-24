@@ -1,0 +1,31 @@
+{
+  "name": "leafless-inner-node-binary",
+  "violates": "spec \u00a72.3, \u00a73.7: an inner node is present only because a leaf lies beneath it",
+  "layer": "parse",
+  "mutations": [
+    {
+      "delete_at": 7705,
+      "delete_len": 36
+    },
+    {
+      "insert_at": 7705,
+      "insert_hex": "FEFFEFFF03000000ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    },
+    {
+      "delete_at": 7703,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 7703,
+      "insert_hex": "B0"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "contains no leaves"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary trie: inner node contains no leaves"
+  }
+}

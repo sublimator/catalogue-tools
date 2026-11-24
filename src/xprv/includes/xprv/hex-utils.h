@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <iomanip>
+#include <span>
 #include <stdexcept>
 #include <sstream>
 #include <string>
@@ -79,6 +80,18 @@ from_hex(std::string_view hex)
     for (size_t i = 0; i < hex.size(); i += 2)
         result.push_back(hex_byte(hex[i], hex[i + 1]));
     return result;
+}
+
+/// A public key is 33 bytes: 0xED for Ed25519, 0x02 or 0x03 for secp256k1.
+inline void
+require_public_key(std::span<const uint8_t> key, std::string_view what)
+{
+    if (key.size() != 33)
+        throw std::runtime_error(
+            std::string(what) + " must be exactly 33 bytes");
+    if (key[0] != 0xED && key[0] != 0x02 && key[0] != 0x03)
+        throw std::runtime_error(
+            std::string(what) + " must begin with ED, 02 or 03");
 }
 
 }  // namespace xprv

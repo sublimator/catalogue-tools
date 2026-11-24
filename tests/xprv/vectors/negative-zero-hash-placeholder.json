@@ -1,0 +1,20 @@
+{
+  "name": "zero-hash-placeholder",
+  "violates": "spec \u00a72.3: an empty branch is absent, never a zero hash",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie/A/3/7/6/6/0",
+      "value": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "zero hash"
+  },
+  "observed": {
+    "python_reason": "trie placeholder is a zero hash; an empty branch is absent"
+  }
+}

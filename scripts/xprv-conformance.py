@@ -24,9 +24,11 @@ For the built-in verifiers a refusal must also print the vector's
 verifier's wording is its own; --check-reasons applies the check to it.
 
 A vector may carry `known_failing`: an object naming verifiers that do not yet
-meet its expectation, each with the reason. Such a verifier is expected to
-miss. When it starts to meet the expectation the run fails until the tag is
-removed, so a tag cannot outlive the defect it records.
+meet its expectation, each with what it `does` instead (accept, reject,
+wrong-reason, abnormal or timeout) and `because` of what. Such a verifier is
+expected to miss in exactly that way. A different failure fails the run, and
+so does meeting the expectation while still tagged, so a tag can neither hide
+a new defect nor outlive the one it records.
 
 This runner needs no XRPL library. It only builds each vector's bytes and
 compares exit statuses.
@@ -53,6 +55,7 @@ VECTOR_DIR = REPO / "tests" / "xprv" / "vectors"
 VECTOR_TOOL = REPO / "scripts" / "xprv-vectors.py"
 
 ACCEPT, REJECT, ABNORMAL, TIMEOUT = "accept", "reject", "abnormal", "timeout"
+WRONG_REASON = "wrong-reason"
 
 
 def load_vector_tool() -> Any:
@@ -76,7 +79,7 @@ class Case:
     network_id: int
     publisher_key: str
     reason_contains: str | None = None
-    known_failing: dict[str, str] = field(default_factory=dict)
+    known_failing: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
@@ -92,8 +95,15 @@ def expand(path: Path, tool: Any) -> list[Case]:
     if verdict not in (ACCEPT, REJECT):
         raise SystemExit(f"{path.name}: expect.verdict must be accept or reject")
     known = vec.get("known_failing", {})
-    if not isinstance(known, dict):
-        raise SystemExit(f"{path.name}: known_failing must be an object")
+    kinds = {ACCEPT, REJECT, WRONG_REASON, ABNORMAL, TIMEOUT}
+    if not isinstance(known, dict) or not all(
+        isinstance(tag, dict) and tag.get("does") in kinds and isinstance(tag.get("because"), str)
+        for tag in known.values()
+    ):
+        raise SystemExit(
+            f"{path.name}: known_failing maps a verifier to {{does, because}}, "
+            f"with does one of {', '.join(sorted(kinds))}"
+        )
 
     def case(form: str, data: bytes, trust: dict[str, Any]) -> Case:
         return Case(
@@ -161,6 +171,7 @@ def run_verifier(template: list[str], case: Case, proof: Path, timeout: float) -
 def judge(case: Case, verifier: str, got: Outcome, check_reasons: bool) -> tuple[str, str]:
     """(status, note). Status is pass, known, fixed or FAIL."""
     met = got.verdict == case.expect
+    does = got.verdict
     note = got.verdict + (f" ({got.detail})" if got.detail else "")
     # A file without the magic is not a binary proof to a command line, which
     # picks the form from the magic, so its stated binary reason cannot appear.
@@ -168,11 +179,17 @@ def judge(case: Case, verifier: str, got: Outcome, check_reasons: bool) -> tuple
     if met and check_reasons and recognisable and case.expect == REJECT and case.reason_contains:
         if case.reason_contains.lower() not in got.output.lower():
             met = False
+            does = WRONG_REASON
             note = f"refused, but not for {case.reason_contains!r}"
     if verifier in case.known_failing:
+        tag = case.known_failing[verifier]
         if met:
             return "fixed", f"{note}; meets the expectation, remove its known_failing tag"
-        return "known", f"{note}; {case.known_failing[verifier]}"
+        # A tag excuses the failure it names and no other: an abort or a
+        # timeout is never hidden behind a tag written for a wrong refusal.
+        if does != tag["does"]:
+            return "FAIL", f"tagged as known to {tag['does']}, but it now does this: {note}"
+        return "known", f"{note}; {tag['because']}"
     if met:
         return "pass", note
     return "FAIL", f"expected {case.expect}, got {note}"

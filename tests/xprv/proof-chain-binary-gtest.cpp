@@ -41,6 +41,20 @@ make_bytes(size_t len, uint8_t fill)
     return std::vector<uint8_t>(len, fill);
 }
 
+/// A minimal well-formed binary trie (§3.7): a root with one leaf of `size`
+/// bytes, on the branch its key begins with. from_binary refuses a payload
+/// that is not a trie.
+std::vector<uint8_t>
+make_trie(size_t size, uint8_t fill)
+{
+    std::vector<uint8_t> out;
+    catl::shamap::write_u32_le(out, 1u << (2 * (fill >> 4)));
+    out.insert(out.end(), 32, fill);  // the key: every byte `fill`
+    catl::shamap::leb128_encode(out, size);
+    out.insert(out.end(), size, fill);
+    return out;
+}
+
 /// Make a minimal valid VL blob JSON for testing.
 /// The blob must be JSON that encode_anchor can parse.
 std::vector<uint8_t>
@@ -530,12 +544,12 @@ TEST(ProofChainBinary, TrieRoundTrip)
     TrieData trie;
     trie.tree = TrieData::TreeType::state;
     // Fake binary trie data
-    trie.trie_binary = make_bytes(256, 0xAB);
+    trie.trie_binary = make_trie(256, 0xAB);
     chain.steps.push_back(trie);
 
     TrieData trie2;
     trie2.tree = TrieData::TreeType::tx;
-    trie2.trie_binary = make_bytes(128, 0xCD);
+    trie2.trie_binary = make_trie(128, 0xCD);
     chain.steps.push_back(trie2);
 
     auto binary = to_binary(chain);
@@ -578,7 +592,7 @@ TEST(ProofChainBinary, FullChainRoundTrip)
 
     TrieData state_proof;
     state_proof.tree = TrieData::TreeType::state;
-    state_proof.trie_binary = make_bytes(500, 0xEE);
+    state_proof.trie_binary = make_trie(500, 0xEE);
     chain.steps.push_back(state_proof);
 
     HeaderData h2;
@@ -592,7 +606,7 @@ TEST(ProofChainBinary, FullChainRoundTrip)
 
     TrieData tx_proof;
     tx_proof.tree = TrieData::TreeType::tx;
-    tx_proof.trie_binary = make_bytes(300, 0xFF);
+    tx_proof.trie_binary = make_trie(300, 0xFF);
     chain.steps.push_back(tx_proof);
 
     auto binary = to_binary(chain);
@@ -617,11 +631,11 @@ TEST(ProofChainBinary, FullChainRoundTrip)
 
     auto& ds = std::get<TrieData>(decoded.steps[2]);
     EXPECT_EQ(ds.tree, TrieData::TreeType::state);
-    EXPECT_EQ(ds.trie_binary.size(), 500u);
+    EXPECT_EQ(ds.trie_binary, state_proof.trie_binary);
 
     auto& dt = std::get<TrieData>(decoded.steps[4]);
     EXPECT_EQ(dt.tree, TrieData::TreeType::tx);
-    EXPECT_EQ(dt.trie_binary.size(), 300u);
+    EXPECT_EQ(dt.trie_binary, tx_proof.trie_binary);
 
     std::cout << "  Full chain: " << binary.size() << " bytes binary, "
               << "5 steps\n";
@@ -653,7 +667,7 @@ TEST(ProofChainBinary, CompressedRoundTrip)
 
     TrieData trie;
     trie.tree = TrieData::TreeType::tx;
-    trie.trie_binary = make_bytes(500, 0xEE);
+    trie.trie_binary = make_trie(500, 0xEE);
     chain.steps.push_back(trie);
 
     auto raw = to_binary(chain);
@@ -678,7 +692,7 @@ TEST(ProofChainBinary, CompressedRoundTrip)
     EXPECT_EQ(dh.seq, 100000u);
 
     auto& dt = std::get<TrieData>(decoded.steps[2]);
-    EXPECT_EQ(dt.trie_binary.size(), 500u);
+    EXPECT_EQ(dt.trie_binary, trie.trie_binary);
 
     std::cout << "  Compressed: " << raw.size() << " -> " << compressed.size()
               << " bytes (" << (100 - 100 * compressed.size() / raw.size())

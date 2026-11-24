@@ -1,0 +1,23 @@
+{
+  "name": "leaf-key-off-its-path-binary",
+  "violates": "spec \u00a72.3, \u00a73.7: a leaf sits where its key puts it",
+  "layer": "parse",
+  "mutations": [
+    {
+      "delete_at": 8785,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 8785,
+      "insert_hex": "B3"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "does not match its trie path"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary trie: leaf key does not match its trie path"
+  }
+}

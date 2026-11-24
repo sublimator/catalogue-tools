@@ -1,0 +1,20 @@
+{
+  "name": "lowercase-leaf-key",
+  "violates": "spec \u00a72: hex in the JSON form is uppercase",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/4/trie/B/4/9/7/9/A/0",
+      "value": "b4979a36cdc7f3d3d5c31a4eae2ac7d7209dda877588b9afc66799692ab0d66b"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "uppercase hex"
+  },
+  "observed": {
+    "python_reason": "trie leaf key must be a 32-byte uppercase hex hash"
+  }
+}

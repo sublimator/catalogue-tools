@@ -15,7 +15,10 @@
     "reason_contains": "tx must be an object"
   },
   "known_failing": {
-    "cpp": "xprv verify refuses the leaf, then aborts on an uncaught exception while describing it"
+    "cpp": {
+      "does": "abnormal",
+      "because": "xprv verify refuses the leaf, then aborts on an uncaught exception while describing it"
+    }
   },
   "observed": {
     "python_reason": "step 7: tx tree error: leaf member tx must be an object"

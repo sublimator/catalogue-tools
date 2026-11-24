@@ -1,0 +1,20 @@
+{
+  "name": "empty-inner-node",
+  "violates": "spec \u00a72.3: an inner node is present only because a leaf lies beneath it",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie/A/3/7/6/6/0",
+      "value": {}
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "contains no leaves"
+  },
+  "observed": {
+    "python_reason": "trie inner node contains no leaves"
+  }
+}

@@ -15,8 +15,14 @@
     "reason_contains": "must be a string or a number"
   },
   "known_failing": {
-    "python": "accepts: false and true serialize as 0 and 1",
-    "cpp": "refuses through a codec type error, not through the \u00a72.3 value rule"
+    "python": {
+      "does": "accept",
+      "because": "false and true serialize as 0 and 1"
+    },
+    "cpp": {
+      "does": "wrong-reason",
+      "because": "refuses through a codec type error, not through the \u00a72.3 value rule"
+    }
   },
   "observed": {
     "python_reason": "accepted"

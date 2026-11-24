@@ -125,4 +125,81 @@ read_u32_le(std::span<const uint8_t> data, size_t& pos)
     return v;
 }
 
+// Checks one inner node of a binary trie and everything beneath it, starting
+// at `pos`, and returns the number of leaves there. Advances `pos` past the
+// node. `path` is the branch nibbles from the root, one per byte.
+//
+// The rules are the JSON trie's (json-trie.h, XPRV §2.3, §3.7): an inner node
+// has a leaf beneath it, a hash placeholder is not all zero, a leaf sits
+// where its key puts it, and no inner node lies deeper than 63.
+inline size_t
+validate_binary_trie_node(
+    std::span<const uint8_t> data,
+    size_t& pos,
+    std::vector<uint8_t>& path)
+{
+    if (path.size() >= 64)
+        throw std::runtime_error("binary trie: depth exceeds maximum (64)");
+    auto const header = read_u32_le(data, pos);
+    size_t leaves = 0;
+    for (int branch = 0; branch < 16; ++branch)
+    {
+        auto const type = get_branch_type(header, branch);
+        if (type == BranchType::empty)
+            continue;
+        if (type == BranchType::inner)
+        {
+            path.push_back(static_cast<uint8_t>(branch));
+            leaves += validate_binary_trie_node(data, pos, path);
+            path.pop_back();
+            continue;
+        }
+        if (pos > data.size() || data.size() - pos < 32)
+            throw std::runtime_error("binary trie: unexpected end of data");
+        auto const hash = data.subspan(pos, 32);
+        pos += 32;
+        if (type == BranchType::hash)
+        {
+            bool zero = true;
+            for (auto const byte : hash)
+                zero = zero && byte == 0;
+            if (zero)
+                throw std::runtime_error(
+                    "binary trie: placeholder is a zero hash; an empty "
+                    "branch is absent");
+            continue;
+        }
+        // A leaf: its key, then its length-prefixed bytes.
+        path.push_back(static_cast<uint8_t>(branch));
+        for (size_t i = 0; i < path.size(); ++i)
+        {
+            auto const byte = hash[i / 2];
+            auto const nibble = i % 2 == 0 ? byte >> 4 : byte & 0x0F;
+            if (nibble != path[i])
+                throw std::runtime_error(
+                    "binary trie: leaf key does not match its trie path");
+        }
+        path.pop_back();
+        auto const size = leb128_decode(data, pos);
+        if (size > data.size() - pos)
+            throw std::runtime_error("binary trie: unexpected end of data");
+        pos += size;
+        ++leaves;
+    }
+    if (leaves == 0)
+        throw std::runtime_error("binary trie: inner node contains no leaves");
+    return leaves;
+}
+
+/// Checks a whole binary trie payload: one root inner node, consumed exactly.
+inline void
+validate_binary_trie(std::span<const uint8_t> data)
+{
+    size_t pos = 0;
+    std::vector<uint8_t> path;
+    validate_binary_trie_node(data, pos, path);
+    if (pos != data.size())
+        throw std::runtime_error("binary trie: trailing bytes");
+}
+
 }  // namespace catl::shamap

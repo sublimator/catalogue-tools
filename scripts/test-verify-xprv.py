@@ -121,8 +121,8 @@ class Fixture:
             "ledger_hash": ANCHOR_HASH,
             "unl": {
                 "public_key": claimed_key or publisher[0],
-                "manifest": hexlify(make_manifest(publisher, publisher_signing)).decode(),
-                "blob": hexlify(blob).decode(),
+                "manifest": hexlify(make_manifest(publisher, publisher_signing)).decode().upper(),
+                "blob": hexlify(blob).decode().upper(),
                 "signature": sign(blob, publisher_signing[1]),
             },
             "validations": {
@@ -347,7 +347,7 @@ class AnchorVerificationTests(unittest.TestCase):
         self.assertRejected(self.verify(anchor, f.trusted_key), "together, or none of them")
 
     def test_hex_leaf_is_not_leaf_data(self) -> None:
-        trie = {"0": ["AB" * 32, "ABCDEF"]}
+        trie = {"A": ["AB" * 32, "ABCDEF"]}
         with self.assertRaisesRegex(ValueError, "not hex"):
             v.hash_trie(trie, is_tx=True)
 
@@ -1299,7 +1299,7 @@ class StrictParsingTests(unittest.TestCase):
         # Field id 0xFF is not in the xrpl-py 5.2.0 definitions, so decode()
         # raises KeyError. The anchor decoder reports a validation it cannot
         # decode as not canonical, never as a traceback.
-        payload = bytes(32) + bytes(33) + bytes([1]) + bytes([2]) + b"\xff\x00"
+        payload = bytes(32) + b"\xed" + bytes(32) + bytes([1]) + bytes([2]) + b"\xff\x00"
         with self.assertRaisesRegex(ValueError, "canonical STValidation"):
             v.decode_anchor_core(payload)
 
@@ -1310,7 +1310,7 @@ class StrictParsingTests(unittest.TestCase):
 class StructuralParityTests(unittest.TestCase):
     def test_zero_validation_core_parses(self):
         # 32-byte hash, 33-byte publisher key and a zero count: 66 bytes.
-        payload = bytes(32) + bytes(33) + bytes([0])
+        payload = bytes(32) + b"\xed" + bytes(32) + bytes([0])
         self.assertEqual(len(payload), 66)
         self.assertEqual(v.decode_anchor_core(payload)["validations"], {})
 

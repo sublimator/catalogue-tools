@@ -1,0 +1,20 @@
+{
+  "name": "lowercase-list-signature",
+  "violates": "spec \u00a72: hex in the JSON form is uppercase",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/unl/signature",
+      "value": "38cbf21d2b192d4ed86d54baadec708bbe63cb84085427dee260ec80b7ea2019403114979db70b5e45899672ca38d89e75e9a76c27e91a95642f03d4f09b160c"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "uppercase hex"
+  },
+  "observed": {
+    "python_reason": "unl signature must be uppercase hex"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "leaf-key-off-its-path",
+  "violates": "spec \u00a72.3: a leaf sits where its key puts it",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/4/trie/B/4/9/7/9/A/0",
+      "value": "04979A36CDC7F3D3D5C31A4EAE2AC7D7209DDA877588B9AFC66799692AB0D66B"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "does not match its trie path"
+  },
+  "observed": {
+    "python_reason": "trie leaf key does not match its trie path"
+  }
+}
