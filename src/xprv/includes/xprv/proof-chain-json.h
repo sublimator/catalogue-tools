@@ -6,6 +6,7 @@
 
 #include <boost/json.hpp>
 #include <cstddef>
+#include <stdexcept>
 #include <string_view>
 
 namespace xprv {
@@ -36,10 +37,20 @@ from_json(boost::json::value const& json);
 ProofChain
 from_json_text(std::string_view text);
 
-/// Throw unless a decoded JSON leaf holds only serialized fields of
-/// `protocol`, at every depth: a tx leaf is exactly {tx, meta}. The codec
-/// skips names it doesn't know, so an unchecked member would be shown but
-/// never hashed (§2.3, §3.8).
+/// A JSON leaf that is not a valid representation of a leaf under the
+/// network's codec (§2.3). It is a fault in the proof's form, so a report
+/// names the parse layer for it (§2.4), although it can only be met once the
+/// network, and with it the codec, is known.
+struct LeafFormError : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+/// Throw LeafFormError unless a decoded JSON leaf is exactly the JSON its
+/// own bytes decode to under `protocol` (§2.3): only serialized fields, at
+/// every depth, each with a value the codec would write; a tx leaf is
+/// exactly {tx, meta}. The codec skips names it doesn't know, so an
+/// unchecked member would be shown but never hashed (§3.8).
 void
 require_codec_members(
     boost::json::value const& leaf,

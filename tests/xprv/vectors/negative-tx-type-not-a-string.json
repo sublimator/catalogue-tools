@@ -1,7 +1,7 @@
 {
   "name": "tx-type-not-a-string",
   "violates": "spec \u00a72.3: a leaf is refused, never fatal, when a member has the wrong JSON type",
-  "layer": "graph",
+  "layer": "parse",
   "base": "positive-tx-skiplist",
   "json_patch": [
     {

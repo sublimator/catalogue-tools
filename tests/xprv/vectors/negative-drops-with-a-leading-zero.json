@@ -1,7 +1,7 @@
 {
   "name": "drops-with-a-leading-zero",
   "violates": "spec \u00a72.3: a JSON leaf equals what its serialized bytes decode to",
-  "layer": "graph",
+  "layer": "parse",
   "base": "positive-tx-skiplist",
   "json_patch": [
     {

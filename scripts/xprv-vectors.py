@@ -628,7 +628,7 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("wrong-depth", "spec §2.3: __depth__ MUST equal the node's nesting depth",
         "parse", "__depth__", [at(f"/steps/{first_map}/trie/__depth__", 17)])
     neg("unknown-leaf-member", "spec §2.3: leaf data is the decoded content and nothing else",
-        "graph", "not a serialized field", [at(f"{state_leaf}/1/DisplayedButNotHashed", 1)])
+        "parse", "not a serialized field", [at(f"{state_leaf}/1/DisplayedButNotHashed", 1)])
 
     recorded = base["intermediates"]["map_proofs"][-1]
     assert recorded["tree"] == "tx" and len(recorded["leaves"]) == 1
@@ -727,31 +727,60 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     # null member hashes the leaf as if it were absent, so the reader sees a
     # member nothing authenticated.
     value_rule = "spec §2.3: a leaf field that is not structured has a string or a number as its value"
-    neg("null-leaf-value", value_rule, "graph", "must be a string or a number",
+    neg("null-leaf-value", value_rule, "parse", "must be a string or a number",
         [at(f"{tx_leaf}/1/tx/InvoiceID", None)])
-    neg("bool-leaf-value", value_rule, "graph", "must be a string or a number",
+    neg("bool-leaf-value", value_rule, "parse", "must be a string or a number",
         [at(f"{state_leaf}/1/Flags", False)])
 
     # §2.3: a JSON leaf is the JSON its own bytes decode to. Each of these
     # serializes to the leaf's real bytes, so only the round trip sees it.
+    # §2.4: an invalid leaf is a fault in the proof's form, so the layer is
+    # parse; graph is for a valid leaf under a root nothing supports.
     roundtrip = "spec §2.3: a JSON leaf equals what its serialized bytes decode to"
     differs = "not the JSON its bytes decode to"
     tx = proof
     for token in _pointer_tokens(f"{tx_leaf}/1/tx"):
         tx = _step(tx, token)
-    neg("enum-as-a-number", roundtrip, "graph", differs,
+    neg("enum-as-a-number", roundtrip, "parse", differs,
         [at(f"{tx_leaf}/1/tx/TransactionType", V.encode_transaction_type(tx["TransactionType"]))])
-    neg("number-as-a-string", roundtrip, "graph", differs,
+    neg("number-as-a-string", roundtrip, "parse", differs,
         [at(f"{tx_leaf}/1/tx/Sequence", str(tx["Sequence"]))])
-    neg("drops-with-a-leading-zero", roundtrip, "graph", differs,
+    neg("drops-with-a-leading-zero", roundtrip, "parse", differs,
         [at(f"{tx_leaf}/1/tx/Fee", "0" + tx["Fee"])])
-    neg("lowercase-hex-in-a-leaf", roundtrip, "graph", differs,
+    neg("lowercase-hex-in-a-leaf", roundtrip, "parse", differs,
         [at(f"{tx_leaf}/1/tx/SigningPubKey", tx["SigningPubKey"].lower())])
+    # The other side of §2.4: a leaf that is a valid leaf, with one value
+    # changed to another valid value. Its form is fine; its root is one that
+    # no authenticated header names.
+    neg("leaf-changed-to-another-valid-value",
+        "spec §2.4: a valid leaf under a root no authenticated header names is a graph refusal",
+        "graph", "supported by",
+        [at(f"{tx_leaf}/1/tx/Sequence", tx["Sequence"] + 1)])
+
+    # An issued amount's value may be written in another notation for exactly
+    # the same number, and in no other way.
+    issued = next(
+        (name for name, value in tx.items()
+         if isinstance(value, dict) and {"value", "currency", "issuer"} <= value.keys()),
+        None,
+    )
+    if issued is not None:
+        value = tx[issued]["value"]
+        assert value.isdigit() and not value.startswith("0"), "the base's issued value is a plain integer"
+        value_at = f"{tx_leaf}/1/tx/{issued}/value"
+        for name, spelling in (
+            ("issued-value-leading-zero", "0" + value),
+            ("issued-value-plus-sign", "+" + value),
+            ("issued-value-trailing-text", value + " "),
+            # The exponent is written in at most nine digits.
+            ("issued-value-ten-digit-exponent", value + "e0000000000"),
+        ):
+            neg(name, roundtrip, "parse", differs, [at(value_at, spelling)])
     neg("tx-not-an-object", "spec §2.3: a transaction leaf's tx and meta are the decoded objects",
-        "graph", "tx must be an object", [at(f"{tx_leaf}/1/tx", 123)])
+        "parse", "tx must be an object", [at(f"{tx_leaf}/1/tx", 123)])
     # A verifier that describes a leaf it has just refused can trip over it.
     neg("tx-type-not-a-string", "spec §2.3: a leaf is refused, never fatal, when a member has the wrong JSON type",
-        "graph", "", [at(f"{tx_leaf}/1/tx/TransactionType", [])])
+        "parse", "", [at(f"{tx_leaf}/1/tx/TransactionType", [])])
     return fam
 
 
@@ -772,13 +801,32 @@ def patch_accept_family(base: dict[str, Any], base_name: str) -> list[dict[str, 
         for pointer in depth_pointers(step["trie"], f"/steps/{i}/trie")
     ]
     assert diagnostics, "the base carries no __depth__ to remove"
-    return [{
+    family = [{
         "name": "no-depth-diagnostics",
         "states": "spec §2.3: __depth__ is an optional diagnostic; a trie without any verifies",
         "base": base_name,
         "json_patch": [{"op": "remove", "path": pointer} for pointer in diagnostics],
         "expect": {"verdict": "accept"},
     }]
+    # An issued amount's value in another notation for exactly the same number.
+    tx_leaf = _leaf_pointer(proof, "tx")
+    tx = proof
+    for token in _pointer_tokens(f"{tx_leaf}/1/tx"):
+        tx = _step(tx, token)
+    for name, value in tx.items():
+        if isinstance(value, dict) and {"value", "currency", "issuer"} <= value.keys():
+            digits = value["value"]
+            assert digits.isdigit() and digits.endswith("0"), "the base's issued value ends in a zero"
+            family.append({
+                "name": "issued-value-in-another-notation",
+                "states": "spec §2.3: an issued amount's value may use another notation for exactly the same number",
+                "base": base_name,
+                "json_patch": [{"op": "set", "path": f"{tx_leaf}/1/tx/{name}/value",
+                                "value": digits.rstrip("0") + "e" + str(len(digits) - len(digits.rstrip("0")))}],
+                "expect": {"verdict": "accept"},
+            })
+            break
+    return family
 
 
 def apply_mutations(raw: bytes, muts: list[dict[str, Any]]) -> bytes:
@@ -921,23 +969,31 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     raw = bytes.fromhex(bin_hex)
 
     written = 0
-    for derived in patch_accept_family(base, args.base) + patch_negative_family(base, args.base):
+    # With --only-issued, a second base contributes just the vectors that
+    # need what the first lacks: an issued amount.
+    suffix = ""
+    accept_family = patch_accept_family(base, args.base)
+    negative_family_json = patch_negative_family(base, args.base)
+    if args.only_issued:
+        accept_family = [a for a in accept_family if a["name"].startswith("issued-")]
+        negative_family_json = [n for n in negative_family_json if n["name"].startswith("issued-")]
+    for derived in accept_family + negative_family_json:
         # Compared as text: 10 and 10.0 are equal numbers and different tokens.
         if json.dumps(apply_json_patch(base["form"]["json"], derived["json_patch"])) == json.dumps(base["form"]["json"]):
             LOG.error("vector %r patches its base into itself; it would assert nothing", derived["name"])
             return 1
-    for acc in patch_accept_family(base, args.base):
+    for acc in accept_family:
         data = json.dumps(apply_json_patch(base["form"]["json"], acc["json_patch"])).encode()
         ok, reason = python_verdict(data, trust=base["trust"])
         if not ok:
             LOG.error("accept vector %r was REFUSED by the reference verifier (%s); "
                       "not writing a vector that asserts a false claim", acc["name"], reason)
             return 1
-        out = VECTOR_DIR / f"accept-{acc['name']}.json"
+        out = VECTOR_DIR / f"accept-{acc['name']}{suffix}.json"
         out.write_text(json.dumps(acc, indent=2) + "\n")
         LOG.info("wrote %s (accepted)", out.name)
         written += 1
-    for neg in patch_negative_family(base, args.base):
+    for neg in negative_family_json:
         data = json.dumps(apply_json_patch(base["form"]["json"], neg["json_patch"])).encode()
         ok, reason = python_verdict(data, trust=base["trust"])
         tagged = "python" in neg.get("known_failing", {})
@@ -956,7 +1012,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         out.write_text(json.dumps(neg, indent=2) + "\n")
         LOG.info("wrote %s (rejected: %s)", out.name, reason[:60])
         written += 1
-    for neg in negative_family(raw):
+    for neg in ([] if args.only_issued else negative_family(raw)):
         mutated = apply_mutations(raw, neg["mutations"])
         ok, reason = python_verdict(mutated, binary=True, trust=base["trust"])
         if ok:
@@ -1114,6 +1170,8 @@ def main() -> int:
 
     m = sub.add_parser("mutate", help="write the accept and negative families")
     m.add_argument("--base", required=True)
+    m.add_argument("--only-issued", action="store_true",
+                   help="write only the issued-amount vectors, from a base whose transaction carries one")
     m.set_defaults(fn=cmd_mutate)
 
     c = sub.add_parser("check", help="check every vector in the corpus")

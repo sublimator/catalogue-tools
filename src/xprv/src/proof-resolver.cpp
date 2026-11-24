@@ -739,6 +739,9 @@ resolve_proof_chain_impl(
 
                     std::optional<AbbrevMap> reconstructed;
                     std::string reconstruct_error;
+                    // A leaf that is not a valid leaf under the codec is a
+                    // fault in the proof's form (§2.4), not in what supports it.
+                    bool leaf_form_error = false;
                     std::vector<LedgerHashesLeaf> ledger_hashes_leaves;
 
                     // --- JSON trie path ---
@@ -776,7 +779,7 @@ resolve_proof_chain_impl(
                                     -> boost::intrusive_ptr<MmapItem> {
                                     auto key = hash_from_hex(key_hex);
                                     if (!leaf_data.is_object())
-                                        throw std::runtime_error(
+                                        throw LeafFormError(
                                             "JSON trie leaf data must be a "
                                             "decoded object, not hex (§2.3)");
                                     if (is_state)
@@ -799,6 +802,12 @@ resolve_proof_chain_impl(
                                     return boost::intrusive_ptr<MmapItem>(
                                         OwnedItem::create(key, s));
                                 });
+                        }
+                        catch (LeafFormError const& e)
+                        {
+                            PLOGW(verify_log, "  JSON trie leaf: ", e.what());
+                            reconstruct_error = e.what();
+                            leaf_form_error = true;
                         }
                         catch (std::exception const& e)
                         {
@@ -1006,9 +1015,12 @@ resolve_proof_chain_impl(
                             "  Trie proof:   FAIL (could not reconstruct "
                             "abbreviated tree)");
                         map_step.root_hash_check = Check::fail;
-                        fail(
-                            "map proof could not be reconstructed: " +
-                            reconstruct_error);
+                        if (leaf_form_error)
+                            fail(reconstruct_error, "parse");
+                        else
+                            fail(
+                                "map proof could not be reconstructed: " +
+                                reconstruct_error);
                     }
                     else if (structural_leaves == 0)
                     {

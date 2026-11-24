@@ -1,7 +1,7 @@
 {
   "name": "null-leaf-value",
   "violates": "spec \u00a72.3: a leaf field that is not structured has a string or a number as its value",
-  "layer": "graph",
+  "layer": "parse",
   "base": "positive-tx-skiplist",
   "json_patch": [
     {

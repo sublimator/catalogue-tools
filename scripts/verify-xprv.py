@@ -373,7 +373,15 @@ def vl_encode(data: bytes) -> bytes:
     raise ValueError(f"VL too large: {len(data)}")
 
 
-class UnknownLeafField(ValueError):
+class LeafFormError(ValueError):
+    """A JSON leaf that is not a valid leaf under the codec (§2.3).
+
+    A fault in the proof's form, so a report names the parse layer for it
+    (§2.4), although it is only met once the network's codec is known.
+    """
+
+
+class UnknownLeafField(LeafFormError):
     """A decoded leaf member that the codec would not serialize."""
 
 
@@ -468,7 +476,7 @@ def _require_value_grammar(type_name: str, value: Any, at: str) -> None:
     # a null member and reads true as 1, and the reader would then see
     # something nothing hashed. bool is an int in Python, so it is named.
     if isinstance(value, bool) or not isinstance(value, (str, int)):
-        raise UnknownLeafField(f"leaf member {at} must be a string or a number")
+        raise LeafFormError(f"leaf member {at} must be a string or a number")
 
 
 def encode_transaction_type(name: str) -> int:
@@ -508,7 +516,8 @@ def _require_stobject_members(obj: Any, path: str) -> None:
 # as 16 hex digits, and reads LockedAmount's text as hex. The two helpers
 # below put its input and its output into the form the reference writes.
 _BASE_TEN_UINT64 = frozenset({"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount"})
-_DECIMAL_TEXT = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]{1,9})?")
+# One spelling of the integer part: no leading zero (§2.3).
+_DECIMAL_TEXT = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]{1,9})?")
 
 
 def _for_codec(value: Any) -> Any:
@@ -516,7 +525,7 @@ def _for_codec(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             k: f"{int(v):016X}"
-            if k == "LockedAmount" and isinstance(v, str) and v.isascii() and v.isdigit() and int(v) < 1 << 64
+            if k == "LockedAmount" and isinstance(v, str) and len(v) <= 20 and v.isascii() and v.isdigit() and int(v) < 1 << 64
             else _for_codec(v)
             for k, v in value.items()
         }
@@ -546,7 +555,7 @@ def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -
     and equal strings. A decimal string (an issued amount's value, a Number)
     may use another notation for exactly the same number (§2.3).
     """
-    differs = UnknownLeafField(
+    differs = LeafFormError(
         "leaf is not the JSON its bytes decode to: "
         + (f"member {at} differs" if at else "it differs")
     )
@@ -556,11 +565,13 @@ def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -
         for name, value in given.items():
             child = f"{at}.{name}" if at else name
             if name not in decoded:
-                raise UnknownLeafField(
+                raise LeafFormError(
                     f"leaf is not the JSON its bytes decode to: member {child} is not in it"
                 )
             if text == "amount":
-                child_text = "decimal" if name == "value" else "exact"
+                # Only an issued amount's value is a decimal. A token (MPT)
+                # amount's value is an integer with one spelling.
+                child_text = "decimal" if name == "value" and "currency" in given else "exact"
             else:
                 field_info = _serialized_field(name)
                 kind = field_info.type if field_info else ""
@@ -568,7 +579,7 @@ def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -
             _require_same_json(value, decoded[name], child, child_text)
         for name in decoded:
             if name not in given:
-                raise UnknownLeafField(
+                raise LeafFormError(
                     "leaf is not the JSON its bytes decode to: "
                     f"member {at + '.' if at else ''}{name} is missing"
                 )
@@ -589,6 +600,8 @@ def _require_same_json(given: Any, decoded: Any, at: str, text: str = "exact") -
             and _DECIMAL_TEXT.fullmatch(given)
             and _DECIMAL_TEXT.fullmatch(decoded)
             and _Decimal(given) == _Decimal(decoded)
+            # Zero has no sign: "-0" is not a second spelling of it.
+            and not (given.startswith("-") and _Decimal(given).is_zero())
         ):
             return
         raise differs
@@ -618,21 +631,27 @@ def require_codec_members(leaf: Any, *, is_tx: bool) -> None:
     spelling the codec would not write: each serializes to bytes whose
     decoding is some other JSON, and is refused here.
     """
-    if not is_tx:
-        _require_stobject_members(leaf, "")
-        parts = [("", leaf)]
-    else:
-        if not isinstance(leaf, dict) or set(leaf) != {"tx", "meta"}:
-            raise ValueError("a tx leaf must be exactly {tx, meta}")
-        _require_stobject_members(leaf["tx"], "tx")
-        _require_stobject_members(leaf["meta"], "meta")
-        parts = [("tx", leaf["tx"]), ("meta", leaf["meta"])]
+    try:
+        if not is_tx:
+            _require_stobject_members(leaf, "")
+            parts = [("", leaf)]
+        else:
+            if not isinstance(leaf, dict) or set(leaf) != {"tx", "meta"}:
+                raise ValueError("a tx leaf must be exactly {tx, meta}")
+            _require_stobject_members(leaf["tx"], "tx")
+            _require_stobject_members(leaf["meta"], "meta")
+            parts = [("tx", leaf["tx"]), ("meta", leaf["meta"])]
+    except LeafFormError:
+        raise
+    except Exception as exc:
+        # Whatever a check above says, it says about the leaf's form.
+        raise LeafFormError(str(exc)) from exc
     for at, part in parts:
         try:
             decoded = _as_reference(decode(encode(_for_codec(part))))
         except Exception as exc:
             # A leaf the codec will not serialize has no bytes to decode.
-            raise UnknownLeafField(
+            raise LeafFormError(
                 "leaf is not the JSON its bytes decode to: it does not serialize "
                 f"({type(exc).__name__}: {exc})"
             ) from exc
@@ -866,10 +885,15 @@ def binary_leaf_bytes(data: bytes) -> list[tuple[str, bytes]]:
 
 
 def verifier_identity() -> str:
-    """The program and codec library that produced a report (§7)."""
+    """The program and codec library that produced a report (§7).
+
+    The digest is of this file, so two revisions with different rules never
+    share an identity, whatever the codec library's version.
+    """
     from importlib.metadata import version
 
-    return f"verify-xprv.py xrpl-py {version('xrpl-py')}"
+    digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    return f"verify-xprv.py {digest} xrpl-py {version('xrpl-py')}"
 
 
 def definitions_fingerprint() -> str:
@@ -1989,15 +2013,20 @@ def verify(
                     ]
             except Exception as exc:
                 detail = str(exc)
-                if network_id == XAHAU_NETWORK_ID and isinstance(exc, (KeyError, UnknownLeafField)):
+                leaf_form = isinstance(exc, LeafFormError)
+                if network_id == XAHAU_NETWORK_ID and leaf_form:
                     # Known limitation: xrpl-py ships XRPL definitions only, so
                     # it can't re-serialize Xahau fields in a decoded JSON leaf.
-                    detail = (
-                        f"xrpl-py has no Xahau definition for {exc}; this verifier "
-                        "can't check Xahau JSON leaves, verify the binary proof instead"
+                    detail += (
+                        " (this verifier reads leaves with xrpl-py's XRPL definitions, "
+                        "so it can't check a Xahau JSON leaf; verify the binary proof instead)"
                     )
                 print(f"    [ERROR] {detail}")
-                result.refuse("graph", f"step {i}: {tree} tree error: {detail}")
+                # An invalid leaf is a fault in the proof's form (§2.4); a
+                # well-formed one under a root nothing supports is found below.
+                result.refuse(
+                    "parse" if leaf_form else "graph", f"step {i}: {tree} tree error: {detail}"
+                )
                 continue
 
             capability_store = trusted_tx_roots if is_tx else trusted_state_roots

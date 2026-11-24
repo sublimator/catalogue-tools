@@ -1,0 +1,20 @@
+{
+  "name": "issued-value-ten-digit-exponent",
+  "violates": "spec \u00a72.3: a JSON leaf equals what its serialized bytes decode to",
+  "layer": "parse",
+  "base": "positive-tx-issued-xah",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/E/9/1/tx/TakerGets/value",
+      "value": "130000e0000000000"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "not the JSON its bytes decode to"
+  },
+  "observed": {
+    "python_reason": "step 7: tx tree error: leaf is not the JSON its bytes decode to: member tx.TakerGets.value differs"
+  }
+}

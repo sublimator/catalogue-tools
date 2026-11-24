@@ -1,7 +1,7 @@
 {
   "name": "unknown-leaf-member",
   "violates": "spec \u00a72.3: leaf data is the decoded content and nothing else",
-  "layer": "graph",
+  "layer": "parse",
   "base": "positive-tx-skiplist",
   "json_patch": [
     {

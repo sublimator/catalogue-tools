@@ -515,8 +515,12 @@ parse_decimal_text(std::string_view s)
     }
     if (!digit(i))
         return std::nullopt;
+    auto const integer_at = i;
     while (digit(i))
         d.digits += s[i++];
+    // One spelling of the integer part: no leading zero (§2.3).
+    if (i - integer_at > 1 && s[integer_at] == '0')
+        return std::nullopt;
     if (i < s.size() && s[i] == '.')
     {
         ++i;
@@ -550,7 +554,12 @@ parse_decimal_text(std::string_view s)
         return std::nullopt;
     auto const first = d.digits.find_first_not_of('0');
     if (first == std::string::npos)
+    {
+        // Zero has no sign: "-0" is not a second spelling of it.
+        if (d.negative)
+            return std::nullopt;
         return DecimalText{false, "0", 0};
+    }
     d.digits.erase(0, first);
     while (d.digits.size() > 1 && d.digits.back() == '0')
     {
@@ -598,8 +607,12 @@ require_same_json(
                     "member " +
                     child + " is not in it");
             auto child_text = Text::exact;
+            // Only an issued amount's value is a decimal. A token (MPT)
+            // amount's value is an integer with one spelling.
             if (text == Text::amount)
-                child_text = name == "value" ? Text::decimal : Text::exact;
+                child_text = name == "value" && g.contains("currency")
+                    ? Text::decimal
+                    : Text::exact;
             else if (auto const field = protocol.find_field(name))
             {
                 if (field->meta.type == types::Amount)
@@ -700,6 +713,7 @@ require_codec_members(
     boost::json::value const& leaf,
     bool is_tx,
     catl::xdata::Protocol const& protocol)
+try
 {
     if (!is_tx)
         require_stobject_members(leaf, protocol, "");
@@ -738,6 +752,15 @@ require_codec_members(
             std::string(e.what()) + ")");
     }
     require_same_json(leaf, decoded, "", protocol, Text::exact);
+}
+catch (LeafFormError const&)
+{
+    throw;
+}
+catch (std::exception const& e)
+{
+    // Whatever a check above says, it says about the leaf's form.
+    throw LeafFormError(e.what());
 }
 
 boost::json::object

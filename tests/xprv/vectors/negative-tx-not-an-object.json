@@ -1,7 +1,7 @@
 {
   "name": "tx-not-an-object",
   "violates": "spec \u00a72.3: a transaction leaf's tx and meta are the decoded objects",
-  "layer": "graph",
+  "layer": "parse",
   "base": "positive-tx-skiplist",
   "json_patch": [
     {

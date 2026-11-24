@@ -1,0 +1,15 @@
+{
+  "name": "issued-value-in-another-notation",
+  "states": "spec \u00a72.3: an issued amount's value may use another notation for exactly the same number",
+  "base": "positive-tx-issued-xah",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/E/9/1/tx/TakerGets/value",
+      "value": "13e4"
+    }
+  ],
+  "expect": {
+    "verdict": "accept"
+  }
+}

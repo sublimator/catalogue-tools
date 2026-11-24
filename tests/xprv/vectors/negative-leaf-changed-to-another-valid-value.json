@@ -1,0 +1,20 @@
+{
+  "name": "leaf-changed-to-another-valid-value",
+  "violates": "spec \u00a72.4: a valid leaf under a root no authenticated header names is a graph refusal",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1/tx/Sequence",
+      "value": 102020902
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "supported by"
+  },
+  "observed": {
+    "python_reason": "step 7: tx root 22C4C5E1396EFE69... is not supported by any earlier header"
+  }
+}
