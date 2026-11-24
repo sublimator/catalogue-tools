@@ -970,17 +970,23 @@ class StructuredValueGrammarTests(unittest.TestCase):
     def test_variants(self) -> None:
         iou = {"value": "1", "currency": "USD", "issuer": self.ISSUER}
         bridge = {
-            "LockingChainDoor": self.ISSUER, "LockingChainIssue": "XRP",
-            "IssuingChainDoor": self.ISSUER, "IssuingChainIssue": "XRP",
+            "LockingChainDoor": self.ISSUER, "LockingChainIssue": {"currency": "XRP"},
+            "IssuingChainDoor": self.ISSUER, "IssuingChainIssue": {"currency": "XRP"},
         }
         accept = [
             ("Amount", "1000000"), ("Amount", iou),
-            ("Asset", "XRP"), ("Asset", {"currency": "XRP"}),
+            ("Asset", {"currency": "XRP"}),
+            # XAH is native on Xahau only; on XRPL it is an issued currency.
+            ("Amount", {**iou, "currency": "XAH"}),
+            ("Asset", {"currency": "XAH", "issuer": self.ISSUER}),
             ("Asset", {"currency": "USD", "issuer": self.ISSUER}),
             ("Paths", [[{"currency": "USD", "issuer": self.ISSUER}]]),
             ("XChainBridge", bridge),
         ]
         refuse = [
+            # An issue is an object, as rippled writes it.
+            ("Asset", "XRP"),
+            ("Asset", {"currency": "XAH"}),
             ("Amount", {**iou, "note": "x"}),
             ("Amount", {**iou, "currency": "XRP"}),
             ("Asset", {"currency": "USD"}),

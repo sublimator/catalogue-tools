@@ -371,8 +371,17 @@ TEST(ParsingStrictness, StructuredValuesCarryExactlyTheirMembers)
     EXPECT_FALSE(leaf_accepted(tx_leaf_with(
         "Amount", {{"value", "1"}, {"currency", "XRP"}, {"issuer", issuer}})));
 
-    EXPECT_TRUE(leaf_accepted(tx_leaf_with("Asset", "XRP")));
+    // An issue is an object, as rippled writes it; a bare string is not one.
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("Asset", "XRP")));
     EXPECT_TRUE(leaf_accepted(tx_leaf_with("Asset", {{"currency", "XRP"}})));
+    // XAH is the native code on Xahau only. On XRPL it is an issued currency
+    // like any other: valid with an issuer, in an amount and in an issue,
+    // and not a native issue without one.
+    EXPECT_TRUE(leaf_accepted(tx_leaf_with(
+        "Amount", {{"value", "1"}, {"currency", "XAH"}, {"issuer", issuer}})));
+    EXPECT_TRUE(leaf_accepted(
+        tx_leaf_with("Asset", {{"currency", "XAH"}, {"issuer", issuer}})));
+    EXPECT_FALSE(leaf_accepted(tx_leaf_with("Asset", {{"currency", "XAH"}})));
     EXPECT_TRUE(leaf_accepted(
         tx_leaf_with("Asset", {{"currency", "USD"}, {"issuer", issuer}})));
     EXPECT_FALSE(leaf_accepted(tx_leaf_with("Asset", {{"currency", "USD"}})));
@@ -390,9 +399,9 @@ TEST(ParsingStrictness, StructuredValuesCarryExactlyTheirMembers)
 
     boost::json::object bridge{
         {"LockingChainDoor", issuer},
-        {"LockingChainIssue", "XRP"},
+        {"LockingChainIssue", {{"currency", "XRP"}}},
         {"IssuingChainDoor", issuer},
-        {"IssuingChainIssue", "XRP"}};
+        {"IssuingChainIssue", {{"currency", "XRP"}}}};
     EXPECT_TRUE(leaf_accepted(tx_leaf_with("XChainBridge", bridge)));
     auto bridge_extra = bridge;
     bridge_extra["note"] = "x";

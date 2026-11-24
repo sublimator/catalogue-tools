@@ -307,10 +307,13 @@ not_a_value(std::string const& at, std::string_view type)
         std::string(type) + " value");
 }
 
+// The native asset's code is the network's own: XRP on XRPL, XAH on Xahau.
+// The other network's symbol is an ordinary issued currency there (§2.3,
+// following rippled's to_string(Currency)).
 static bool
-is_native_code(boost::json::value const& v)
+is_native_code(boost::json::value const& v, std::string const& native)
 {
-    return v.is_string() && (v.as_string() == "XRP" || v.as_string() == "XAH");
+    return v.is_string() && v.as_string() == native;
 }
 
 static bool
@@ -325,19 +328,21 @@ has_exactly(
 }
 
 static void
-require_issue(boost::json::value const& v, std::string const& at)
+require_issue(
+    boost::json::value const& v,
+    std::string const& at,
+    std::string const& native)
 {
-    if (is_native_code(v))
-        return;
+    // An issue is an object, as rippled writes it: the native asset is
+    // {"currency": <native code>} and nothing else. A bare string is not one.
     if (!v.is_object())
         not_a_value(at, "Issue");
     auto const& o = v.as_object();
-    // A currency without an issuer is native; the codec writes native bytes
-    // for any such currency, so anything but XRP or XAH would misstate them.
     if (has_exactly(o, {"mpt_issuance_id"}) ||
-        (has_exactly(o, {"currency"}) && is_native_code(o.at("currency"))) ||
+        (has_exactly(o, {"currency"}) &&
+         is_native_code(o.at("currency"), native)) ||
         (has_exactly(o, {"currency", "issuer"}) &&
-         !is_native_code(o.at("currency"))))
+         !is_native_code(o.at("currency"), native)))
         return;
     not_a_value(at, "Issue");
 }
@@ -349,7 +354,8 @@ static void
 require_value_grammar(
     catl::xdata::FieldType const& type,
     boost::json::value const& v,
-    std::string const& at)
+    std::string const& at,
+    std::string const& native)
 {
     namespace types = catl::xdata::FieldTypes;
     if (type == types::Amount)
@@ -361,13 +367,13 @@ require_value_grammar(
             auto const& o = v.as_object();
             if (has_exactly(o, {"value", "mpt_issuance_id"}) ||
                 (has_exactly(o, {"value", "currency", "issuer"}) &&
-                 !is_native_code(o.at("currency"))))
+                 !is_native_code(o.at("currency"), native)))
                 return;
         }
         not_a_value(at, "Amount");
     }
     if (type == types::Issue)
-        return require_issue(v, at);
+        return require_issue(v, at, native);
     if (type == types::XChainBridge)
     {
         if (!v.is_object() ||
@@ -380,8 +386,10 @@ require_value_grammar(
             !v.at("LockingChainDoor").is_string() ||
             !v.at("IssuingChainDoor").is_string())
             not_a_value(at, "XChainBridge");
-        require_issue(v.at("LockingChainIssue"), at + ".LockingChainIssue");
-        require_issue(v.at("IssuingChainIssue"), at + ".IssuingChainIssue");
+        require_issue(
+            v.at("LockingChainIssue"), at + ".LockingChainIssue", native);
+        require_issue(
+            v.at("IssuingChainIssue"), at + ".IssuingChainIssue", native);
         return;
     }
     if (type == types::PathSet)
@@ -466,7 +474,8 @@ require_stobject_members(
             }
         }
         else
-            require_value_grammar(field->meta.type, member, at);
+            require_value_grammar(
+                field->meta.type, member, at, protocol.native_currency());
     }
 }
 

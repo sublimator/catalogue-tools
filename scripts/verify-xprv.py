@@ -356,7 +356,13 @@ def _serialized_field(name: str) -> Any:
 
 
 def _is_native_code(value: Any) -> bool:
-    return value in ("XRP", "XAH")
+    """The native asset's code. xrpl-py is an XRPL codec, so it is XRP.
+
+    XAH is an ordinary issued currency on XRPL, and is traded there. This
+    verifier checks no Xahau JSON leaves (Appendix A), so it never needs XAH
+    as the native code.
+    """
+    return value == "XRP"
 
 
 def _not_a_value(at: str, type_name: str) -> UnknownLeafField:
@@ -364,10 +370,8 @@ def _not_a_value(at: str, type_name: str) -> UnknownLeafField:
 
 
 def _require_issue(value: Any, at: str) -> None:
-    # A currency without an issuer is native; the codec writes native bytes
-    # for it, so anything but XRP or XAH would misstate them.
-    if _is_native_code(value):
-        return
+    # An issue is an object, as rippled writes it: the native asset is
+    # {"currency": "XRP"} and nothing else. A bare string is not one.
     if isinstance(value, dict) and (
         set(value) == {"mpt_issuance_id"}
         or (set(value) == {"currency"} and _is_native_code(value["currency"]))
