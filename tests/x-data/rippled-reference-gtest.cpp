@@ -297,18 +297,16 @@ TEST(RippledReference, BridgeFromJson)
         });
 }
 
-// ─── UInt64: measured, not yet matched ───────────────────────────────
+// ─── UInt64 ──────────────────────────────────────────────────────────
 //
-// rippled writes an ordinary UInt64 as lowercase hex without padding
-// ("OwnerNode": "1"), and as decimal for the four fields it marks base-ten
-// (MaximumAmount, OutstandingAmount, MPTAmount, LockedAmount). x-data writes
-// 16 uppercase hex digits for all of them, and reads all of them as hex, so
-// for the base-ten fields it also reads a different number than rippled does
-// from the same text.
+// rippled marks a few UInt64 fields base-ten (SField::kSmdBaseTen): amounts,
+// read and written as decimal text. Every other UInt64 is hex. x-data used to
+// read all of them as hex, so {"LockedAmount": "255"} went on the wire as
+// 0x255. That is a wrong value, not a spelling, and is fixed.
 //
-// Changing that changes what every catl tool prints, so it waits for a
-// decision. These tests state rippled's behaviour and are disabled until then;
-// run them with --gtest_also_run_disabled_tests to see the gap.
+// The hex fields are a spelling difference only: x-data reads them as rippled
+// does and writes 16 uppercase digits where rippled writes lowercase without
+// padding ("OwnerNode": "1").
 
 namespace {
 
@@ -324,27 +322,60 @@ decode_object(std::vector<uint8_t> const& bytes, Protocol const& protocol)
 
 }  // namespace
 
-TEST(RippledReference, DISABLED_UInt64Text)
+// Which fields are base-ten, asked of rippled for every UInt64 field it
+// knows: one is base-ten when rippled reads "255" as 255 and refuses "ff".
+TEST(RippledReference, UInt64BaseTenFields)
+{
+    size_t base_ten = 0;
+    for (auto const& e : section("uint64_fields"))
+    {
+        auto const name = std::string(e.at("field").as_string());
+        EXPECT_EQ(UInt64Codec::is_base_ten(name), e.at("base_ten").as_bool())
+            << name;
+        base_ten += e.at("base_ten").as_bool();
+    }
+    EXPECT_EQ(base_ten, std::size(UInt64Codec::base_ten_fields));
+}
+
+// Decimal text at 0, 1, 255, 2^63 - 1, 2^63 and 2^64 - 1.
+TEST(RippledReference, UInt64DecimalText)
 {
     auto const protocol = Protocol::load_embedded_xrpl_protocol();
-    for (auto const& e : section("uint64_decode"))
+    for (auto const& e : section("uint64_decimal_decode"))
     {
         EXPECT_EQ(decode_object(bytes_of(e.at("hex")), protocol), e.at("json"))
             << e.at("hex").as_string();
     }
 }
 
-TEST(RippledReference, DISABLED_UInt64FromText)
+// Digits only: hex, a sign, a space, an exponent and 2^64 are refused.
+TEST(RippledReference, UInt64DecimalFromText)
 {
     auto const protocol = Protocol::load_embedded_xrpl_protocol();
-    for (auto const& e : section("uint64_encode"))
+    for (auto const& e : section("uint64_decimal_encode"))
+        expect_encodes(e.as_object(), [&](auto& s) {
+            STObjectCodec::encode(s, e.at("json"), protocol, false, {});
+        });
+}
+
+// x-data reads a hex field as rippled does, in either case.
+TEST(RippledReference, UInt64HexFromText)
+{
+    auto const protocol = Protocol::load_embedded_xrpl_protocol();
+    for (auto const& e : section("uint64_hex_encode"))
+        expect_encodes(e.as_object(), [&](auto& s) {
+            STObjectCodec::encode(s, e.at("json"), protocol, false, {});
+        });
+}
+
+// Disabled: waits on the decision about how x-data writes a hex UInt64.
+TEST(RippledReference, DISABLED_UInt64HexText)
+{
+    auto const protocol = Protocol::load_embedded_xrpl_protocol();
+    for (auto const& e : section("uint64_hex_decode"))
     {
-        std::vector<uint8_t> bytes;
-        ASSERT_NO_THROW(
-            bytes = serialize_object(e.at("json").as_object(), protocol))
-            << boost::json::serialize(e.at("json"));
-        EXPECT_EQ(upper_hex(bytes), std::string(e.at("hex").as_string()))
-            << boost::json::serialize(e.at("json"));
+        EXPECT_EQ(decode_object(bytes_of(e.at("hex")), protocol), e.at("json"))
+            << e.at("hex").as_string();
     }
 }
 
@@ -544,4 +575,34 @@ TEST(XahauNative, AmountsAndPathsInAnObject)
     payment["Amount"] = boost::json::object{
         {"value", "1"}, {"currency", "XAH"}, {"issuer", kXahIssuer}};
     EXPECT_THROW(serialize_object(payment, protocol), EncodeError);
+}
+
+// xahaud marks MaximumAmount, OutstandingAmount and MPTAmount base-ten
+// (include/xrpl/protocol/detail/sfields.macro:154-156) and its definitions
+// carry no other field of rippled's set. By source reading, as above.
+TEST(XahauNative, BaseTenFieldsAreDecimal)
+{
+    auto const protocol = Protocol::load_embedded_xahau_protocol();
+    for (auto const* name : {"MaximumAmount", "OutstandingAmount", "MPTAmount"})
+    {
+        auto const field = protocol.find_field(name);
+        ASSERT_TRUE(field) << name;
+        boost::json::object obj{{name, "255"}};
+        auto const bytes = serialize_object(obj, protocol);
+        ASSERT_GE(bytes.size(), 8u);
+        // The value is the last eight bytes: 255, not 0x255.
+        EXPECT_EQ(
+            hex_encode(bytes.data() + bytes.size() - 8, 8), "00000000000000FF")
+            << name;
+        EXPECT_EQ(decode_object(bytes, protocol), boost::json::value(obj))
+            << name;
+        obj[name] = "ff";
+        EXPECT_THROW(serialize_object(obj, protocol), EncodeError) << name;
+    }
+    // A hex field is unchanged.
+    boost::json::object node{{"OwnerNode", "ff"}};
+    auto const bytes = serialize_object(node, protocol);
+    EXPECT_EQ(
+        hex_encode(bytes.data() + bytes.size() - 8, 8), "00000000000000FF");
+    EXPECT_FALSE(protocol.find_field("LockedAmount"));
 }

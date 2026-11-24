@@ -18,8 +18,11 @@ What it covers, and why:
              cutovers, trailing-zero mantissas, values that need rounding.
   pathset    a step's currency through the same currency rules.
   bridge     both issues of an XChainBridge.
-  uint64     every UInt64 field holding 255, as rippled writes and reads it.
-             x-data does not match this yet; its tests are DISABLED_.
+  uint64     which UInt64 fields rippled treats as base-ten, and their decimal
+             text at 0, 1, 255, 2^63 - 1, 2^63 and 2^64 - 1, with what it
+             refuses. Then every other UInt64 field as hex: x-data reads those
+             as rippled does and writes them differently, which is an open
+             question, so that half's decode test is DISABLED_.
 
 An entry rippled refuses carries "refused" with rippled's message. A few
 entries carry "xdata": x-data deliberately does something else there, and the
@@ -80,6 +83,10 @@ class Oracle:
         if not Path(path).exists():
             sys.exit(f"xrpl-codec not found at {path}; pass --codec PATH")
 
+    def run(self, args: list[str]) -> tuple[bool, str]:
+        r = subprocess.run([self.path, *args], capture_output=True, text=True)
+        return r.returncode == 0, (r.stdout if r.returncode == 0 else r.stdout + r.stderr).strip()
+
     def decode(self, kind: str, hex_text: str) -> tuple[bool, str]:
         r = subprocess.run([self.path, "decode", "--codec-type", kind, hex_text], capture_output=True, text=True)
         return r.returncode == 0, (r.stdout if r.returncode == 0 else r.stdout + r.stderr).strip()
@@ -92,7 +99,15 @@ class Oracle:
 def reason(message: str) -> str:
     for prefix in ("Error encoding: ", "Error decoding: ", "Error: "):
         if message.startswith(prefix):
-            return message[len(prefix):]
+            message = message[len(prefix):]
+            break
+    # rippled's JSON parser reports a field error as an RPC error object.
+    start = message.find("{")
+    if start >= 0:
+        try:
+            return message[:start] + json.loads(message[start:])["error_message"]
+        except (ValueError, KeyError, TypeError):
+            pass
     return message
 
 
@@ -350,24 +365,57 @@ def build(oracle: Oracle) -> dict:
         oracle, "bridge", [e["hex"] for e in fx["bridge_encode"] if "hex" in e], as_json=True)
 
     # ── UInt64 ────────────────────────────────────────────────────────
-    # Measured, not yet matched: x-data writes every UInt64 as 16 uppercase
-    # hex digits. rippled writes lowercase hex without padding, and decimal
-    # for the fields it marks base-ten. The tests on this section are
-    # DISABLED_ until that is decided.
+    # rippled marks a few UInt64 fields base-ten: amounts, read and written
+    # as decimal text. Every other UInt64 is hex. Which is which is asked of
+    # the oracle, field by field, over the oracle's own field table: a field
+    # is base-ten when rippled reads "255" as 255 and refuses "ff".
+    ok, text = oracle.run(["server-definitions"])
+    if not ok:
+        sys.exit("xrpl-codec server-definitions failed: " + text)
+    oracle_uint64 = sorted(n for n, m in json.loads(text)["FIELDS"] if m["type"] == "UInt64" and m.get("isSerialized"))
+    base_ten = []
+    hexadecimal = []
+    for name in oracle_uint64:
+        as_decimal, out_d = oracle.encode("stobject", json.dumps({name: "255"}))
+        as_hex, _ = oracle.encode("stobject", json.dumps({name: "ff"}))
+        if as_decimal and not as_hex and out_d.upper().endswith("00000000000000FF"):
+            base_ten.append(name)
+        elif as_hex:
+            hexadecimal.append(name)
+    fx["uint64_fields"] = [{"field": n, "base_ten": n in base_ten} for n in sorted(base_ten + hexadecimal)]
+
+    # x-data can only be asked about the fields its own definitions hold.
     defs = json.loads((Path(__file__).resolve().parents[2] / "src/x-data/definitions/xrpl_definitions.json").read_text())
-    uint64_fields = sorted(n for n, m in defs["FIELDS"] if m["type"] == "UInt64" and m.get("isSerialized"))
-    objects = []
-    for name in uint64_fields:
-        for text in ("ff", "255"):  # 255, as hex and as decimal
-            ok, out = oracle.encode("stobject", json.dumps({name: text}))
-            if ok and out.upper().endswith("00000000000000FF"):
-                objects.append({name: text})
-                break
-    objects.append({"ExchangeRate": "4f0415eb4ea0c727"})
-    objects.append({"OwnerNode": "0"})
-    fx["uint64_encode"] = encode_section(oracle, "stobject", "uint64_encode", objects, as_json=True)
-    fx["uint64_decode"] = decode_section(
-        oracle, "stobject", [e["hex"] for e in fx["uint64_encode"] if "hex" in e], as_json=True)
+    known = {n for n, m in defs["FIELDS"] if m["type"] == "UInt64" and m.get("isSerialized")}
+
+    decimal_inputs: list = []
+    for name in base_ten:
+        if name in known:
+            for value in ("0", "1", "255", str(2 ** 63 - 1), str(2 ** 63), str(2 ** 64 - 1)):
+                decimal_inputs.append({name: value})
+    probe = next(n for n in base_ten if n in known)
+    for value in (str(2 ** 64), "ff", "FF", "0xff", "00000000000000FF", "0255", "00", "-1", "-0", "+5",
+                  " 5", "5 ", "1e3", "1.0", "", "12a", 255, -1, True, None):
+        decimal_inputs.append({probe: value})
+    DEVIATIONS[("uint64_decimal_encode", json.dumps({probe: 255}))] = (
+        "refuses",
+        "x-data takes a UInt64 as a string only; rippled also takes a small JSON integer",
+    )
+    fx["uint64_decimal_encode"] = encode_section(
+        oracle, "stobject", "uint64_decimal_encode", decimal_inputs, as_json=True)
+    fx["uint64_decimal_decode"] = decode_section(
+        oracle, "stobject",
+        sorted({e["hex"] for e in fx["uint64_decimal_encode"] if "hex" in e}), as_json=True)
+
+    # The hex fields. x-data reads these as rippled does and writes them
+    # differently (16 uppercase digits against lowercase without padding).
+    # That is an open question, so the decode half of this is DISABLED_.
+    hex_inputs: list = [{name: "ff"} for name in hexadecimal if name in known]
+    hex_inputs.append({"ExchangeRate": "4f0415eb4ea0c727"})
+    hex_inputs.append({"OwnerNode": "0"})
+    fx["uint64_hex_encode"] = encode_section(oracle, "stobject", "uint64_hex_encode", hex_inputs, as_json=True)
+    fx["uint64_hex_decode"] = decode_section(
+        oracle, "stobject", [e["hex"] for e in fx["uint64_hex_encode"] if "hex" in e], as_json=True)
     return fx
 
 
