@@ -1,0 +1,31 @@
+{
+  "name": "anchor-core-no-validations",
+  "violates": "spec \u00a71.3 rule 6, \u00a73.4: an anchor with no validations parses and fails quorum",
+  "layer": "trust",
+  "mutations": [
+    {
+      "delete_at": 78,
+      "delete_len": 7504
+    },
+    {
+      "insert_at": 78,
+      "insert_hex": "00"
+    },
+    {
+      "delete_at": 11,
+      "delete_len": 2
+    },
+    {
+      "insert_at": 11,
+      "insert_hex": "42"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "quorum not met"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "step 1: anchor: quorum not met: 0/35 (need 28); step 2: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 3: state root 72DB884ECB8F3C58... is not supported by any earlier header; step 4: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 5: state root EDCE53D36B387392... is not supported by any earlier header; step 6: header hash is not supported by any earlier authenticated ancestor or recognized LedgerHashes leaf; step 7: tx root 48EF725280083243... is not supported by any earlier header"
+  }
+}

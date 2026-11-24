@@ -79,6 +79,11 @@ public:
     static bool
     is_canonical_stvalidation(std::vector<uint8_t> const& raw);
 
+    /// The 33-byte `SigningPubKey` of a complete canonical `STValidation`,
+    /// or nullopt when `raw` is not one.
+    static std::optional<std::vector<uint8_t>>
+    canonical_validation_signing_key(std::vector<uint8_t> const& raw);
+
 #ifdef XPRV_TESTING
     /// §5.1 body: canonical bytes with only `Signature` removed. Empty when
     /// `raw` is not a canonical STValidation.

@@ -458,7 +458,6 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     {
         AnchorData anchor;
         anchor.ledger_hash = ctx->anchor_hash;
-        anchor.ledger_index = ctx->anchor_hdr.seq();
         anchor.publisher_key_hex = vl_data.publisher_key_hex;
         anchor.publisher_manifest = vl_data.publisher_manifest.raw;
         anchor.blob = vl_data.blob_bytes;

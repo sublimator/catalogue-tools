@@ -1,0 +1,31 @@
+{
+  "name": "anchor-core-empty-validation",
+  "violates": "spec \u00a72.1, \u00a73.4: every validation record is a complete canonical STValidation",
+  "layer": "parse",
+  "mutations": [
+    {
+      "delete_at": 78,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 78,
+      "insert_hex": "2100"
+    },
+    {
+      "delete_at": 11,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 11,
+      "insert_hex": "92"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "canonical STValidation"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: validation is not a canonical STValidation"
+  }
+}

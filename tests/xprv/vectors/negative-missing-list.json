@@ -4,7 +4,7 @@
   "layer": "trust",
   "mutations": [
     {
-      "truncate_to": 25342
+      "truncate_to": 27877
     }
   ],
   "expect": {

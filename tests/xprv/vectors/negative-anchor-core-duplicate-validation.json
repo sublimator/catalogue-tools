@@ -1,0 +1,31 @@
+{
+  "name": "anchor-core-duplicate-validation",
+  "violates": "spec \u00a73.4: validations are in strictly ascending order of their SigningPubKey",
+  "layer": "parse",
+  "mutations": [
+    {
+      "delete_at": 78,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 78,
+      "insert_hex": "21E90122800000012606249B36293153D2003A350125FE10EEAECC51CC0A27B7BBD6C0606300F920D18B0F94BCE60C82795DEA4AF4C534D23D1136305017AA8BEB65C8D2D8B82B85139422EFAABA7EB50A923D3CE128FAA120DD25E32BAF50193BD31A56D7CFFAF28BF6ED2C7146696CFABB5DC40FE2B44D4DEEE823182AEE1E7321020EA2AB574A644ED75DF19E0A8F54ED8E2163FA5CF0444DBDA293BE0EDA7BFB3B7647304502210097BF35AF028472CA70E38FAF448EEE31716AF871E41301DB95FE43A407EA3B6E022029C774F5D39D73A88437F166D1116C6A2BB0DE2F64BE233713E946AB76DB5666"
+    },
+    {
+      "delete_at": 11,
+      "delete_len": 2
+    },
+    {
+      "insert_at": 11,
+      "insert_hex": "FC3C"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "distinct and sorted"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: anchor core validations must be distinct and sorted by SigningPubKey"
+  }
+}

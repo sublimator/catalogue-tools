@@ -153,7 +153,6 @@ make_state_link_proof(
 
     xprv::AnchorData anchor;
     anchor.ledger_hash = hash_header(containing);
-    anchor.ledger_index = containing_seq;
 
     xprv::TrieData state_proof;
     state_proof.tree = xprv::TrieData::TreeType::state;

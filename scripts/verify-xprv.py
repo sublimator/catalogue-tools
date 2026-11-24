@@ -91,7 +91,6 @@ class AnchorStep(TypedDict, total=False):
 
     type: Literal["anchor"]
     ledger_hash: str  # trusted ledger hash (hex)
-    ledger_index: int
     unl: UNLData
     validations: dict[str, str]  # signing_key_hex → raw STValidation hex
 
@@ -1251,7 +1250,6 @@ def verify_anchor(
     partial = 0
     matched_unl = 0
     counted_masters: set[str] = set()
-    counted_seqs: set[int | None] = set()
 
     for key_hex, val_hex in validations.items():
         parsed = parse_validation(val_hex) if isinstance(val_hex, str) else None
@@ -1277,7 +1275,6 @@ def verify_anchor(
         if master is not None and master not in counted_masters:
             counted_masters.add(master)
             matched_unl += 1
-            counted_seqs.add(parsed.ledger_seq)
 
     partial_note = f", {partial} partial (not counted)" if partial else ""
     print(
@@ -1301,14 +1298,6 @@ def verify_anchor(
         print(f"    A6: QUORUM — {matched_unl}/{unl_size} (>= 80%)")
     else:
         result.message = f"quorum not met: {matched_unl}/{unl_size} (need {quorum})"
-    # §2.1 SHOULD: the counted validations' signed LedgerSequence against the
-    # advisory index. A mismatch is reported, never a rejection.
-    advisory = anchor.get("ledger_index")
-    if counted_seqs and counted_seqs != {advisory}:
-        signed = ", ".join(str(seq) for seq in sorted(counted_seqs, key=lambda x: (x is None, x or 0)))
-        warn = f"counted validations sign LedgerSequence {signed}, not the advisory ledger_index {advisory}"
-        print(f"    [WARN] {warn}")
-        result.warnings.append(warn)
     return result
 
 
@@ -1413,7 +1402,6 @@ def _require_members(obj: dict[str, Any], names: frozenset[str] | set[str], what
 def validate_json_steps(steps: Any) -> None:
     """Check each step's members against the types of spec §2.
 
-    An advisory field is still typed: a malformed one is a syntax error.
     Map proofs decoded by binary_to_proof carry their TLV payload as bytes,
     which JSON can't express, and are checked when hashed.
     """
@@ -1424,9 +1412,8 @@ def validate_json_steps(steps: Any) -> None:
             raise ValueError("step must be an object with a string type")
         kind = step["type"]
         if kind == "anchor":
-            _require_members(step, {"type", "ledger_hash", "ledger_index", "unl", "validations"}, "anchor")
+            _require_members(step, {"type", "ledger_hash", "unl", "validations"}, "anchor")
             _require_hex(step.get("ledger_hash"), "anchor ledger_hash", 32)
-            _require_uint(step.get("ledger_index"), 32, "anchor ledger_index")
             validations = step.get("validations")
             if not isinstance(validations, dict):
                 raise ValueError("anchor validations must be an object")
@@ -1570,8 +1557,7 @@ def verify(
             anchor_seen = True
             n_val = len(step.get("validations", {}))
             print(
-                f"\n  Step {i}: ANCHOR advisory seq={step.get('ledger_index', '?')} "
-                f"(not authenticated) hash={step.get('ledger_hash', '')[:16]}... "
+                f"\n  Step {i}: ANCHOR hash={step.get('ledger_hash', '')[:16]}... "
                 f"({n_val} validations)"
             )
 
@@ -1818,12 +1804,6 @@ BR_LEAF = 1
 BR_INNER = 2
 BR_HASH = 3
 
-# Blob JSON key permutations (for exact byte reconstitution)
-BLOB_KEYS = ["sequence", "expiration", "validators"]
-VAL_KEYS = ["validation_public_key", "manifest"]
-PERMS_3 = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]
-PERMS_2 = [[0, 1], [1, 0]]
-
 
 def leb128_read(data: bytes, pos: int) -> tuple[int, int]:
     """Read a LEB128 varint. Returns (value, new_pos).
@@ -1969,168 +1949,53 @@ def decode_bin_header(payload: bytes) -> dict[str, Any]:
     }
 
 
-def _decode_fields(hex_text: str, what: str) -> dict[str, Any]:
-    """Decode an STObject. An unknown field is a ValueError, not a traceback."""
-    if not hex_text:
-        return {}
-    try:
-        fields = decode(hex_text)
-    except Exception as exc:
-        raise ValueError(f"{what} are not decodable") from exc
-    if not isinstance(fields, dict):
-        raise ValueError(f"{what} are not an STObject")
-    return fields
-
-
 def decode_anchor_core(payload: bytes) -> dict[str, Any]:
-    """Decode anchor core TLV: hash + ledger_index + publisher key + validations."""
-    if len(payload) < 69:
-        raise ValueError(f"anchor core payload too short: {len(payload)}")
-
+    """Decode anchor core TLV (§3.4): hash + publisher key + raw validations."""
     # Must match xprv::encode_anchor_core():
-    #   ledger_hash[32] + ledger_index[4] + publisher_key[33] + ...
-    ledger_hash = hexlify(payload[0:32]).decode().upper()
-    ledger_index = struct.unpack_from(">I", payload, 32)[0]
-    publisher_key = hexlify(payload[36:69]).decode().upper()
-    pos = 69
+    #   ledger_hash[32] + publisher_key[33] + count + (len + STValidation)*
+    head, pos = read_fixed(payload, 0, 65)
+    ledger_hash = head[:32].hex().upper()
+    publisher_key = head[32:].hex().upper()
     val_count, pos = leb128_read(payload, pos)
 
+    # Each record is a complete canonical STValidation (§2.1). Its own
+    # SigningPubKey orders it; there is no second key on the wire.
     validations: dict[str, str] = {}
-    if val_count == 0:
-        if pos != len(payload):
-            raise ValueError("trailing bytes in anchor core payload")
-        return {
-            "type": "anchor",
-            "ledger_hash": ledger_hash,
-            "ledger_index": ledger_index,
-            "unl": {"public_key": publisher_key},
-            "validations": validations,
-        }
-
-    # Read common fields (XRPL binary → hex for decode())
-    common_bytes, pos = read_vl(payload, pos)
-    common_hex = hexlify(common_bytes).decode()
-    common_fields = _decode_fields(common_hex, "common validation fields")
-    if bytes.fromhex(encode(common_fields)) != common_bytes:
-        raise ValueError("non-canonical common STObject")
-
-    # Read unique field names
-    num_unique, pos = leb128_read(payload, pos)
-    unique_names: list[str] = []
-    for _ in range(num_unique):
-        name_len, pos = leb128_read(payload, pos)
-        name, pos = read_fixed(payload, pos, name_len)
-        unique_names.append(name.decode("utf-8"))
-    if unique_names != sorted(set(unique_names)):
-        raise ValueError("non-canonical anchor core field names")
-
-    # Read each validator's key + unique fields, merge with common
-    all_fields = []
     previous_key = b""
     for _ in range(val_count):
-        key_bytes, pos = read_fixed(payload, pos, 33)
-        if key_bytes <= previous_key:
-            raise ValueError("anchor core validation keys must be distinct and sorted")
-        previous_key = key_bytes
-        vkey = key_bytes.hex().upper()
-        unique_bytes, pos = read_vl(payload, pos)
-        unique_hex = hexlify(unique_bytes).decode()
-        unique_fields = _decode_fields(unique_hex, "unique validation fields")
-        if bytes.fromhex(encode(unique_fields)) != unique_bytes:
-            raise ValueError("non-canonical unique STObject")
-        if common_fields.keys() & unique_fields.keys():
-            raise ValueError("common and unique validation fields overlap")
-
-        merged = dict(common_fields)
-        merged.update(unique_fields)
-        full_hex = encode(merged)
-        if parse_validation(full_hex) is None:
+        raw, pos = read_vl(payload, pos)
+        raw_hex = raw.hex().upper()
+        parsed = parse_validation(raw_hex)
+        if parsed is None:
             raise ValueError("validation is not a canonical STValidation")
-        if merged.get("SigningPubKey", "").upper() != vkey:
-            raise ValueError("binary validation key does not match SigningPubKey")
-        all_fields.append(merged)
-        validations[vkey] = full_hex
+        key_bytes = bytes.fromhex(parsed.signing_key)
+        if key_bytes <= previous_key:
+            raise ValueError("anchor core validations must be distinct and sorted by SigningPubKey")
+        previous_key = key_bytes
+        validations[parsed.signing_key] = raw_hex
 
     if pos != len(payload):
         raise ValueError("trailing bytes in anchor core payload")
-    union = set().union(*(fields.keys() for fields in all_fields))
-    expected_common = {
-        key: all_fields[0][key] for key in union
-        if key in all_fields[0] and all(key in fields and fields[key] == all_fields[0][key] for fields in all_fields)
-    }
-    if common_fields != expected_common or unique_names != sorted(union - expected_common.keys()):
-        raise ValueError("non-canonical anchor core decomposition")
-
     return {
         "type": "anchor",
         "ledger_hash": ledger_hash,
-        "ledger_index": ledger_index,
         "unl": {"public_key": publisher_key},
         "validations": validations,
     }
 
 
 def decode_anchor_unl(payload: bytes, anchor: dict[str, Any]) -> None:
-    """Decode anchor UNL TLV and merge into existing anchor dict."""
-    pos = 0
-    manifest_bytes, pos = read_vl(payload, pos)
+    """Decode anchor UNL TLV (§3.5): manifest + signature + the signed list bytes."""
+    manifest_bytes, pos = read_vl(payload, 0)
     sig_bytes, pos = read_vl(payload, pos)
-
-    anchor["unl"]["manifest"] = hexlify(manifest_bytes).decode().upper()
-    anchor["unl"]["signature"] = hexlify(sig_bytes).decode().upper()
-
-    if pos >= len(payload):
-        raise ValueError("missing anchor UNL shape")
-
-    # Reconstruct blob JSON with exact key ordering
-    shape = payload[pos]
-    pos += 1
-    if shape & 0xF0 or (shape & 7) > 5:
-        raise ValueError("invalid anchor UNL shape")
-    top_perm = PERMS_3[shape & 0x07]
-    val_perm = PERMS_2[(shape >> 3) & 0x01]
-
-    sequence = struct.unpack_from(">I", payload, pos)[0]
-    pos += 4
-    expiration = struct.unpack_from(">I", payload, pos)[0]
-    pos += 4
-    validator_count, pos = leb128_read(payload, pos)
-
-    validators: list[tuple[str, str]] = []
-    for _ in range(validator_count):
-        key_bytes, pos = read_fixed(payload, pos, 33)
-        vpk = key_bytes.hex().upper()
-        m_bytes, pos = read_vl(payload, pos)
-        m_b64 = base64.b64encode(m_bytes).decode()
-        validators.append((vpk, m_b64))
+    blob_bytes, pos = read_vl(payload, pos)
     if pos != len(payload):
         raise ValueError("trailing bytes in anchor UNL payload")
-
-    # Build blob JSON string with exact key ordering for sig verification
-    values = {
-        0: str(sequence),
-        1: str(expiration),
-        2: None,  # validators array
-    }
-
-    parts: list[str] = []
-    for ki in top_perm:
-        key = BLOB_KEYS[ki]
-        if ki == 2:  # validators
-            val_parts: list[str] = []
-            for vpk, m_b64 in validators:
-                vobj_parts: list[str] = []
-                for vki in val_perm:
-                    vkey = VAL_KEYS[vki]
-                    vval = vpk if vki == 0 else m_b64
-                    vobj_parts.append(f'"{vkey}":"{vval}"')
-                val_parts.append("{" + ",".join(vobj_parts) + "}")
-            parts.append(f'"{key}":[' + ",".join(val_parts) + "]")
-        else:
-            parts.append(f'"{key}":{values[ki]}')
-
-    blob_str = "{" + ",".join(parts) + "}"
-    anchor["unl"]["blob"] = hexlify(blob_str.encode()).decode().upper()
+    if not manifest_bytes or not sig_bytes or not blob_bytes:
+        raise ValueError("a bundled list needs a non-empty manifest, list and signature")
+    anchor["unl"]["manifest"] = manifest_bytes.hex().upper()
+    anchor["unl"]["signature"] = sig_bytes.hex().upper()
+    anchor["unl"]["blob"] = blob_bytes.hex().upper()
 
 
 def hash_binary_trie(data: bytes, pos: int, *, is_tx: bool, depth: int = 0) -> tuple[Hash256, int]:

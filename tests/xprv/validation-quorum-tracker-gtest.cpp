@@ -2257,6 +2257,8 @@ TEST(ProofQuorumAt80, ThirtyRealSignedValidationsGiveAVerifiableAnchor)
 {
     auto chain = load_chain_fixture();
     auto& anchor = std::get<xprv::AnchorData>(chain.steps.front());
+    // The anchor ledger's sequence, from the header the anchor hash names.
+    auto const anchor_seq = std::get<xprv::HeaderData>(chain.steps.at(1)).seq;
     auto members = list_members(anchor);
     ASSERT_EQ(members.size(), 35u);
     ASSERT_GE(anchor.validations.size(), 30u);
@@ -2284,7 +2286,7 @@ TEST(ProofQuorumAt80, ThirtyRealSignedValidationsGiveAVerifiableAnchor)
                     s.queued_validations == 0;
             });
             auto q = co_await tracker->co_latest_quorum_at_or_before(
-                anchor.ledger_index, 7);
+                anchor_seq, 7);
             EXPECT_TRUE(q.has_value());
             if (q)
                 EXPECT_EQ(q->validations.size(), 30u);
@@ -2305,6 +2307,7 @@ TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
 {
     auto const chain = load_chain_fixture();
     auto const& anchor = std::get<xprv::AnchorData>(chain.steps.front());
+    auto const anchor_seq = std::get<xprv::HeaderData>(chain.steps.at(1)).seq;
     auto const members = list_members(anchor);
     ASSERT_EQ(members.size(), 35u);
 
@@ -2390,7 +2393,7 @@ TEST(ProofQuorumAt80, LiveOnlyDiagnosticUsesProof80AndLive90)
                 // counts whether or not the list's own keys could explain it.
                 EXPECT_FALSE(co_await tracker->co_has_live_only_quorum());
                 auto proof = co_await tracker->co_latest_quorum_at_or_before(
-                    anchor.ledger_index, 7);
+                    anchor_seq, 7);
                 EXPECT_TRUE(proof.has_value());
                 if (proof)
                     EXPECT_EQ(proof->validations.size(), voted.size());

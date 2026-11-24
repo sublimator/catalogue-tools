@@ -1,21 +1,20 @@
 {
   "name": "negative-json-duplicate-nibble-forge",
-  "violates": "spec \u00a72.3: branch keys are uppercase 0-9A-F only, one member per branch; a leaf enumerated but not hashed into the root is unauthenticated",
+  "violates": "spec §2.3: branch keys are uppercase 0-9A-F only, one member per branch; a leaf enumerated but not hashed into the root is unauthenticated",
   "layer": "parse",
   "trust": {
     "network_id": 0,
     "publisher_key": "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734"
   },
-  "provenance": "independent adversarial review, 2026-07-25 \u2014 forged a ~1e9 XRP Payment that never existed on-ledger; both reference verifiers returned exit 0 before the fix",
+  "provenance": "independent adversarial review, 2026-07-25 — forged a ~1e9 XRP Payment that never existed on-ledger; both reference verifiers returned exit 0 before the fix",
   "form": {
     "json": {
-      "format_version": 9,
+      "format_version": 10,
       "network_id": 0,
       "steps": [
         {
           "type": "anchor",
           "ledger_hash": "CC0A27B7BBD6C0606300F920D18B0F94BCE60C82795DEA4AF4C534D23D113630",
-          "ledger_index": 103062326,
           "unl": {
             "public_key": "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734",
             "manifest": "24000000017121ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F47347321ED5D009C48B90F8A1D63D5F6B31F9C63C07738736326F32101144FB531E65A70217640C5720E77740412D560CC4032C8B36C30C07A5272B5278E9D62670C135D55D7B1A4712F3B72722A2DA3726022619DBA45EE6DBAE37AA08D534D9FED8FFEEB0D01701240DCCD04394FB7F61981F2FC1F81EAE75D9203435FA8D1D9EE5E35FBDE80CB82C69CC17CCB05539D069480B09C180FE9D6F1869269C38712C59A3E5A1FD3912C02",
@@ -786,5 +785,5 @@
     "verdict": "reject",
     "reason_contains": "branch"
   },
-  "notes": "Real anchor, real vl.ripple.com UNL; only the tail is forged. The forged LedgerHashes leaf hangs off a lowercase 'a' beside the uppercase 'A' branch, so the root still matches account_hash while leaf enumeration yields the forged leaf \u2014 authenticating a fabricated header and through it a transaction that never existed."
+  "notes": "Real anchor, real vl.ripple.com UNL; only the tail is forged. The forged LedgerHashes leaf hangs off a lowercase 'a' beside the uppercase 'A' branch, so the root still matches account_hash while leaf enumeration yields the forged leaf — authenticating a fabricated header and through it a transaction that never existed."
 }

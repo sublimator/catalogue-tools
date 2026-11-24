@@ -1,0 +1,31 @@
+{
+  "name": "anchor-unl-empty-list",
+  "violates": "spec \u00a73.5: the manifest, the signature and the list are each non-empty",
+  "layer": "parse",
+  "mutations": [
+    {
+      "delete_at": 28155,
+      "delete_len": 14630
+    },
+    {
+      "insert_at": 28155,
+      "insert_hex": "00"
+    },
+    {
+      "delete_at": 27878,
+      "delete_len": 2
+    },
+    {
+      "insert_at": 27878,
+      "insert_hex": "9402"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "non-empty manifest, list and signature"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: a bundled list needs a non-empty manifest, list and signature"
+  }
+}

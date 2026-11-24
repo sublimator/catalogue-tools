@@ -1,0 +1,27 @@
+{
+  "name": "anchor-unl-trailing-byte",
+  "violates": "spec \u00a73.8: a TLV payload is consumed exactly",
+  "layer": "parse",
+  "mutations": [
+    {
+      "insert_at": 42785,
+      "insert_hex": "00"
+    },
+    {
+      "delete_at": 27878,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 27878,
+      "insert_hex": "BA"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "trailing bytes in anchor UNL"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: trailing bytes in anchor UNL payload"
+  }
+}

@@ -4,7 +4,7 @@
   "layer": "parse",
   "mutations": [
     {
-      "truncate_to": 34824
+      "truncate_to": 42721
     }
   ],
   "expect": {

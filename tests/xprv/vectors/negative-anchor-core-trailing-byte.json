@@ -1,0 +1,27 @@
+{
+  "name": "anchor-core-trailing-byte",
+  "violates": "spec \u00a73.8: a TLV payload is consumed exactly",
+  "layer": "parse",
+  "mutations": [
+    {
+      "insert_at": 7582,
+      "insert_hex": "00"
+    },
+    {
+      "delete_at": 11,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 11,
+      "insert_hex": "92"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "trailing bytes in anchor core"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: trailing bytes in anchor core payload"
+  }
+}

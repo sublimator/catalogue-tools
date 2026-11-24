@@ -28,7 +28,6 @@ namespace xprv {
 struct AnchorData
 {
     Hash256 ledger_hash;
-    uint32_t ledger_index = 0;
 
     // UNL data (raw bytes, self-contained for offline verification)
     std::string publisher_key_hex;

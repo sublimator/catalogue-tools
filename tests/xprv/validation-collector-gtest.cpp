@@ -77,6 +77,9 @@ load_anchor_fixture()
     return std::get<xprv::AnchorData>(chain.steps.front());
 }
 
+// Any sequence serves: these tests key the collector by ledger hash.
+constexpr uint32_t kAnchorSequence = 103188348;
+
 }  // namespace
 
 TEST(ValidationCollector, PeerManifestsExplainProofQuorumToo)
@@ -297,7 +300,7 @@ TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
     {
         xprv::ValidationCollector::Entry entry;
         entry.ledger_hash = anchor.ledger_hash;
-        entry.ledger_seq = anchor.ledger_index;
+        entry.ledger_seq = kAnchorSequence;
         entry.signing_key_hex = lower_ascii(manifests[i].signing_key_hex());
         entries.push_back(std::move(entry));
     }

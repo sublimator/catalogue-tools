@@ -32,7 +32,6 @@ anchor_to_json(AnchorData const& a)
     boost::json::object obj;
     obj["type"] = "anchor";
     obj["ledger_hash"] = upper_hex(a.ledger_hash);
-    obj["ledger_index"] = a.ledger_index;
 
     if (!a.publisher_key_hex.empty())
     {
@@ -584,13 +583,11 @@ anchor_from_json(boost::json::object const& obj)
 {
     require_members(
         obj,
-        {"type", "ledger_hash", "ledger_index", "unl", "validations"},
+        {"type", "ledger_hash", "unl", "validations"},
         "anchor");
     AnchorData a;
     a.ledger_hash =
         hash_from_hex(std::string(obj.at("ledger_hash").as_string()));
-    a.ledger_index = static_cast<uint32_t>(
-        integer_member(obj, "ledger_index", kUint32Max, "anchor"));
 
     auto const& unl = obj.at("unl").as_object();
     a.publisher_key_hex = std::string(unl.at("public_key").as_string());

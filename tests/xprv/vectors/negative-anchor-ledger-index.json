@@ -1,0 +1,20 @@
+{
+  "name": "anchor-ledger-index",
+  "violates": "spec \u00a72, \u00a72.1: the anchor is a hash; it carries no ledger index",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/ledger_index",
+      "value": 1
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "unknown member"
+  },
+  "observed": {
+    "python_reason": "unknown member ledger_index in anchor"
+  }
+}

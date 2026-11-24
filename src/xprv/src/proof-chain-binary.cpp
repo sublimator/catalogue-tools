@@ -6,10 +6,6 @@
 #include <catl/shamap/binary-trie.h>
 #include <catl/shamap/json-trie.h>
 
-#include <catl/core/base64.h>
-#include <catl/xdata/json-visitor.h>
-#include <catl/xdata/parser-context.h>
-#include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
 #include <catl/xdata/serialize.h>
 
@@ -26,7 +22,7 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
-#include <set>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 
@@ -150,6 +146,8 @@ hex_decode(std::string_view hex)
     // non-null-terminated string_view left `byte` uninitialized and its return
     // unchecked, so malformed hex pushed garbage bytes (sec #0054). Now reject
     // a bad digit instead.
+    if (hex.size() % 2 != 0)
+        throw std::runtime_error("binary proof: odd number of hex digits");
     std::vector<uint8_t> result;
     result.reserve(hex.size() / 2);
     for (size_t i = 0; i + 1 < hex.size(); i += 2)
@@ -161,20 +159,6 @@ hex_decode(std::string_view hex)
         result.push_back(static_cast<uint8_t>((hi << 4) | lo));
     }
     return result;
-}
-
-static bool
-hex_equal_ci(std::string_view a, std::string_view b)
-{
-    if (a.size() != b.size())
-        return false;
-    for (size_t i = 0; i < a.size(); ++i)
-    {
-        if (std::tolower(static_cast<unsigned char>(a[i])) !=
-            std::tolower(static_cast<unsigned char>(b[i])))
-            return false;
-    }
-    return true;
 }
 
 static std::string
@@ -277,227 +261,55 @@ zlib_decompress(std::span<const uint8_t> input)
 }
 
 //------------------------------------------------------------------------------
-// Blob JSON key ordering
-//------------------------------------------------------------------------------
-// The blob must reconstitute to the exact same bytes for signature
-// verification. JSON key ordering varies by publisher implementation.
-// We encode the permutation as a single byte:
-//   bits 0-2: top-level key order (3! = 6 permutations of
-//             {sequence, expiration, validators})
-//   bit 3:    validator key order (2! = 2 permutations of
-//             {validation_public_key, manifest})
-// Total: 12 combinations in 4 bits.
-
-static const std::string BLOB_KEYS[] = {"sequence", "expiration", "validators"};
-static const std::string VAL_KEYS[] = {"validation_public_key", "manifest"};
-
-/// Detect the permutation index for an ordered set of keys.
-/// Returns the Lehmer code index (0..n!-1).
-static uint8_t
-detect_key_order(
-    boost::json::object const& obj,
-    std::string const* expected,
-    int n)
-{
-    // Collect the actual key order
-    std::vector<int> order;
-    for (auto const& kv : obj)
-    {
-        for (int i = 0; i < n; i++)
-        {
-            if (kv.key() == expected[i])
-            {
-                order.push_back(i);
-                break;
-            }
-        }
-    }
-
-    // Convert permutation to index (factorial number system)
-    if (n == 2)
-    {
-        return (order.size() >= 2 && order[0] == 1) ? 1 : 0;
-    }
-    if (n == 3 && order.size() >= 3)
-    {
-        // 6 permutations of {0,1,2}
-        if (order[0] == 0 && order[1] == 1)
-            return 0;  // 0,1,2
-        if (order[0] == 0 && order[1] == 2)
-            return 1;  // 0,2,1
-        if (order[0] == 1 && order[1] == 0)
-            return 2;  // 1,0,2
-        if (order[0] == 1 && order[1] == 2)
-            return 3;  // 1,2,0
-        if (order[0] == 2 && order[1] == 0)
-            return 4;  // 2,0,1
-        if (order[0] == 2 && order[1] == 1)
-            return 5;  // 2,1,0
-    }
-    return 0;
-}
-
-/// Get the key permutation for a given index.
-static std::vector<int>
-get_key_permutation(int n, uint8_t index)
-{
-    if (n == 2)
-    {
-        return index ? std::vector<int>{1, 0} : std::vector<int>{0, 1};
-    }
-    // n == 3
-    static const int perms[6][3] = {
-        {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
-    if (index >= 6)
-        index = 0;
-    return {perms[index][0], perms[index][1], perms[index][2]};
-}
-
-//------------------------------------------------------------------------------
 // TLV encode
 //------------------------------------------------------------------------------
 
-/// Encode anchor core: ledger hash + publisher key + validations.
-/// This goes at the front — the verifier can check signatures against
-/// a cached UNL without needing the full VL blob.
+/// Encode anchor core: ledger hash + publisher key + the validations, each
+/// as its raw signed bytes (§3.4). It goes at the front, so a verifier
+/// holding the list can check the signatures before the list arrives.
 static std::vector<uint8_t>
 encode_anchor_core(AnchorData const& a)
 {
     std::vector<uint8_t> payload;
 
     write_bytes(payload, a.ledger_hash.data(), 32);
-    write_u32_be(payload, a.ledger_index);
 
-    auto pubkey = hex_decode(a.publisher_key_hex);
-    if (pubkey.size() < 33)
-        pubkey.resize(33, 0);
+    auto const pubkey = hex_decode(a.publisher_key_hex);
+    if (pubkey.size() != 33)
+        throw std::runtime_error(
+            "binary proof: publisher key must be exactly 33 bytes");
     write_bytes(payload, pubkey.data(), 33);
 
-    // Decomposed validations: common fields once + unique per validator
-    leb128_encode(payload, a.validations.size());
-    if (a.validations.empty())
-    {
-        return payload;
-    }
-
-    static auto const protocol =
-        catl::xdata::Protocol::load_embedded_xrpl_protocol();
-
-    std::vector<std::pair<std::string, boost::json::object>> parsed;
+    // Ascending order of the embedded SigningPubKey. Direct AnchorData
+    // callers never passed through the collector, so a validation that is
+    // not canonical, or sits under another key, must not become a proof.
+    std::map<std::vector<uint8_t>, std::vector<uint8_t> const*> by_key;
     for (auto const& [key_hex, val_bytes] : a.validations)
     {
-        // Direct AnchorData callers never passed through the collector.
-        // A non-canonical validation must not become a binary proof.
-        if (!AnchorVerifier::is_canonical_stvalidation(val_bytes))
+        auto const key =
+            AnchorVerifier::canonical_validation_signing_key(val_bytes);
+        if (!key)
             throw std::runtime_error(
                 "binary proof: validation is not a canonical STValidation");
-
-        Slice slice(val_bytes.data(), val_bytes.size());
-        catl::xdata::JsonVisitor::Options options;
-        options.ascii_hints = false;
-        catl::xdata::JsonVisitor visitor(protocol, options);
-        catl::xdata::ParserContext ctx(slice);
-        catl::xdata::parse_with_visitor(ctx, protocol, visitor);
-        auto result = visitor.get_result();
-        if (catl::xdata::codecs::serialize_object(
-                result.as_object(), protocol) != val_bytes)
-            throw std::runtime_error(
-                "binary proof: validation does not round-trip exactly");
-        parsed.emplace_back(key_hex, result.as_object());
-    }
-
-    // Collect ALL field names across all validations
-    std::set<std::string> all_keys;
-    for (auto const& [_, fields] : parsed)
-    {
-        for (auto const& [key, val] : fields)
-            all_keys.insert(std::string(key));
-    }
-
-    // A field is common if it appears in ALL validations with the
-    // same value. Everything else is unique (per-validator).
-    auto const& first = parsed[0].second;
-    boost::json::object common;
-    std::set<std::string> unique_key_set;
-
-    for (auto const& key : all_keys)
-    {
-        auto it0 = first.find(key);
-        if (it0 == first.end())
-        {
-            unique_key_set.insert(key);
-            continue;
-        }
-        auto const& ref_val = it0->value();
-        bool is_common = true;
-        for (size_t i = 1; i < parsed.size(); i++)
-        {
-            auto it = parsed[i].second.find(key);
-            if (it == parsed[i].second.end() ||
-                boost::json::serialize(it->value()) !=
-                    boost::json::serialize(ref_val))
-            {
-                is_common = false;
-                break;
-            }
-        }
-        if (is_common)
-            common[key] = ref_val;
-        else
-            unique_key_set.insert(key);
-    }
-
-    auto common_bytes = catl::xdata::codecs::serialize_object(common, protocol);
-    write_vl(payload, common_bytes);
-
-    std::vector<std::string> unique_keys(
-        unique_key_set.begin(), unique_key_set.end());
-    leb128_encode(payload, unique_keys.size());
-    for (auto const& uk : unique_keys)
-    {
-        leb128_encode(payload, uk.size());
-        write_bytes(
-            payload, reinterpret_cast<uint8_t const*>(uk.data()), uk.size());
-    }
-
-    for (auto const& [key_hex, fields] : parsed)
-    {
-        auto const* embedded = fields.if_contains("SigningPubKey");
-        auto const embedded_hex = embedded && embedded->is_string()
-            ? std::string(embedded->as_string())
-            : std::string{};
-        if (!hex_equal_ci(embedded_hex, key_hex))
+        if (hex_decode(key_hex) != *key)
             throw std::runtime_error(
                 "binary proof: validation key does not match SigningPubKey");
-
-        auto key_bytes = hex_decode(key_hex);
-        if (key_bytes.size() < 33)
-            key_bytes.resize(33, 0);
-        write_bytes(payload, key_bytes.data(), 33);
-
-        boost::json::object unique;
-        for (auto const& uk : unique_keys)
-        {
-            auto it = fields.find(uk);
-            if (it != fields.end())
-            {
-                unique[uk] = it->value();
-            }
-        }
-        auto unique_bytes =
-            catl::xdata::codecs::serialize_object(unique, protocol);
-        write_vl(payload, unique_bytes);
+        if (!by_key.emplace(*key, &val_bytes).second)
+            throw std::runtime_error(
+                "binary proof: validations must be distinct and sorted by "
+                "SigningPubKey");
     }
+
+    leb128_encode(payload, by_key.size());
+    for (auto const& entry : by_key)
+        write_vl(payload, *entry.second);
 
     return payload;
 }
 
-static void
-decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a);
-
-/// Encode anchor UNL: publisher manifest + blob signature + decomposed VL blob.
-/// This goes at the end — only needed if the verifier doesn't have a cached
-/// UNL.
+/// Encode anchor UNL: publisher manifest + list signature + the exact signed
+/// list bytes (§3.5). It goes at the end, needed only by a verifier that
+/// does not already hold the list.
 static std::vector<uint8_t>
 encode_anchor_unl(AnchorData const& a)
 {
@@ -511,65 +323,15 @@ encode_anchor_unl(AnchorData const& a)
                 "no validator list blob");
         return {};
     }
+    if (a.publisher_manifest.empty() || a.blob_signature.empty())
+        throw std::runtime_error(
+            "binary proof: a bundled list needs a non-empty manifest, list "
+            "and signature");
 
     std::vector<uint8_t> payload;
-
-    // Publisher manifest (raw binary STObject)
     write_vl(payload, a.publisher_manifest);
-
-    // Blob signature
     write_vl(payload, a.blob_signature);
-
-    // Decomposed VL blob with shape byte for key ordering
-    if (!a.blob.empty())
-    {
-        std::string blob_str(
-            reinterpret_cast<char const*>(a.blob.data()), a.blob.size());
-        auto blob_json = boost::json::parse(blob_str);
-        auto const& obj = blob_json.as_object();
-
-        uint8_t top_perm = detect_key_order(obj, BLOB_KEYS, 3);
-        uint8_t val_perm = 0;
-        auto const& validators = obj.at("validators").as_array();
-        if (!validators.empty())
-        {
-            val_perm = detect_key_order(validators[0].as_object(), VAL_KEYS, 2);
-        }
-        uint8_t shape = (top_perm & 0x07) | ((val_perm & 0x01) << 3);
-        payload.push_back(shape);
-
-        write_u32_be(
-            payload,
-            static_cast<uint32_t>(obj.at("sequence").to_number<int64_t>()));
-        write_u32_be(
-            payload,
-            static_cast<uint32_t>(obj.at("expiration").to_number<int64_t>()));
-
-        leb128_encode(payload, validators.size());
-
-        for (auto const& v : validators)
-        {
-            auto const& vobj = v.as_object();
-            auto vpk = hex_decode(
-                std::string_view(vobj.at("validation_public_key").as_string()));
-            if (vpk.size() < 33)
-                vpk.resize(33, 0);
-            write_bytes(payload, vpk.data(), 33);
-
-            auto m_b64 = std::string(vobj.at("manifest").as_string());
-            auto m_bytes = catl::base64_decode(m_b64);
-            write_vl(payload, m_bytes);
-        }
-    }
-
-    AnchorData decoded;
-    decode_anchor_unl(payload, decoded);
-    if (decoded.blob != a.blob)
-    {
-        throw std::runtime_error(
-            "binary proof: validator list blob cannot be encoded exactly");
-    }
-
+    write_vl(payload, a.blob);
     return payload;
 }
 
@@ -606,7 +368,7 @@ write_tlv(
 /// Encode the TLV body (no file header).
 ///
 /// TLV ordering for progressive verification:
-///   1. Anchor core (0x01) — hash + publisher key + validation signatures
+///   1. Anchor core (0x01) — hash + publisher key + validations
 ///   2. Headers + map proofs (0x02, 0x03, 0x04) — the actual proof chain
 ///   3. Anchor UNL (0x05) — VL blob, only needed if no cached UNL
 ///
@@ -730,7 +492,7 @@ to_binary(ProofChain const& chain, BinaryOptions const& opts)
 // TLV decode
 //------------------------------------------------------------------------------
 
-/// Decode anchor core: ledger hash + publisher key + validations.
+/// Decode anchor core: ledger hash + publisher key + raw validations.
 static AnchorData
 decode_anchor_core(std::span<const uint8_t> payload)
 {
@@ -738,97 +500,38 @@ decode_anchor_core(std::span<const uint8_t> payload)
     size_t pos = 0;
 
     read_bytes(payload, pos, a.ledger_hash.data(), 32);
-    a.ledger_index = read_u32_be(payload, pos);
 
     uint8_t pubkey[33];
     read_bytes(payload, pos, pubkey, 33);
     a.publisher_key_hex = hex_encode(pubkey, 33);
 
-    // Validations: reconstitute from common + unique fields
-    size_t val_count = leb128_decode(payload, pos);
-    if (val_count == 0)
-    {
-        if (pos != payload.size())
-            throw std::runtime_error(
-                "binary proof: trailing bytes in anchor core payload");
-        return a;
-    }
-
-    static auto const protocol =
-        catl::xdata::Protocol::load_embedded_xrpl_protocol();
-
-    auto common_bytes = read_vl(payload, pos);
-
-    Slice common_slice(common_bytes.data(), common_bytes.size());
-    catl::xdata::JsonVisitor::Options options;
-    options.ascii_hints = false;
-    catl::xdata::JsonVisitor common_visitor(protocol, options);
-    catl::xdata::ParserContext common_ctx(common_slice);
-    catl::xdata::parse_with_visitor(common_ctx, protocol, common_visitor);
-    auto common_json = common_visitor.get_result().as_object();
-
-    size_t num_unique_keys = leb128_decode(payload, pos);
-    std::vector<std::string> unique_keys;
-    for (size_t i = 0; i < num_unique_keys; i++)
-    {
-        size_t name_len = leb128_decode(payload, pos);
-        if (name_len > payload.size() - pos)
-        {
-            throw std::runtime_error(
-                "binary proof: unexpected end reading field name");
-        }
-        unique_keys.emplace_back(
-            reinterpret_cast<char const*>(payload.data() + pos), name_len);
-        pos += name_len;
-    }
-
+    // Each record is a complete canonical STValidation (§2.1). Its own
+    // SigningPubKey orders it; there is no second key on the wire.
+    size_t const val_count = leb128_decode(payload, pos);
+    std::vector<uint8_t> previous;
     for (size_t i = 0; i < val_count; i++)
     {
-        uint8_t vkey[33];
-        read_bytes(payload, pos, vkey, 33);
-        auto key_hex = hex_encode(vkey, 33);
-
-        auto unique_bytes = read_vl(payload, pos);
-
-        Slice unique_slice(unique_bytes.data(), unique_bytes.size());
-        catl::xdata::JsonVisitor unique_visitor(protocol, options);
-        catl::xdata::ParserContext unique_ctx(unique_slice);
-        catl::xdata::parse_with_visitor(unique_ctx, protocol, unique_visitor);
-        auto unique_json = unique_visitor.get_result().as_object();
-
-        boost::json::object merged = common_json;
-        for (auto const& [k, v] : unique_json)
-            merged[k] = v;
-
-        auto full_bytes =
-            catl::xdata::codecs::serialize_object(merged, protocol);
-        if (!AnchorVerifier::is_canonical_stvalidation(full_bytes))
+        auto raw = read_vl(payload, pos);
+        auto key = AnchorVerifier::canonical_validation_signing_key(raw);
+        if (!key)
             throw std::runtime_error(
                 "binary proof: validation is not a canonical STValidation");
-        auto const* embedded = merged.if_contains("SigningPubKey");
-        auto const embedded_hex = embedded && embedded->is_string()
-            ? std::string(embedded->as_string())
-            : std::string{};
-        if (!hex_equal_ci(embedded_hex, key_hex))
+        if (i > 0 && !(previous < *key))
             throw std::runtime_error(
-                "binary proof: validation key does not match SigningPubKey");
-        a.validations[key_hex] = std::move(full_bytes);
+                "binary proof: validations must be distinct and sorted by "
+                "SigningPubKey");
+        a.validations[hex_encode(key->data(), key->size())] = std::move(raw);
+        previous = std::move(*key);
     }
 
     if (pos != payload.size())
         throw std::runtime_error(
             "binary proof: trailing bytes in anchor core payload");
 
-    auto canonical = encode_anchor_core(a);
-    if (!std::equal(
-            payload.begin(), payload.end(), canonical.begin(), canonical.end()))
-        throw std::runtime_error(
-            "binary proof: non-canonical anchor core decomposition");
-
     return a;
 }
 
-/// Decode anchor UNL: manifest + blob signature + decomposed VL blob.
+/// Decode anchor UNL: manifest + list signature + the signed list bytes.
 /// Merges into an existing AnchorData (from decode_anchor_core).
 static void
 decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a)
@@ -837,89 +540,16 @@ decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a)
 
     a.publisher_manifest = read_vl(payload, pos);
     a.blob_signature = read_vl(payload, pos);
-
-    if (pos >= payload.size())
-        throw std::runtime_error("binary proof: missing anchor UNL shape");
-
-    uint8_t shape = payload[pos++];
-    uint8_t top_perm = shape & 0x07;
-    uint8_t val_perm = (shape >> 3) & 0x01;
-    if ((shape & 0xF0) != 0 || top_perm > 5)
-        throw std::runtime_error("binary proof: invalid anchor UNL shape");
-
-    auto top_order = get_key_permutation(3, top_perm);
-    auto val_order = get_key_permutation(2, val_perm);
-
-    uint32_t sequence = read_u32_be(payload, pos);
-    uint32_t expiration = read_u32_be(payload, pos);
-    size_t validator_count = leb128_decode(payload, pos);
-
-    struct ValEntry
-    {
-        std::string pubkey_hex;
-        std::string manifest_b64;
-    };
-    std::vector<ValEntry> vals;
-    for (size_t i = 0; i < validator_count; i++)
-    {
-        ValEntry ve;
-        uint8_t vpk[33];
-        read_bytes(payload, pos, vpk, 33);
-        ve.pubkey_hex = hex_encode(vpk, 33);
-        auto m_bytes = read_vl(payload, pos);
-        ve.manifest_b64 = catl::base64_encode(m_bytes);
-        vals.push_back(std::move(ve));
-    }
+    a.blob = read_vl(payload, pos);
 
     if (pos != payload.size())
         throw std::runtime_error(
             "binary proof: trailing bytes in anchor UNL payload");
-
-    std::string blob_json = "{";
-    for (int k = 0; k < 3; k++)
-    {
-        if (k > 0)
-            blob_json += ',';
-        int key_idx = top_order[k];
-        blob_json += '"';
-        blob_json += BLOB_KEYS[key_idx];
-        blob_json += "\":";
-        if (key_idx == 0)
-        {
-            blob_json += std::to_string(sequence);
-        }
-        else if (key_idx == 1)
-        {
-            blob_json += std::to_string(expiration);
-        }
-        else
-        {
-            blob_json += '[';
-            for (size_t i = 0; i < vals.size(); i++)
-            {
-                if (i > 0)
-                    blob_json += ',';
-                blob_json += '{';
-                for (int vk = 0; vk < 2; vk++)
-                {
-                    if (vk > 0)
-                        blob_json += ',';
-                    int vkey_idx = val_order[vk];
-                    blob_json += '"';
-                    blob_json += VAL_KEYS[vkey_idx];
-                    blob_json += "\":\"";
-                    blob_json += (vkey_idx == 0) ? vals[i].pubkey_hex
-                                                 : vals[i].manifest_b64;
-                    blob_json += '"';
-                }
-                blob_json += '}';
-            }
-            blob_json += ']';
-        }
-    }
-    blob_json += '}';
-
-    a.blob.assign(blob_json.begin(), blob_json.end());
+    if (a.publisher_manifest.empty() || a.blob_signature.empty() ||
+        a.blob.empty())
+        throw std::runtime_error(
+            "binary proof: a bundled list needs a non-empty manifest, list "
+            "and signature");
 }
 
 static HeaderData

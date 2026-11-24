@@ -119,7 +119,6 @@ class Fixture:
         return {
             "type": "anchor",
             "ledger_hash": ANCHOR_HASH,
-            "ledger_index": HEADER["ledger_index"],
             "unl": {
                 "public_key": claimed_key or publisher[0],
                 "manifest": hexlify(make_manifest(publisher, publisher_signing)).decode(),
@@ -778,7 +777,6 @@ class ProofBindingTests(unittest.TestCase):
         cases = {
             "validation value": lambda p: p["steps"][0]["validations"].update({"ED" + "00" * 32: "ZZ"}),
             "validation value ": lambda p: p["steps"][0]["validations"].update({"ED" + "00" * 32: None}),
-            "anchor ledger_index": lambda p: p["steps"][0].update(ledger_index="1"),
             "header total_coins": lambda p: p["steps"][1]["header"].update(
                 total_coins=int(p["steps"][1]["header"]["total_coins"])
             ),
@@ -951,14 +949,6 @@ class ClosedJsonTests(unittest.TestCase):
                 proof = self.proof()
                 mutate(proof)
                 self.assertFalse(self.verify(proof).ok)
-
-    def test_warns_when_signed_sequence_differs_from_advisory_index(self) -> None:
-        proof = self.proof()
-        proof["steps"][0]["ledger_index"] += 1
-        result = self.verify(proof)
-        self.assertTrue(result.ok)
-        self.assertTrue(any("not the advisory ledger_index" in w for w in result.warnings), result.warnings)
-        self.assertFalse(any("advisory" in w for w in self.verify(self.proof()).warnings))
 
 
 class StructuredValueGrammarTests(unittest.TestCase):
@@ -1261,20 +1251,6 @@ class StrictParsingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     v.binary_to_proof(self.packed(changed))
 
-    def test_rejects_reserved_shape_bits(self):
-        index = next(i for i, (t, _) in enumerate(self.records) if t == 5)
-        payload = self.records[index][1]
-        _, pos = v.read_vl(payload, 0)
-        _, pos = v.read_vl(payload, pos)
-        for bit in [0x10, 0x80]:
-            with self.subTest(bit=bit):
-                changed = list(self.records)
-                value = bytearray(payload)
-                value[pos] |= bit
-                changed[index] = 5, bytes(value)
-                with self.assertRaisesRegex(ValueError, "shape"):
-                    v.binary_to_proof(self.packed(changed))
-
     def test_rejects_truncated_vl_data(self):
         with self.assertRaises(ValueError):
             v.read_vl(b"\x05x", 0)
@@ -1319,125 +1295,24 @@ class StrictParsingTests(unittest.TestCase):
         next(s for s in proof["steps"] if s["type"] == "map_proof")["tree"] = "banana"
         self.assertFalse(quietly(v.verify, proof).ok)
 
-    def core_mutation(self, mutation):
-        core = next(payload for kind, payload in self.records if kind == 1)
-        count, count_end = v.leb128_read(core, 69)
-        _, names_start = v.read_vl(core, count_end)
-        name_count, pos = v.leb128_read(core, names_start)
-        names = []
-        for _ in range(name_count):
-            name, pos = v.read_vl(core, pos)
-            names.append(name)
-        names_end = pos
-        records = []
-        for _ in range(count):
-            start = pos
-            _, pos = v.read_vl(core, pos + 33)
-            records.append(core[start:pos])
-        if mutation == "unknown-name":
-            names[0] = b"Z" * len(names[0])
-        elif mutation == "name-order":
-            names.reverse()
-        elif mutation == "record-order":
-            records.reverse()
-        else:
-            records.append(records[0])
-        return (core[:69] + self.leb(len(records)) + core[count_end:names_start]
-            + self.leb(len(names)) + b"".join(self.leb(len(n)) + n for n in names)
-            + b"".join(records))
+    def test_unknown_field_in_a_validation_is_a_value_error(self):
+        # Field id 0xFF is not in the xrpl-py 5.2.0 definitions, so decode()
+        # raises KeyError. The anchor decoder reports a validation it cannot
+        # decode as not canonical, never as a traceback.
+        payload = bytes(32) + bytes(33) + bytes([1]) + bytes([2]) + b"\xff\x00"
+        with self.assertRaisesRegex(ValueError, "canonical STValidation"):
+            v.decode_anchor_core(payload)
 
-    def test_unknown_field_is_a_value_error(self):
-        # Field id 0xFF is not in the xrpl-py 5.2.0 definitions. decode() raises
-        # KeyError; the anchor decoder must turn that into ValueError.
-        payload = bytearray(32) + (1).to_bytes(4, "big") + bytes(33)
-        payload += bytes([1])  # one validation
-        payload += bytes([2]) + b"\xff\x00"  # common VL
-        payload += bytes([0])  # no unique names
-        payload += bytes(33) + bytes([0])  # key + empty unique
-        with self.assertRaisesRegex(ValueError, "not decodable") as caught:
-            v.decode_anchor_core(bytes(payload))
-        self.assertIsInstance(caught.exception.__cause__, KeyError)
-
-    def test_rejects_unknown_decomposition_name(self):
-        with self.assertRaises(ValueError):
-            v.decode_anchor_core(self.core_mutation("unknown-name"))
-
-    def test_rejects_unsorted_decomposition_names(self):
-        with self.assertRaises(ValueError):
-            v.decode_anchor_core(self.core_mutation("name-order"))
-
-    def test_rejects_unsorted_validation_records(self):
-        with self.assertRaises(ValueError):
-            v.decode_anchor_core(self.core_mutation("record-order"))
-
-    def test_rejects_duplicate_validation_records(self):
-        with self.assertRaises(ValueError):
-            v.decode_anchor_core(self.core_mutation("duplicate"))
+    # Record order, a repeated record, an empty record and payload trailers in
+    # the anchor core are shared vectors: tests/xprv/vectors/negative-anchor-*.
 
 
 class StructuralParityTests(unittest.TestCase):
-    def core(self, items: list[tuple[bytes, dict | None]]) -> bytes:
-        """0x01 payload. None is an empty validator record (no fields)."""
-        items = sorted(items, key=lambda item: item[0])
-        present = [fields for _, fields in items if fields is not None]
-        union = set().union(*(fields.keys() for fields in present)) if present else set()
-        if any(fields is None for _, fields in items):
-            common: dict = {}
-        else:
-            common = {
-                key: present[0][key]
-                for key in union
-                if all(key in fields and fields[key] == present[0][key] for fields in present)
-            }
-        names = sorted(union - common.keys())
-        common_bytes = bytes.fromhex(encode(common)) if common else b""
-        payload = bytearray(32)
-        payload += (1).to_bytes(4, "big")
-        payload += bytes(33)
-        payload += leb128(len(items))
-        payload += leb128(len(common_bytes)) + common_bytes
-        payload += leb128(len(names))
-        for name in names:
-            raw = name.encode()
-            payload += leb128(len(raw)) + raw
-        for key, fields in items:
-            unique = {} if fields is None else {name: fields[name] for name in names if name in fields}
-            unique_bytes = bytes.fromhex(encode(unique)) if unique else b""
-            payload += key + leb128(len(unique_bytes)) + unique_bytes
-        return bytes(payload)
-
     def test_zero_validation_core_parses(self):
-        payload = bytes(32) + (0).to_bytes(4, "big") + bytes(33) + bytes([0])
-        self.assertEqual(len(payload), 70)
-        decoded = v.decode_anchor_core(payload)
-        self.assertEqual(decoded["validations"], {})
-
-    def test_zero_key_empty_record_is_rejected_beside_a_real_validation(self):
-        signer = keypair(200)
-        fields = decode(make_validation(signer, "AB" * 32))
-        good = self.core([(bytes.fromhex(signer[0]), fields)])
-        self.assertIn(signer[0], v.decode_anchor_core(good)["validations"])
-        bad = self.core([(bytes(33), None), (bytes.fromhex(signer[0]), fields)])
-        with self.assertRaisesRegex(ValueError, "canonical STValidation"):
-            v.decode_anchor_core(bad)
-
-    def test_common_field_left_unique_is_rejected(self):
-        signer = keypair(200)
-        fields = decode(make_validation(signer, "AB" * 32))
-        names = sorted(fields)
-        payload = bytearray(32)
-        payload += (1).to_bytes(4, "big")
-        payload += bytes(33)
-        payload += leb128(1)
-        payload += leb128(0)  # common omits fields every validation carries
-        payload += leb128(len(names))
-        for name in names:
-            raw = name.encode()
-            payload += leb128(len(raw)) + raw
-        unique = bytes.fromhex(encode(fields))
-        payload += bytes.fromhex(signer[0]) + leb128(len(unique)) + unique
-        with self.assertRaisesRegex(ValueError, "non-canonical"):
-            v.decode_anchor_core(bytes(payload))
+        # 32-byte hash, 33-byte publisher key and a zero count: 66 bytes.
+        payload = bytes(32) + bytes(33) + bytes([0])
+        self.assertEqual(len(payload), 66)
+        self.assertEqual(v.decode_anchor_core(payload)["validations"], {})
 
     def test_root_leaf_is_rejected_at_parse(self):
         leaf = ["AB" * 32, {"LedgerEntryType": "AccountRoot"}]

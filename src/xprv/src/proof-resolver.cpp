@@ -411,16 +411,10 @@ resolve_proof_chain_impl(
                         "  Trusted hash: ",
                         ledger_hash_hex.substr(0, 16),
                         "...");
-                    // §2.1: outside every signed preimage; the anchor
-                    // ledger's header step reports the authenticated index.
-                    PLOGI(
-                        verify_log,
-                        "  Ledger index: ",
-                        data.ledger_index,
-                        " (advisory, not authenticated)");
+                    // The anchor is a hash. The header step whose hash it
+                    // is reports the authenticated ledger index.
 
                     AnchorStep anchor_step;
-                    anchor_step.ledger_index = data.ledger_index;
                     anchor_step.ledger_hash = ledger_hash_hex.substr(0, 16);
 
                     bool anchor_verified = pretrusted_anchor_for_testing;

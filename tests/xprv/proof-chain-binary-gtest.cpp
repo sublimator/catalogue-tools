@@ -385,7 +385,6 @@ TEST(ProofChainBinary, AnchorRoundTrip)
     ProofChain chain;
     AnchorData a;
     a.ledger_hash = make_hash(0x11);
-    a.ledger_index = 100000;
     a.publisher_key_hex = "ED" + std::string(64, 'A');  // 33 bytes
     a.publisher_manifest = make_bytes(100, 0x22);
     a.blob = make_blob(3);
@@ -416,7 +415,9 @@ TEST(ProofChainBinary, AnchorRoundTrip)
     }
 }
 
-TEST(ProofChainBinary, RejectsValidatorListBlobThatCannotRoundTripExactly)
+// The list record carries the signed list as its exact bytes (§3.5), so a
+// list with `effective`, whitespace or any other member has a binary form.
+TEST(ProofChainBinary, CarriesAnyValidatorListByteForByte)
 {
     ProofChain chain;
     AnchorData anchor;
@@ -424,11 +425,16 @@ TEST(ProofChainBinary, RejectsValidatorListBlobThatCannotRoundTripExactly)
     anchor.publisher_manifest = make_bytes(8, 1);
     anchor.blob_signature = make_bytes(64, 2);
     std::string const blob =
-        R"({"sequence":1,"effective":2,"expiration":3,"validators":[]})";
+        "{ \"sequence\":1,\n \"effective\":2, \"expiration\":3,"
+        "\"validators\":[] }";
     anchor.blob.assign(blob.begin(), blob.end());
-    chain.steps.emplace_back(std::move(anchor));
+    chain.steps.emplace_back(anchor);
 
-    EXPECT_THROW(to_binary(chain), std::runtime_error);
+    auto const decoded = from_binary(to_binary(chain));
+    auto const& got = std::get<AnchorData>(decoded.steps.at(0));
+    EXPECT_EQ(got.blob, anchor.blob);
+    EXPECT_EQ(got.publisher_manifest, anchor.publisher_manifest);
+    EXPECT_EQ(got.blob_signature, anchor.blob_signature);
 }
 
 // In-memory AnchorData skips the collector. encode must still refuse a
@@ -451,7 +457,6 @@ TEST(ProofChainBinary, RejectsNonCanonicalValidationInAnchorData)
     ProofChain chain;
     AnchorData anchor;
     anchor.ledger_hash = make_hash(0x11);
-    anchor.ledger_index = 1;
     anchor.publisher_key_hex = "ED" + std::string(64, 'A');
     anchor.validations.emplace("ED" + std::string(64, 'B'), std::move(raw));
     chain.steps.emplace_back(std::move(anchor));
@@ -476,7 +481,6 @@ TEST(ProofChainBinary, AnchorWithoutListOmitsUnlRecord)
     ProofChain chain;
     AnchorData a;
     a.ledger_hash = make_hash(0x11);
-    a.ledger_index = 100000;
     a.publisher_key_hex = "ED" + std::string(64, 'A');
     chain.steps.push_back(a);
 
@@ -755,7 +759,6 @@ TEST(ProofChainBinary, RealProofRoundTrip)
     auto& orig_anchor = std::get<AnchorData>(chain.steps[0]);
     auto& dec_anchor = std::get<AnchorData>(decoded.steps[0]);
     EXPECT_EQ(dec_anchor.ledger_hash, orig_anchor.ledger_hash);
-    EXPECT_EQ(dec_anchor.ledger_index, orig_anchor.ledger_index);
     EXPECT_EQ(dec_anchor.publisher_key_hex, orig_anchor.publisher_key_hex);
     EXPECT_EQ(dec_anchor.blob, orig_anchor.blob);
     EXPECT_EQ(dec_anchor.validations.size(), orig_anchor.validations.size());

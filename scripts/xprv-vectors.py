@@ -293,6 +293,49 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
         [{"compress_body": 9}, {"append_hex": "00"}],
         "bytes after the zlib stream",
     )
+
+    # The anchor core (§3.4): 32-byte hash, 33-byte publisher key, a count,
+    # then each validation whole, in ascending order of its SigningPubKey.
+    records = V.parse_tlv_records(raw[10:])
+    core_at = next(i for i, (t, _) in enumerate(records) if t == V.TLV_ANCHOR)
+    head, vals = _core_parts(records[core_at][1])
+    assert len(vals) >= 2, "the base needs two validations to reorder"
+
+    def core(validations: list[bytes], tail: bytes = b"") -> list[dict[str, Any]]:
+        payload = head + _leb128(len(validations)) + b"".join(validations) + tail
+        return _replace_payload(raw, core_at, payload)
+
+    order_rule = "spec §3.4: validations are in strictly ascending order of their SigningPubKey"
+    mut("anchor-core-unsorted-validations", order_rule,
+        core([vals[1], vals[0]] + vals[2:]), "distinct and sorted")
+    mut("anchor-core-duplicate-validation", order_rule,
+        core([vals[0]] + vals), "distinct and sorted")
+    mut("anchor-core-empty-validation",
+        "spec §2.1, §3.4: every validation record is a complete canonical STValidation",
+        core([b"\x00"] + vals), "canonical STValidation")
+    mut("anchor-core-trailing-byte",
+        "spec §3.8: a TLV payload is consumed exactly",
+        core(vals, b"\x00"), "trailing bytes in anchor core")
+    # A core with no validations is well formed: 66 bytes. It fails later,
+    # at quorum, which is a trust refusal and not a parse one.
+    mut("anchor-core-no-validations",
+        "spec §1.3 rule 6, §3.4: an anchor with no validations parses and fails quorum",
+        core([]), "quorum not met", layer="trust")
+
+    # The anchor list (§3.5): manifest, signature and the exact signed list,
+    # each length-prefixed and none empty.
+    unl_at = next(i for i, (t, _) in enumerate(records) if t == V.TLV_UNL)
+    unl = records[unl_at][1]
+    manifest, pos = V.read_vl(unl, 0)
+    signature, pos = V.read_vl(unl, pos)
+    assert V.read_vl(unl, pos)[1] == len(unl)
+    mut("anchor-unl-trailing-byte",
+        "spec §3.8: a TLV payload is consumed exactly",
+        _replace_payload(raw, unl_at, unl + b"\x00"), "trailing bytes in anchor UNL")
+    mut("anchor-unl-empty-list",
+        "spec §3.5: the manifest, the signature and the list are each non-empty",
+        _replace_payload(raw, unl_at, unl[:pos] + b"\x00"),
+        "non-empty manifest, list and signature")
     return fam
 
 
@@ -303,6 +346,45 @@ def _leb128(value: int) -> bytes:
         value >>= 7
     out.append(value)
     return bytes(out)
+
+
+def _core_parts(payload: bytes) -> tuple[bytes, list[bytes]]:
+    """An anchor core's fixed head and its validation records, lengths included."""
+    count, pos = V.leb128_read(payload, 65)
+    records = []
+    for _ in range(count):
+        size, start = V.leb128_read(payload, pos)
+        records.append(payload[pos : start + size])
+        pos = start + size
+    assert pos == len(payload)
+    return payload[:65], records
+
+
+def _splice(old: bytes, new: bytes, at: int) -> list[dict[str, Any]]:
+    """The smallest delete and insert that turn `old`, at file offset `at`, into `new`."""
+    lead = 0
+    while lead < min(len(old), len(new)) and old[lead] == new[lead]:
+        lead += 1
+    tail = 0
+    while tail < min(len(old), len(new)) - lead and old[-1 - tail] == new[-1 - tail]:
+        tail += 1
+    gone, came = old[lead : len(old) - tail], new[lead : len(new) - tail]
+    ops: list[dict[str, Any]] = []
+    if gone:
+        ops.append({"delete_at": at + lead, "delete_len": len(gone)})
+    if came:
+        ops.append({"insert_at": at + lead, "insert_hex": came.hex().upper()})
+    return ops
+
+
+def _replace_payload(raw: bytes, index: int, payload: bytes) -> list[dict[str, Any]]:
+    """Mutations that give TLV record `index` a new payload and a matching length."""
+    at = _record_offsets(raw)[index][1] + 1
+    old = V.parse_tlv_records(raw[10:])[index][1]
+    old_len, new_len = _leb128(len(old)), _leb128(len(payload))
+    # The payload first: it follows the length, so editing the length
+    # afterwards cannot move it.
+    return _splice(old, payload, at + len(old_len)) + _splice(old_len, new_len, at)
 
 
 def _record_offsets(raw: bytes) -> list[tuple[int, int]]:
@@ -444,6 +526,11 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("validation-unsigned-field",
         "spec §5.1: validation signing data keeps every field except Signature",
         "trust", "quorum not met", injected)
+
+    neg("anchor-ledger-index", "spec §2, §2.1: the anchor is a hash; it carries no ledger index",
+        "parse", "unknown member", [at("/steps/0/ledger_index", 1)])
+    neg("no-validations", "spec §1.3 rule 6: an anchor with no validations fails quorum",
+        "trust", "quorum not met", [at("/steps/0/validations", {})])
 
     # §2.3 gives a plain field's value two JSON types. A codec that skips a
     # null member hashes the leaf as if it were absent, so the reader sees a

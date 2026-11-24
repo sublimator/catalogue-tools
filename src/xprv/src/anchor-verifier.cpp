@@ -159,6 +159,16 @@ AnchorVerifier::is_canonical_stvalidation(std::vector<uint8_t> const& raw)
     return parse_validation(raw).valid;
 }
 
+std::optional<std::vector<uint8_t>>
+AnchorVerifier::canonical_validation_signing_key(
+    std::vector<uint8_t> const& raw)
+{
+    auto parsed = parse_validation(raw);
+    if (!parsed.valid)
+        return std::nullopt;
+    return std::move(parsed.signing_key);
+}
+
 #ifdef XPRV_TESTING
 std::vector<uint8_t>
 AnchorVerifier::validation_signing_body_for_test(
@@ -638,7 +648,6 @@ AnchorVerifier::verify(
 
     int total = 0;
     int verified = 0;
-    std::set<std::optional<uint32_t>> counted_seqs;
     int partial = 0;
     int matched_unl = 0;
     std::set<std::string> counted_masters;  // one vote per validator identity
@@ -715,30 +724,6 @@ AnchorVerifier::verify(
             counted_masters.insert(member->second).second)
         {
             matched_unl++;
-            counted_seqs.insert(parsed.ledger_seq);
-        }
-    }
-
-    // §2.1 SHOULD: the counted validations' signed LedgerSequence against the
-    // advisory index. A mismatch is reported, never a rejection.
-    if (auto const* advisory = anchor.if_contains("ledger_index");
-        advisory && advisory->is_number() && !counted_seqs.empty())
-    {
-        auto const index = strict_uint32(*advisory);
-        if (index &&
-            (counted_seqs.size() != 1 || *counted_seqs.begin() != *index))
-        {
-            std::string signed_seqs;
-            for (auto const& seq : counted_seqs)
-            {
-                if (!signed_seqs.empty())
-                    signed_seqs += ", ";
-                signed_seqs += seq ? std::to_string(*seq) : "none";
-            }
-            result.warnings.push_back(
-                "counted validations sign LedgerSequence " + signed_seqs +
-                ", not the advisory ledger_index " + std::to_string(*index));
-            narrative.push_back("   WARN: " + result.warnings.back() + ".");
         }
     }
 
