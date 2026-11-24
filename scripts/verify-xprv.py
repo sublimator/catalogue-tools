@@ -521,8 +521,8 @@ def _require_stobject_members(obj: Any, path: str) -> None:
 # input (_for_codec) and its output (_as_reference) into the reference form:
 # - an ordinary UInt64 field: rippled writes lowercase hex without padding
 #   ("ff"); xrpl-py writes and wants 16 uppercase digits;
-# - the four base-ten UInt64 fields: rippled writes decimal; xrpl-py decodes
-#   them as 16 hex digits, and reads LockedAmount's text as hex;
+# - the five base-ten UInt64 fields: rippled writes decimal; xrpl-py decodes
+#   them as 16 hex digits, and reads the text of two of them as hex;
 # - a path step: rippled writes its type byte as `type`; xrpl-py does not;
 # - an issued amount's value: rippled keeps the 16-digit mantissa
 #   (1000000000000000e-3); xrpl-py writes plain digits (1000000000000);
@@ -533,7 +533,11 @@ def _require_stobject_members(obj: Any, path: str) -> None:
 # as 40 hex digits; xrpl-py refuses to encode or decode it. This verifier
 # refuses a JSON leaf that holds one, and such a proof verifies in its binary
 # form. None is known in a validated ledger.
-_BASE_TEN_UINT64 = frozenset({"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount"})
+_BASE_TEN_UINT64 = frozenset(
+    {"MaximumAmount", "OutstandingAmount", "MPTAmount", "LockedAmount", "ConfidentialOutstandingAmount"}
+)
+# Of those, the ones whose decimal text xrpl-py would read as hex.
+_BASE_TEN_READ_AS_HEX = frozenset({"LockedAmount", "ConfidentialOutstandingAmount"})
 _RIPPLED_HEX_UINT64 = re.compile(r"[0-9a-f]{1,16}")
 _STEP_TYPE = {"account": 0x01, "currency": 0x10, "issuer": 0x20}
 
@@ -553,7 +557,7 @@ def _for_codec(value: Any) -> Any:
         info = _serialized_field(name)
         kind = info.type if info else ""
         if kind == "UInt64" and isinstance(member, str):
-            if name == "LockedAmount":
+            if name in _BASE_TEN_READ_AS_HEX:
                 decimal = len(member) <= 20 and member.isascii() and member.isdigit()
                 out[name] = f"{int(member):016X}" if decimal and int(member) < 1 << 64 else member
             elif name not in _BASE_TEN_UINT64 and _RIPPLED_HEX_UINT64.fullmatch(member):
