@@ -397,15 +397,28 @@ def _serialized_field(name: str) -> Any:
 def _is_native_code(value: Any) -> bool:
     """The native asset's code as xrpl-py, an XRPL codec, serializes it: XRP.
 
-    XAH is an ordinary issued currency on XRPL, and is traded there. On a
-    Xahau JSON proof this verifier still re-serializes each leaf with the
-    XRPL codec and compares the result with the authenticated root, so it
-    accepts a Xahau leaf only when that codec reproduces its exact bytes, and
-    refuses the rest: a field xrpl-py does not define, or a native XAH issue.
-    It cannot accept a leaf whose bytes it got wrong. A Xahau binary proof
-    needs no codec and verifies in full (Appendix A).
+    XAH is an ordinary issued currency on XRPL, and is traded there. This is
+    XRPL's rule only. No decoded leaf of another network reaches it: see
+    XAHAU_JSON_LEAVES_DECLINED.
     """
     return value == "XRP"
+
+
+# A decoded leaf must equal the JSON its network's own codec writes (§2.3):
+# xahaud's on Xahau. This verifier's codec is xrpl-py, which holds XRPL's
+# definitions and XRPL's renderings. Re-serializing a Xahau leaf with it can
+# reproduce the leaf's bytes, and so its hash, while the text it was given is
+# XRPL's spelling and not xahaud's: a native issue is {"currency": "XRP"} to
+# one and {"currency": "XAH"} to the other, over the same twenty zero bytes.
+# Matching the root is therefore not enough to accept the leaf, and this
+# verifier cannot check the rest. It declines every decoded Xahau map step,
+# whatever the leaf holds. A Xahau binary proof carries the leaves' bytes,
+# needs no codec, and verifies in full, as does a Xahau JSON proof that has
+# no map step (Appendix A).
+XAHAU_JSON_LEAVES_DECLINED = (
+    "this verifier cannot check a decoded Xahau leaf: it reads leaves with xrpl-py's "
+    "XRPL definitions, and section 2.3 requires xahaud's JSON; verify the binary proof instead"
+)
 
 
 def _not_a_value(at: str, type_name: str) -> UnknownLeafField:
@@ -1937,6 +1950,15 @@ def verify(
         layer, error = "trust", f"trusted key belongs to network {key_network}, not configured network {network_id}"
     elif proof_network != network_id:
         layer, error = "trust", f"proof network_id {proof_network} does not match configured network {network_id}"
+    elif network_id == XAHAU_NETWORK_ID and any(
+        isinstance(step, dict)
+        and step.get("type") == "map_proof"
+        and not isinstance(step.get("__binary_payload__"), bytes)
+        for step in steps
+    ):
+        # The form of these leaves is the one thing this verifier cannot
+        # establish, so the refusal is at the layer that rule belongs to.
+        layer, error = "parse", XAHAU_JSON_LEAVES_DECLINED
     if error:
         print(f"\n  FAIL: {error}")
         result.refuse(layer, error)
@@ -2140,13 +2162,6 @@ def verify(
             except Exception as exc:
                 detail = str(exc)
                 leaf_form = isinstance(exc, LeafFormError)
-                if network_id == XAHAU_NETWORK_ID and leaf_form:
-                    # Known limitation: xrpl-py ships XRPL definitions only, so
-                    # it can't re-serialize Xahau fields in a decoded JSON leaf.
-                    detail += (
-                        " (this verifier reads leaves with xrpl-py's XRPL definitions, "
-                        "so it can't check a Xahau JSON leaf; verify the binary proof instead)"
-                    )
                 print(f"    [ERROR] {detail}")
                 # An invalid leaf is a fault in the proof's form (§2.4); a
                 # well-formed one under a root nothing supports is found below.

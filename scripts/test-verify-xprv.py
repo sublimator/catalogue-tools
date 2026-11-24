@@ -326,6 +326,60 @@ class StructuredValueGrammarTests(unittest.TestCase):
                 self.assertEqual(self.accepted(case["field"], case["value"]), case["accept"])
 
 
+class XahauJsonLeafTests(unittest.TestCase):
+    """§2.3 wants xahaud's JSON for a Xahau leaf. This verifier's codec is
+    XRPL's, so it declines every decoded Xahau map step and says why."""
+
+    MAP_STEP = {
+        "type": "map_proof",
+        "tree": "state",
+        "trie": {"0": ["00" * 32, {"LedgerEntryType": "AccountRoot", "Flags": 0}]},
+    }
+
+    def verify(self, proof, f, network_id):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return v.verify(proof, f.trusted_key, network_id)
+
+    def test_a_xahau_json_proof_without_a_map_step_still_verifies(self) -> None:
+        f = world.Fixture()
+        result = self.verify(f.proof(network_id=v.XAHAU_NETWORK_ID), f, v.XAHAU_NETWORK_ID)
+        self.assertTrue(result.ok, result.reason)
+
+    def test_a_decoded_xahau_map_step_is_declined(self) -> None:
+        f = world.Fixture()
+        proof = f.proof(network_id=v.XAHAU_NETWORK_ID)
+        proof["steps"].append(copy.deepcopy(self.MAP_STEP))
+        result = self.verify(proof, f, v.XAHAU_NETWORK_ID)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.layer, "parse")
+        self.assertEqual(result.reason, v.XAHAU_JSON_LEAVES_DECLINED)
+
+    def test_the_same_map_step_on_xrpl_is_judged_on_its_content(self) -> None:
+        f = world.Fixture()
+        proof = f.proof(network_id=0)
+        proof["steps"].append(copy.deepcopy(self.MAP_STEP))
+        result = self.verify(proof, f, 0)
+        self.assertFalse(result.ok)
+        self.assertNotEqual(result.reason, v.XAHAU_JSON_LEAVES_DECLINED)
+
+    def test_a_binary_xahau_map_step_is_not_declined(self) -> None:
+        # The same proof in binary carries the leaf's bytes; no codec is
+        # asked. It is refused, and only because nothing supports its root.
+        f = world.Fixture()
+        proof = f.proof(network_id=v.XAHAU_NETWORK_ID)
+        leaf = bytes.fromhex(v.encode({"LedgerEntryType": "AccountRoot", "Flags": 0}))
+        proof["steps"].append({
+            "type": "map_proof",
+            "tree": "state",
+            "__binary_payload__": world.trie_with_leaves([(bytes(32), leaf)]),
+        })
+        raw = world.binary_proof(proof)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = v.verify(v.binary_to_proof(raw), f.trusted_key, v.XAHAU_NETWORK_ID)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.layer, "graph", result.reason)
+
+
 class JsonTextCapTests(unittest.TestCase):
     """The text itself: its size and its encoding, before any JSON is read."""
 
