@@ -392,6 +392,16 @@ def cases() -> list[dict[str, Any]]:
     f.entries[0]["manifest"] = b64(revocation(f.masters[0]))
     f.voters = f.signers[:4]  # the revoked validator's vote must not count
     anchored("revoked-master-votes-with-three", revoked, f, reason="quorum not met")
+    # At N=5 four votes meet the quorum whether the revoked master stays in N
+    # or leaves it. At N=6 they differ: ceil(0.8 x 6) is 5, ceil(0.8 x 5) is 4.
+    f = Fixture(validators=6)
+    f.entries[0]["manifest"] = b64(revocation(f.masters[0]))
+    f.voters = f.signers[1:5]
+    anchored("revoked-master-stays-in-n", revoked, f, reason="quorum not met")
+    f = Fixture(validators=6)
+    f.entries[0]["manifest"] = b64(revocation(f.masters[0]))
+    f.voters = f.signers[1:]
+    anchored("revoked-master-of-six-and-five-votes", revoked, f)
 
     # ── votes that must not matter, and votes that must not count ─────
     f = Fixture()
@@ -483,7 +493,7 @@ def cases() -> list[dict[str, Any]]:
     ):
         f = Fixture()
         f.blob_fields = blob_fields
-        anchored(f"list-{name}-is-a-float", token, f, reason="malformed")
+        anchored(f"list-{name}-is-a-float", token, f, reason="UNL blob validity fields are malformed")
 
     # A signed list is text, and the publisher signs exactly its bytes. Text
     # with two readings is refused, never read one way (Nicholas, 2026-11-24).
@@ -582,6 +592,9 @@ def cases() -> list[dict[str, Any]]:
     f = Fixture()
     f.voters = f.signers[1:]
     anchored("equivocating-validator-and-four-others", conflict, f, manifests=[twin])
+    f = Fixture(validators=6)  # four of N=6 fail; four of N=5 would pass
+    f.voters = f.signers[1:5]
+    anchored("equivocating-validator-stays-in-n", conflict, f, reason="quorum not met", manifests=[twin])
     f = Fixture()
     a = make_manifest(f.masters[0], rotated_key, seq=2)
     b = make_manifest(f.masters[0], keypair(301), seq=2)
@@ -616,10 +629,14 @@ def cases() -> list[dict[str, Any]]:
 
     f = Fixture()
     anchored("held-manifest-takes-another-validators-key", "spec §1.3 rule 11: no key serves two masters",
-             f, reason="collides", manifests=[make_manifest(f.masters[0], f.signers[1], seq=2)])
+             f, reason="resolved signing key collides with another validator key",
+             manifests=[make_manifest(f.masters[0], f.signers[1], seq=2)])
     f = Fixture()
     f.voters = f.signers[:4]
     anchored("held-revocation", revoked, f, reason="quorum not met", manifests=[revocation(f.masters[0])])
+    f = Fixture(validators=6)  # four of N=6 fail; four of N=5 would pass
+    f.voters = f.signers[1:5]
+    anchored("held-revocation-stays-in-n", revoked, f, reason="quorum not met", manifests=[revocation(f.masters[0])])
     f = Fixture()
     f.voters = [keypair(401)] + f.signers[1:4]
     anchored("held-manifest-for-an-unlisted-master", "spec §1.3 rule 5: a held manifest never adds a member",

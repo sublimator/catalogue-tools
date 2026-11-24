@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "format_version"
+    "reason_contains": "format_version 999"
   },
   "observed": {
     "python_reason": "unsupported format_version 999 (expected 10)"

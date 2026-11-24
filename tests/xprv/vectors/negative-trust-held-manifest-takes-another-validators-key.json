@@ -37,7 +37,7 @@
   },
   "expect": {
     "verdict": "reject",
-    "reason_contains": "collides"
+    "reason_contains": "resolved signing key collides with another validator key"
   },
   "observed": {
     "python_reason": "step 1: anchor: resolved signing key collides with another validator key"

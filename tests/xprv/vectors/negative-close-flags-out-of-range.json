@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "close_flags"
+    "reason_contains": "header close_flags must be"
   },
   "observed": {
     "python_reason": "header close_flags must be a uint8"

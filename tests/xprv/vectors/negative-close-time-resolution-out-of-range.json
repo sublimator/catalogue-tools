@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "close_time_resolution"
+    "reason_contains": "header close_time_resolution must be"
   },
   "observed": {
     "python_reason": "header close_time_resolution must be a uint8"

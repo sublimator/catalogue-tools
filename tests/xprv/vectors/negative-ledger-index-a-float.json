@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "ledger_index"
+    "reason_contains": "header ledger_index must be"
   },
   "observed": {
     "python_reason": "header ledger_index must be a uint32"

@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "inner node"
+    "reason_contains": "root must be an inner node"
   },
   "observed": {
     "python_reason": "trie root must be an inner node"

@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "network_id"
+    "reason_contains": "proof network_id must be an integer"
   },
   "observed": {
     "python_reason": "proof network_id must be an integer, got False"

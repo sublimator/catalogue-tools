@@ -34,7 +34,7 @@
   },
   "expect": {
     "verdict": "reject",
-    "reason_contains": "malformed"
+    "reason_contains": "UNL blob validity fields are malformed"
   },
   "observed": {
     "python_reason": "step 1: anchor: UNL blob validity fields are malformed"

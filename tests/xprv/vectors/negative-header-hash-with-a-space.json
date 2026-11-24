@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "parent_hash"
+    "reason_contains": "header parent_hash must be uppercase hex"
   },
   "observed": {
     "python_reason": "header parent_hash must be uppercase hex"

@@ -18,7 +18,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "trailing bytes"
+    "reason_contains": "binary trie: trailing bytes"
   },
   "base": "positive-tx-skiplist",
   "observed": {

@@ -428,9 +428,9 @@ def negative_family(raw: bytes) -> list[dict[str, Any]]:
 
     # Every payload is consumed exactly (§3.8). The anchor records are above.
     mut("header-trailing-byte", "spec §3.6: a ledger header payload is exactly 118 bytes",
-        _replace_payload(raw, 1, records[1][1] + b"\x00"), "118 bytes")
+        _replace_payload(raw, 1, records[1][1] + b"\x00"), "ledger header payload must be exactly 118 bytes")
     mut("trie-trailing-byte", "spec §3.8: a TLV payload is consumed exactly",
-        _replace_payload(raw, map_at, records[map_at][1] + b"\x00"), "trailing bytes")
+        _replace_payload(raw, map_at, records[map_at][1] + b"\x00"), "binary trie: trailing bytes")
 
     # The compressed body is one complete zlib stream, bounded while it
     # inflates (§3.1, §8).
@@ -852,10 +852,11 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     # ── the envelope and the steps (§2) ──────────────────────────────
     envelope = "spec §2: a proof is an object with format_version, network_id and steps"
     neg("missing-network-id", envelope, "parse", "network_id", [remove("/network_id")])
-    neg("boolean-network-id", "spec §2: integer fields are integer tokens", "parse", "network_id",
+    neg("boolean-network-id", "spec §2: integer fields are integer tokens", "parse",
+        "proof network_id must be an integer",
         [at("/network_id", False)])
     neg("missing-format-version", envelope, "parse", "format_version", [remove("/format_version")])
-    neg("unknown-format-version", "spec §9.1: an unrecognized version is refused", "parse", "format_version",
+    neg("unknown-format-version", "spec §9.1: an unrecognized version is refused", "parse", "format_version 999",
         [at("/format_version", 999)])
     neg("unknown-step-type", "spec §2.4: an unknown step type", "parse", "unknown step type",
         [at(f"/steps/{header_at}/type", "banana")])
@@ -878,12 +879,14 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
         [at(f"{header_ptr}/total_coins", int(header["total_coins"]))])
     neg("total-coins-with-junk", "spec §2.2: total_coins is decimal text", "parse", "total_coins must be",
         [at(f"{header_ptr}/total_coins", "100junk")])
-    neg("close-flags-out-of-range", numbers, "parse", "close_flags", [at(f"{header_ptr}/close_flags", 256)])
-    neg("close-time-resolution-out-of-range", numbers, "parse", "close_time_resolution",
+    neg("close-flags-out-of-range", numbers, "parse", "header close_flags must be",
+        [at(f"{header_ptr}/close_flags", 256)])
+    neg("close-time-resolution-out-of-range", numbers, "parse", "header close_time_resolution must be",
         [at(f"{header_ptr}/close_time_resolution", 256)])
-    neg("ledger-index-a-float", numbers, "parse", "ledger_index",
+    neg("ledger-index-a-float", numbers, "parse", "header ledger_index must be",
         [at(f"{header_ptr}/ledger_index", float(header["ledger_index"]))])
-    neg("header-hash-with-a-space", "spec §2: a hash is 64 uppercase hex digits", "parse", "parent_hash",
+    neg("header-hash-with-a-space", "spec §2: a hash is 64 uppercase hex digits", "parse",
+        "header parent_hash must be uppercase hex",
         [at(f"{header_ptr}/parent_hash", "AB CD")])
 
     # ── the anchor's members (§2.1) ──────────────────────────────────
@@ -908,14 +911,16 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     trie_at = f"/steps/{first_map}/trie"
     neg("null-trie-branch", node_rule, "parse", "trie", [at(f"{inner_at}/{free}", None)])
     neg("numeric-trie-branch", node_rule, "parse", "trie", [at(f"{inner_at}/{free}", 17)])
-    neg("malformed-trie-placeholder", node_rule, "parse", "placeholder", [at(f"{inner_at}/{free}", "BAD")])
-    neg("leaf-with-three-elements", node_rule, "parse", "[key, data]",
+    neg("malformed-trie-placeholder", node_rule, "parse", "placeholder must be a 32-byte uppercase hex hash",
+        [at(f"{inner_at}/{free}", "BAD")])
+    neg("leaf-with-three-elements", node_rule, "parse", "leaf must be exactly [key, data]",
         [at(state_leaf, value_at(state_leaf) + ["ignored"])])
-    neg("non-nibble-trie-member", "spec §2.3: an inner node's members are its branch keys", "parse", "branch",
+    neg("non-nibble-trie-member", "spec §2.3: an inner node's members are its branch keys", "parse", "branch keys",
         [at(f"{trie_at}/10", "AB" * 32)])
-    neg("trie-root-hash", "spec §2.3: a JSON map_proof root is an inner node", "parse", "inner node",
+    neg("trie-root-hash", "spec §2.3: a JSON map_proof root is an inner node", "parse", "root must be an inner node",
         [at(trie_at, "AB" * 32)])
-    neg("hex-leaf-data", "spec §2.3: JSON leaf data is the decoded object, never hex", "parse", "not hex",
+    neg("hex-leaf-data", "spec §2.3: JSON leaf data is the decoded object, never hex", "parse",
+        "leaf data must be a decoded object, not hex",
         [at(f"{tx_leaf}/1", "ABCDEF")])
 
     # ── members a codec would display and not hash (§2.3) ────────────
@@ -931,7 +936,7 @@ def patch_negative_family(base: dict[str, Any], base_name: str) -> list[dict[str
     neg("nested-unknown-member", unhashed, "graph", "not a serialized field",
         [at(f"{tx_leaf}/1/meta/AffectedNodes/0/{wrapper}/DisplayedButNotHashed", 1)])
     neg("tx-leaf-wrapper-member", "spec §2.3: a transaction leaf has exactly the members tx and meta",
-        "graph", "tx", [at(f"{tx_leaf}/1/hash", value_at(f"{tx_leaf}/0"))])
+        "graph", "a tx leaf must be exactly {tx, meta}", [at(f"{tx_leaf}/1/hash", value_at(f"{tx_leaf}/0"))])
 
     # ── a member name written twice (§2.4): only the text can say it ──
     twice = "spec §2.4: no object in a proof repeats a member"

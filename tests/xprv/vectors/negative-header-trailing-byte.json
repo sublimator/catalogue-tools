@@ -18,7 +18,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "118 bytes"
+    "reason_contains": "ledger header payload must be exactly 118 bytes"
   },
   "base": "positive-tx-skiplist",
   "observed": {

@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "not hex"
+    "reason_contains": "leaf data must be a decoded object, not hex"
   },
   "observed": {
     "python_reason": "trie leaf data must be a decoded object, not hex (\u00a72.3)"

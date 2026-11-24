@@ -36,6 +36,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <optional>
 #include <set>
@@ -778,6 +779,12 @@ void
 expect_refused_for_its_reason(Negative const& n, bool production)
 {
     auto const why = refusal(n, production);
+    // XPRV_VECTOR_REASONS=1 lists what this verifier says of each negative,
+    // for choosing a reason_contains that both verifiers print.
+    if (production && std::getenv("XPRV_VECTOR_REASONS"))
+        std::cout << "[ REASON   ] " << n.path.filename().string() << '\t'
+                  << (n.binary ? "binary" : "json") << '\t'
+                  << why.value_or("ACCEPTED") << "\n";
     EXPECT_TRUE(why) << n.path.filename() << " ("
                      << std::string(n.vector.at("violates").as_string())
                      << "): ACCEPTED, which is a hole, not a test failure";

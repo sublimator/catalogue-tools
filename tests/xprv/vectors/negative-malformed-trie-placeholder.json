@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "placeholder"
+    "reason_contains": "placeholder must be a 32-byte uppercase hex hash"
   },
   "observed": {
     "python_reason": "trie placeholder must be a 32-byte uppercase hex hash"

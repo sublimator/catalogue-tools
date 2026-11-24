@@ -12,7 +12,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "tx"
+    "reason_contains": "a tx leaf must be exactly {tx, meta}"
   },
   "observed": {
     "python_reason": "step 7: tx tree error: a tx leaf must be exactly {tx, meta}"

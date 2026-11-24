@@ -279,7 +279,7 @@
   ],
   "expect": {
     "verdict": "reject",
-    "reason_contains": "[key, data]"
+    "reason_contains": "leaf must be exactly [key, data]"
   },
   "observed": {
     "python_reason": "trie leaf must be exactly [key, data]"
