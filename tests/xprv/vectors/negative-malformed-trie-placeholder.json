@@ -1,0 +1,20 @@
+{
+  "name": "malformed-trie-placeholder",
+  "violates": "spec \u00a72.3: a trie node is a hash string, a [key, data] leaf or an inner-node object",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/trie/A/3/7/6/6/0",
+      "value": "BAD"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "placeholder"
+  },
+  "observed": {
+    "python_reason": "trie placeholder must be a 32-byte uppercase hex hash"
+  }
+}

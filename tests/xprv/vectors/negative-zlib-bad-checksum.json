@@ -1,0 +1,21 @@
+{
+  "name": "zlib-bad-checksum",
+  "violates": "spec \u00a73.1: a compressed body is one complete RFC 1950 zlib stream",
+  "layer": "parse",
+  "mutations": [
+    {
+      "compress_body": 9
+    },
+    {
+      "xor_last": "01"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "invalid zlib body"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: invalid zlib body (Error -3 while decompressing data: incorrect data check)"
+  }
+}

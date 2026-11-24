@@ -1,0 +1,20 @@
+{
+  "name": "close-time-resolution-out-of-range",
+  "violates": "spec \u00a72: integer fields are integer tokens in range",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/header/close_time_resolution",
+      "value": 256
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "close_time_resolution"
+  },
+  "observed": {
+    "python_reason": "header close_time_resolution must be a uint8"
+  }
+}

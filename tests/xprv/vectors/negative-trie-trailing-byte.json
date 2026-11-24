@@ -1,0 +1,27 @@
+{
+  "name": "trie-trailing-byte",
+  "violates": "spec \u00a73.8: a TLV payload is consumed exactly",
+  "layer": "parse",
+  "mutations": [
+    {
+      "insert_at": 15429,
+      "insert_hex": "00"
+    },
+    {
+      "delete_at": 7703,
+      "delete_len": 1
+    },
+    {
+      "insert_at": 7703,
+      "insert_hex": "AD"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "trailing bytes"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary trie: trailing bytes"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "boolean-network-id",
+  "violates": "spec \u00a72: integer fields are integer tokens",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/network_id",
+      "value": false
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "network_id"
+  },
+  "observed": {
+    "python_reason": "proof network_id must be an integer, got False"
+  }
+}

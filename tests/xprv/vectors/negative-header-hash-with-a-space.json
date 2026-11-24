@@ -1,0 +1,20 @@
+{
+  "name": "header-hash-with-a-space",
+  "violates": "spec \u00a72: a hash is 64 uppercase hex digits",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/header/parent_hash",
+      "value": "AB CD"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "parent_hash"
+  },
+  "observed": {
+    "python_reason": "header parent_hash must be uppercase hex"
+  }
+}

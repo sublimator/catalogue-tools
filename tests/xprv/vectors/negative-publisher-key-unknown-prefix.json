@@ -1,0 +1,20 @@
+{
+  "name": "publisher-key-unknown-prefix",
+  "violates": "spec \u00a75.1: a public key is 33 bytes beginning ED, 02 or 03",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/0/unl/public_key",
+      "value": "042677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "must begin with ED, 02 or 03"
+  },
+  "observed": {
+    "python_reason": "publisher key must begin with ED, 02 or 03"
+  }
+}

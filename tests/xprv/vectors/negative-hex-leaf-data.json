@@ -1,0 +1,20 @@
+{
+  "name": "hex-leaf-data",
+  "violates": "spec \u00a72.3: JSON leaf data is the decoded object, never hex",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1",
+      "value": "ABCDEF"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "not hex"
+  },
+  "observed": {
+    "python_reason": "trie leaf data must be a decoded object, not hex (\u00a72.3)"
+  }
+}

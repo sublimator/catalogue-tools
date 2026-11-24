@@ -1,0 +1,20 @@
+{
+  "name": "unknown-member-in-map-proof-step",
+  "violates": "spec \u00a72: the JSON form is closed; an object carries its listed members and no other",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/note",
+      "value": "x"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "unknown member note in map_proof step"
+  },
+  "observed": {
+    "python_reason": "unknown member note in map_proof step"
+  }
+}

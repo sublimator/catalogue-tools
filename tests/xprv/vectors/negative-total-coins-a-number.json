@@ -1,0 +1,20 @@
+{
+  "name": "total-coins-a-number",
+  "violates": "spec \u00a72.2: total_coins is decimal text",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/header/total_coins",
+      "value": 99985686943749331
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "total_coins must be"
+  },
+  "observed": {
+    "python_reason": "header total_coins must be the decimal text of a uint64 with no leading zeros"
+  }
+}

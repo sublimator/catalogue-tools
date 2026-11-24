@@ -1,0 +1,20 @@
+{
+  "name": "meta-unknown-member",
+  "violates": "spec \u00a72.3: leaf data is the decoded content and nothing else",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1/meta/not_a_field",
+      "value": "1"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "not a serialized field"
+  },
+  "observed": {
+    "python_reason": "step 7: tx tree error: leaf member meta.not_a_field is not a serialized field"
+  }
+}

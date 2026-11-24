@@ -1,0 +1,20 @@
+{
+  "name": "ledger-index-a-float",
+  "violates": "spec \u00a72: integer fields are integer tokens in range",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/header/ledger_index",
+      "value": 103062326.0
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "ledger_index"
+  },
+  "observed": {
+    "python_reason": "header ledger_index must be a uint32"
+  }
+}

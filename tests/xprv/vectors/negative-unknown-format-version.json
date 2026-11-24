@@ -1,0 +1,20 @@
+{
+  "name": "unknown-format-version",
+  "violates": "spec \u00a79.1: an unrecognized version is refused",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/format_version",
+      "value": 999
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "format_version"
+  },
+  "observed": {
+    "python_reason": "unsupported format_version 999 (expected 10)"
+  }
+}

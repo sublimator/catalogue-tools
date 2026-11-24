@@ -1,0 +1,20 @@
+{
+  "name": "step-not-an-object",
+  "violates": "spec \u00a72: a step is an object",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1",
+      "value": 5
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "step must be an object"
+  },
+  "observed": {
+    "python_reason": "step must be an object with a string type"
+  }
+}

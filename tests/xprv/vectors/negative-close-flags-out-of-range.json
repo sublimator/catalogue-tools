@@ -1,0 +1,20 @@
+{
+  "name": "close-flags-out-of-range",
+  "violates": "spec \u00a72: integer fields are integer tokens in range",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/header/close_flags",
+      "value": 256
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "close_flags"
+  },
+  "observed": {
+    "python_reason": "header close_flags must be a uint8"
+  }
+}

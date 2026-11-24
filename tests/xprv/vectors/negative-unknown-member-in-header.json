@@ -1,0 +1,20 @@
+{
+  "name": "unknown-member-in-header",
+  "violates": "spec \u00a72: the JSON form is closed; an object carries its listed members and no other",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/1/header/note",
+      "value": "x"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "unknown member note in header"
+  },
+  "observed": {
+    "python_reason": "unknown member note in header"
+  }
+}

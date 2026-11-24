@@ -1,0 +1,20 @@
+{
+  "name": "tx-leaf-wrapper-member",
+  "violates": "spec \u00a72.3: a transaction leaf has exactly the members tx and meta",
+  "layer": "graph",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/6/trie/D/F/2/1/hash",
+      "value": "DF2B3DE0FD737AEECCB13CC59E030D81C6128FFC0DF4166DD1F1CEF1728D5031"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "tx"
+  },
+  "observed": {
+    "python_reason": "step 7: tx tree error: a tx leaf must be exactly {tx, meta}"
+  }
+}

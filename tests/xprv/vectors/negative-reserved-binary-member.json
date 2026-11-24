@@ -1,0 +1,20 @@
+{
+  "name": "reserved-binary-member",
+  "violates": "spec \u00a72: the JSON form is closed; an object carries its listed members and no other",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/__binary_root__",
+      "value": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "map_proof"
+  },
+  "observed": {
+    "python_reason": "map_proof carries a member reserved for binary decoding"
+  }
+}

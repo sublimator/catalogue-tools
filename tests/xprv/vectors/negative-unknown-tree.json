@@ -1,0 +1,20 @@
+{
+  "name": "unknown-tree",
+  "violates": "spec \u00a72.3: tree is tx or state",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "set",
+      "path": "/steps/2/tree",
+      "value": "banana"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "unknown map tree type"
+  },
+  "observed": {
+    "python_reason": "unknown map tree type"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "duplicate-validation-member",
+  "violates": "spec \u00a72.4: no object in a proof repeats a member",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "duplicate",
+      "path": "/steps/0/validations",
+      "key": "020EA2AB574A644ED75DF19E0A8F54ED8E2163FA5CF0444DBDA293BE0EDA7BFB3B",
+      "value": "00"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "duplicate"
+  },
+  "observed": {
+    "python_reason": "ValueError: duplicate JSON member '020EA2AB574A644ED75DF19E0A8F54ED8E2163FA5CF0444DBDA293BE0EDA7BFB3B'"
+  }
+}

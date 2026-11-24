@@ -1,0 +1,19 @@
+{
+  "name": "missing-network-id",
+  "violates": "spec \u00a72: a proof is an object with format_version, network_id and steps",
+  "layer": "parse",
+  "base": "positive-tx-skiplist",
+  "json_patch": [
+    {
+      "op": "remove",
+      "path": "/network_id"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "network_id"
+  },
+  "observed": {
+    "python_reason": "proof network_id must be an integer, got None"
+  }
+}
